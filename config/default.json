@@ -1,0 +1,206 @@
+{
+  "schema_version": 4,
+  "router": {
+    "poll_ms": 50,
+    "debounce_ms": 150,
+    "fallback_debounce_ms": 350,
+    "fallback_state": {
+      "Game": "Vanilla",
+      "OverlayProfile": "Vanilla",
+      "CaptureProfile": "Default",
+      "AudioProfile": "Default",
+      "LayoutProfile": "Vanilla"
+    }
+  },
+  "obs": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 4455,
+    "password": "",
+    "timeout_seconds": 2.0,
+    "reconnect_seconds": 3.0
+  },
+  "ui": {
+    "close_to_tray": true,
+    "start_with_windows": false,
+    "auto_detect_modules": true,
+    "module_scan_seconds": 5
+  },
+  "rules": [
+    {
+      "name": "Overwatch",
+      "behavior": "match",
+      "priority": 100,
+      "enabled": true,
+      "exe": "Overwatch.exe",
+      "path": "",
+      "title_regex": "",
+      "state": {
+        "Game": "Overwatch",
+        "OverlayProfile": "FPS",
+        "CaptureProfile": "HDR",
+        "AudioProfile": "Game",
+        "LayoutProfile": "FPS"
+      },
+      "apply_delay_ms": 0,
+      "conditions": {}
+    },
+    {
+      "name": "Dofus Retro",
+      "behavior": "match",
+      "priority": 95,
+      "enabled": true,
+      "exe": "Dofus Retro.exe",
+      "path": "",
+      "title_regex": "",
+      "state": {
+        "Game": "Dofus Retro",
+        "OverlayProfile": "Dofus",
+        "CaptureProfile": "Default",
+        "AudioProfile": "Game",
+        "LayoutProfile": "Dofus"
+      },
+      "apply_delay_ms": 0,
+      "conditions": {}
+    },
+    {
+      "name": "Dofus Unity",
+      "behavior": "match",
+      "priority": 90,
+      "enabled": true,
+      "exe": "Dofus.exe",
+      "path": "",
+      "title_regex": "",
+      "state": {
+        "Game": "Dofus Unity",
+        "OverlayProfile": "Dofus",
+        "CaptureProfile": "Default",
+        "AudioProfile": "Game",
+        "LayoutProfile": "Dofus"
+      },
+      "apply_delay_ms": 0,
+      "conditions": {}
+    },
+    {
+      "name": "Ankama Launcher (ignorer)",
+      "behavior": "ignore",
+      "priority": 200,
+      "enabled": true,
+      "exe": "Ankama Launcher.exe",
+      "path": "",
+      "title_regex": "",
+      "apply_delay_ms": 0,
+      "conditions": {}
+    }
+  ],
+  "profiles": {
+    "game": {
+      "Vanilla": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      },
+      "Overwatch": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      },
+      "Dofus Unity": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      },
+      "Dofus Retro": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      }
+    },
+    "overlay": {
+      "Vanilla": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      },
+      "FPS": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      },
+      "Dofus": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      }
+    },
+    "capture": {
+      "Default": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      },
+      "HDR": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      }
+    },
+    "audio": {
+      "Default": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      },
+      "Game": {
+        "actions": [],
+        "extends": "",
+        "conditions": {}
+      }
+    }
+  },
+  "layout_profiles": {
+    "Dofus": {
+      "scene": "",
+      "modules": {},
+      "extends": "",
+      "coordinate_mode": "normalized",
+      "conditions": {},
+      "transition": {
+        "mode": "instant",
+        "duration_ms": 0,
+        "steps": 8
+      }
+    },
+    "FPS": {
+      "scene": "",
+      "modules": {},
+      "extends": "",
+      "coordinate_mode": "normalized",
+      "conditions": {},
+      "transition": {
+        "mode": "instant",
+        "duration_ms": 0,
+        "steps": 8
+      }
+    },
+    "Vanilla": {
+      "scene": "",
+      "modules": {},
+      "extends": "",
+      "coordinate_mode": "normalized",
+      "conditions": {},
+      "transition": {
+        "mode": "instant",
+        "duration_ms": 0,
+        "steps": 8
+      }
+    }
+  },
+  "api": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "token": ""
+  },
+  "layout_history": {}
+}

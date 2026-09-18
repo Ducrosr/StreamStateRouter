@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install Python
+        run: python -m pip install -e ".[all]"
+      - name: Test Python
+        run: |
+          python -m unittest discover -s tests -v
+          python -m ruff check .
+      - name: Build portable EXE
+        run: pyinstaller --clean --noconfirm StreamStateRouter.spec
+      - name: Build portable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path .\dist\StreamStateRouter.exe -DestinationPath .\Stream-State-Router-${{ github.ref_name }}-portable.zip
+      - name: Install Stream Deck dependencies
+        working-directory: streamdeck-plugin
+        run: npm install
+      - name: Build Stream Deck plugin
+        working-directory: streamdeck-plugin
+        run: |
+          npm run typecheck
+          npm run build
+          npm run validate
+          npm run pack
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build installer
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" ".\installer\StreamStateRouter.iss"'
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Stream-State-Router-${{ github.ref_name }}-portable.zip
+            release/Stream-State-Router-v2.0.0-setup.exe
+            streamdeck-plugin/*.streamDeckPlugin
+          generate_release_notes: true

@@ -1,0 +1,23 @@
+{
+  "Name": "Stream State Router",
+  "Version": "2.0.2.0",
+  "Author": "Rémy Ducros",
+  "UUID": "com.remyducros.streamstaterouter",
+  "Description": "Contrôle Stream State Router depuis Stream Deck.",
+  "Category": "Stream State Router",
+  "CategoryIcon": "imgs/plugin/category-icon",
+  "Icon": "imgs/plugin/marketplace",
+  "CodePath": "bin/plugin.js",
+  "SDKVersion": 3,
+  "Software": { "MinimumVersion": "7.1" },
+  "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
+  "Nodejs": { "Version": "24", "Debug": "enabled" },
+  "Actions": [
+    {"Name":"Suspendre / reprendre","UUID":"com.remyducros.streamstaterouter.toggle-pause","Icon":"imgs/actions/icon","Controllers":["Keypad"],"States":[{"Image":"imgs/actions/key"}],"SupportedInMultiActions":true},
+    {"Name":"Reprendre auto","UUID":"com.remyducros.streamstaterouter.auto","Icon":"imgs/actions/icon","Controllers":["Keypad"],"States":[{"Image":"imgs/actions/key"}],"SupportedInMultiActions":true},
+    {"Name":"Réappliquer","UUID":"com.remyducros.streamstaterouter.reapply","Icon":"imgs/actions/icon","Controllers":["Keypad"],"States":[{"Image":"imgs/actions/key"}],"SupportedInMultiActions":true},
+    {"Name":"Layout","UUID":"com.remyducros.streamstaterouter.layout","Icon":"imgs/actions/icon","PropertyInspectorPath":"ui/layout.html","Controllers":["Keypad"],"States":[{"Image":"imgs/actions/key","TitleAlignment":"bottom","TitleColor":"#FFFFFF"}],"SupportedInMultiActions":true},
+    {"Name":"Undo layout","UUID":"com.remyducros.streamstaterouter.undo-layout","Icon":"imgs/actions/icon","Controllers":["Keypad"],"States":[{"Image":"imgs/actions/key"}],"SupportedInMultiActions":true},
+    {"Name":"Annuler aperçu","UUID":"com.remyducros.streamstaterouter.cancel-preview","Icon":"imgs/actions/icon","Controllers":["Keypad"],"States":[{"Image":"imgs/actions/key"}],"SupportedInMultiActions":true}
+  ]
+}

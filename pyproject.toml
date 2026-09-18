@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stream-state-router"
+version = "2.0.11"
+description = "Windows foreground application router for OBS streaming automation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+desktop = [
+  "PySide6>=6.8,<7",
+  "obsws-python>=1.7,<2",
+]
+dev = [
+  "ruff>=0.12",
+]
+build = [
+  "pyinstaller>=6.15",
+]
+all = [
+  "PySide6>=6.8,<7",
+  "obsws-python>=1.7,<2",
+  "ruff>=0.12",
+  "pyinstaller>=6.15",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stream_state_router*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B"]

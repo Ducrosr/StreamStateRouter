@@ -1,0 +1,662 @@
+from __future__ import annotations
+
+import copy
+import json
+import shutil
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Mapping
+
+from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
+from ..obs.models import OBSConnectionConfig
+from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
+from ..router.models import StreamState
+from ..router.rules import AppRule, ResolutionKind, RuleSet
+from .paths import backups_dir, config_path, default_config_path
+
+SCHEMA_VERSION = 4
+SUPPORTED_ACTION_TYPES = {
+    "set_program_scene",
+    "scene_item_enabled",
+    "source_filter_enabled",
+    "input_mute",
+    "input_volume_db",
+    "set_input_settings",
+}
+LAYOUT_ANCHORS = {
+    "top_left",
+    "top_center",
+    "top_right",
+    "center_left",
+    "center",
+    "center_right",
+    "bottom_left",
+    "bottom_center",
+    "bottom_right",
+}
+LAYOUT_TRANSITIONS = {"instant", "move", "fade", "move_fade"}
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ConfigError(f"Configuration introuvable : {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"JSON invalide ({path.name}) : {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("La racine de la configuration doit être un objet JSON")
+    return data
+
+
+def _layout_box(value: Any, fallback: Mapping[str, Any] | None = None) -> dict[str, float]:
+    raw = value if isinstance(value, Mapping) else (fallback or {})
+    return {
+        "x": float(raw.get("x", 0.0) or 0.0),
+        "y": float(raw.get("y", 0.0) or 0.0),
+        "width": max(0.0001, abs(float(raw.get("width", 1.0) or 1.0))),
+        "height": max(0.0001, abs(float(raw.get("height", 1.0) or 1.0))),
+    }
+
+
+def _split_legacy_grouped_layout_modules(profile: dict[str, Any]) -> None:
+    """Migrate old ``[prefix] element`` grouping to one OBS source per module.
+
+    Schema v3 interpreted the bracket prefix as the module identity. In the
+    real scene collection the convention is ``[Type de module] Nom du module``:
+    the prefix is only a category. Re-key every stored module by its full OBS
+    source name and preserve the effective geometry of each former child.
+    """
+    modules = profile.get("modules")
+    if not isinstance(modules, dict):
+        return
+
+    canvas_raw = profile.get("canvas") if isinstance(profile.get("canvas"), Mapping) else {}
+    try:
+        canvas_w = max(0.0, float(canvas_raw.get("width", 0) or 0))
+        canvas_h = max(0.0, float(canvas_raw.get("height", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        canvas_w = canvas_h = 0.0
+
+    migrated: dict[str, Any] = {}
+    for _legacy_key, raw_module in modules.items():
+        if not isinstance(raw_module, Mapping):
+            continue
+        elements = raw_module.get("elements")
+        if not isinstance(elements, list):
+            continue
+
+        old_base = _layout_box(raw_module.get("base_bounds"))
+        old_geometry = _layout_box(raw_module.get("geometry"), old_base)
+        scale_x = old_geometry["width"] / old_base["width"]
+        scale_y = old_geometry["height"] / old_base["height"]
+        anchor = str(raw_module.get("anchor") or "top_left")
+        ax, ay = anchor_factors(anchor)
+
+        for raw_element in elements:
+            if not isinstance(raw_element, Mapping) or not bool(raw_element.get("included", True)):
+                continue
+            source = str(raw_element.get("source") or "").strip()
+            transform = raw_element.get("transform")
+            if not source or not isinstance(transform, Mapping):
+                continue
+
+            parsed = parse_module_source(source)
+            module_type = parsed.module if parsed is not None else "Autre"
+            display_name = parsed.element if parsed is not None else source
+            elem_left, elem_top, elem_width, elem_height = transform_bbox(transform)
+            elem_base = {
+                "x": elem_left,
+                "y": elem_top,
+                "width": max(1.0, elem_width),
+                "height": max(1.0, elem_height),
+            }
+            elem_geometry = {
+                "x": old_geometry["x"] + (elem_base["x"] - old_base["x"]) * scale_x,
+                "y": old_geometry["y"] + (elem_base["y"] - old_base["y"]) * scale_y,
+                "width": max(1.0, elem_base["width"] * scale_x),
+                "height": max(1.0, elem_base["height"] * scale_y),
+            }
+
+            container = str(raw_element.get("container") or raw_module.get("container") or profile.get("scene") or "")
+            key = source
+            if key in migrated:
+                key = f"{source} @ {container or 'scene'}"
+                suffix = 2
+                while key in migrated:
+                    key = f"{source} @ {container or 'scene'} #{suffix}"
+                    suffix += 1
+
+            element = copy.deepcopy(dict(raw_element))
+            element["element"] = display_name
+            element["included"] = True
+            element["container"] = container
+
+            module = copy.deepcopy(dict(raw_module))
+            module.update(
+                {
+                    "display_name": display_name,
+                    "module_type": module_type,
+                    "source_name": source,
+                    "container": container,
+                    "visible": bool(raw_module.get("visible", True)) and bool(raw_element.get("enabled", True)),
+                    "base_bounds": elem_base,
+                    "geometry": elem_geometry,
+                    "elements": [element],
+                }
+            )
+            if canvas_w > 0 and canvas_h > 0:
+                module["normalized_geometry"] = {
+                    "x": elem_geometry["x"] / canvas_w,
+                    "y": elem_geometry["y"] / canvas_h,
+                    "width": elem_geometry["width"] / canvas_w,
+                    "height": elem_geometry["height"] / canvas_h,
+                }
+                module["anchor_offsets"] = {
+                    "x": elem_geometry["x"] + elem_geometry["width"] * ax - canvas_w * ax,
+                    "y": elem_geometry["y"] + elem_geometry["height"] * ay - canvas_h * ay,
+                }
+            migrated[key] = module
+
+    profile["modules"] = migrated
+
+
+def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Migrate known older configuration schemas without losing user rules."""
+    migrated = copy.deepcopy(dict(data))
+    try:
+        version = int(migrated.get("schema_version", 0))
+    except (TypeError, ValueError):
+        return migrated
+
+    if version == SCHEMA_VERSION:
+        return migrated
+
+    if version == 1:
+        router = migrated.setdefault("router", {})
+        fallback = router.setdefault("fallback_state", {})
+        if isinstance(fallback, dict):
+            fallback.setdefault("LayoutProfile", fallback.get("OverlayProfile", "Vanilla"))
+        layout_names: set[str] = set()
+        if isinstance(fallback, dict):
+            layout_names.add(str(fallback.get("LayoutProfile") or "Vanilla"))
+        for raw in migrated.get("rules", []):
+            if not isinstance(raw, dict) or str(raw.get("behavior", "match")).casefold() != "match":
+                continue
+            state = raw.get("state")
+            if not isinstance(state, dict):
+                continue
+            state.setdefault("LayoutProfile", state.get("OverlayProfile", "Vanilla"))
+            layout_names.add(str(state.get("LayoutProfile") or "Vanilla"))
+        existing = migrated.get("layout_profiles")
+        if not isinstance(existing, dict):
+            existing = {}
+        for name in layout_names or {"Vanilla"}:
+            existing.setdefault(name, {"scene": "", "modules": {}})
+        migrated["layout_profiles"] = existing
+        version = 2
+
+    if version == 2:
+        migrated.setdefault("layout_history", {})
+        migrated.setdefault(
+            "api",
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 8765,
+                "token": "",
+            },
+        )
+        ui = migrated.setdefault("ui", {})
+        if isinstance(ui, dict):
+            ui.setdefault("auto_detect_modules", True)
+            ui.setdefault("module_scan_seconds", 5)
+        for raw in migrated.get("rules", []):
+            if isinstance(raw, dict):
+                raw.setdefault("apply_delay_ms", 0)
+                raw.setdefault("conditions", {})
+        profiles = migrated.get("profiles", {})
+        if isinstance(profiles, dict):
+            for domain_profiles in profiles.values():
+                if not isinstance(domain_profiles, dict):
+                    continue
+                for profile in domain_profiles.values():
+                    if isinstance(profile, dict):
+                        profile.setdefault("extends", "")
+                        profile.setdefault("conditions", {})
+        layouts = migrated.get("layout_profiles", {})
+        if isinstance(layouts, dict):
+            for profile in layouts.values():
+                if not isinstance(profile, dict):
+                    continue
+                profile.setdefault("extends", "")
+                profile.setdefault("coordinate_mode", "normalized")
+                profile.setdefault("conditions", {})
+                profile.setdefault("transition", {"mode": "instant", "duration_ms": 0, "steps": 8})
+                modules = profile.get("modules", {})
+                if not isinstance(modules, dict):
+                    continue
+                for module in modules.values():
+                    if not isinstance(module, dict):
+                        continue
+                    module.setdefault("managed", True)
+                    module.setdefault("locked", False)
+                    module.setdefault("anchor_mode", "relative")
+                    for element in module.get("elements", []) if isinstance(module.get("elements"), list) else []:
+                        if not isinstance(element, dict):
+                            continue
+                        element.setdefault("follow_position", True)
+                        element.setdefault("follow_size", True)
+                        element.setdefault("follow_visibility", True)
+                        element.setdefault("locked", False)
+                        element.setdefault("flags", [])
+        version = 3
+
+    if version == 3:
+        layouts = migrated.get("layout_profiles", {})
+        if isinstance(layouts, dict):
+            for profile in layouts.values():
+                if isinstance(profile, dict):
+                    _split_legacy_grouped_layout_modules(profile)
+        history = migrated.get("layout_history", {})
+        if isinstance(history, dict):
+            for entries in history.values():
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    profile = entry.get("profile")
+                    if isinstance(profile, dict):
+                        _split_legacy_grouped_layout_modules(profile)
+        migrated["schema_version"] = SCHEMA_VERSION
+        return migrated
+
+    return migrated
+
+
+def ensure_user_config() -> Path:
+    target = config_path()
+    if not target.exists():
+        source = default_config_path()
+        if not source.exists():
+            raise ConfigError(f"Configuration par défaut introuvable : {source}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    return target
+
+
+def load_config(path: str | Path | None = None) -> dict[str, Any]:
+    target = Path(path) if path else ensure_user_config()
+    data = migrate_config(_read_json(target))
+    errors = validate_config(data)
+    if errors:
+        raise ConfigError("Configuration invalide :\n- " + "\n- ".join(errors))
+    return data
+
+
+def save_config(data: Mapping[str, Any], path: str | Path | None = None) -> Path:
+    payload = migrate_config(data)
+    errors = validate_config(payload)
+    if errors:
+        raise ConfigError("Configuration invalide :\n- " + "\n- ".join(errors))
+    target = Path(path) if path else config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(target, backups_dir() / f"config-{stamp}.json")
+    temp = target.with_suffix(".tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(target)
+    return target
+
+
+def export_config(data: Mapping[str, Any], destination: str | Path) -> Path:
+    payload = migrate_config(data)
+    target = Path(destination)
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
+def import_config(source: str | Path) -> dict[str, Any]:
+    return load_config(Path(source))
+
+
+def push_layout_history(data: dict[str, Any], name: str, profile: Mapping[str, Any], *, limit: int = 10) -> None:
+    history = data.setdefault("layout_history", {})
+    entries = history.setdefault(str(name), [])
+    if not isinstance(entries, list):
+        entries = []
+        history[str(name)] = entries
+    entries.append(
+        {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "profile": copy.deepcopy(dict(profile)),
+        }
+    )
+    del entries[:-max(1, int(limit))]
+
+
+def pop_layout_history(data: dict[str, Any], name: str) -> dict[str, Any] | None:
+    history = data.get("layout_history", {})
+    if not isinstance(history, dict):
+        return None
+    entries = history.get(str(name))
+    if not isinstance(entries, list) or not entries:
+        return None
+    entry = entries.pop()
+    profile = entry.get("profile") if isinstance(entry, Mapping) else None
+    return copy.deepcopy(dict(profile)) if isinstance(profile, Mapping) else None
+
+
+def _valid_number(value: Any, *, positive: bool = False) -> bool:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return parsed > 0 if positive else True
+
+
+def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
+    if raw in (None, {}):
+        return
+    if not isinstance(raw, Mapping):
+        errors.append(f"{prefix} doit être un objet")
+        return
+    allowed = {"streaming", "recording", "program_scene", "obs_enabled"}
+    unknown = set(raw) - allowed
+    if unknown:
+        errors.append(f"{prefix} contient des conditions inconnues : {', '.join(sorted(unknown))}")
+
+
+def _check_inheritance_cycles(mapping: Mapping[str, Any], prefix: str, errors: list[str]) -> None:
+    def visit(name: str, stack: tuple[str, ...]) -> None:
+        raw = mapping.get(name)
+        if not isinstance(raw, Mapping):
+            return
+        parent = str(raw.get("extends") or "").strip()
+        if not parent:
+            return
+        if parent not in mapping:
+            errors.append(f"{prefix}.{name}.extends référence un profil inexistant : {parent}")
+            return
+        if parent in stack or parent == name:
+            errors.append(f"Héritage circulaire dans {prefix} : {' -> '.join((*stack, name, parent))}")
+            return
+        visit(parent, (*stack, name))
+
+    for name in mapping:
+        visit(str(name), ())
+
+
+def validate_config(data: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    try:
+        schema = int(data.get("schema_version", 0))
+    except (TypeError, ValueError):
+        schema = 0
+    if schema != SCHEMA_VERSION:
+        errors.append(f"schema_version doit valoir {SCHEMA_VERSION}")
+
+    router = data.get("router")
+    if not isinstance(router, Mapping):
+        errors.append("router doit être un objet")
+        router = {}
+    else:
+        for key in ("poll_ms", "debounce_ms", "fallback_debounce_ms"):
+            try:
+                value = int(router.get(key, 0))
+                if value < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append(f"router.{key} doit être un entier >= 0")
+
+    fallback = router.get("fallback_state") if isinstance(router, Mapping) else None
+    if not isinstance(fallback, Mapping):
+        errors.append("router.fallback_state doit être un objet")
+
+    rules = data.get("rules")
+    if not isinstance(rules, list):
+        errors.append("rules doit être une liste")
+        rules = []
+    seen_names: set[str] = set()
+    for index, raw in enumerate(rules):
+        prefix = f"rules[{index}]"
+        if not isinstance(raw, Mapping):
+            errors.append(f"{prefix} doit être un objet")
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            errors.append(f"{prefix}.name est requis")
+        elif name.casefold() in seen_names:
+            errors.append(f"Nom de règle dupliqué : {name}")
+        else:
+            seen_names.add(name.casefold())
+        behavior = str(raw.get("behavior", "match")).casefold()
+        if behavior not in {"match", "ignore"}:
+            errors.append(f"{prefix}.behavior doit être match ou ignore")
+        if not any(str(raw.get(key) or "").strip() for key in ("exe", "path", "title_regex")):
+            errors.append(f"{prefix} doit définir exe, path ou title_regex")
+        if behavior == "match" and not isinstance(raw.get("state"), Mapping):
+            errors.append(f"{prefix}.state est requis pour une règle match")
+        try:
+            if int(raw.get("apply_delay_ms", 0)) < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            errors.append(f"{prefix}.apply_delay_ms doit être >= 0")
+        _validate_conditions(raw.get("conditions", {}), f"{prefix}.conditions", errors)
+
+    obs = data.get("obs")
+    if not isinstance(obs, Mapping):
+        errors.append("obs doit être un objet")
+    else:
+        host = str(obs.get("host") or "127.0.0.1").strip().casefold()
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            errors.append("obs.host doit rester local (127.0.0.1, localhost ou ::1)")
+        try:
+            port = int(obs.get("port", 4455))
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except (TypeError, ValueError):
+            errors.append("obs.port doit être compris entre 1 et 65535")
+
+    api = data.get("api", {})
+    if not isinstance(api, Mapping):
+        errors.append("api doit être un objet")
+    else:
+        if str(api.get("host") or "127.0.0.1").strip() not in {"127.0.0.1", "localhost", "::1"}:
+            errors.append("api.host doit rester local")
+        try:
+            port = int(api.get("port", 8765))
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except (TypeError, ValueError):
+            errors.append("api.port doit être compris entre 1 et 65535")
+
+    profiles = data.get("profiles")
+    if not isinstance(profiles, Mapping):
+        errors.append("profiles doit être un objet")
+        profiles = {}
+    for domain in PROFILE_DOMAINS:
+        values = profiles.get(domain, {}) if isinstance(profiles, Mapping) else {}
+        if not isinstance(values, Mapping):
+            errors.append(f"profiles.{domain} doit être un objet")
+            continue
+        _check_inheritance_cycles(values, f"profiles.{domain}", errors)
+        for name, profile in values.items():
+            if not str(name).strip():
+                errors.append(f"profiles.{domain} contient un nom vide")
+            if not isinstance(profile, Mapping):
+                errors.append(f"profiles.{domain}.{name} doit être un objet")
+                continue
+            _validate_conditions(profile.get("conditions", {}), f"profiles.{domain}.{name}.conditions", errors)
+            actions = profile.get("actions", [])
+            if not isinstance(actions, list):
+                errors.append(f"profiles.{domain}.{name}.actions doit être une liste")
+                continue
+            for action_index, action in enumerate(actions):
+                if not isinstance(action, Mapping):
+                    errors.append(f"profiles.{domain}.{name}.actions[{action_index}] doit être un objet")
+                    continue
+                action_type = str(action.get("type") or "").strip()
+                if not action_type:
+                    errors.append(f"profiles.{domain}.{name}.actions[{action_index}].type est requis")
+                elif action_type not in SUPPORTED_ACTION_TYPES:
+                    errors.append(f"profiles.{domain}.{name}.actions[{action_index}].type inconnu : {action_type}")
+
+    layout_profiles = data.get("layout_profiles")
+    if not isinstance(layout_profiles, Mapping):
+        errors.append("layout_profiles doit être un objet")
+        layout_profiles = {}
+    _check_inheritance_cycles(layout_profiles, "layout_profiles", errors)
+    for profile_name, profile in layout_profiles.items():
+        prefix = f"layout_profiles.{profile_name}"
+        if not str(profile_name).strip():
+            errors.append("layout_profiles contient un nom vide")
+        if not isinstance(profile, Mapping):
+            errors.append(f"{prefix} doit être un objet")
+            continue
+        _validate_conditions(profile.get("conditions", {}), f"{prefix}.conditions", errors)
+        transition = profile.get("transition", {})
+        if not isinstance(transition, Mapping):
+            errors.append(f"{prefix}.transition doit être un objet")
+        else:
+            mode = str(transition.get("mode") or "instant")
+            if mode not in LAYOUT_TRANSITIONS:
+                errors.append(f"{prefix}.transition.mode inconnu : {mode}")
+        modules = profile.get("modules", {})
+        if not isinstance(modules, Mapping):
+            errors.append(f"{prefix}.modules doit être un objet")
+            continue
+        for module_name, module in modules.items():
+            mprefix = f"{prefix}.modules.{module_name}"
+            if not str(module_name).strip() or not isinstance(module, Mapping):
+                errors.append(f"{mprefix} doit être un objet nommé")
+                continue
+            for box_key in ("base_bounds", "geometry"):
+                box = module.get(box_key)
+                if not isinstance(box, Mapping):
+                    errors.append(f"{mprefix}.{box_key} doit être un objet")
+                    continue
+                for key in ("x", "y"):
+                    if not _valid_number(box.get(key, 0)):
+                        errors.append(f"{mprefix}.{box_key}.{key} doit être numérique")
+                for key in ("width", "height"):
+                    if not _valid_number(box.get(key, 0), positive=True):
+                        errors.append(f"{mprefix}.{box_key}.{key} doit être > 0")
+            anchor = str(module.get("anchor") or "top_left")
+            if anchor not in LAYOUT_ANCHORS:
+                errors.append(f"{mprefix}.anchor inconnu : {anchor}")
+            elements = module.get("elements", [])
+            if not isinstance(elements, list):
+                errors.append(f"{mprefix}.elements doit être une liste")
+                continue
+            for element_index, element in enumerate(elements):
+                eprefix = f"{mprefix}.elements[{element_index}]"
+                if not isinstance(element, Mapping):
+                    errors.append(f"{eprefix} doit être un objet")
+                    continue
+                if not str(element.get("source") or "").strip():
+                    errors.append(f"{eprefix}.source est requis")
+                if not isinstance(element.get("transform"), Mapping):
+                    errors.append(f"{eprefix}.transform doit être un objet")
+
+    profile_keys = {
+        "game": "Game",
+        "overlay": "OverlayProfile",
+        "capture": "CaptureProfile",
+        "audio": "AudioProfile",
+        "layout": "LayoutProfile",
+    }
+    profile_sets = {
+        domain: set((profiles.get(domain) or {}).keys())
+        if isinstance(profiles.get(domain, {}), Mapping)
+        else set()
+        for domain in PROFILE_DOMAINS
+    }
+    profile_sets["layout"] = set(layout_profiles.keys()) if isinstance(layout_profiles, Mapping) else set()
+
+    def check_state_refs(state, where: str) -> None:
+        if not isinstance(state, Mapping):
+            return
+        parsed = StreamState.from_mapping(state)
+        for domain, key in profile_keys.items():
+            value = parsed.profile_name(domain)
+            if value not in profile_sets[domain]:
+                errors.append(f"{where}.{key} référence un profil inexistant : {value}")
+
+    check_state_refs(fallback, "router.fallback_state")
+    for index, raw in enumerate(rules):
+        if not isinstance(raw, Mapping) or str(raw.get("behavior", "match")).casefold() != "match":
+            continue
+        check_state_refs(raw.get("state"), f"rules[{index}].state")
+
+    return errors
+
+
+def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
+    router = data.get("router", {})
+    fallback = StreamState.from_mapping(router.get("fallback_state", {}))
+    rules: list[AppRule] = []
+    for raw in data.get("rules", []):
+        if not isinstance(raw, Mapping):
+            continue
+        behavior_text = str(raw.get("behavior", "match")).casefold()
+        behavior = ResolutionKind.IGNORE if behavior_text == "ignore" else ResolutionKind.MATCH
+        conditions = raw.get("conditions")
+        rules.append(
+            AppRule(
+                name=str(raw.get("name") or "Unnamed rule"),
+                priority=int(raw.get("priority", 0)),
+                exe=str(raw.get("exe") or ""),
+                path=str(raw.get("path") or ""),
+                title_regex=str(raw.get("title_regex") or ""),
+                enabled=bool(raw.get("enabled", True)),
+                behavior=behavior,
+                state=(
+                    StreamState.from_mapping(raw.get("state", {}))
+                    if behavior is ResolutionKind.MATCH
+                    else None
+                ),
+                conditions=dict(conditions) if isinstance(conditions, Mapping) else {},
+                apply_delay_ms=max(0, int(raw.get("apply_delay_ms", 0))),
+            )
+        )
+    return (
+        RuleSet(rules, fallback=fallback),
+        int(router.get("poll_ms", 50)),
+        int(router.get("debounce_ms", 150)),
+        int(router.get("fallback_debounce_ms", 350)),
+    )
+
+
+def build_obs_config(data: Mapping[str, Any]) -> OBSConnectionConfig:
+    obs = data.get("obs", {})
+    return OBSConnectionConfig(
+        enabled=bool(obs.get("enabled", False)),
+        host=str(obs.get("host") or "127.0.0.1"),
+        port=int(obs.get("port", 4455)),
+        password=str(obs.get("password") or ""),
+        timeout_seconds=float(obs.get("timeout_seconds", 2.0)),
+        reconnect_seconds=float(obs.get("reconnect_seconds", 3.0)),
+    )
+
+
+def build_profiles(data: Mapping[str, Any]):
+    profiles = data.get("profiles", {})
+    return profile_map_from_raw(profiles if isinstance(profiles, Mapping) else {})
+
+
+def build_layout_profiles(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = data.get("layout_profiles", {})
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        str(name): copy.deepcopy(dict(profile))
+        for name, profile in raw.items()
+        if isinstance(profile, Mapping)
+    }

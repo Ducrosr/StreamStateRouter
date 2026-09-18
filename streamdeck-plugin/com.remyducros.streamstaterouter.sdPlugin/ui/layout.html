@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Layout SSR</title>
+  <script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+</head>
+<body>
+  <sdpi-item label="LayoutProfile">
+    <sdpi-textfield setting="layout" placeholder="ex. Overwatch"></sdpi-textfield>
+  </sdpi-item>
+  <sdpi-item label="Mode">
+    <sdpi-select setting="mode" default="apply">
+      <option value="apply">Appliquer</option>
+      <option value="preview">Prévisualiser</option>
+    </sdpi-select>
+  </sdpi-item>
+  <p style="margin:12px;color:#aaa;font:12px system-ui">SSR doit être lancé et l’API locale active sur 127.0.0.1:8765.</p>
+</body>
+</html>
