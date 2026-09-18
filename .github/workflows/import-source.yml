@@ -1,0 +1,56 @@
+name: Import source archive
+
+on:
+  push:
+    paths:
+      - 'bootstrap/*.zip'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract latest source archive
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem bootstrap -Filter *.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $archive) { throw "No source archive found in bootstrap/" }
+
+          $temp = Join-Path $env:RUNNER_TEMP "ssr-import"
+          if (Test-Path $temp) { Remove-Item $temp -Recurse -Force }
+          New-Item -ItemType Directory -Path $temp | Out-Null
+          Expand-Archive $archive.FullName $temp -Force
+
+          $root = Get-ChildItem $temp -Directory | Select-Object -First 1
+          if (-not $root) { throw "Archive does not contain a source directory" }
+
+          Get-ChildItem -Force $root.FullName | ForEach-Object {
+            Copy-Item $_.FullName $PWD -Recurse -Force
+          }
+
+          Get-ChildItem -Recurse -Directory -Filter __pycache__ -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force
+          Get-ChildItem -Recurse -File -Include *.pyc,*.pyo -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+
+          Remove-Item bootstrap -Recurse -Force
+
+      - name: Commit imported source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if (git diff --cached --quiet) {
+            Write-Host "No changes to commit."
+            exit 0
+          }
+          git commit -m "chore: import Stream State Router v2.0.11 source"
+          git push
