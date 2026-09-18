@@ -3,7 +3,7 @@ name: Import source archive
 on:
   push:
     paths:
-      - 'bootstrap/*.zip'
+      - 'bootstrap/READY'
 
 permissions:
   contents: write
@@ -17,16 +17,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Extract latest source archive
+      - name: Rebuild and extract source archive
         shell: pwsh
         run: |
-          $archive = Get-ChildItem bootstrap -Filter *.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $archive) { throw "No source archive found in bootstrap/" }
+          $chunkDir = Join-Path $PWD "bootstrap/chunks"
+          if (-not (Test-Path $chunkDir)) { throw "bootstrap/chunks is missing" }
 
+          $base64Path = Join-Path $env:RUNNER_TEMP "ssr-source.b64"
+          $zipPath = Join-Path $env:RUNNER_TEMP "ssr-source.zip"
           $temp = Join-Path $env:RUNNER_TEMP "ssr-import"
+
+          $chunks = Get-ChildItem $chunkDir -Filter *.b64 | Sort-Object Name
+          if (-not $chunks) { throw "No source chunks found" }
+
+          $builder = [System.Text.StringBuilder]::new()
+          foreach ($chunk in $chunks) {
+            [void]$builder.Append((Get-Content $chunk.FullName -Raw).Trim())
+          }
+          [IO.File]::WriteAllText($base64Path, $builder.ToString(), [Text.Encoding]::ASCII)
+          [IO.File]::WriteAllBytes($zipPath, [Convert]::FromBase64String([IO.File]::ReadAllText($base64Path)))
+
           if (Test-Path $temp) { Remove-Item $temp -Recurse -Force }
           New-Item -ItemType Directory -Path $temp | Out-Null
-          Expand-Archive $archive.FullName $temp -Force
+          Expand-Archive $zipPath $temp -Force
 
           $root = Get-ChildItem $temp -Directory | Select-Object -First 1
           if (-not $root) { throw "Archive does not contain a source directory" }
