@@ -464,9 +464,12 @@ class MainWindow(QMainWindow):
 
         router_card, router_lay = self._card("Moteur de routage")
         form = QFormLayout()
-        self.poll_ms = QSpinBox(); self.poll_ms.setRange(20, 5000)
-        self.debounce_ms = QSpinBox(); self.debounce_ms.setRange(0, 5000)
-        self.fallback_debounce_ms = QSpinBox(); self.fallback_debounce_ms.setRange(0, 10000)
+        self.poll_ms = QSpinBox()
+        self.poll_ms.setRange(20, 5000)
+        self.debounce_ms = QSpinBox()
+        self.debounce_ms.setRange(0, 5000)
+        self.fallback_debounce_ms = QSpinBox()
+        self.fallback_debounce_ms.setRange(0, 10000)
         form.addRow("Intervalle de détection (ms)", self.poll_ms)
         form.addRow("Debounce règle (ms)", self.debounce_ms)
         form.addRow("Debounce fallback (ms)", self.fallback_debounce_ms)
@@ -477,8 +480,10 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.obs_enabled = QCheckBox("Piloter OBS")
         self.obs_host = QLineEdit()
-        self.obs_port = QSpinBox(); self.obs_port.setRange(1, 65535)
-        self.obs_password = QLineEdit(); self.obs_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.obs_port = QSpinBox()
+        self.obs_port.setRange(1, 65535)
+        self.obs_password = QLineEdit()
+        self.obs_password.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("", self.obs_enabled)
         form.addRow("Hôte", self.obs_host)
         form.addRow("Port", self.obs_port)
@@ -492,8 +497,10 @@ class MainWindow(QMainWindow):
         api_card, api_lay = self._card("API locale / Stream Deck")
         api_form = QFormLayout()
         self.api_enabled = QCheckBox("Activer l’API locale")
-        self.api_port = QSpinBox(); self.api_port.setRange(1, 65535)
-        self.api_token = QLineEdit(); self.api_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_port = QSpinBox()
+        self.api_port.setRange(1, 65535)
+        self.api_token = QLineEdit()
+        self.api_token.setEchoMode(QLineEdit.EchoMode.Password)
         api_form.addRow("", self.api_enabled)
         api_form.addRow("Port localhost", self.api_port)
         api_form.addRow("Token facultatif", self.api_token)
@@ -504,11 +511,16 @@ class MainWindow(QMainWindow):
         self.close_to_tray = QCheckBox("Fermer la fenêtre vers la zone de notification")
         self.start_with_windows = QCheckBox("Démarrer avec Windows")
         self.auto_detect_modules = QCheckBox("Détecter automatiquement les nouveaux modules OBS")
-        self.module_scan_seconds = QSpinBox(); self.module_scan_seconds.setRange(2, 120); self.module_scan_seconds.setSuffix(" s")
+        self.module_scan_seconds = QSpinBox()
+        self.module_scan_seconds.setRange(2, 120)
+        self.module_scan_seconds.setSuffix(" s")
         behavior_lay.addWidget(self.close_to_tray)
         behavior_lay.addWidget(self.start_with_windows)
         behavior_lay.addWidget(self.auto_detect_modules)
-        scan_row = QHBoxLayout(); scan_row.addWidget(QLabel("Intervalle détection modules")); scan_row.addWidget(self.module_scan_seconds); scan_row.addStretch(1)
+        scan_row = QHBoxLayout()
+        scan_row.addWidget(QLabel("Intervalle détection modules"))
+        scan_row.addWidget(self.module_scan_seconds)
+        scan_row.addStretch(1)
         behavior_lay.addLayout(scan_row)
         root.addWidget(behavior_card)
         root.addStretch(1)
@@ -822,7 +834,8 @@ class MainWindow(QMainWindow):
         dlg = RuleDialog(self, profile_choices=self._state_profile_choices())
         if dlg.exec() == QDialog.Accepted:
             self.config.setdefault("rules", []).append(dlg.result_rule())
-            self._mark_dirty(); self._refresh_rules_table()
+            self._mark_dirty()
+            self._refresh_rules_table()
 
     def _edit_rule(self, *_args) -> None:
         idx = self._selected_rule_index()
@@ -835,7 +848,8 @@ class MainWindow(QMainWindow):
         )
         if dlg.exec() == QDialog.Accepted:
             self.config["rules"][idx] = dlg.result_rule()
-            self._mark_dirty(); self._refresh_rules_table()
+            self._mark_dirty()
+            self._refresh_rules_table()
 
     def _duplicate_rule(self) -> None:
         idx = self._selected_rule_index()
@@ -844,7 +858,8 @@ class MainWindow(QMainWindow):
         raw = copy.deepcopy(self.config["rules"][idx])
         raw["name"] = f"{raw.get('name', 'Règle')} (copie)"
         self.config["rules"].insert(idx + 1, raw)
-        self._mark_dirty(); self._refresh_rules_table()
+        self._mark_dirty()
+        self._refresh_rules_table()
 
     def _toggle_rule(self) -> None:
         idx = self._selected_rule_index()
@@ -852,7 +867,8 @@ class MainWindow(QMainWindow):
             return
         rule = self.config["rules"][idx]
         rule["enabled"] = not bool(rule.get("enabled", True))
-        self._mark_dirty(); self._refresh_rules_table()
+        self._mark_dirty()
+        self._refresh_rules_table()
 
     def _test_rule(self) -> None:
         idx = self._selected_rule_index()
@@ -890,7 +906,8 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Supprimer", f"Supprimer « {name} » ?") != QMessageBox.Yes:
             return
         self.config["rules"].pop(idx)
-        self._mark_dirty(); self._refresh_rules_table()
+        self._mark_dirty()
+        self._refresh_rules_table()
 
     # ---------- profiles/actions ----------
     def _profiles_for_domain(self, domain: str) -> dict:
@@ -972,7 +989,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Profil", "Ce profil existe déjà.")
             return
         profiles[name] = {"actions": [], "extends": "", "conditions": {}}
-        self._mark_dirty(); self._refresh_profile_names(); self.profile_name.setCurrentText(name)
+        self._mark_dirty()
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(name)
         self._refresh_override_boxes()
 
     def _duplicate_profile(self) -> None:
@@ -989,7 +1008,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Profil", "Ce profil existe déjà.")
             return
         profiles[name] = copy.deepcopy(profile)
-        self._mark_dirty(); self._refresh_profile_names(); self.profile_name.setCurrentText(name)
+        self._mark_dirty()
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(name)
         self._refresh_override_boxes()
 
     def _profile_references(self, domain: str, name: str) -> list[str]:
@@ -1048,7 +1069,9 @@ class MainWindow(QMainWindow):
         del profiles[old_name]
         profiles[name] = profile
         self._replace_profile_references(domain, old_name, name)
-        self._mark_dirty(); self._refresh_profile_names(); self.profile_name.setCurrentText(name)
+        self._mark_dirty()
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(name)
         self._refresh_rules_table()
         self._refresh_override_boxes()
 
@@ -1069,7 +1092,9 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Supprimer", f"Supprimer le profil « {name} » ?") != QMessageBox.Yes:
             return
         del self._profiles_for_domain(domain)[name]
-        self._mark_dirty(); self._refresh_profile_names(); self._refresh_override_boxes()
+        self._mark_dirty()
+        self._refresh_profile_names()
+        self._refresh_override_boxes()
 
     def _add_action(self) -> None:
         current = self._current_profile()
@@ -1078,43 +1103,53 @@ class MainWindow(QMainWindow):
         dlg = ActionDialog(self)
         if dlg.exec() == QDialog.Accepted:
             current[2].setdefault("actions", []).append(dlg.result_action())
-            self._mark_dirty(); self._refresh_actions_table()
+            self._mark_dirty()
+            self._refresh_actions_table()
 
     def _edit_action(self, *_args) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         actions = current[2].setdefault("actions", [])
         dlg = ActionDialog(self, actions[idx])
         if dlg.exec() == QDialog.Accepted:
             actions[idx] = dlg.result_action()
-            self._mark_dirty(); self._refresh_actions_table()
+            self._mark_dirty()
+            self._refresh_actions_table()
 
     def _duplicate_action(self) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         actions = current[2].setdefault("actions", [])
         actions.insert(idx + 1, copy.deepcopy(actions[idx]))
-        self._mark_dirty(); self._refresh_actions_table()
+        self._mark_dirty()
+        self._refresh_actions_table()
 
     def _toggle_action(self) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         action = current[2].setdefault("actions", [])[idx]
         action["enabled"] = not bool(action.get("enabled", True))
-        self._mark_dirty(); self._refresh_actions_table()
+        self._mark_dirty()
+        self._refresh_actions_table()
 
     def _delete_action(self) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         current[2].setdefault("actions", []).pop(idx)
-        self._mark_dirty(); self._refresh_actions_table()
+        self._mark_dirty()
+        self._refresh_actions_table()
 
     def _move_action(self, delta: int) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         actions = current[2].setdefault("actions", [])
@@ -1122,7 +1157,8 @@ class MainWindow(QMainWindow):
         if not 0 <= new_idx < len(actions):
             return
         actions[idx], actions[new_idx] = actions[new_idx], actions[idx]
-        self._mark_dirty(); self._refresh_actions_table(); self.actions_table.selectRow(new_idx)
+        self._mark_dirty()
+        self._refresh_actions_table(); self.actions_table.selectRow(new_idx)
 
     def _test_profile(self) -> None:
         current = self._current_profile()
