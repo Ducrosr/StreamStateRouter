@@ -103,7 +103,12 @@ class OBSActivationController:
         if not pending:
             return False, ""
         names = ", ".join(
-            sorted({f"{item.target.container}/{item.target.source}" for item in pending})
+            sorted(
+                {
+                    f"{item.target.container_kind}:{item.target.container}/{item.target.source}"
+                    for item in pending
+                }
+            )
         )
         return True, f"nettoyage OBS en attente : {names}"
 
