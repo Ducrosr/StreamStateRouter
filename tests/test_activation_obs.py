@@ -5,10 +5,12 @@ from types import SimpleNamespace
 
 from stream_state_router.activation import (
     ActivationEvent,
+    ActivationVisibilityUncertain,
     OBSActivationController,
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
+from stream_state_router.obs.client import OBSUnavailableError
 
 
 class FakeClock:
@@ -37,6 +39,7 @@ class FakeLayoutManager:
         self.reset_calls = 0
         self.catalog_by_scene = {}
         self.runtime_visibility_owners = set()
+        self.failures = {}
 
     def set_runtime_visibility_owners(self, owners):
         self.runtime_visibility_owners = set(owners)
@@ -49,6 +52,22 @@ class FakeLayoutManager:
 
     def set_item_enabled(self, container, source, enabled, *, container_kind="scene"):
         self.enabled_calls.append((container, source, bool(enabled), container_kind))
+
+    def set_activation_item_enabled(
+        self,
+        container,
+        source,
+        enabled,
+        *,
+        container_kind="scene",
+    ):
+        key = (container, source, bool(enabled), container_kind)
+        failure = self.failures.get(key)
+        self.enabled_calls.append(key)
+        if failure:
+            exc = failure.pop(0)
+            if exc is not None:
+                raise exc
 
 
 class FakeDispatcher:
@@ -211,7 +230,7 @@ class OBSActivationControllerTests(unittest.TestCase):
         clock.value = 1.6
 
         self.assertTrue(controller.scene_collection_changed())
-        self.assertGreaterEqual(dispatcher.layout_manager.reset_calls, 2)
+        self.assertEqual(dispatcher.layout_manager.reset_calls, 0)
 
     def test_eligibility_reports_reason(self):
         dispatcher = FakeDispatcher()
@@ -237,6 +256,178 @@ class OBSActivationControllerTests(unittest.TestCase):
 
         self.assertFalse(eligible)
         self.assertIn("déconnecté", reason)
+
+    def test_hide_failure_stays_pending_and_retries_until_acknowledged(self):
+        dispatcher = FakeDispatcher()
+        clock = FakeClock(10.0)
+        policy = self.policy()
+        controller = OBSActivationController(
+            dispatcher,
+            {"egg": policy},
+            clock=clock,
+            retry_base_seconds=0.1,
+            retry_max_seconds=0.2,
+        )
+        controller.reconcile()
+        dispatcher.layout_manager.enabled_calls.clear()
+        dispatcher.layout_manager.failures[
+            ("[Module] EasterEgg", "B", False, "scene")
+        ] = [OBSUnavailableError("response lost")]
+
+        with self.assertRaises(ActivationVisibilityUncertain):
+            controller.apply_event(
+                ActivationEvent(
+                    "hide",
+                    "egg",
+                    10.0,
+                    source="B",
+                    container="[Module] EasterEgg",
+                )
+            )
+
+        blocked, reason = controller.policy_cleanup_status("egg")
+        self.assertTrue(blocked)
+        self.assertIn("B", reason)
+        self.assertEqual(len(controller.pending_hides("egg")), 1)
+
+        clock.value = 10.2
+        messages = controller.retry_pending_hides(now=clock.value)
+
+        self.assertTrue(messages)
+        self.assertEqual(controller.pending_hides("egg"), ())
+
+    def test_uncertain_show_schedules_compensating_hide(self):
+        dispatcher = FakeDispatcher()
+        clock = FakeClock(20.0)
+        policy = self.policy()
+        controller = OBSActivationController(
+            dispatcher,
+            {"egg": policy},
+            clock=clock,
+            retry_base_seconds=0.1,
+            retry_max_seconds=0.2,
+        )
+        controller.reconcile()
+        dispatcher.layout_manager.enabled_calls.clear()
+        dispatcher.layout_manager.failures[
+            ("[Module] EasterEgg", "B", True, "scene")
+        ] = [OBSUnavailableError("response lost after apply")]
+
+        with self.assertRaises(ActivationVisibilityUncertain):
+            controller.apply_event(
+                ActivationEvent(
+                    "show",
+                    "egg",
+                    20.0,
+                    source="B",
+                    container="[Module] EasterEgg",
+                )
+            )
+
+        self.assertEqual(len(controller.pending_hides("egg")), 1)
+        clock.value = 20.2
+        controller.retry_pending_hides(now=clock.value)
+
+        self.assertEqual(controller.pending_hides("egg"), ())
+        self.assertEqual(
+            dispatcher.layout_manager.enabled_calls[-1],
+            ("[Module] EasterEgg", "B", False, "scene"),
+        )
+
+    def test_exclusive_show_is_blocked_if_competitor_hide_is_uncertain(self):
+        dispatcher = FakeDispatcher()
+        controller = OBSActivationController(dispatcher, {"egg": self.policy()})
+        controller.reconcile()
+        dispatcher.layout_manager.enabled_calls.clear()
+        dispatcher.layout_manager.failures[
+            ("[Module] EasterEgg", "A", False, "scene")
+        ] = [OBSUnavailableError("timeout")]
+
+        with self.assertRaises(ActivationVisibilityUncertain):
+            controller.apply_event(
+                ActivationEvent(
+                    "show",
+                    "egg",
+                    30.0,
+                    source="B",
+                    container="[Module] EasterEgg",
+                )
+            )
+
+        self.assertFalse(
+            any(
+                source == "B" and enabled
+                for _container, source, enabled, _kind
+                in dispatcher.layout_manager.enabled_calls
+            )
+        )
+
+    def test_pending_hide_from_old_collection_is_not_replayed_in_new_collection(self):
+        dispatcher = FakeDispatcher()
+        clock = FakeClock(40.0)
+        controller = OBSActivationController(
+            dispatcher,
+            {"egg": self.policy()},
+            clock=clock,
+            retry_base_seconds=0.1,
+        )
+        controller.reconcile()
+        dispatcher.layout_manager.enabled_calls.clear()
+        dispatcher.layout_manager.failures[
+            ("[Module] EasterEgg", "A", False, "scene")
+        ] = [OBSUnavailableError("timeout")]
+
+        with self.assertRaises(ActivationVisibilityUncertain):
+            controller.apply_event(
+                ActivationEvent(
+                    "hide",
+                    "egg",
+                    40.0,
+                    source="A",
+                    container="[Module] EasterEgg",
+                )
+            )
+        calls_before = len(dispatcher.layout_manager.enabled_calls)
+
+        dispatcher.client.scene_collection = "Collection B"
+        clock.value = 40.2
+        controller.retry_pending_hides(now=clock.value)
+
+        self.assertEqual(controller.pending_hides(), ())
+        self.assertEqual(len(dispatcher.layout_manager.enabled_calls), calls_before)
+
+    def test_legacy_source_only_event_is_rejected_when_ambiguous(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy(
+            exclusive=False,
+            targets=(
+                TriggerTargetConfig("Scene A", "Cloud", container_kind="scene"),
+                TriggerTargetConfig("Group B", "Cloud", container_kind="group"),
+            ),
+        )
+        controller = OBSActivationController(dispatcher, {"egg": policy})
+        controller.reconcile()
+
+        with self.assertRaisesRegex(RuntimeError, "ambiguë"):
+            controller.apply_event(
+                ActivationEvent("show", "egg", 50.0, source="Cloud", container="")
+            )
+
+        controller.apply_event(
+            ActivationEvent(
+                "show",
+                "egg",
+                50.0,
+                source="Cloud",
+                container="Group B",
+                container_kind="group",
+            )
+        )
+        self.assertEqual(
+            dispatcher.layout_manager.enabled_calls[-1],
+            ("Group B", "Cloud", True, "group"),
+        )
+
 
 
 if __name__ == "__main__":
