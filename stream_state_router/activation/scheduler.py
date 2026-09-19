@@ -128,7 +128,11 @@ class ActivationScheduler:
                 blocked_count += 1
                 continue
             trigger_count += 1
-            label = f"{target.container}/{target.source}" if target.container else target.source
+            label = (
+                f"{target.container_kind}:{target.container}/{target.source}"
+                if target.container
+                else target.source
+            )
             counts[label] = counts.get(label, 0) + 1
             last_source = target.source
 
