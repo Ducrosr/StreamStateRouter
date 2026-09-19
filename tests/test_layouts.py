@@ -289,6 +289,90 @@ class LayoutTests(unittest.TestCase):
         self.assertFalse(element["enabled"])
         self.assertEqual(element["visibility_owner"], "runtime")
 
+    def test_activation_visibility_resolves_fresh_id_even_if_stale_id_still_works(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+
+        # Seed the layout cache with Avatar=id 2.
+        manager.discover_scene("Gameplay")
+        self.assertEqual(manager._scene_item_cache[("Gameplay", "[Webcam] Avatar")], 2)
+
+        # OBS structurally changes: id 2 is still a valid scene item, but Avatar
+        # moved to id 20. A retry-on-error strategy would mutate the wrong item.
+        client.items["[Webcam] Avatar"] = 20
+        client.calls.clear()
+
+        manager.set_activation_item_enabled(
+            "Gameplay",
+            "[Webcam] Avatar",
+            False,
+            container_kind="scene",
+        )
+
+        resolutions = [
+            payload
+            for request, payload in client.calls
+            if request == "GetSceneItemId"
+            and payload.get("sourceName") == "[Webcam] Avatar"
+        ]
+        mutations = [
+            payload
+            for request, payload in client.calls
+            if request == "SetSceneItemEnabled"
+        ]
+        self.assertTrue(resolutions)
+        self.assertEqual(mutations[-1]["sceneItemId"], 20)
+        self.assertNotEqual(mutations[-1]["sceneItemId"], 2)
+
+    def test_persisted_runtime_visibility_owner_survives_policy_owner_removal(self):
+        manager = OBSLayoutManager(FakeLayoutClient())
+        manager.set_runtime_visibility_owners({("Gameplay", "[Webcam] Avatar")})
+        profile = manager.capture_profile("Gameplay")
+        element = profile["modules"]["[Webcam] Avatar"]["elements"][0]
+        self.assertEqual(element["visibility_owner"], "runtime")
+
+        # Characterization only: removing the live policy ownership set does
+        # not silently turn a persisted runtime marker back into layout-owned
+        # visibility. This semantic remains intentionally unchanged.
+        manager.set_runtime_visibility_owners(set())
+        self.assertTrue(
+            manager.runtime_visibility_owned(
+                "Gameplay",
+                "[Webcam] Avatar",
+                element,
+            )
+        )
+
+        manager.client.calls.clear()
+        manager.apply_profile(profile, record_undo=False)
+        visibility_ids = [
+            payload["sceneItemId"]
+            for request, payload in manager.client.calls
+            if request == "SetSceneItemEnabled"
+        ]
+        self.assertNotIn(2, visibility_ids)
+
+    def test_preview_and_undo_preserve_runtime_owned_visibility(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        manager.set_runtime_visibility_owners({("Gameplay", "[Webcam] Avatar")})
+        profile = manager.capture_profile("Gameplay")
+        profile["modules"]["[Webcam] Avatar"]["geometry"]["x"] += 10.0
+
+        client.calls.clear()
+        manager.preview_profile(profile)
+        manager.commit_preview()
+        manager.undo_last()
+
+        avatar_visibility = [
+            payload
+            for request, payload in client.calls
+            if request == "SetSceneItemEnabled"
+            and payload.get("sceneItemId") == 2
+        ]
+        self.assertEqual(avatar_visibility, [])
+
+
 
 if __name__ == "__main__":
     unittest.main()
