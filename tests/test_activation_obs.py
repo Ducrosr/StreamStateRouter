@@ -36,6 +36,10 @@ class FakeLayoutManager:
         self.enabled_calls = []
         self.reset_calls = 0
         self.catalog_by_scene = {}
+        self.runtime_visibility_owners = set()
+
+    def set_runtime_visibility_owners(self, owners):
+        self.runtime_visibility_owners = set(owners)
 
     def reset_cache(self):
         self.reset_calls += 1
@@ -155,6 +159,43 @@ class OBSActivationControllerTests(unittest.TestCase):
             ],
         )
         self.assertFalse(controller.scene_collection_changed())
+
+    def test_all_configured_targets_remain_runtime_visibility_owned(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy(
+            enabled=False,
+            targets=(
+                TriggerTargetConfig("[Module] EasterEgg", "A", enabled=True),
+                TriggerTargetConfig("[Module] EasterEgg", "B", enabled=False),
+            ),
+        )
+
+        OBSActivationController(dispatcher, {"egg": policy})
+
+        self.assertEqual(
+            dispatcher.layout_manager.runtime_visibility_owners,
+            {
+                ("[Module] EasterEgg", "A"),
+                ("[Module] EasterEgg", "B"),
+            },
+        )
+
+    def test_reconcile_hides_disabled_configured_target_too(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy(
+            targets=(
+                TriggerTargetConfig("[Module] EasterEgg", "A", enabled=True),
+                TriggerTargetConfig("[Module] EasterEgg", "B", enabled=False),
+            )
+        )
+        controller = OBSActivationController(dispatcher, {"egg": policy})
+
+        controller.reconcile()
+
+        self.assertIn(
+            ("[Module] EasterEgg", "B", False, "scene"),
+            dispatcher.layout_manager.enabled_calls,
+        )
 
     def test_scene_collection_change_is_detected_after_probe_interval(self):
         dispatcher = FakeDispatcher()
