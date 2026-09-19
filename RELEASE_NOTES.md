@@ -34,4 +34,10 @@ Le rapport Astra sur la base 2.0.12 indiquait **85 tests exécutés en mémoire 
 
 Les nouveaux tests de concurrence utilisent des barrières/événements et couvrent notamment show→stop sérialisé, cleanup incertain, show à réponse perdue, exclusivité, changement de collection, arrêt/redémarrage, valeurs non finies et simulation concurrente.
 
-Au moment de cette mise à jour, GitHub Actions échoue encore **avant l'exécution de toute étape** sur le dépôt (`steps=null`). Aucun succès de suite complète, Ruff ou validation Windows/OBS réelle n'est donc revendiqué tant que ces commandes n'ont pas réellement tourné.
+Validation locale Windows 11 / PowerShell 7.6.6 réussie :
+
+- **109/109 tests unitaires réussis** ;
+- **Ruff : All checks passed!** ;
+- **smoke test de configuration : Configuration valide**.
+
+GitHub Actions reste indisponible sur le dépôt privé parce que les jobs échouent avant toute étape (`steps=null`). La validation avec la vraie collection OBS reste à effectuer séparément.
