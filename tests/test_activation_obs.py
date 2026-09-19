@@ -213,6 +213,31 @@ class OBSActivationControllerTests(unittest.TestCase):
         self.assertTrue(controller.scene_collection_changed())
         self.assertGreaterEqual(dispatcher.layout_manager.reset_calls, 2)
 
+    def test_eligibility_reports_reason(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy(active_when="streaming")
+        controller = OBSActivationController(dispatcher, {"egg": policy})
+
+        eligible, reason = controller.eligibility("egg", policy)
+        self.assertFalse(eligible)
+        self.assertIn("inactif", reason)
+
+        dispatcher.context["streaming"] = True
+        eligible, reason = controller.eligibility("egg", policy)
+        self.assertTrue(eligible)
+        self.assertIn("actif", reason)
+
+    def test_eligibility_reports_disconnected_obs(self):
+        dispatcher = FakeDispatcher()
+        dispatcher.client.connected = False
+        policy = self.policy()
+        controller = OBSActivationController(dispatcher, {"egg": policy})
+
+        eligible, reason = controller.eligibility("egg", policy)
+
+        self.assertFalse(eligible)
+        self.assertIn("déconnecté", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

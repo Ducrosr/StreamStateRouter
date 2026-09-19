@@ -11,6 +11,7 @@ from .models import (
     ActivationPhase,
     ActivationRuntimeState,
     RollTestResult,
+    SimulationResult,
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
@@ -86,6 +87,51 @@ class ActivationScheduler:
             source = target.source if target is not None else ""
             triggered = target is not None
         return RollTestResult(policy_name, roll, self._chance(policy), triggered, source)
+
+    def simulate(
+        self,
+        policy_name: str,
+        *,
+        trials: int = 1000,
+        seed: int = 12345,
+    ) -> SimulationResult:
+        """Run deterministic dry rolls without mutating runtime state or the live RNG."""
+        policy = self._policy(policy_name)
+        sample_count = max(1, min(1_000_000, int(trials)))
+        sample_seed = int(seed)
+        rng = random.Random(sample_seed)
+        chance = self._chance(policy)
+        last_source = ""
+        hit_count = 0
+        trigger_count = 0
+        miss_count = 0
+        blocked_count = 0
+        counts: dict[str, int] = {}
+
+        for _ in range(sample_count):
+            if rng.random() >= chance:
+                miss_count += 1
+                continue
+            hit_count += 1
+            target = self._choose_target_with_rng(policy, last_source, rng)
+            if target is None:
+                blocked_count += 1
+                continue
+            trigger_count += 1
+            label = f"{target.container}/{target.source}" if target.container else target.source
+            counts[label] = counts.get(label, 0) + 1
+            last_source = target.source
+
+        return SimulationResult(
+            policy=policy_name,
+            trials=sample_count,
+            seed=sample_seed,
+            chance_hit_count=hit_count,
+            trigger_count=trigger_count,
+            miss_count=miss_count,
+            blocked_count=blocked_count,
+            target_counts=tuple(sorted(counts.items())),
+        )
 
     def trigger_now(
         self,
@@ -258,12 +304,23 @@ class ActivationScheduler:
 
         roll = self._rng.random()
         chance = self._chance(policy)
-        events = [ActivationEvent("roll", name, now, roll=roll, chance=chance)]
-        if roll >= chance:
+        hit = roll < chance
+        events = [
+            ActivationEvent(
+                "roll",
+                name,
+                now,
+                roll=roll,
+                chance=chance,
+                reason="chance_hit" if hit else "chance_miss",
+            )
+        ]
+        if not hit:
             return events
 
         target = self._choose_target(policy, state)
         if target is None:
+            events.append(ActivationEvent("blocked", name, now, reason="no_target"))
             return events
         events.extend(self._activate(name, policy, state, target, now, reason="random"))
         return events
@@ -367,6 +424,14 @@ class ActivationScheduler:
         policy: TriggerPolicyConfig,
         state: ActivationRuntimeState,
     ) -> TriggerTargetConfig | None:
+        return self._choose_target_with_rng(policy, state.last_source, self._rng)
+
+    @staticmethod
+    def _choose_target_with_rng(
+        policy: TriggerPolicyConfig,
+        last_source: str,
+        rng: random.Random,
+    ) -> TriggerTargetConfig | None:
         candidates = [
             target
             for target in policy.targets
@@ -374,15 +439,15 @@ class ActivationScheduler:
         ]
         if not candidates:
             return None
-        if policy.avoid_immediate_repeat and state.last_source and len(candidates) > 1:
-            alternatives = [target for target in candidates if target.source != state.last_source]
+        if policy.avoid_immediate_repeat and last_source and len(candidates) > 1:
+            alternatives = [target for target in candidates if target.source != last_source]
             if alternatives:
                 candidates = alternatives
 
         total = sum(float(target.weight) for target in candidates)
         if total <= 0:
             return None
-        needle = self._rng.random() * total
+        needle = rng.random() * total
         cumulative = 0.0
         for target in candidates:
             cumulative += float(target.weight)

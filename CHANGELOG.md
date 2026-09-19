@@ -1,5 +1,18 @@
 # Historique
 
+## 2.0.12 — observabilité et validation bêta du scheduler
+
+- Affichage de l'état runtime d'une politique : inactif, éligible, déclenché/visible ou cooldown.
+- Affichage de la raison d'éligibilité OBS et du dernier événement.
+- Journal de diagnostic par politique : tirages réussis/échoués, déclenchements, masquages, cooldowns, blocages, erreurs et fail-safe.
+- Les déclenchements manuels respectent désormais le cooldown par défaut au lieu de le contourner.
+- Ajout d'une réinitialisation runtime globale qui remet le scheduler à zéro et masque toutes les sources temporaires.
+- Ajout d'une simulation déterministe par seed, sans effet sur OBS, l'état runtime ou le RNG live.
+- La simulation rapporte succès de chance, échecs, blocages sans cible et distribution pondérée des sources.
+- Le contrôleur OBS expose la raison précise d'inéligibilité (OBS déconnecté, stream inactif, module absent, etc.).
+- Tests unitaires ajoutés pour la simulation, les raisons d'éligibilité, le cooldown manuel et le fail-safe manuel.
+
+
 ## 2.0.11 — transitions de layout sur une timeline globale
 
 - Correction d'un gel/crash apparent lorsqu'une transition `Déplacement` longue était appliquée à de nombreux éléments.

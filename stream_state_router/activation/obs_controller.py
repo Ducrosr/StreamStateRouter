@@ -25,7 +25,7 @@ class OBSActivationController:
         self._clock = clock
         self._eligibility_cache_seconds = max(0.05, float(eligibility_cache_seconds))
         self._collection_probe_seconds = max(0.1, float(collection_probe_seconds))
-        self._module_presence_cache: dict[tuple[str, str], tuple[float, bool]] = {}
+        self._module_presence_cache: dict[tuple[str, str], tuple[float, bool, str]] = {}
         self._last_collection_probe = 0.0
         self._scene_collection: str | None = None
         self._sync_visibility_owners()
@@ -46,33 +46,40 @@ class OBSActivationController:
         self._module_presence_cache.clear()
         self.layout_manager.reset_cache()
 
-    def is_eligible(self, policy_name: str, policy: TriggerPolicyConfig) -> bool:
+    def eligibility(
+        self,
+        policy_name: str,
+        policy: TriggerPolicyConfig,
+    ) -> tuple[bool, str]:
         config = getattr(self.client, "config", None)
         if config is None or not bool(getattr(config, "enabled", False)):
-            return False
+            return False, "pilotage OBS désactivé"
         if not bool(getattr(self.client, "connected", False)):
-            return False
+            return False, "OBS déconnecté"
 
         mode = str(policy.active_when or "module_in_program_scene").casefold()
         if mode == "always":
-            return True
+            return True, "condition Toujours satisfaite"
 
         context = self.dispatcher.obs_context()
         if mode == "streaming":
-            return bool(context.get("streaming"))
+            streaming = bool(context.get("streaming"))
+            return (True, "stream actif") if streaming else (False, "stream inactif")
         if mode != "module_in_program_scene":
-            return False
+            return False, f"condition inconnue : {mode}"
 
         scene = str(context.get("program_scene") or "").strip()
         module_source = str(policy.module_source or policy_name).strip()
-        if not scene or not module_source:
-            return False
+        if not scene:
+            return False, "aucune scène programme détectée"
+        if not module_source:
+            return False, "module OBS non défini"
 
         key = (scene, module_source)
         now = self._clock()
         cached = self._module_presence_cache.get(key)
         if cached is not None and now - cached[0] < self._eligibility_cache_seconds:
-            return cached[1]
+            return cached[1], cached[2]
 
         try:
             catalog = self.layout_manager.discover_scene(scene, recursive=True)
@@ -81,10 +88,15 @@ class OBSActivationController:
                 for elements in catalog.values()
                 for element in elements
             )
-        except Exception:
+            reason = f"module présent dans {scene}" if present else f"module absent de {scene}"
+        except Exception as exc:
             present = False
-        self._module_presence_cache[key] = (now, present)
-        return present
+            reason = f"scan OBS impossible : {exc}"
+        self._module_presence_cache[key] = (now, present, reason)
+        return present, reason
+
+    def is_eligible(self, policy_name: str, policy: TriggerPolicyConfig) -> bool:
+        return self.eligibility(policy_name, policy)[0]
 
     def apply_event(self, event: ActivationEvent) -> None:
         if event.kind not in {"show", "hide"}:

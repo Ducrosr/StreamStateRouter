@@ -1569,7 +1569,13 @@ class MainWindow(QMainWindow):
             return {"available": False, "phase": "idle"}
         return self._service.activation_status(policy_name)
 
-    def _activation_command(self, action: str, policy_name: str, source: str | None = None):
+    def _activation_command(
+        self,
+        action: str,
+        policy_name: str,
+        source: str | None = None,
+        options=None,
+    ):
         service = self._service
         if service is None:
             raise RuntimeError("Runtime non disponible")
@@ -1581,6 +1587,15 @@ class MainWindow(QMainWindow):
             return service.activation_stop(policy_name)
         if action == "reset_cooldown":
             return service.activation_reset_cooldown(policy_name)
+        if action == "reset_all":
+            return service.activation_reset_all()
+        if action == "simulate":
+            options = options or {}
+            return service.activation_simulate(
+                policy_name,
+                trials=int(options.get("trials", 1000)),
+                seed=int(options.get("seed", 12345)),
+            )
         raise ValueError(f"Commande de déclenchement inconnue : {action}")
 
     def _edit_layout_module(self, *_args) -> None:

@@ -372,22 +372,62 @@ class ModuleLayoutDialog(QDialog):
         self.activation_status = QLabel("État runtime : —")
         self.activation_status.setObjectName("Muted")
         root.addWidget(self.activation_status)
+        self.activation_eligibility = QLabel("Éligibilité : —")
+        self.activation_eligibility.setObjectName("Muted")
+        root.addWidget(self.activation_eligibility)
+        self.activation_last_event = QLabel("Dernier événement : —")
+        self.activation_last_event.setWordWrap(True)
+        self.activation_last_event.setObjectName("Muted")
+        root.addWidget(self.activation_last_event)
+
         action_row = QHBoxLayout()
         for label, action in (
             ("Tester le tirage", "test_roll"),
             ("Déclencher maintenant", "trigger"),
             ("Arrêter", "stop"),
             ("Réinitialiser le cooldown", "reset_cooldown"),
+            ("Réinitialiser runtime", "reset_all"),
         ):
             button = QPushButton(label)
             button.clicked.connect(lambda _checked=False, a=action: self._run_activation_command(a))
             action_row.addWidget(button)
         action_row.addStretch(1)
         root.addLayout(action_row)
+
+        simulation_row = QHBoxLayout()
+        simulation_row.addWidget(QLabel("Simulation déterministe"))
+        self.activation_sim_trials = QSpinBox()
+        self.activation_sim_trials.setRange(1, 100000)
+        self.activation_sim_trials.setValue(1000)
+        self.activation_sim_trials.setSuffix(" tirages")
+        self.activation_sim_seed = QSpinBox()
+        self.activation_sim_seed.setRange(0, 2147483647)
+        self.activation_sim_seed.setValue(12345)
+        self.activation_sim_seed.setPrefix("seed ")
+        self.activation_sim_button = QPushButton("Simuler")
+        self.activation_sim_button.clicked.connect(
+            lambda _checked=False: self._run_activation_command("simulate")
+        )
+        simulation_row.addWidget(self.activation_sim_trials)
+        simulation_row.addWidget(self.activation_sim_seed)
+        simulation_row.addWidget(self.activation_sim_button)
+        simulation_row.addStretch(1)
+        root.addLayout(simulation_row)
+
+        diagnostics_title = QLabel("Diagnostic scheduler")
+        diagnostics_title.setObjectName("Section")
+        root.addWidget(diagnostics_title)
+        self.activation_diagnostics = QPlainTextEdit()
+        self.activation_diagnostics.setReadOnly(True)
+        self.activation_diagnostics.setMaximumBlockCount(40)
+        self.activation_diagnostics.setMaximumHeight(140)
+        root.addWidget(self.activation_diagnostics)
+
         test_hint = QLabel(
-            "Les commandes manuelles utilisent la configuration actuellement appliquée au runtime. "
-            "Après une modification, utilisez « Enregistrer et appliquer » avant de les tester. "
-            "Double-cliquez une source participante pour la déclencher directement."
+            "Les commandes manuelles utilisent exactement la même machine d'état que l'automatique : "
+            "un cooldown actif n'est donc pas contourné. Après une modification, utilisez "
+            "« Enregistrer et appliquer » avant de tester. Double-cliquez une source participante "
+            "pour la déclencher directement."
         )
         test_hint.setWordWrap(True)
         test_hint.setObjectName("Muted")
@@ -490,22 +530,38 @@ class ModuleLayoutDialog(QDialog):
             self.activation_exclusive,
             self.activation_repeat,
             self.activation_targets,
+            self.activation_sim_trials,
+            self.activation_sim_seed,
+            self.activation_sim_button,
         ):
             widget.setEnabled(enabled)
 
     def _refresh_activation_status(self) -> None:
         if self._activation_status_provider is None or not self._activation_policy_name:
             self.activation_status.setText("État runtime : politique non appliquée")
+            self.activation_eligibility.setText("Éligibilité : —")
+            self.activation_last_event.setText("Dernier événement : —")
+            self.activation_diagnostics.clear()
             return
         try:
             status = self._activation_status_provider(self._activation_policy_name) or {}
         except Exception as exc:
             self.activation_status.setText(f"État runtime : erreur — {exc}")
+            self.activation_eligibility.setText("Éligibilité : erreur")
             return
         if not status.get("available"):
             self.activation_status.setText("État runtime : politique non appliquée")
+            self.activation_eligibility.setText("Éligibilité : —")
+            self.activation_last_event.setText("Dernier événement : —")
+            self.activation_diagnostics.clear()
             return
         phase = str(status.get("phase") or "idle")
+        phase_label = {
+            "idle": "Inactif",
+            "eligible": "Éligible",
+            "visible": "Déclenché / visible",
+            "cooldown": "Cooldown",
+        }.get(phase, phase)
         details = []
         if status.get("active_source"):
             details.append(str(status.get("active_source")))
@@ -518,7 +574,16 @@ class ModuleLayoutDialog(QDialog):
             if value is not None:
                 details.append(f"{label} {float(value):.1f} s")
         suffix = " — " + " · ".join(details) if details else ""
-        self.activation_status.setText(f"État runtime : {phase}{suffix}")
+        self.activation_status.setText(f"État runtime : {phase_label}{suffix}")
+        eligible = bool(status.get("eligible"))
+        reason = str(status.get("eligibility_reason") or "—")
+        self.activation_eligibility.setText(
+            f"Éligibilité : {'oui' if eligible else 'non'} — {reason}"
+        )
+        last_event = str(status.get("last_event") or "—")
+        self.activation_last_event.setText(f"Dernier événement : {last_event}")
+        diagnostics = status.get("diagnostics") or []
+        self.activation_diagnostics.setPlainText("\n".join(str(item) for item in diagnostics))
 
     def _run_activation_command(self, action: str, source: str | None = None) -> None:
         if self._activation_command is None:
@@ -528,8 +593,19 @@ class ModuleLayoutDialog(QDialog):
                 "Enregistrez et appliquez d'abord cette politique pour la tester.",
             )
             return
+        options = None
+        if action == "simulate":
+            options = {
+                "trials": self.activation_sim_trials.value(),
+                "seed": self.activation_sim_seed.value(),
+            }
         try:
-            result = self._activation_command(action, self._activation_policy_name, source)
+            result = self._activation_command(
+                action,
+                self._activation_policy_name,
+                source,
+                options,
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Déclenchement", str(exc))
             return
@@ -542,6 +618,25 @@ class ModuleLayoutDialog(QDialog):
                 "Test du tirage",
                 f"Tirage {float(getattr(result, 'roll', 0.0)) * 100.0:.3f} % "
                 f"/ seuil {float(getattr(result, 'chance', 0.0)) * 100.0:.3f} % : {verdict}{extra}.",
+            )
+        elif action == "simulate" and result is not None:
+            counts = getattr(result, "target_counts", ()) or ()
+            distribution = "\n".join(
+                f"• {name} : {count} ({count / max(1, result.trigger_count) * 100.0:.2f} %)"
+                for name, count in counts
+            ) or "• aucune source sélectionnée"
+            QMessageBox.information(
+                self,
+                "Simulation déterministe",
+                (
+                    f"{result.trials} tirages · seed {result.seed}\n"
+                    f"Succès chance : {result.chance_hit_count}\n"
+                    f"Déclenchements : {result.trigger_count} "
+                    f"({result.trigger_rate * 100.0:.2f} %)\n"
+                    f"Échecs chance : {result.miss_count}\n"
+                    f"Bloqués sans cible : {result.blocked_count}\n\n"
+                    f"Distribution :\n{distribution}"
+                ),
             )
         self._refresh_activation_status()
 

@@ -1,4 +1,11 @@
-# Stream State Router 2.0.11
+# Stream State Router 2.0.12
+
+## Bêta 2.0.12 — observabilité du scheduler
+
+L'éditeur de module expose maintenant l'état runtime (Inactif, Éligible, Déclenché / visible, Cooldown), la raison d'éligibilité, le dernier événement et un journal de diagnostic. Les commandes manuelles empruntent la même machine d'état que le scheduler : un déclenchement manuel ne contourne plus un cooldown actif.
+
+Un bouton **Réinitialiser runtime** applique le fail-safe global et masque toutes les sources temporaires possédées par le scheduler. Une simulation déterministe (nombre de tirages + seed) permet de vérifier chance, poids et anti-répétition sans toucher OBS ni l'état runtime.
+
 
 ## Transition 2.0.11 — timeline globale
 
@@ -311,7 +318,7 @@ Le script valide Python, construit l'EXE portable, tente de construire/valider/e
 
 ## Migration depuis les versions précédentes
 
-Le schema de configuration actuel est **v3**. Les configurations v1/v2 sont migrées automatiquement en mémoire vers v3.
+Le schéma de configuration actuel est **v5**. Les configurations plus anciennes prises en charge sont migrées automatiquement en mémoire vers v5.
 
 La migration depuis Advanced Scene Switcher doit rester progressive. La synchronisation de la variable `Game` encore présente dans DWM sera retirée uniquement après validation de SSR avec la vraie collection OBS.
 
