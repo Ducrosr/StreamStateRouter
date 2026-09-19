@@ -7,6 +7,7 @@ from unittest.mock import patch
 from stream_state_router.obs.client import (
     OBSClientManager,
     OBSRequestError,
+    OBSResourceNotFoundError,
     OBSUnavailableError,
 )
 from stream_state_router.obs.models import OBSConnectionConfig
@@ -48,7 +49,7 @@ class OBSClientManagerTests(unittest.TestCase):
             patch("stream_state_router.obs.client._obs", fake_obs),
             patch("stream_state_router.obs.client._OBS_REQUEST_ERRORS", (_FakeRequestError,)),
         ):
-            with self.assertRaises(OBSRequestError):
+            with self.assertRaises(OBSResourceNotFoundError):
                 manager.send("GetSceneItemTransform", {"sceneName": "Test", "sceneItemId": 7})
 
             self.assertTrue(manager.connected)
