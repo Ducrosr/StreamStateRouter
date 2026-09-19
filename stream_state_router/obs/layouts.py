@@ -287,6 +287,20 @@ class OBSLayoutManager:
     def reset_cache(self) -> None:
         self._scene_item_cache.clear()
 
+    def set_item_enabled(
+        self,
+        container: str,
+        source: str,
+        enabled: bool,
+        *,
+        container_kind: str = "scene",
+    ) -> None:
+        """Set one scene/group item visibility through the cache-safe path."""
+        kind = str(container_kind or "scene").casefold()
+        if kind not in {"scene", "group"}:
+            raise ValueError(f"Type de conteneur OBS inconnu : {container_kind}")
+        self._set_enabled(str(container), str(source), bool(enabled))
+
     def canvas_size(self) -> tuple[int, int] | None:
         try:
             response = self.client.send("GetVideoSettings")

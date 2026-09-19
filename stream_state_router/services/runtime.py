@@ -4,8 +4,9 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping
 
+from ..activation import ActivationEvent, ActivationScheduler, OBSActivationController, TriggerPolicyConfig
 from ..obs.dispatcher import DispatchResult, OBSDispatcher
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
@@ -30,6 +31,9 @@ class RoutingService:
         provider=None,
         logger: logging.Logger | None = None,
         obs_probe_seconds: float = 2.0,
+        activation_policies: Mapping[str, TriggerPolicyConfig] | None = None,
+        activation_scheduler: ActivationScheduler | None = None,
+        activation_controller: OBSActivationController | None = None,
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
@@ -37,6 +41,13 @@ class RoutingService:
         self.provider = provider or WindowsForegroundProvider()
         self.logger = logger or logging.getLogger("stream_state_router")
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
+        policies = dict(activation_policies or {})
+        self.activation_scheduler = activation_scheduler
+        self.activation_controller = activation_controller
+        if self.activation_scheduler is None and policies:
+            self.activation_scheduler = ActivationScheduler(policies)
+        if self.activation_controller is None and policies:
+            self.activation_controller = OBSActivationController(dispatcher, policies)
 
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -77,6 +88,14 @@ class RoutingService:
             self._dispatch_generation += 1
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
+        if self.activation_controller is not None:
+            try:
+                for warning in self.activation_controller.reconcile():
+                    self.logger.warning("Activation stop fail-safe: %s", warning)
+            except Exception as exc:
+                self.logger.warning("Activation stop fail-safe failed: %s", exc)
+        if self.activation_scheduler is not None:
+            self.activation_scheduler.reset_all()
 
     def pause(self, paused: bool = True) -> None:
         with self._lock:
@@ -138,6 +157,7 @@ class RoutingService:
                         change = self.engine.observe(app)
                     if change:
                         self._apply_change(change)
+                self._tick_activation(paused=paused)
             except Exception as exc:
                 self.logger.exception("Routing loop error")
                 self._emit(RuntimeEvent("error", str(exc)))
@@ -164,6 +184,7 @@ class RoutingService:
         if ok:
             if self._last_obs_connected is not True:
                 self.logger.info("OBS connection established: %s", message)
+                self._reconcile_activation("connexion OBS")
                 self._emit(RuntimeEvent("obs_connected", message))
             self._last_obs_connected = True
             return
@@ -172,6 +193,84 @@ class RoutingService:
             self.logger.warning("OBS connection unavailable: %s", message)
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
+
+    def _reconcile_activation(self, reason: str) -> None:
+        scheduler = self.activation_scheduler
+        controller = self.activation_controller
+        if scheduler is None or controller is None:
+            return
+        scheduler.reset_all()
+        try:
+            warnings = controller.reconcile()
+        except Exception as exc:
+            self.logger.warning("Activation reconciliation failed (%s): %s", reason, exc)
+            self._emit(RuntimeEvent("activation_error", str(exc)))
+            return
+        for warning in warnings:
+            self.logger.warning("Activation reconcile: %s", warning)
+        self._emit(RuntimeEvent("activation_reconciled", f"Déclenchements réinitialisés — {reason}"))
+
+    def _tick_activation(self, *, paused: bool) -> None:
+        scheduler = self.activation_scheduler
+        controller = self.activation_controller
+        if scheduler is None or controller is None:
+            return
+
+        if controller.scene_collection_changed():
+            self._reconcile_activation("changement de Scene Collection")
+            return
+
+        eligibility = (lambda _name, _policy: False) if paused else controller.is_eligible
+        now = time.monotonic()
+        events = scheduler.tick(eligibility, now=now)
+        for event in events:
+            self._handle_activation_event(event, now=now)
+
+    def _handle_activation_event(self, event: ActivationEvent, *, now: float) -> None:
+        controller = self.activation_controller
+        scheduler = self.activation_scheduler
+        if controller is None or scheduler is None:
+            return
+
+        if event.kind not in {"show", "hide"}:
+            if event.kind == "cooldown_started":
+                self.logger.info(
+                    "Activation cooldown [%s] %.1f s",
+                    event.policy,
+                    event.cooldown_seconds or 0.0,
+                )
+            return
+
+        try:
+            controller.apply_event(event)
+        except Exception as exc:
+            self.logger.warning(
+                "Activation OBS failed [%s/%s]: %s",
+                event.policy,
+                event.source,
+                exc,
+            )
+            self._emit(RuntimeEvent("activation_error", f"{event.policy}/{event.source}: {exc}"))
+            if event.kind == "show":
+                scheduler.reset_policy(event.policy, now=now)
+            return
+
+        if event.kind == "show":
+            self.logger.info(
+                "Activation show [%s] %s for %.1f s",
+                event.policy,
+                event.source,
+                event.duration_seconds or 0.0,
+            )
+            self._emit(
+                RuntimeEvent(
+                    "activation_show",
+                    f"{event.policy}: {event.source} ({event.duration_seconds or 0.0:.1f} s)",
+                )
+            )
+        else:
+            self.logger.info("Activation hide [%s] %s", event.policy, event.source)
+            self._emit(RuntimeEvent("activation_hide", f"{event.policy}: {event.source}"))
 
     def _apply_change(self, change: StateChange) -> None:
         self.logger.info(

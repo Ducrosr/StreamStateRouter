@@ -162,22 +162,37 @@ class ActivationScheduler:
             )
         ]
 
+    def reset_policy(
+        self,
+        policy_name: str,
+        *,
+        now: float | None = None,
+    ) -> list[ActivationEvent]:
+        """Reset one policy to Idle and return a best-effort hide event if needed."""
+        timestamp = self._clock() if now is None else float(now)
+        state = self._state(policy_name)
+        events: list[ActivationEvent] = []
+        if state.phase is ActivationPhase.VISIBLE and state.active_source:
+            events.append(
+                ActivationEvent(
+                    "hide",
+                    policy_name,
+                    timestamp,
+                    source=state.active_source,
+                    container=state.active_container,
+                    container_kind=state.active_container_kind,
+                    reason="reset",
+                )
+            )
+        self._reset_to_idle(state)
+        return events
+
     def reset_all(self, *, now: float | None = None) -> list[ActivationEvent]:
         """Return hide events for active sources and reset every policy to Idle."""
         timestamp = self._clock() if now is None else float(now)
         events: list[ActivationEvent] = []
-        for name, state in self._states.items():
-            if state.phase is ActivationPhase.VISIBLE and state.active_source:
-                events.append(
-                    ActivationEvent(
-                        "hide",
-                        name,
-                        timestamp,
-                        source=state.active_source,
-                        reason="reset",
-                    )
-                )
-            self._reset_to_idle(state)
+        for name in tuple(self._states):
+            events.extend(self.reset_policy(name, now=timestamp))
         return events
 
     def _tick_policy(
@@ -197,6 +212,8 @@ class ActivationScheduler:
                         name,
                         now,
                         source=state.active_source,
+                        container=state.active_container,
+                        container_kind=state.active_container_kind,
                         reason="ineligible",
                     )
                 )
@@ -264,6 +281,8 @@ class ActivationScheduler:
         duration = self._duration(policy, target)
         state.phase = ActivationPhase.VISIBLE
         state.active_source = target.source
+        state.active_container = target.container
+        state.active_container_kind = target.container_kind
         state.visible_until = now + duration
         state.cooldown_until = None
         state.next_roll_at = None
@@ -275,6 +294,8 @@ class ActivationScheduler:
                 name,
                 now,
                 source=target.source,
+                container=target.container,
+                container_kind=target.container_kind,
                 duration_seconds=duration,
                 reason=reason,
             )
@@ -291,8 +312,22 @@ class ActivationScheduler:
         reason: str,
     ) -> list[ActivationEvent]:
         source = state.active_source
-        events = [ActivationEvent("hide", name, now, source=source, reason=reason)]
+        container = state.active_container
+        container_kind = state.active_container_kind
+        events = [
+            ActivationEvent(
+                "hide",
+                name,
+                now,
+                source=source,
+                container=container,
+                container_kind=container_kind,
+                reason=reason,
+            )
+        ]
         state.active_source = ""
+        state.active_container = ""
+        state.active_container_kind = "scene"
         state.visible_until = None
         cooldown = max(0.0, float(policy.cooldown_seconds))
         if enter_cooldown and cooldown > 0:
@@ -387,3 +422,5 @@ class ActivationScheduler:
         state.visible_until = None
         state.cooldown_until = None
         state.active_source = ""
+        state.active_container = ""
+        state.active_container_kind = "scene"

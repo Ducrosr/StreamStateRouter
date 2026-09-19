@@ -41,6 +41,7 @@ from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overr
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.models import ForegroundApp, StreamState
 from ..services.config import (
+    build_activation_policies,
     build_obs_config,
     build_profiles,
     build_layout_profiles,
@@ -646,6 +647,7 @@ class MainWindow(QMainWindow):
             self._dispatcher,
             poll_ms=poll_ms,
             logger=self.logger,
+            activation_policies=build_activation_policies(self.config),
         )
         self._service.on_foreground = self.bridge.foreground.emit
         self._service.on_change = self.bridge.state_change.emit

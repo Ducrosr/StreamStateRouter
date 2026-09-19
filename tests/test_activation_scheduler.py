@@ -61,6 +61,8 @@ class ActivationSchedulerTests(unittest.TestCase):
         events = scheduler.tick()
         self.assertEqual([event.kind for event in events], ["roll", "show"])
         self.assertEqual(events[-1].source, "A")
+        self.assertEqual(events[-1].container, "[Module] EasterEgg")
+        self.assertEqual(scheduler.state("egg").active_container, "[Module] EasterEgg")
         self.assertEqual(scheduler.state("egg").visible_until, 15.0)
 
         clock.value = 15.0

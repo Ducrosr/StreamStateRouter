@@ -114,6 +114,8 @@ class ActivationRuntimeState:
     visible_until: float | None = None
     cooldown_until: float | None = None
     active_source: str = ""
+    active_container: str = ""
+    active_container_kind: str = "scene"
     last_source: str = ""
     last_trigger_at: float | None = None
 
@@ -124,6 +126,8 @@ class ActivationEvent:
     policy: str
     at: float
     source: str = ""
+    container: str = ""
+    container_kind: str = "scene"
     roll: float | None = None
     chance: float | None = None
     duration_seconds: float | None = None

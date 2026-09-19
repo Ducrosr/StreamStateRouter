@@ -8,6 +8,7 @@ from .models import (
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
+from .obs_controller import OBSActivationController
 from .scheduler import ActivationScheduler
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "ActivationPhase",
     "ActivationRuntimeState",
     "ActivationScheduler",
+    "OBSActivationController",
     "RollTestResult",
     "TriggerPolicyConfig",
     "TriggerTargetConfig",
