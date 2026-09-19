@@ -6,7 +6,9 @@ on:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,7 +24,7 @@ jobs:
         run: python main.py --check-config
 
   streamdeck:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: streamdeck-plugin
