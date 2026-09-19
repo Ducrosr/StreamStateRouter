@@ -6,6 +6,7 @@ from typing import Mapping, Sequence
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -363,8 +364,8 @@ class ModuleLayoutDialog(QDialog):
         self.activation_targets = QTableWidget(0, 4)
         self.activation_targets.setHorizontalHeaderLabels(["Actif", "Source OBS", "Poids", "Durée"])
         self.activation_targets.verticalHeader().setVisible(False)
-        self.activation_targets.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.activation_targets.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.activation_targets.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.activation_targets.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         root.addWidget(self.activation_targets, 1)
         self._populate_activation_targets(activation_candidates or (), policy)
 

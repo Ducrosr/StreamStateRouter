@@ -101,9 +101,17 @@ class OBSActivationController:
 
         if event.kind == "show":
             if policy.exclusive:
+                # A stale/missing alternate target must not prevent a valid
+                # selected target from being shown. The selected target itself
+                # still raises normally so the scheduler can fail safe/reset.
                 for candidate in policy.targets:
-                    if candidate.enabled:
+                    if not candidate.enabled or candidate == target:
+                        continue
+                    try:
                         self._set_target_enabled(candidate, False)
+                    except Exception:
+                        continue
+                self._set_target_enabled(target, False)
             self._set_target_enabled(target, True)
             return
 
