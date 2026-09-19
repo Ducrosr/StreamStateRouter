@@ -12,4 +12,6 @@ Cette version prépare l'audit architectural en rendant le scheduler observable 
 
 ## Validation
 
-La CI Windows exécute les tests unitaires, Ruff, le smoke test de configuration et la validation du plugin Stream Deck.
+Des tests de régression ont été ajoutés et une campagne OBS détaillée est documentée dans `TESTING.md`.
+
+GitHub Actions a été déclenché, mais les jobs Windows et Linux n'ont reçu aucun runner et ont échoué avant toute étape (`steps=[]`). Les résultats automatisés 2.0.12 doivent donc être relancés lorsque l'infrastructure Actions fonctionne ; aucune réussite de CI n'est revendiquée pour cette version.
