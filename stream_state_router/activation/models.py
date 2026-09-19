@@ -13,6 +13,21 @@ class ActivationPhase(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class TriggerTargetIdentity:
+    container: str
+    source: str
+    container_kind: str = "scene"
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "TriggerTargetIdentity":
+        return cls(
+            container=str(raw.get("container") or "").strip(),
+            source=str(raw.get("source") or "").strip(),
+            container_kind=str(raw.get("container_kind") or "scene").strip() or "scene",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TriggerTargetConfig:
     container: str
     source: str
@@ -37,6 +52,10 @@ class TriggerTargetConfig:
             container_kind=str(raw.get("container_kind") or "scene").strip() or "scene",
             path=path,
         )
+
+    @property
+    def identity(self) -> TriggerTargetIdentity:
+        return TriggerTargetIdentity(self.container, self.source, self.container_kind)
 
     def to_mapping(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -149,6 +168,7 @@ class SimulationResult:
     policy: str
     trials: int
     seed: int
+    config_fingerprint: str = ""
     chance_hit_count: int
     trigger_count: int
     miss_count: int
