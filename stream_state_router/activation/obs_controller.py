@@ -39,9 +39,7 @@ class OBSActivationController:
         self.layout_manager.set_runtime_visibility_owners(
             (target.container, target.source)
             for policy in self._policies.values()
-            if policy.enabled
             for target in policy.targets
-            if target.enabled
         )
 
     def invalidate_cache(self) -> None:
@@ -105,7 +103,7 @@ class OBSActivationController:
                 # selected target from being shown. The selected target itself
                 # still raises normally so the scheduler can fail safe/reset.
                 for candidate in policy.targets:
-                    if not candidate.enabled or candidate == target:
+                    if candidate == target:
                         continue
                     try:
                         self._set_target_enabled(candidate, False)
@@ -134,7 +132,7 @@ class OBSActivationController:
         for policy in self._policies.values():
             for target in policy.targets:
                 key = (target.container, target.source)
-                if not target.enabled or key in seen:
+                if key in seen:
                     continue
                 seen.add(key)
                 try:
