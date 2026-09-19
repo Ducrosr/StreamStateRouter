@@ -630,13 +630,15 @@ class RuntimeTests(unittest.TestCase):
         try:
             self.assertTrue(dispatcher.dispatch_entered.wait(1.0))
             result = {}
+            stop_started = threading.Event()
 
             def stop_service():
+                stop_started.set()
                 result["stopped"] = service.stop(timeout=2.0)
 
             stopper = threading.Thread(target=stop_service)
             stopper.start()
-            self.assertFalse(threading.Event().wait(0.05) and not stopper.is_alive())
+            self.assertTrue(stop_started.wait(1.0))
             self.assertTrue(stopper.is_alive())
 
             dispatcher.release_dispatch.set()
