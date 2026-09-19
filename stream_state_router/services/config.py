@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -499,7 +500,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             errors.append(f"{prefix}.active_when inconnu : {active_when}")
         try:
             chance = float(policy.get("chance", 0.01))
-            if not 0.0 <= chance <= 1.0:
+            if not math.isfinite(chance) or not 0.0 <= chance <= 1.0:
                 raise ValueError
         except (TypeError, ValueError, OverflowError):
             errors.append(f"{prefix}.chance doit être compris entre 0 et 1")
@@ -510,7 +511,9 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         ):
             try:
                 value = float(policy.get(key, default))
-                valid = value >= 0.0 if allow_zero else value > 0.0
+                valid = math.isfinite(value) and (
+                    value >= 0.0 if allow_zero else value > 0.0
+                )
                 if not valid:
                     raise ValueError
             except (TypeError, ValueError, OverflowError):
@@ -520,6 +523,8 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         if not isinstance(targets, list):
             errors.append(f"{prefix}.targets doit être une liste")
             continue
+        identities: dict[tuple[str, str, str], int] = {}
+        target_nodes: list[tuple[int, tuple[str, ...]]] = []
         for target_index, target in enumerate(targets):
             tprefix = f"{prefix}.targets[{target_index}]"
             if not isinstance(target, Mapping):
@@ -527,21 +532,60 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 continue
             if not str(target.get("container") or "").strip():
                 errors.append(f"{tprefix}.container est requis")
-            if not str(target.get("source") or "").strip():
+            source = str(target.get("source") or "").strip()
+            container = str(target.get("container") or "").strip()
+            container_kind = str(target.get("container_kind") or "scene").strip() or "scene"
+            if not source:
                 errors.append(f"{tprefix}.source est requis")
+            if container_kind not in {"scene", "group"}:
+                errors.append(f"{tprefix}.container_kind doit être scene ou group")
+            if container and source:
+                identity = (container, container_kind, source)
+                previous = identities.get(identity)
+                if previous is not None:
+                    errors.append(
+                        f"{tprefix} duplique exactement {prefix}.targets[{previous}]"
+                    )
+                else:
+                    identities[identity] = target_index
+                path_raw = target.get("path")
+                path = tuple(
+                    str(item).strip()
+                    for item in path_raw
+                    if str(item).strip()
+                ) if isinstance(path_raw, (list, tuple)) else ()
+                if path:
+                    target_nodes.append((target_index, (*path, source)))
             try:
                 weight = float(target.get("weight", 1.0))
-                if not weight >= 0.0:
+                if not math.isfinite(weight) or weight < 0.0:
                     raise ValueError
             except (TypeError, ValueError, OverflowError):
                 errors.append(f"{tprefix}.weight doit être >= 0")
             if target.get("duration_seconds") not in (None, ""):
                 try:
                     duration = float(target.get("duration_seconds"))
-                    if not duration > 0.0:
+                    if not math.isfinite(duration) or duration <= 0.0:
                         raise ValueError
                 except (TypeError, ValueError, OverflowError):
                     errors.append(f"{tprefix}.duration_seconds doit être > 0")
+
+        for left_pos, (left_index, left_path) in enumerate(target_nodes):
+            for right_index, right_path in target_nodes[left_pos + 1 :]:
+                shortest = min(len(left_path), len(right_path))
+                if left_path[:shortest] != right_path[:shortest]:
+                    continue
+                if len(left_path) == len(right_path):
+                    continue
+                parent_index, child_index = (
+                    (left_index, right_index)
+                    if len(left_path) < len(right_path)
+                    else (right_index, left_index)
+                )
+                errors.append(
+                    f"{prefix}.targets[{parent_index}] et targets[{child_index}] "
+                    "sont en conflit ancêtre/descendant"
+                )
 
     profiles = data.get("profiles")
     if not isinstance(profiles, Mapping):
