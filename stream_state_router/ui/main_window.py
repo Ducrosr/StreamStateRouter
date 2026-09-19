@@ -1548,8 +1548,8 @@ class MainWindow(QMainWindow):
         item = self.layout_modules_table.item(rows[0].row(), 0)
         return item.text() if item else None
 
+    @staticmethod
     def _activation_candidates_for_module(
-        self,
         profile: dict,
         module_name: str,
         module: dict,
