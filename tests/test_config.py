@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from stream_state_router.services.config import (
+    build_activation_policies,
     build_ruleset,
     load_config,
     migrate_config,
