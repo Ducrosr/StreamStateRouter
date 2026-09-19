@@ -40,6 +40,19 @@ class FakeDispatcher:
         return DispatchResult(0, 0, ("game",))
 
 
+class BlockingDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.dispatch_entered = threading.Event()
+        self.release_dispatch = threading.Event()
+
+    def dispatch_change(self, change):
+        self.dispatch_entered.set()
+        if not self.release_dispatch.wait(2.0):
+            raise RuntimeError("dispatch barrier timed out")
+        return super().dispatch_change(change)
+
+
 class FakeOBSHeartbeatClient:
     def __init__(self):
         self.config = SimpleNamespace(enabled=True)
@@ -589,6 +602,50 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(scheduler.state("egg").phase, ActivationPhase.IDLE)
         self.assertIsNone(scheduler.state("egg").cooldown_until)
+
+    def test_stop_waits_for_inflight_old_obs_dispatch(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        state,
+                        exe="game.exe",
+                        apply_delay_ms=10,
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = BlockingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        try:
+            self.assertTrue(dispatcher.dispatch_entered.wait(1.0))
+            result = {}
+
+            def stop_service():
+                result["stopped"] = service.stop(timeout=2.0)
+
+            stopper = threading.Thread(target=stop_service)
+            stopper.start()
+            self.assertFalse(threading.Event().wait(0.05) and not stopper.is_alive())
+            self.assertTrue(stopper.is_alive())
+
+            dispatcher.release_dispatch.set()
+            stopper.join(2.0)
+            self.assertTrue(result.get("stopped"))
+        finally:
+            dispatcher.release_dispatch.set()
+            service.stop()
+
 
 
 if __name__ == "__main__":
