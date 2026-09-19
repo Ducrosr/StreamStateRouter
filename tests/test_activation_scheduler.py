@@ -263,42 +263,34 @@ class ActivationSchedulerTests(unittest.TestCase):
         self.assertEqual(events[0].container_kind, "group")
 
     def test_non_finite_direct_scheduler_values_are_rejected(self):
-        with self.assertRaises(ValueError):
-            ActivationScheduler(
-                {"egg": self.policy(chance=float("nan"))}
-            ).test_roll("egg")
-
-        with self.assertRaises(ValueError):
-            ActivationScheduler(
-                {"egg": self.policy(interval_seconds=float("inf"))}
-            ).tick()
-
-        with self.assertRaises(ValueError):
-            ActivationScheduler(
-                {"egg": self.policy(default_duration_seconds=float("nan"))}
-            ).trigger_now("egg")
-
-        scheduler = ActivationScheduler(
-            {"egg": self.policy(cooldown_seconds=float("inf"))}
+        invalid_policies = (
+            self.policy(chance=float("nan")),
+            self.policy(interval_seconds=float("inf")),
+            self.policy(default_duration_seconds=float("nan")),
+            self.policy(cooldown_seconds=float("inf")),
+            self.policy(
+                targets=(
+                    TriggerTargetConfig(
+                        "[Module] EasterEgg",
+                        "A",
+                        weight=float("inf"),
+                    ),
+                )
+            ),
+            self.policy(
+                targets=(
+                    TriggerTargetConfig(
+                        "[Module] EasterEgg",
+                        "A",
+                        duration_seconds=float("nan"),
+                    ),
+                )
+            ),
         )
-        scheduler.trigger_now("egg")
-        with self.assertRaises(ValueError):
-            scheduler.stop("egg")
-
-        with self.assertRaises(ValueError):
-            ActivationScheduler(
-                {
-                    "egg": self.policy(
-                        targets=(
-                            TriggerTargetConfig(
-                                "[Module] EasterEgg",
-                                "A",
-                                weight=float("inf"),
-                            ),
-                        )
-                    )
-                }
-            ).test_roll("egg")
+        for policy in invalid_policies:
+            with self.subTest(policy=policy):
+                with self.assertRaises(ValueError):
+                    ActivationScheduler({"egg": policy})
 
     def test_large_finite_weights_do_not_overflow_sum(self):
         policy = self.policy(
