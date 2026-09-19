@@ -128,6 +128,17 @@ class FakeActivationController:
         self.events.append(event)
 
 
+class CleanupBlockingController(FakeActivationController):
+    def __init__(self):
+        super().__init__()
+        self.blocked = True
+
+    def policy_cleanup_status(self, _policy_name):
+        if self.blocked:
+            return True, "nettoyage OBS en attente : Egg/Cloud"
+        return False, ""
+
+
 class BlockingActivationController(FakeActivationController):
     def __init__(self):
         super().__init__()
@@ -565,6 +576,8 @@ class RuntimeTests(unittest.TestCase):
             activation_scheduler=scheduler,
             activation_controller=controller,
         )
+        collector = ResultCollector()
+        service.on_event = collector.callback
         service.start()
         trigger_id = service.activation_trigger_now("egg")
         self.assertTrue(controller.show_entered.wait(1.0))
@@ -583,13 +596,56 @@ class RuntimeTests(unittest.TestCase):
             controller.release_show.set()
             stopper.join(2.0)
             self.assertTrue(stopped.get("value"))
-            self.assertTrue(queued_id)
+            cancelled = collector.wait(queued_id)
+            self.assertFalse(cancelled.success)
+            self.assertIn("annulée", cancelled.error)
             self.assertTrue(trigger_id)
         finally:
             controller.release_show.set()
             if stopper.is_alive():
                 stopper.join(1.0)
             service.stop()
+
+    def test_pending_cleanup_blocks_tick_status_and_manual_trigger(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        policy = activation_policy()
+        scheduler = ActivationScheduler({"egg": policy})
+        controller = CleanupBlockingController()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        collector = ResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            status = service.activation_status("egg")
+            while (
+                "nettoyage OBS en attente" not in str(status.get("eligibility_reason"))
+                and time.monotonic() < deadline
+            ):
+                service._wake.set()
+                threading.Event().wait(0.01)
+                status = service.activation_status("egg")
+
+            self.assertFalse(status["eligible"])
+            self.assertIn("nettoyage OBS en attente", status["eligibility_reason"])
+            self.assertEqual(scheduler.state("egg").phase, ActivationPhase.IDLE)
+
+            request_id = service.activation_trigger_now("egg")
+            result = collector.wait(request_id)
+            self.assertFalse(result.success)
+            self.assertIn("non éligible", result.error)
+            self.assertEqual(controller.events, [])
+        finally:
+            self.assertTrue(service.stop())
 
     def test_losing_eligibility_clears_cooldown_characterization_is_preserved(self):
         policy = activation_policy(cooldown=100.0)
