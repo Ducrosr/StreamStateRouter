@@ -142,10 +142,8 @@ class RoutingService:
         if scheduler is None or controller is None or policy_name not in scheduler.policies:
             return {"available": False, "phase": "idle", "diagnostics": []}
         now = time.monotonic()
-        policy = scheduler.policies[policy_name]
         with self._lock:
             state = scheduler.state(policy_name)
-        with self._lock:
             eligible, eligibility_reason = self._activation_eligibility_cache.get(
                 policy_name,
                 (False, "en attente du prochain cycle runtime"),
