@@ -622,7 +622,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Enregistrement", str(exc))
             return
-        self._restart_runtime()
+        if not self._restart_runtime():
+            self.unsaved.setText("Configuration enregistrée, application runtime incomplète")
+            self.statusBar().showMessage(
+                "Configuration enregistrée — runtime précédent encore actif",
+                6000,
+            )
+            return
         self._restart_api()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
@@ -658,7 +664,7 @@ class MainWindow(QMainWindow):
         self._service.start()
         self._update_obs_status()
 
-    def _restart_runtime(self) -> None:
+    def _restart_runtime(self) -> bool:
         previous = self._service
         if previous is not None and not previous.stop():
             self._log(
@@ -670,8 +676,9 @@ class MainWindow(QMainWindow):
                 "Le runtime précédent n'a pas terminé son nettoyage. "
                 "Le nouveau runtime n'a pas été démarré.",
             )
-            return
+            return False
         self._start_runtime()
+        return True
 
     def _on_foreground(self, app: ForegroundApp | None) -> None:
         if app is None:
