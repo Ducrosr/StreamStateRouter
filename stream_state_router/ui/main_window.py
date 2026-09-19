@@ -1550,46 +1550,60 @@ class MainWindow(QMainWindow):
         module_source = str(module.get("source_name") or module_name).strip()
         candidates: list[dict] = []
         seen: set[tuple[str, str, str]] = set()
+
+        def add_candidate(raw) -> None:
+            if not isinstance(raw, dict):
+                return
+            path = (
+                [str(item) for item in raw.get("path", [])]
+                if isinstance(raw.get("path"), list)
+                else []
+            )
+            container = str(raw.get("container") or "").strip()
+            source = str(raw.get("source") or "").strip()
+            container_kind = str(raw.get("container_kind") or "scene").strip() or "scene"
+            if not container or not source or source == module_source:
+                return
+            direct_child = (
+                container == module_source
+                or bool(path and path[-1] == module_source)
+            )
+            if not direct_child:
+                return
+            key = (container, container_kind, source)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(
+                {
+                    "container": container,
+                    "container_kind": container_kind,
+                    "path": path,
+                    "source": source,
+                    "enabled": True,
+                    "weight": 1.0,
+                }
+            )
+
+        # Module-named descendants live in profile.modules, while ordinary
+        # implementation children live in support_items. Both are needed to
+        # present the actual direct children of a module scene/group.
+        modules = profile.get("modules") if isinstance(profile, dict) else None
+        if isinstance(modules, dict):
+            for child_name, child_module in modules.items():
+                if child_name == module_name or not isinstance(child_module, dict):
+                    continue
+                elements = child_module.get("elements")
+                if not isinstance(elements, list):
+                    continue
+                for element in elements:
+                    add_candidate(element)
+
         support_items = profile.get("support_items") if isinstance(profile, dict) else None
         if isinstance(support_items, list):
             for raw in support_items:
-                if not isinstance(raw, dict):
-                    continue
-                path = (
-                    [str(item) for item in raw.get("path", [])]
-                    if isinstance(raw.get("path"), list)
-                    else []
-                )
-                container = str(raw.get("container") or "").strip()
-                source = str(raw.get("source") or "").strip()
-                container_kind = str(raw.get("container_kind") or "scene").strip() or "scene"
-                if not container or not source or source == module_source:
-                    continue
+                add_candidate(raw)
 
-                # Default alternatives are direct children only. A child scene
-                # or group is one activation unit; its own descendants must not
-                # silently become sibling alternatives.
-                direct_child = (
-                    container == module_source
-                    or bool(path and path[-1] == module_source)
-                )
-                if not direct_child:
-                    continue
-
-                key = (container, container_kind, source)
-                if key in seen:
-                    continue
-                seen.add(key)
-                candidates.append(
-                    {
-                        "container": container,
-                        "container_kind": container_kind,
-                        "path": path,
-                        "source": source,
-                        "enabled": True,
-                        "weight": 1.0,
-                    }
-                )
         return candidates
 
     def _activation_status(self, policy_name: str) -> dict:
