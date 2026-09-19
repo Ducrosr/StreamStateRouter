@@ -63,17 +63,32 @@ La suite source contient maintenant des tests dédiés pour :
 - preview/undo et visibilité runtime ;
 - sémantiques de cooldown et de `visibility_owner=runtime`.
 
-## Exécution automatisée 2.0.13
+## Exécution locale Windows 2.0.13
 
-GitHub Actions continue à échouer au niveau infrastructure **avant toute étape de job**. Exemple observé sur la branche de correction :
+Une validation locale a été exécutée sur Windows 11 / PowerShell 7.6.6 depuis la branche `fix/activation-runtime-serialization`.
 
-- workflow `Tests`, run `35469148865` ;
-- jobs `windows` et `streamdeck` : `conclusion=failure` ;
-- aucune étape retournée par GitHub (`steps=null`).
+Résultats obtenus sur le commit `d8beba5` avant le nettoyage Ruff final :
 
-Par conséquent, aucune affirmation « tests 2.0.13 OK », « Ruff OK » ou « build Windows OK » n'est faite dans ce document.
+- `python -m unittest discover -s tests -v` : **109 tests exécutés, 109 réussites** ;
+- durée de la suite : **1,450 s** ;
+- `python main.py --check-config` : **Configuration valide** ;
+- Ruff : **40 diagnostics de style/qualité**, sans échec fonctionnel des tests.
 
-Une tentative de récupération directe de l'archive GitHub dans l'environnement d'exécution a également été bloquée par l'accès réseau, donc la suite complète n'a pas pu être exécutée localement depuis cette session.
+Les 40 diagnostics Ruff observés étaient composés de :
+
+- 37 occurrences `E702` (plusieurs instructions sur une même ligne) dans `ui/main_window.py` ;
+- 2 imports inutilisés (`Iterable` et `time`) ;
+- 1 variable locale inutilisée (`current_enabled`).
+
+Ces diagnostics ont été corrigés sur la branche après cette exécution. **Ruff doit encore être relancé sur le nouveau head avant de déclarer Ruff OK.**
+
+## GitHub Actions
+
+GitHub Actions continue à échouer au niveau infrastructure **avant toute étape de job**, le quota Actions du dépôt privé étant épuisé. Les jobs retournent `conclusion=failure` avec `steps=null`.
+
+Ces échecs ne constituent donc pas un résultat de test du code 2.0.13.
+
+Une tentative de récupération directe de l'archive GitHub dans l'environnement d'exécution a également été bloquée par l'accès réseau.
 
 ## Revue statique effectuée pendant l'implémentation
 
