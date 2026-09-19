@@ -1,27 +1,92 @@
-# Build / validation status — 2.0.12
+# Build / validation status — 2.0.13
 
-## Implémentation
+## Base
 
-- Observabilité du scheduler : état runtime, raison d'éligibilité, dernier événement et journal détaillé.
-- Commandes manuelles alignées sur la machine d'état automatique ; le cooldown n'est plus contourné par défaut.
-- Fail-safe global exposé via `Réinitialiser runtime`.
-- Simulation déterministe par seed, indépendante du RNG live et sans action OBS.
-- Tests de régression ajoutés pour la simulation, les raisons d'éligibilité, les événements bloqués, le cooldown manuel et le reset global.
-- Documentation du schéma corrigée : configuration actuelle `v5`.
+- Base auditée : **2.0.12**
+- Commit audité : `6f4eb032edfd4d7f8148563956427ee8f8e60d9d`
+- La branche de correction a été créée directement depuis ce commit ; aucun changement ultérieur de `main` n'était présent au démarrage.
 
-## Validation automatisée
+## Résultat communiqué par l'audit Astra
 
-Les workflows GitHub Actions ont été déclenchés sur Windows et sur un workflow Linux temporaire, mais **aucun runner n'a exécuté la moindre étape** : les jobs se terminent en échec avec `steps=[]` et sans logs de commande.
+Le handoff Astra indique qu'il a exécuté **85 tests en mémoire** sur la base 2.0.12 :
 
-Par conséquent, au moment de ce snapshot :
+- **84 réussites** ;
+- **1 échec par `NameError`** dans `tests/test_config.py` : `build_activation_policies` était utilisé sans être importé ;
+- **1 test écrivant sur disque exclu** de cette exécution en mémoire.
 
-- la suite `python -m unittest discover -s tests -v` n'a pas pu être réexécutée sur la 2.0.12 ;
-- Ruff n'a pas pu être réexécuté ;
-- le smoke test `python main.py --check-config` n'a pas pu être réexécuté ;
-- la validation Stream Deck n'a pas pu être réexécutée.
+Ces chiffres décrivent **l'exécution de l'audit**, pas une validation 2.0.13 et pas un essai Windows/OBS réel.
 
-Le diff a fait l'objet d'une revue statique ciblée et deux problèmes ont déjà été corrigés avant fusion : interrogation OBS depuis le thread UI et variable devenue inutile dans `activation_status`.
+Le `NameError` a été corrigé en 2.0.13 par ajout de l'import manquant.
 
-## Validation réelle
+## Implémentation 2.0.13
 
-La campagne Windows + OBS décrite dans `TESTING.md` reste à effectuer sur la collection OBS réelle avant de considérer la bêta validée.
+Réalisé :
+
+- file de commandes d'activation consommée par `SSR-Router` ;
+- résultats asynchrones vers Qt par `request_id` et signal ;
+- sérialisation tick/trigger/stop/reset/reconcile ;
+- arrêt avec refus des nouvelles commandes, invalidation des commandes anciennes et attente des dispatches OBS déjà engagés ;
+- pending hides structurés par politique/cible/collection ;
+- retry borné, hide compensatoire après show incertain, exclusivité sûre ;
+- distinction absence OBS confirmée / résultat incertain ;
+- isolation des opérations entre Scene Collections ;
+- identité exacte `container/container_kind/source` et legacy source-only seulement si unique ;
+- cibles par défaut limitées aux enfants directs ;
+- rejet des doublons exacts et conflits ancêtre/descendant ;
+- résolution fraîche pair-local du `sceneItemId` pour les mutations de visibilité ;
+- éligibilité effective centralisée et statut snapshot sans I/O OBS ;
+- validation `math.isfinite` côté config et scheduler ;
+- somme de poids protégée contre l'overflow ;
+- simulation sur copie de politique dans un executor distinct, avec fingerprint de configuration ;
+- tests de caractérisation des deux comportements laissés volontairement inchangés.
+
+L'isolation du RNG de `test_roll()` n'a pas été modifiée : ce point était facultatif dans l'audit. Le RNG de simulation reste indépendant du live.
+
+## Tests ajoutés/modifiés
+
+La suite source contient maintenant des tests dédiés pour :
+
+- course show/stop avec barrières ;
+- commandes annulées pendant l'arrêt ;
+- dispatch OBS ancien encore actif pendant l'arrêt ;
+- cleanup pending qui bloque statut/tick/trigger ;
+- hide échoué puis repris ;
+- absence confirmée ;
+- show avec réponse perdue ;
+- échec du hide d'un concurrent exclusif ;
+- changement de Scene Collection ;
+- identité exacte/ambiguë ;
+- cibles directes et conflit parent/enfant ;
+- `sceneItemId` réutilisé mais encore accepté ;
+- NaN/Infinity/`1e309` et poids `1e308 + 1e308` ;
+- simulation concurrente ;
+- preview/undo et visibilité runtime ;
+- sémantiques de cooldown et de `visibility_owner=runtime`.
+
+## Exécution automatisée 2.0.13
+
+GitHub Actions continue à échouer au niveau infrastructure **avant toute étape de job**. Exemple observé sur la branche de correction :
+
+- workflow `Tests`, run `35469148865` ;
+- jobs `windows` et `streamdeck` : `conclusion=failure` ;
+- aucune étape retournée par GitHub (`steps=null`).
+
+Par conséquent, aucune affirmation « tests 2.0.13 OK », « Ruff OK » ou « build Windows OK » n'est faite dans ce document.
+
+Une tentative de récupération directe de l'archive GitHub dans l'environnement d'exécution a également été bloquée par l'accès réseau, donc la suite complète n'a pas pu être exécutée localement depuis cette session.
+
+## Revue statique effectuée pendant l'implémentation
+
+La revue du diff a notamment détecté et corrigé avant fusion :
+
+- ordre invalide des champs dataclass de `SimulationResult` après ajout du fingerprint ;
+- risque de mutation partielle d'état avec nombres non finis, corrigé par validation des politiques avant installation dans le scheduler ;
+- possibilité qu'un ancien dispatch OBS différé écrive encore après l'arrêt du worker principal, corrigée par une barrière de dispatch ;
+- message UI « appliqué » incorrect si le runtime précédent ne s'arrête pas ;
+- risque de proposer des descendants profonds comme alternatives d'activation au lieu des seuls enfants directs.
+
+## Validation Windows / OBS réelle
+
+**Non réalisée dans cette session.**
+
+La campagne manuelle détaillée dans `TESTING.md` reste nécessaire sur la vraie collection OBS avant de qualifier la 2.0.13 de validée en production.
