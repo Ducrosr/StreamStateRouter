@@ -100,6 +100,7 @@ class RoutingService:
         self._last_obs_connected: bool | None = None
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._activation_eligibility_cache: dict[str, tuple[bool, str]] = {}
+        self._activation_cleanup_cache: dict[str, int] = {}
         self._activation_commands: queue.Queue[_ActivationCommand] = queue.Queue()
         self._command_generation = 0
         self._accept_activation_commands = False
@@ -233,8 +234,8 @@ class RoutingService:
                 (False, "en attente du prochain cycle runtime"),
             )
             operational = self._runtime_operational and not self._stopping
+            cleanup_pending = self._activation_cleanup_cache.get(policy_name, 0)
         diagnostics = self.activation_diagnostics(policy_name, limit=16)
-        pending = controller.pending_hides(policy_name)
         return {
             "available": True,
             "phase": state.phase.value,
@@ -242,7 +243,7 @@ class RoutingService:
             "eligible": eligible,
             "eligibility_reason": eligibility_reason,
             "operational": operational,
-            "cleanup_pending": len(pending),
+            "cleanup_pending": cleanup_pending,
             "next_roll_seconds": (
                 max(0.0, state.next_roll_at - now) if state.next_roll_at is not None else None
             ),
@@ -427,6 +428,7 @@ class RoutingService:
         with self._lock:
             scheduler.reset_all()
             self._activation_eligibility_cache.clear()
+            self._activation_cleanup_cache.clear()
         try:
             warnings = controller.reconcile()
         except Exception as exc:
@@ -473,8 +475,10 @@ class RoutingService:
 
         def eligibility(name: str, policy: TriggerPolicyConfig) -> bool:
             result = self._effective_activation_eligibility(name, policy)
+            cleanup_count = len(controller.pending_hides(name))
             with self._lock:
                 self._activation_eligibility_cache[name] = result
+                self._activation_cleanup_cache[name] = cleanup_count
             return result[0]
 
         events = scheduler.tick(eligibility, now=now)
