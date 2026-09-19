@@ -80,7 +80,7 @@ class RuntimeBridge(QObject):
 class MainWindow(QMainWindow):
     def __init__(self, config: dict, *, logger, start_minimized: bool = False):
         super().__init__()
-        self.setWindowTitle("Stream State Router 2.0.12")
+        self.setWindowTitle("Stream State Router 2.0.13")
         self.resize(1180, 760)
         self.config = copy.deepcopy(config)
         self.logger = logger
