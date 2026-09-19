@@ -445,6 +445,11 @@ class RoutingService:
             self.logger.warning("Activation reconcile: %s", warning)
             self._record_activation_diagnostic("*", "warning", warning)
         pending = controller.pending_hides()
+        cleanup_counts: dict[str, int] = {}
+        for item in pending:
+            cleanup_counts[item.policy] = cleanup_counts.get(item.policy, 0) + 1
+        with self._lock:
+            self._activation_cleanup_cache.update(cleanup_counts)
         if warnings or pending:
             message = (
                 f"Nettoyage activation incomplet — {reason} "
