@@ -282,7 +282,12 @@ class OBSActivationController:
         if not self._pending_hides:
             return ()
         timestamp = self._clock() if now is None else float(now)
-        if not bool(getattr(self.client, "connected", False)):
+        due = [
+            pending
+            for pending in self._pending_hides.values()
+            if timestamp >= pending.next_retry_at
+        ]
+        if not due or not bool(getattr(self.client, "connected", False)):
             return ()
 
         try:
