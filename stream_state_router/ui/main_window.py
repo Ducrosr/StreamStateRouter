@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
 )
 
+from ..activation import TriggerTargetIdentity
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -73,12 +74,13 @@ class RuntimeBridge(QObject):
     state_change = Signal(object)
     dispatch = Signal(object)
     runtime_event = Signal(object)
+    activation_result = Signal(object)
 
 
 class MainWindow(QMainWindow):
     def __init__(self, config: dict, *, logger, start_minimized: bool = False):
         super().__init__()
-        self.setWindowTitle("Stream State Router 2.0.11")
+        self.setWindowTitle("Stream State Router 2.0.12")
         self.resize(1180, 760)
         self.config = copy.deepcopy(config)
         self.logger = logger
@@ -657,11 +659,20 @@ class MainWindow(QMainWindow):
         self._update_obs_status()
 
     def _restart_runtime(self) -> None:
-        if self._service:
-            self._service.stop()
+        previous = self._service
+        if previous is not None and not previous.stop():
+            self._log(
+                "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
+            )
+            QMessageBox.critical(
+                self,
+                "Runtime",
+                "Le runtime précédent n'a pas terminé son nettoyage. "
+                "Le nouveau runtime n'a pas été démarré.",
+            )
+            return
         self._start_runtime()
 
-    # ---------- dashboard callbacks ----------
     def _on_foreground(self, app: ForegroundApp | None) -> None:
         if app is None:
             self.fg_exe.setText("Aucune fenêtre")
@@ -693,6 +704,9 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         self._log(f"{event.kind}: {event.message}")
+        if event.kind == "activation_command_result" and event.payload is not None:
+            self.bridge.activation_result.emit(event.payload)
+            return
         if event.kind in {"obs_connected", "obs_disconnected"}:
             self._update_obs_status()
         elif event.kind == "obs_error":
@@ -1535,27 +1549,41 @@ class MainWindow(QMainWindow):
     ) -> list[dict]:
         module_source = str(module.get("source_name") or module_name).strip()
         candidates: list[dict] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         support_items = profile.get("support_items") if isinstance(profile, dict) else None
         if isinstance(support_items, list):
             for raw in support_items:
                 if not isinstance(raw, dict):
                     continue
-                path = [str(item) for item in raw.get("path", [])] if isinstance(raw.get("path"), list) else []
-                if module_source not in path:
-                    continue
+                path = (
+                    [str(item) for item in raw.get("path", [])]
+                    if isinstance(raw.get("path"), list)
+                    else []
+                )
                 container = str(raw.get("container") or "").strip()
                 source = str(raw.get("source") or "").strip()
+                container_kind = str(raw.get("container_kind") or "scene").strip() or "scene"
                 if not container or not source or source == module_source:
                     continue
-                key = (container, source)
+
+                # Default alternatives are direct children only. A child scene
+                # or group is one activation unit; its own descendants must not
+                # silently become sibling alternatives.
+                direct_child = (
+                    container == module_source
+                    or bool(path and path[-1] == module_source)
+                )
+                if not direct_child:
+                    continue
+
+                key = (container, container_kind, source)
                 if key in seen:
                     continue
                 seen.add(key)
                 candidates.append(
                     {
                         "container": container,
-                        "container_kind": str(raw.get("container_kind") or "scene"),
+                        "container_kind": container_kind,
                         "path": path,
                         "source": source,
                         "enabled": True,
@@ -1573,16 +1601,28 @@ class MainWindow(QMainWindow):
         self,
         action: str,
         policy_name: str,
-        source: str | None = None,
+        target=None,
         options=None,
-    ):
+    ) -> str:
         service = self._service
         if service is None:
             raise RuntimeError("Runtime non disponible")
+        options = options or {}
+        identity = None
+        legacy_source = None
+        if isinstance(target, dict):
+            identity = TriggerTargetIdentity.from_mapping(target)
+        elif target:
+            legacy_source = str(target)
+
         if action == "test_roll":
             return service.activation_test_roll(policy_name)
         if action == "trigger":
-            return service.activation_trigger_now(policy_name, target_source=source)
+            return service.activation_trigger_now(
+                policy_name,
+                target_identity=identity,
+                target_source=legacy_source,
+            )
         if action == "stop":
             return service.activation_stop(policy_name)
         if action == "reset_cooldown":
@@ -1590,7 +1630,6 @@ class MainWindow(QMainWindow):
         if action == "reset_all":
             return service.activation_reset_all()
         if action == "simulate":
-            options = options or {}
             return service.activation_simulate(
                 policy_name,
                 trials=int(options.get("trials", 1000)),
@@ -1622,6 +1661,7 @@ class MainWindow(QMainWindow):
             activation_candidates=candidates,
             activation_status_provider=self._activation_status,
             activation_command=self._activation_command,
+            activation_result_signal=self.bridge.activation_result,
         )
         if dlg.exec() == QDialog.Accepted:
             updated = dlg.result_module()
