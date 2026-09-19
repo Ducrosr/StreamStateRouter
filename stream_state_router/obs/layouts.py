@@ -1245,8 +1245,6 @@ class OBSLayoutManager:
             source = prepared["source"]
             target_transform = prepared["target_transform"]
             target_enabled = prepared["target_enabled"]
-            current_enabled = prepared["current_enabled"]
-
             # A zero-duration fade is just an immediate visibility change.
             if target_transform:
                 self._set_transform(container, source, target_transform)
