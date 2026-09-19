@@ -318,7 +318,7 @@ Le script valide Python, construit l'EXE portable, tente de construire/valider/e
 
 ## Migration depuis les versions précédentes
 
-Le schema de configuration actuel est **v3**. Les configurations v1/v2 sont migrées automatiquement en mémoire vers v3.
+Le schéma de configuration actuel est **v5**. Les configurations plus anciennes prises en charge sont migrées automatiquement en mémoire vers v5.
 
 La migration depuis Advanced Scene Switcher doit rester progressive. La synchronisation de la variable `Game` encore présente dans DWM sera retirée uniquement après validation de SSR avec la vraie collection OBS.
 

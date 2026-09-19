@@ -60,6 +60,7 @@ class RoutingService:
         self._last_obs_probe = 0.0
         self._last_obs_connected: bool | None = None
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
+        self._activation_eligibility_cache: dict[str, tuple[bool, str]] = {}
 
         self.on_foreground: Callable[[ForegroundApp | None], None] | None = None
         self.on_change: Callable[[StateChange], None] | None = None
@@ -144,7 +145,11 @@ class RoutingService:
         policy = scheduler.policies[policy_name]
         with self._lock:
             state = scheduler.state(policy_name)
-        eligible, eligibility_reason = self._activation_eligibility(policy_name, policy)
+        with self._lock:
+            eligible, eligibility_reason = self._activation_eligibility_cache.get(
+                policy_name,
+                (False, "en attente du prochain cycle runtime"),
+            )
         diagnostics = self.activation_diagnostics(policy_name, limit=16)
         return {
             "available": True,
@@ -379,6 +384,7 @@ class RoutingService:
             return
         with self._lock:
             scheduler.reset_all()
+            self._activation_eligibility_cache.clear()
         try:
             warnings = controller.reconcile()
         except Exception as exc:
@@ -407,7 +413,15 @@ class RoutingService:
             self._reconcile_activation("changement de Scene Collection")
             return
 
-        eligibility = (lambda _name, _policy: False) if paused else controller.is_eligible
+        def eligibility(name: str, policy: TriggerPolicyConfig) -> bool:
+            if paused:
+                result = (False, "routage suspendu")
+            else:
+                result = self._activation_eligibility(name, policy)
+            with self._lock:
+                self._activation_eligibility_cache[name] = result
+            return result[0]
+
         now = time.monotonic()
         events = scheduler.tick(eligibility, now=now)
         for event in events:

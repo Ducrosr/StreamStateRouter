@@ -367,6 +367,7 @@ class RuntimeTests(unittest.TestCase):
             activation_controller=controller,
         )
         service._record_activation_diagnostic("egg", "test", "diagnostic visible")
+        service._activation_eligibility_cache["egg"] = (True, "test éligible")
 
         status = service.activation_status("egg")
 
