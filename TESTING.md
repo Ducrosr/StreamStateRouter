@@ -1,67 +1,182 @@
-# Plan de validation — Stream State Router 2.0.12
+# Plan de validation — Stream State Router 2.0.13
 
-## Bêta 2.0.12 — scheduler / Easter Eggs
+## 1. Validation automatisée prioritaire
 
-Cette campagne doit être réalisée sur la vraie collection OBS avant l'audit final Astra.
+À exécuter dès qu'un runner ou un environnement Windows Python est disponible :
 
-### État runtime et diagnostics
+```powershell
+python -m unittest discover -s tests -v
+python -m ruff check .
+python main.py --check-config
+```
 
-- [ ] Ouvrir l'éditeur d'un module avec une politique aléatoire.
-- [ ] Vérifier les états `Inactif`, `Éligible`, `Déclenché / visible` et `Cooldown`.
-- [ ] Vérifier que la raison d'éligibilité correspond au contexte OBS réel.
-- [ ] Vérifier que le journal affiche les tirages réussis/échoués, show/hide, cooldown, blocages et fail-safe.
+Le plugin Stream Deck doit ensuite conserver sa validation habituelle :
 
-### Chance et pondération
+```powershell
+cd streamdeck-plugin
+npm install
+npm run typecheck
+npm run build
+npm run validate
+```
 
-- [ ] Tester une chance à 100 % : chaque tirage dû doit réussir si une cible est disponible.
-- [ ] Tester une chance à 0 % : aucun déclenchement ne doit avoir lieu.
-- [ ] Configurer plusieurs sources avec des poids très différents et vérifier la distribution avec la simulation déterministe.
-- [ ] Relancer la même simulation avec la même seed : le résultat doit être identique.
-- [ ] Vérifier que la simulation ne modifie ni OBS, ni l'état runtime, ni le prochain comportement aléatoire live.
-- [ ] Activer l'anti-répétition et vérifier qu'une autre source est choisie lorsqu'une alternative est disponible.
+Les tests 2.0.13 ajoutés couvrent notamment :
 
-### Commandes manuelles
+- sérialisation show/stop avec barrières ;
+- invalidation des commandes en attente pendant l'arrêt ;
+- attente d'un ancien dispatch OBS déjà engagé ;
+- hide non acquitté puis retry ;
+- show potentiellement appliqué avec réponse perdue puis hide compensatoire ;
+- refus d'une activation exclusive si un concurrent n'est pas masqué avec certitude ;
+- changement de Scene Collection sans replay des anciennes opérations ;
+- identité exacte et rejet du legacy ambigu ;
+- cible de poids zéro toujours déclenchable manuellement ;
+- NaN, Infinity, `1e309` et poids très élevés ;
+- simulation concurrente sans bloquer les hides live ;
+- `sceneItemId` ancien encore valide mais attribué à la mauvaise source ;
+- propriété runtime de visibilité pendant apply/preview/undo ;
+- perte d'éligibilité qui efface le cooldown — test de caractérisation ;
+- marqueur `visibility_owner=runtime` persisté après suppression de politique — test de caractérisation.
 
-- [ ] `Tester le tirage` ne doit modifier ni OBS ni l'état runtime.
-- [ ] `Déclencher maintenant` doit emprunter la même machine d'état que le scheduler.
-- [ ] Pendant un cooldown, `Déclencher maintenant` doit être refusé.
-- [ ] Un double-clic sur une source participante doit la déclencher uniquement si la politique est éligible.
-- [ ] `Arrêter` pendant `Visible` doit masquer la source puis entrer en cooldown.
-- [ ] `Arrêter` hors `Visible` doit rester un no-op explicite dans le diagnostic.
-- [ ] `Réinitialiser le cooldown` doit remettre la politique dans l'état cohérent avec son éligibilité.
-- [ ] `Réinitialiser runtime` doit masquer toutes les sources temporaires possédées par le scheduler et remettre ses états à zéro.
+## 2. Concurrence runtime
 
-### Intégration LayoutProfile / runtime
+### Show suspendu puis Stop
 
-- [ ] Déclencher une source temporaire, puis changer de LayoutProfile pendant qu'elle est visible.
-- [ ] La visibilité appartenant au scheduler ne doit pas être écrasée par le LayoutProfile.
-- [ ] Recapturer un LayoutProfile pendant/après un Easter Egg et vérifier que la visibilité runtime n'est pas mémorisée comme état du layout.
-- [ ] Vérifier qu'un élément `[Type:locked]` reste totalement hors LayoutProfile et n'est pas modifié indirectement.
+- [ ] Déclencher une cible et suspendre/ralentir volontairement la réponse OBS si un environnement de test le permet.
+- [ ] Envoyer `Arrêter` pendant le show.
+- [ ] Attendu : le stop attend dans la file ; aucune séquence `hide -> reprise du show` ne doit être possible.
+- [ ] Après acquittement du show, le stop doit s'exécuter ensuite et produire l'état de cooldown attendu.
 
-### Fail-safe OBS
+### Arrêt / redémarrage
 
-- [ ] Supprimer ou renommer une source participante puis provoquer un tirage : SSR doit journaliser l'erreur sans casser le runtime global.
-- [ ] Déconnecter/reconnecter OBS pendant une activation : au retour, toutes les sources temporaires doivent être masquées.
-- [ ] Changer de Scene Collection : le scheduler doit être réinitialisé et ses sources temporaires masquées.
-- [ ] Fermer SSR pendant une activation normale : le fail-safe d'arrêt doit tenter de masquer les sources temporaires.
-- [ ] Relancer SSR avec OBS connecté : aucune ancienne activation temporaire ne doit rester considérée comme active.
+- [ ] Quitter ou appliquer une nouvelle configuration alors qu'une commande d'activation est en attente.
+- [ ] Les nouvelles commandes doivent être refusées dès le début de l'arrêt.
+- [ ] Les commandes anciennes en file doivent être annulées.
+- [ ] Le nettoyage doit être tenté avant fin du worker.
+- [ ] Si un ancien dispatch OBS est encore actif, le runtime de remplacement ne doit pas démarrer.
+- [ ] L'UI ne doit pas annoncer « configuration appliquée » si le redémarrage runtime a été refusé.
 
-## Régression — convention `:locked`
+## 3. Acquittements OBS / fail-safe
 
-1. Dans OBS, renommer temporairement un module en `[Webcam:locked] Test`.
-2. Dans SSR, cliquer sur **Synchroniser avec OBS**.
-3. Attendu : ce module ne doit plus apparaître dans le catalogue de modules du LayoutProfile.
-4. Recapturer le LayoutProfile depuis OBS.
-5. Attendu : le module `:locked` ne doit pas réapparaître dans le profil.
-6. Modifier sa position ou sa taille directement dans OBS, puis réappliquer le LayoutProfile.
-7. Attendu : SSR ne doit ni déplacer, ni redimensionner, ni masquer/afficher ce module.
-8. Si le module `:locked` est une scène ou un groupe contenant d'autres sources, vérifier que ses descendants restent eux aussi inchangés par le layout.
+### Hide incertain
 
-Pour revenir au comportement normal, retirer `:locked` du nom puis resynchroniser et recapturer le LayoutProfile.
+- [ ] Provoquer un timeout/perte de réponse sur un hide.
+- [ ] Le diagnostic doit indiquer un nettoyage en attente.
+- [ ] La politique concernée doit devenir inéligible.
+- [ ] Aucun nouveau show de cette politique ne doit être accepté.
+- [ ] Le hide doit être retenté avec une temporisation bornée jusqu'à acquittement ou changement de contexte.
 
-## Régression 2.0.11 — transitions
+### Absence confirmée
 
-- [ ] Tester `Déplacement` avec 2000 ms sur un layout contenant de nombreux modules.
-- [ ] L'interface ne doit plus rester bloquée pendant N × 2000 ms.
-- [ ] Tous les modules doivent progresser ensemble sur une durée proche de 2 secondes.
-- [ ] Refaire le test avec `Déplacement + fondu`.
+- [ ] Supprimer réellement une cible OBS.
+- [ ] Un hide sur cette cible doit être considéré acquitté si OBS confirme son absence.
+- [ ] Aucune fausse déconnexion globale ne doit être créée.
+
+### Show au résultat incertain
+
+- [ ] Simuler un show appliqué côté OBS dont la réponse est perdue.
+- [ ] SSR doit enregistrer un hide compensatoire.
+- [ ] La politique doit rester bloquée tant que ce hide n'est pas acquitté.
+
+### Exclusivité
+
+- [ ] Configurer deux cibles exclusives.
+- [ ] Faire échouer le hide de la cible concurrente.
+- [ ] La nouvelle cible ne doit jamais être affichée tant que le concurrent peut encore être visible.
+
+### Reconnexion / Scene Collection
+
+- [ ] Déconnecter puis reconnecter OBS pendant une activation.
+- [ ] Au retour, SSR doit réconcilier les cibles temporaires sans annoncer de succès si un hide reste incertain.
+- [ ] Changer de Scene Collection avec un hide en attente.
+- [ ] Une opération appartenant à l'ancienne collection ne doit jamais être rejouée dans la nouvelle.
+- [ ] La nouvelle collection doit recevoir son propre nettoyage selon les politiques actuelles.
+
+## 4. Cibles et hiérarchies imbriquées
+
+- [ ] Ouvrir l'éditeur d'un module contenant directement un PNG, une scène et/ou un groupe.
+- [ ] Seuls ses enfants directs doivent être proposés par défaut.
+- [ ] Si un enfant direct est une scène ou un groupe, ses propres éléments internes ne doivent pas apparaître automatiquement comme alternatives sœurs.
+- [ ] Une ancienne cible profonde unique/cohérente doit rester visible dans la configuration et utilisable.
+- [ ] Configurer volontairement un parent et son descendant comme deux cibles : la validation doit refuser ce conflit.
+- [ ] Configurer deux cibles exactement identiques : la validation doit les refuser.
+- [ ] Deux cibles de même nom dans des conteneurs différents doivent exiger l'identité exacte pour un déclenchement manuel.
+- [ ] Une cible de poids `0` doit rester exclue de l'aléatoire mais déclenchable par double-clic/test manuel.
+
+## 5. IDs OBS et LayoutProfiles
+
+- [ ] Capturer un layout, puis modifier structurellement OBS de manière à réattribuer un ancien `sceneItemId`.
+- [ ] Déclencher une mutation de visibilité runtime sur la cible déplacée.
+- [ ] SSR doit résoudre fraîchement `(container, source)` et ne jamais modifier l'item qui a récupéré l'ancien ID.
+- [ ] Vérifier que cette résolution fraîche n'efface pas globalement le cache de transformations.
+
+### Pendant une activation
+
+- [ ] Changer de LayoutProfile pendant qu'une cible temporaire est visible.
+- [ ] Prévisualiser puis annuler une preview pendant une activation.
+- [ ] Utiliser Undo OBS pendant une activation.
+- [ ] Recapturer un layout pendant/après l'activation.
+- [ ] La géométrie reste LayoutProfile-owned ; la visibilité runtime ne doit pas être écrasée/restaurée par ces opérations.
+
+## 6. Éligibilité effective
+
+Pour une même politique, vérifier que le statut, le tick et les commandes rapportent la même cause :
+
+- [ ] politique désactivée → `politique désactivée` ;
+- [ ] runtime en arrêt → service non opérationnel / commande refusée ;
+- [ ] routage suspendu → `routage suspendu` ;
+- [ ] nettoyage incertain → `nettoyage OBS en attente` ;
+- [ ] OBS déconnecté → motif OBS correspondant ;
+- [ ] stream inactif pour `active_when=streaming` ;
+- [ ] module absent de la scène programme pour `module_in_program_scene`.
+
+Ouvrir le dialogue et laisser le statut se rafraîchir : cette lecture ne doit générer aucune requête OBS supplémentaire à elle seule.
+
+## 7. Simulation
+
+- [ ] Lancer une simulation longue puis déclencher/arrêter une cible live.
+- [ ] Les hides live doivent continuer pendant le calcul.
+- [ ] Fermer le dialogue avant la fin : aucun popup tardif ne doit apparaître.
+- [ ] Même seed + même fingerprint de configuration → mêmes résultats.
+- [ ] La simulation ne doit pas modifier l'état du scheduler live ni son RNG.
+- [ ] Modifier/appliquer la politique puis relancer : le fingerprint doit changer si la configuration sérialisée change.
+
+## 8. Comportements caractérisés — ne pas interpréter comme des bugs corrigés
+
+### Cooldown et perte d'éligibilité
+
+Comportement 2.0.13 conservé :
+
+- si une politique en cooldown perd son éligibilité, le scheduler revient à `Idle` ;
+- le cooldown est effacé.
+
+Toute modification de cette sémantique nécessite une décision explicite.
+
+### `visibility_owner=runtime` après suppression d'une politique
+
+Comportement 2.0.13 conservé :
+
+- un marqueur `visibility_owner=runtime` déjà persisté dans un LayoutProfile reste runtime-owned même si la politique disparaît ;
+- SSR ne réactive pas automatiquement les anciennes cibles.
+
+Toute stratégie de nettoyage/migration de ces marqueurs doit être décidée séparément.
+
+## 9. Régressions historiques
+
+### Convention `:locked`
+
+- [ ] Un module `[Type:locked] Nom` n'apparaît pas dans les LayoutProfiles.
+- [ ] Son sous-arbre reste hors capture/apply.
+- [ ] Une recapture ne doit pas le réintroduire.
+
+### Transitions 2.0.11
+
+- [ ] Tester `Déplacement` 2000 ms sur un layout chargé.
+- [ ] Tous les modules avancent ensemble sur une timeline globale.
+- [ ] Refaire avec `Déplacement + fondu`.
+
+### Canvas / groupes / scènes imbriquées
+
+- [ ] Vérifier 1080p → QHD et retour.
+- [ ] Vérifier scène → groupe → scène imbriquée → PNG.
+- [ ] Vérifier que les correctifs de stabilisation des groupes restent intacts.
