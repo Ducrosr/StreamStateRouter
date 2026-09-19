@@ -92,6 +92,7 @@ class RoutingService:
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._dispatch_lock = threading.RLock()
         self._paused = False
         self._last_app: ForegroundApp | None = None
         self._dispatch_generation = 0
@@ -144,7 +145,7 @@ class RoutingService:
                 self._accept_activation_commands = False
                 self._runtime_operational = False
                 self._stopping = True
-            return True
+            return self._wait_for_dispatch_quiescence(timeout)
 
         with self._lock:
             if not self._stopping:
@@ -161,14 +162,24 @@ class RoutingService:
                 )
                 self._activation_commands.put(command)
         self._wake.set()
-        thread.join(timeout=max(0.1, float(timeout)))
-        stopped = not thread.is_alive()
-        if not stopped:
+
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
             self.logger.error(
                 "Routing service did not stop within %.1f s; refusing replacement runtime",
                 timeout,
             )
-        return stopped
+            return False
+
+        remaining = max(0.0, deadline - time.monotonic())
+        if not self._wait_for_dispatch_quiescence(remaining):
+            self.logger.error(
+                "An OBS dispatch from the previous runtime is still active; "
+                "refusing replacement runtime"
+            )
+            return False
+        return True
 
     def pause(self, paused: bool = True) -> None:
         with self._lock:
@@ -197,11 +208,14 @@ class RoutingService:
         return change
 
     def force_reapply(self) -> DispatchResult | None:
-        with self._lock:
-            state = self.engine.current_state
-        if state is None:
-            return None
-        result = self.dispatcher.dispatch_state(state, force=True)
+        with self._dispatch_lock:
+            with self._lock:
+                if self._stopping:
+                    return None
+                state = self.engine.current_state
+            if state is None:
+                return None
+            result = self.dispatcher.dispatch_state(state, force=True)
         if self.on_dispatch:
             self.on_dispatch(result)
         return result
@@ -886,28 +900,38 @@ class RoutingService:
             self._dispatch_if_current(change, generation)
 
     def _dispatch_if_current(self, change: StateChange, generation: int) -> None:
-        if self._stop.is_set():
-            return
-        with self._lock:
-            if generation != self._dispatch_generation:
+        with self._dispatch_lock:
+            if self._stop.is_set():
                 return
-            if self.engine.current_state != change.current:
-                return
-        try:
-            result = self.dispatcher.dispatch_change(change)
-            if self.on_dispatch:
-                self.on_dispatch(result)
-            if result.executed:
-                self.logger.info(
-                    "OBS dispatch: %d action(s), domains=%s",
-                    result.executed,
-                    ",".join(result.changed_domains),
-                )
-            for warning in result.warnings:
-                self.logger.warning("OBS: %s", warning)
-        except Exception as exc:
-            self.logger.error("OBS dispatch failed: %s", exc)
-            self._emit(RuntimeEvent("obs_error", str(exc)))
+            with self._lock:
+                if self._stopping:
+                    return
+                if generation != self._dispatch_generation:
+                    return
+                if self.engine.current_state != change.current:
+                    return
+            try:
+                result = self.dispatcher.dispatch_change(change)
+                if self.on_dispatch:
+                    self.on_dispatch(result)
+                if result.executed:
+                    self.logger.info(
+                        "OBS dispatch: %d action(s), domains=%s",
+                        result.executed,
+                        ",".join(result.changed_domains),
+                    )
+                for warning in result.warnings:
+                    self.logger.warning("OBS: %s", warning)
+            except Exception as exc:
+                self.logger.error("OBS dispatch failed: %s", exc)
+                self._emit(RuntimeEvent("obs_error", str(exc)))
+
+    def _wait_for_dispatch_quiescence(self, timeout: float) -> bool:
+        acquired = self._dispatch_lock.acquire(timeout=max(0.0, float(timeout)))
+        if not acquired:
+            return False
+        self._dispatch_lock.release()
+        return True
 
     def _emit(self, event: RuntimeEvent) -> None:
         if self.on_event:
