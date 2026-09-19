@@ -41,6 +41,7 @@ from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overr
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.models import ForegroundApp, StreamState
 from ..services.config import (
+    build_activation_policies,
     build_obs_config,
     build_profiles,
     build_layout_profiles,
@@ -646,6 +647,7 @@ class MainWindow(QMainWindow):
             self._dispatcher,
             poll_ms=poll_ms,
             logger=self.logger,
+            activation_policies=build_activation_policies(self.config),
         )
         self._service.on_foreground = self.bridge.foreground.emit
         self._service.on_change = self.bridge.state_change.emit
@@ -1525,6 +1527,62 @@ class MainWindow(QMainWindow):
         item = self.layout_modules_table.item(rows[0].row(), 0)
         return item.text() if item else None
 
+    def _activation_candidates_for_module(
+        self,
+        profile: dict,
+        module_name: str,
+        module: dict,
+    ) -> list[dict]:
+        module_source = str(module.get("source_name") or module_name).strip()
+        candidates: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        support_items = profile.get("support_items") if isinstance(profile, dict) else None
+        if isinstance(support_items, list):
+            for raw in support_items:
+                if not isinstance(raw, dict):
+                    continue
+                path = [str(item) for item in raw.get("path", [])] if isinstance(raw.get("path"), list) else []
+                if module_source not in path:
+                    continue
+                container = str(raw.get("container") or "").strip()
+                source = str(raw.get("source") or "").strip()
+                if not container or not source or source == module_source:
+                    continue
+                key = (container, source)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "container": container,
+                        "container_kind": str(raw.get("container_kind") or "scene"),
+                        "path": path,
+                        "source": source,
+                        "enabled": True,
+                        "weight": 1.0,
+                    }
+                )
+        return candidates
+
+    def _activation_status(self, policy_name: str) -> dict:
+        if self._service is None:
+            return {"available": False, "phase": "idle"}
+        return self._service.activation_status(policy_name)
+
+    def _activation_command(self, action: str, policy_name: str, source: str | None = None):
+        service = self._service
+        if service is None:
+            raise RuntimeError("Runtime non disponible")
+        if action == "test_roll":
+            return service.activation_test_roll(policy_name)
+        if action == "trigger":
+            return service.activation_trigger_now(policy_name, target_source=source)
+        if action == "stop":
+            return service.activation_stop(policy_name)
+        if action == "reset_cooldown":
+            return service.activation_reset_cooldown(policy_name)
+        raise ValueError(f"Commande de déclenchement inconnue : {action}")
+
     def _edit_layout_module(self, *_args) -> None:
         current = self._current_layout_profile()
         module_name = self._selected_layout_module_name()
@@ -1534,9 +1592,29 @@ class MainWindow(QMainWindow):
         module = modules.get(module_name) if isinstance(modules, dict) else None
         if not isinstance(module, dict):
             return
-        dlg = ModuleLayoutDialog(self, module_name, module)
+        policy_name = str(module.get("source_name") or module_name).strip()
+        activation_policies = self.config.setdefault("activation_policies", {})
+        if not isinstance(activation_policies, dict):
+            activation_policies = {}
+            self.config["activation_policies"] = activation_policies
+        activation_policy = activation_policies.get(policy_name)
+        candidates = self._activation_candidates_for_module(current[1], module_name, module)
+        dlg = ModuleLayoutDialog(
+            self,
+            module_name,
+            module,
+            activation_policy=activation_policy if isinstance(activation_policy, dict) else None,
+            activation_candidates=candidates,
+            activation_status_provider=self._activation_status,
+            activation_command=self._activation_command,
+        )
         if dlg.exec() == QDialog.Accepted:
             updated = dlg.result_module()
+            updated_policy = dlg.result_activation_policy()
+            if updated_policy is None:
+                activation_policies.pop(policy_name, None)
+            else:
+                activation_policies[policy_name] = updated_policy
             canvas = current[1].get("canvas") if isinstance(current[1].get("canvas"), dict) else {}
             width = float(canvas.get("width", 0) or 0)
             height = float(canvas.get("height", 0) or 0)

@@ -250,6 +250,45 @@ class LayoutTests(unittest.TestCase):
         }
         self.assertEqual(changed_ids, {1})
 
+    def test_runtime_visibility_owner_keeps_geometry_but_never_applies_visibility(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        # Capture an old-style profile before the runtime owner is registered.
+        profile = manager.capture_profile("Gameplay")
+        profile["modules"]["[Webcam] Avatar"]["visible"] = True
+        profile["modules"]["[Webcam] Avatar"]["elements"][0]["enabled"] = True
+
+        manager.set_runtime_visibility_owners({("Gameplay", "[Webcam] Avatar")})
+        client.calls.clear()
+        manager.apply_profile(profile, record_undo=False)
+
+        # Geometry remains LayoutProfile-owned.
+        transform_ids = [
+            payload["sceneItemId"]
+            for request, payload in client.calls
+            if request == "SetSceneItemTransform"
+        ]
+        self.assertIn(2, transform_ids)
+
+        # Runtime-owned visibility is not touched, even for a pre-v5 profile.
+        visibility_ids = [
+            payload["sceneItemId"]
+            for request, payload in client.calls
+            if request == "SetSceneItemEnabled"
+        ]
+        self.assertNotIn(2, visibility_ids)
+
+    def test_capture_marks_runtime_visibility_as_non_layout_owned(self):
+        manager = OBSLayoutManager(FakeLayoutClient())
+        manager.set_runtime_visibility_owners({("Gameplay", "[Webcam] Avatar")})
+
+        profile = manager.capture_profile("Gameplay")
+        element = profile["modules"]["[Webcam] Avatar"]["elements"][0]
+
+        self.assertFalse(element["follow_visibility"])
+        self.assertFalse(element["enabled"])
+        self.assertEqual(element["visibility_owner"], "runtime")
+
 
 if __name__ == "__main__":
     unittest.main()

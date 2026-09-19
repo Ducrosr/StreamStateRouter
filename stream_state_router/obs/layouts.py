@@ -281,11 +281,54 @@ class OBSLayoutManager:
     def __init__(self, client: OBSClientManager):
         self.client = client
         self._scene_item_cache: dict[tuple[str, str], int] = {}
+        self._runtime_visibility_owners: set[tuple[str, str]] = set()
         self._undo_stack: list[LayoutSnapshot] = []
         self._preview_snapshot: LayoutSnapshot | None = None
 
+    def set_runtime_visibility_owners(
+        self,
+        items: Iterable[tuple[str, str]],
+    ) -> None:
+        """Declare scene items whose visibility belongs to a runtime subsystem.
+
+        LayoutProfiles keep owning geometry for these items, but capture/apply/
+        preview/undo must not read or write their temporary enabled state.
+        """
+        self._runtime_visibility_owners = {
+            (str(container).strip(), str(source).strip())
+            for container, source in items
+            if str(container).strip() and str(source).strip()
+        }
+
+    def runtime_visibility_owned(
+        self,
+        container: str,
+        source: str,
+        raw: Mapping[str, Any] | None = None,
+    ) -> bool:
+        if (str(container).strip(), str(source).strip()) in self._runtime_visibility_owners:
+            return True
+        return bool(
+            isinstance(raw, Mapping)
+            and str(raw.get("visibility_owner") or "").casefold() == "runtime"
+        )
+
     def reset_cache(self) -> None:
         self._scene_item_cache.clear()
+
+    def set_item_enabled(
+        self,
+        container: str,
+        source: str,
+        enabled: bool,
+        *,
+        container_kind: str = "scene",
+    ) -> None:
+        """Set one scene/group item visibility through the cache-safe path."""
+        kind = str(container_kind or "scene").casefold()
+        if kind not in {"scene", "group"}:
+            raise ValueError(f"Type de conteneur OBS inconnu : {container_kind}")
+        self._set_enabled(str(container), str(source), bool(enabled))
 
     def canvas_size(self) -> tuple[int, int] | None:
         try:
@@ -483,6 +526,10 @@ class OBSLayoutManager:
                 flags = set(element.flags)
                 if "locked" in flags:
                     module_locked = True
+                runtime_visibility = self.runtime_visibility_owned(
+                    element.container,
+                    element.source,
+                )
                 element_payload.append(
                     {
                         "source": element.source,
@@ -490,11 +537,17 @@ class OBSLayoutManager:
                         "container": element.container,
                         "container_kind": element.container_kind,
                         "path": list(element.path),
-                        "enabled": element.enabled,
+                        # Never persist a temporary runtime-visible state as a
+                        # LayoutProfile baseline. False is the neutral hidden
+                        # baseline; follow_visibility below makes it non-owned.
+                        "enabled": False if runtime_visibility else element.enabled,
                         "included": is_included,
                         "follow_position": "fixed" not in flags and "nomove" not in flags,
                         "follow_size": "fixed" not in flags and "noresize" not in flags,
-                        "follow_visibility": "novis" not in flags,
+                        "follow_visibility": (
+                            not runtime_visibility and "novis" not in flags
+                        ),
+                        "visibility_owner": "runtime" if runtime_visibility else "",
                         "locked": "locked" in flags,
                         "flags": sorted(flags),
                         "transform": dict(element.transform),
@@ -516,7 +569,16 @@ class OBSLayoutManager:
                 "container": elements[0].container,
                 "container_kind": elements[0].container_kind,
                 "coordinate_space": coordinate_space,
-                "visible": any(item.enabled for item in included),
+                "visible": any(
+                    item.enabled
+                    for item in included
+                    if not self.runtime_visibility_owned(item.container, item.source)
+                )
+                if any(
+                    not self.runtime_visibility_owned(item.container, item.source)
+                    for item in included
+                )
+                else True,
                 "managed": True,
                 "locked": module_locked,
                 "lock_aspect": True,
@@ -626,12 +688,18 @@ class OBSLayoutManager:
                         "GetSceneItemTransform",
                         {"sceneName": group, "sceneItemId": item_id},
                     ).get("sceneItemTransform") or {}
+                    runtime_visibility = self.runtime_visibility_owned(group, source)
                     captured.append({
                         "container": group,
                         "container_kind": "group",
                         "path": list(path),
                         "source": source,
-                        "enabled": bool(raw.get("sceneItemEnabled", True)),
+                        "enabled": (
+                            False
+                            if runtime_visibility
+                            else bool(raw.get("sceneItemEnabled", True))
+                        ),
+                        "visibility_owner": "runtime" if runtime_visibility else "",
                         "source_type": source_kind,
                         "transform": dict(tr) if isinstance(tr, Mapping) else {},
                     })
@@ -682,12 +750,18 @@ class OBSLayoutManager:
                         "GetSceneItemTransform",
                         {"sceneName": scene_name, "sceneItemId": item_id},
                     ).get("sceneItemTransform") or {}
+                    runtime_visibility = self.runtime_visibility_owned(scene_name, source)
                     captured.append({
                         "container": scene_name,
                         "container_kind": "scene",
                         "path": list(path),
                         "source": source,
-                        "enabled": bool(raw.get("sceneItemEnabled", True)),
+                        "enabled": (
+                            False
+                            if runtime_visibility
+                            else bool(raw.get("sceneItemEnabled", True))
+                        ),
+                        "visibility_owner": "runtime" if runtime_visibility else "",
                         "source_type": source_kind,
                         "transform": dict(tr) if isinstance(tr, Mapping) else {},
                     })
@@ -799,6 +873,7 @@ class OBSLayoutManager:
                     update["__ssr_fallback_scale_y"] = captured_scale_y * sy
                 else:
                     update["scaleY"] = captured_scale_y * sy
+            runtime_visibility = self.runtime_visibility_owned(container, source, raw)
             desired.append({
                 "module": "[interne]",
                 "element": source,
@@ -812,7 +887,8 @@ class OBSLayoutManager:
                 ),
                 "path": list(raw.get("path") or ()),
                 "transform": update,
-                "enabled": bool(raw.get("enabled", True)),
+                "enabled": None if runtime_visibility else bool(raw.get("enabled", True)),
+                "visibility_owner": "runtime" if runtime_visibility else "",
                 "support": True,
             })
         return desired
@@ -961,11 +1037,23 @@ class OBSLayoutManager:
                         "container": e.container,
                         "container_kind": e.container_kind,
                         "path": list(e.path),
-                        "enabled": e.enabled,
+                        "enabled": (
+                            False
+                            if self.runtime_visibility_owned(e.container, e.source)
+                            else e.enabled
+                        ),
                         "included": True,
                         "follow_position": True,
                         "follow_size": True,
-                        "follow_visibility": True,
+                        "follow_visibility": not self.runtime_visibility_owned(
+                            e.container,
+                            e.source,
+                        ),
+                        "visibility_owner": (
+                            "runtime"
+                            if self.runtime_visibility_owned(e.container, e.source)
+                            else ""
+                        ),
                         "locked": False,
                         "flags": [],
                         "source_type": e.source_type,
@@ -990,7 +1078,12 @@ class OBSLayoutManager:
                 continue
             item = copy.deepcopy(dict(raw))
             item["transform"] = dict(current["transform"])
-            item["enabled"] = bool(current["enabled"])
+            runtime_visibility = self.runtime_visibility_owned(container, source, raw)
+            if runtime_visibility:
+                item["enabled"] = False
+                item["visibility_owner"] = "runtime"
+            else:
+                item["enabled"] = bool(current["enabled"])
             support_snapshot.append(item)
 
         snapshot: dict[str, Any] = {
@@ -1377,7 +1470,11 @@ class OBSLayoutManager:
                         else:
                             update["scaleY"] = captured_scale_y * scale_y
                 enabled: bool | None = None
-                if bool(element.get("follow_visibility", True)):
+                runtime_visibility = self.runtime_visibility_owned(container, source, element)
+                if (
+                    not runtime_visibility
+                    and bool(element.get("follow_visibility", True))
+                ):
                     enabled = visible and bool(element.get("enabled", True))
                 desired.append(
                     {

@@ -4,21 +4,26 @@ import json
 from copy import deepcopy
 from typing import Mapping, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -203,11 +208,27 @@ class ModuleLayoutDialog(QDialog):
         ("Bas droite", "bottom_right", 1.0, 1.0),
     ]
 
-    def __init__(self, parent=None, module_name: str = "", module: dict | None = None):
+    def __init__(
+        self,
+        parent=None,
+        module_name: str = "",
+        module: dict | None = None,
+        *,
+        activation_policy: dict | None = None,
+        activation_candidates: Sequence[Mapping[str, object]] | None = None,
+        activation_status_provider=None,
+        activation_command=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle(f"Module — {module_name}")
-        self.resize(560, 620)
+        self.resize(720, 860)
         self._source = deepcopy(module or {})
+        self._activation_policy_name = str(
+            self._source.get("source_name") or module_name
+        ).strip()
+        self._activation_source = deepcopy(activation_policy) if isinstance(activation_policy, dict) else None
+        self._activation_status_provider = activation_status_provider
+        self._activation_command = activation_command
         geometry = self._source.get("geometry") if isinstance(self._source.get("geometry"), dict) else {}
         base = self._source.get("base_bounds") if isinstance(self._source.get("base_bounds"), dict) else geometry
         self._aspect = max(0.0001, float(base.get("width", 1.0) or 1.0)) / max(0.0001, float(base.get("height", 1.0) or 1.0))
@@ -255,6 +276,7 @@ class ModuleLayoutDialog(QDialog):
         title.setObjectName("Section")
         root.addWidget(title)
         self.elements = QListWidget()
+        self.elements.setMaximumHeight(150)
         for element in self._source.get("elements", []):
             if not isinstance(element, dict):
                 continue
@@ -263,7 +285,7 @@ class ModuleLayoutDialog(QDialog):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if bool(element.get("included", True)) else Qt.Unchecked)
             self.elements.addItem(item)
-        root.addWidget(self.elements, 1)
+        root.addWidget(self.elements)
 
         info = QLabel(
             "Les éléments décochés ne seront pas modifiés. Exceptions facultatives par nom : "
@@ -274,6 +296,104 @@ class ModuleLayoutDialog(QDialog):
         info.setObjectName("Muted")
         root.addWidget(info)
 
+        activation_title = QLabel("Déclenchement")
+        activation_title.setObjectName("Section")
+        root.addWidget(activation_title)
+        activation_hint = QLabel(
+            "Politique globale de cette source OBS : elle s'applique à tous les LayoutProfiles. "
+            "La visibilité des sources participantes appartient au scheduler et n'est pas mémorisée par les layouts."
+        )
+        activation_hint.setWordWrap(True)
+        activation_hint.setObjectName("Muted")
+        root.addWidget(activation_hint)
+
+        activation_form = QFormLayout()
+        root.addLayout(activation_form)
+        self.activation_type = QComboBox()
+        self.activation_type.addItem("Aucun", "none")
+        self.activation_type.addItem("Aléatoire", "random")
+        self.activation_enabled = QCheckBox("Politique active")
+        self.activation_when = QComboBox()
+        self.activation_when.addItem("Module présent dans la scène programme", "module_in_program_scene")
+        self.activation_when.addItem("Stream actif", "streaming")
+        self.activation_when.addItem("Toujours", "always")
+        self.activation_chance = QDoubleSpinBox()
+        self.activation_chance.setRange(0.0, 100.0)
+        self.activation_chance.setDecimals(3)
+        self.activation_chance.setSuffix(" %")
+        self.activation_interval = QDoubleSpinBox()
+        self.activation_interval.setRange(0.1, 86400.0)
+        self.activation_interval.setDecimals(1)
+        self.activation_interval.setSuffix(" s")
+        self.activation_duration = QDoubleSpinBox()
+        self.activation_duration.setRange(0.1, 86400.0)
+        self.activation_duration.setDecimals(1)
+        self.activation_duration.setSuffix(" s")
+        self.activation_cooldown = QDoubleSpinBox()
+        self.activation_cooldown.setRange(0.0, 86400.0)
+        self.activation_cooldown.setDecimals(1)
+        self.activation_cooldown.setSuffix(" s")
+        self.activation_exclusive = QCheckBox("Une seule source participante visible à la fois")
+        self.activation_repeat = QCheckBox("Éviter la répétition immédiate")
+
+        activation_form.addRow("Type de déclenchement", self.activation_type)
+        activation_form.addRow("", self.activation_enabled)
+        activation_form.addRow("Actif quand", self.activation_when)
+        activation_form.addRow("Chance par tirage", self.activation_chance)
+        activation_form.addRow("Intervalle", self.activation_interval)
+        activation_form.addRow("Durée par défaut", self.activation_duration)
+        activation_form.addRow("Cooldown global", self.activation_cooldown)
+        activation_form.addRow("", self.activation_exclusive)
+        activation_form.addRow("", self.activation_repeat)
+
+        policy = self._activation_source or {}
+        self.activation_type.setCurrentIndex(1 if self._activation_source else 0)
+        self.activation_enabled.setChecked(bool(policy.get("enabled", True)))
+        when_idx = self.activation_when.findData(str(policy.get("active_when") or "module_in_program_scene"))
+        self.activation_when.setCurrentIndex(max(0, when_idx))
+        self.activation_chance.setValue(float(policy.get("chance", 0.01)) * 100.0)
+        self.activation_interval.setValue(float(policy.get("interval_seconds", 60.0)))
+        self.activation_duration.setValue(float(policy.get("default_duration_seconds", 10.0)))
+        self.activation_cooldown.setValue(float(policy.get("cooldown_seconds", 600.0)))
+        self.activation_exclusive.setChecked(bool(policy.get("exclusive", True)))
+        self.activation_repeat.setChecked(bool(policy.get("avoid_immediate_repeat", True)))
+
+        targets_title = QLabel("Sources participantes")
+        targets_title.setObjectName("Section")
+        root.addWidget(targets_title)
+        self.activation_targets = QTableWidget(0, 4)
+        self.activation_targets.setHorizontalHeaderLabels(["Actif", "Source OBS", "Poids", "Durée"])
+        self.activation_targets.verticalHeader().setVisible(False)
+        self.activation_targets.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.activation_targets.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        root.addWidget(self.activation_targets, 1)
+        self._populate_activation_targets(activation_candidates or (), policy)
+
+        self.activation_status = QLabel("État runtime : —")
+        self.activation_status.setObjectName("Muted")
+        root.addWidget(self.activation_status)
+        action_row = QHBoxLayout()
+        for label, action in (
+            ("Tester le tirage", "test_roll"),
+            ("Déclencher maintenant", "trigger"),
+            ("Arrêter", "stop"),
+            ("Réinitialiser le cooldown", "reset_cooldown"),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, a=action: self._run_activation_command(a))
+            action_row.addWidget(button)
+        action_row.addStretch(1)
+        root.addLayout(action_row)
+        test_hint = QLabel(
+            "Les commandes manuelles utilisent la configuration actuellement appliquée au runtime. "
+            "Après une modification, utilisez « Enregistrer et appliquer » avant de les tester. "
+            "Double-cliquez une source participante pour la déclencher directement."
+        )
+        test_hint.setWordWrap(True)
+        test_hint.setObjectName("Muted")
+        root.addWidget(test_hint)
+        self.activation_targets.doubleClicked.connect(self._trigger_selected_target)
+
         self._last_x = self.x.value()
         self._last_y = self.y.value()
         self._last_width = self.width.value()
@@ -282,6 +402,13 @@ class ModuleLayoutDialog(QDialog):
         self.y.valueChanged.connect(self._remember_position)
         self.width.valueChanged.connect(lambda _v: self._resize_from("width"))
         self.height.valueChanged.connect(lambda _v: self._resize_from("height"))
+        self.activation_type.currentIndexChanged.connect(self._sync_activation_mode)
+        self._sync_activation_mode()
+
+        self._activation_timer = QTimer(self)
+        self._activation_timer.timeout.connect(self._refresh_activation_status)
+        self._activation_timer.start(500)
+        self._refresh_activation_status()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save
@@ -298,6 +425,134 @@ class ModuleLayoutDialog(QDialog):
         box.setSingleStep(1.0)
         box.setValue(value)
         return box
+
+    def _populate_activation_targets(
+        self,
+        candidates: Sequence[Mapping[str, object]],
+        policy: Mapping[str, object],
+    ) -> None:
+        existing = {}
+        raw_targets = policy.get("targets") if isinstance(policy, Mapping) else None
+        if isinstance(raw_targets, list):
+            for raw in raw_targets:
+                if not isinstance(raw, Mapping):
+                    continue
+                key = (str(raw.get("container") or ""), str(raw.get("source") or ""))
+                existing[key] = dict(raw)
+        rows: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for raw in candidates:
+            key = (str(raw.get("container") or ""), str(raw.get("source") or ""))
+            if not key[0] or not key[1] or key in seen:
+                continue
+            merged = dict(raw)
+            merged.update(existing.get(key, {}))
+            rows.append(merged)
+            seen.add(key)
+        for key, raw in existing.items():
+            if key not in seen:
+                rows.append(dict(raw))
+
+        self.activation_targets.setRowCount(len(rows))
+        for row, raw in enumerate(rows):
+            enabled = QCheckBox()
+            enabled.setChecked(bool(raw.get("enabled", True)))
+            self.activation_targets.setCellWidget(row, 0, enabled)
+            source_item = QTableWidgetItem(str(raw.get("source") or ""))
+            source_item.setFlags(source_item.flags() & ~Qt.ItemIsEditable)
+            source_item.setData(Qt.UserRole, dict(raw))
+            self.activation_targets.setItem(row, 1, source_item)
+            weight = QDoubleSpinBox()
+            weight.setRange(0.0, 100000.0)
+            weight.setDecimals(3)
+            weight.setValue(float(raw.get("weight", 1.0)))
+            self.activation_targets.setCellWidget(row, 2, weight)
+            duration = QDoubleSpinBox()
+            duration.setRange(0.0, 86400.0)
+            duration.setDecimals(1)
+            duration.setSpecialValueText("Défaut")
+            duration.setSuffix(" s")
+            duration.setValue(float(raw.get("duration_seconds", 0.0) or 0.0))
+            self.activation_targets.setCellWidget(row, 3, duration)
+        self.activation_targets.resizeColumnsToContents()
+        if self.activation_targets.columnWidth(1) < 220:
+            self.activation_targets.setColumnWidth(1, 220)
+
+    def _sync_activation_mode(self) -> None:
+        enabled = self.activation_type.currentData() == "random"
+        for widget in (
+            self.activation_enabled,
+            self.activation_when,
+            self.activation_chance,
+            self.activation_interval,
+            self.activation_duration,
+            self.activation_cooldown,
+            self.activation_exclusive,
+            self.activation_repeat,
+            self.activation_targets,
+        ):
+            widget.setEnabled(enabled)
+
+    def _refresh_activation_status(self) -> None:
+        if self._activation_status_provider is None or not self._activation_policy_name:
+            self.activation_status.setText("État runtime : politique non appliquée")
+            return
+        try:
+            status = self._activation_status_provider(self._activation_policy_name) or {}
+        except Exception as exc:
+            self.activation_status.setText(f"État runtime : erreur — {exc}")
+            return
+        if not status.get("available"):
+            self.activation_status.setText("État runtime : politique non appliquée")
+            return
+        phase = str(status.get("phase") or "idle")
+        details = []
+        if status.get("active_source"):
+            details.append(str(status.get("active_source")))
+        for key, label in (
+            ("next_roll_seconds", "prochain tirage"),
+            ("visible_seconds", "fin"),
+            ("cooldown_seconds", "cooldown"),
+        ):
+            value = status.get(key)
+            if value is not None:
+                details.append(f"{label} {float(value):.1f} s")
+        suffix = " — " + " · ".join(details) if details else ""
+        self.activation_status.setText(f"État runtime : {phase}{suffix}")
+
+    def _run_activation_command(self, action: str, source: str | None = None) -> None:
+        if self._activation_command is None:
+            QMessageBox.information(
+                self,
+                "Déclenchement",
+                "Enregistrez et appliquez d'abord cette politique pour la tester.",
+            )
+            return
+        try:
+            result = self._activation_command(action, self._activation_policy_name, source)
+        except Exception as exc:
+            QMessageBox.warning(self, "Déclenchement", str(exc))
+            return
+        if action == "test_roll" and result is not None:
+            verdict = "succès" if bool(getattr(result, "triggered", False)) else "échec"
+            source_name = str(getattr(result, "source", "") or "")
+            extra = f" → {source_name}" if source_name else ""
+            QMessageBox.information(
+                self,
+                "Test du tirage",
+                f"Tirage {float(getattr(result, 'roll', 0.0)) * 100.0:.3f} % "
+                f"/ seuil {float(getattr(result, 'chance', 0.0)) * 100.0:.3f} % : {verdict}{extra}.",
+            )
+        self._refresh_activation_status()
+
+    def _trigger_selected_target(self, *_args) -> None:
+        row = self.activation_targets.currentRow()
+        if row < 0:
+            return
+        item = self.activation_targets.item(row, 1)
+        source = item.text().strip() if item else ""
+        if source:
+            self._run_activation_command("trigger", source)
 
     def _anchor_factors(self) -> tuple[float, float]:
         current = str(self.anchor.currentData() or "top_left")
@@ -371,6 +626,41 @@ class ModuleLayoutDialog(QDialog):
                 if source in included:
                     element["included"] = included[source]
         return result
+
+    def result_activation_policy(self) -> dict | None:
+        if self.activation_type.currentData() != "random":
+            return None
+        targets = []
+        for row in range(self.activation_targets.rowCount()):
+            item = self.activation_targets.item(row, 1)
+            if item is None:
+                continue
+            raw = item.data(Qt.UserRole)
+            raw = dict(raw) if isinstance(raw, Mapping) else {}
+            raw["source"] = item.text().strip()
+            enabled = self.activation_targets.cellWidget(row, 0)
+            weight = self.activation_targets.cellWidget(row, 2)
+            duration = self.activation_targets.cellWidget(row, 3)
+            raw["enabled"] = bool(enabled.isChecked()) if isinstance(enabled, QCheckBox) else True
+            raw["weight"] = float(weight.value()) if isinstance(weight, QDoubleSpinBox) else 1.0
+            duration_value = float(duration.value()) if isinstance(duration, QDoubleSpinBox) else 0.0
+            if duration_value > 0:
+                raw["duration_seconds"] = duration_value
+            else:
+                raw.pop("duration_seconds", None)
+            targets.append(raw)
+        return {
+            "enabled": self.activation_enabled.isChecked(),
+            "type": "random",
+            "active_when": str(self.activation_when.currentData() or "module_in_program_scene"),
+            "chance": self.activation_chance.value() / 100.0,
+            "interval_seconds": self.activation_interval.value(),
+            "cooldown_seconds": self.activation_cooldown.value(),
+            "default_duration_seconds": self.activation_duration.value(),
+            "exclusive": self.activation_exclusive.isChecked(),
+            "avoid_immediate_repeat": self.activation_repeat.isChecked(),
+            "targets": targets,
+        }
 
 
 class ActionDialog(QDialog):

@@ -723,6 +723,67 @@ class V2FeatureTests(unittest.TestCase):
         finally:
             api.stop()
 
+    def test_runtime_owned_support_visibility_is_not_captured_or_reapplied(self):
+        capture_client = NestedLayoutClient(canvas=(1920, 1080))
+        manager = OBSLayoutManager(capture_client)
+        manager.set_runtime_visibility_owners({
+            ("[Module] Avatar", "Avatar Dynamic")
+        })
+
+        # Simulate capture while the temporary animation is currently visible.
+        capture_client.enabled[("[Module] Avatar", 3)] = True
+        profile = manager.capture_profile("In Game")
+        support = next(
+            item for item in profile["support_items"]
+            if item["source"] == "Avatar Dynamic"
+        )
+        self.assertFalse(support["enabled"])
+        self.assertEqual(support["visibility_owner"], "runtime")
+
+        # Applying the layout still owns/scales geometry but must not alter the
+        # temporary visibility state.
+        client = NestedLayoutClient(canvas=(2560, 1440))
+        client.enabled[("[Module] Avatar", 3)] = True
+        manager = OBSLayoutManager(client)
+        manager.set_runtime_visibility_owners({
+            ("[Module] Avatar", "Avatar Dynamic")
+        })
+        client.calls.clear()
+        manager.apply_profile(profile, record_undo=False)
+
+        self.assertTrue(client.enabled[("[Module] Avatar", 3)])
+        png_visibility_calls = [
+            payload
+            for request, payload in client.calls
+            if request == "SetSceneItemEnabled"
+            and payload.get("sceneName") == "[Module] Avatar"
+            and payload.get("sceneItemId") == 3
+        ]
+        self.assertEqual(png_visibility_calls, [])
+        self.assertAlmostEqual(
+            client.transforms[("[Module] Avatar", 3)]["scaleX"],
+            4.0 / 3.0,
+        )
+
+    def test_preview_snapshot_does_not_restore_runtime_owned_visibility(self):
+        client = MutableLayoutClient()
+        manager = OBSLayoutManager(client)
+        manager.set_runtime_visibility_owners({("In Game", "[Webcam] Avatar")})
+        profile = manager.capture_profile("In Game")
+        profile["coordinate_mode"] = "absolute"
+        profile["modules"]["[Webcam] Avatar"]["geometry"]["x"] = 700.0
+
+        # Runtime turns the source off immediately before the preview.
+        client.enabled[2] = False
+        manager.preview_profile(profile)
+        self.assertFalse(client.enabled[2])
+
+        # Runtime changes it while preview is open. Cancel must restore geometry
+        # only and leave the runtime visibility untouched.
+        client.enabled[2] = True
+        manager.cancel_preview()
+        self.assertTrue(client.enabled[2])
+
 
 if __name__ == "__main__":
     unittest.main()
