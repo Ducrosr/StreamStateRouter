@@ -10,7 +10,7 @@ from stream_state_router.activation import (
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
-from stream_state_router.obs.client import OBSUnavailableError
+from stream_state_router.obs.client import OBSResourceNotFoundError, OBSUnavailableError
 
 
 class FakeClock:
@@ -256,6 +256,29 @@ class OBSActivationControllerTests(unittest.TestCase):
 
         self.assertFalse(eligible)
         self.assertIn("déconnecté", reason)
+
+    def test_confirmed_missing_hide_is_acknowledged_without_pending_cleanup(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy()
+        controller = OBSActivationController(dispatcher, {"egg": policy})
+        controller.reconcile()
+        dispatcher.layout_manager.enabled_calls.clear()
+        dispatcher.layout_manager.failures[
+            ("[Module] EasterEgg", "B", False, "scene")
+        ] = [OBSResourceNotFoundError("GetSceneItemId", "source not found")]
+
+        controller.apply_event(
+            ActivationEvent(
+                "hide",
+                "egg",
+                9.0,
+                source="B",
+                container="[Module] EasterEgg",
+            )
+        )
+
+        self.assertEqual(controller.pending_hides("egg"), ())
+        self.assertEqual(controller.policy_cleanup_status("egg"), (False, ""))
 
     def test_hide_failure_stays_pending_and_retries_until_acknowledged(self):
         dispatcher = FakeDispatcher()
