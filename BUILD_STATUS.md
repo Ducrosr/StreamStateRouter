@@ -65,22 +65,18 @@ La suite source contient maintenant des tests dédiés pour :
 
 ## Exécution locale Windows 2.0.13
 
-Une validation locale a été exécutée sur Windows 11 / PowerShell 7.6.6 depuis la branche `fix/activation-runtime-serialization`.
+Une validation locale complète a été exécutée sur Windows 11 / PowerShell 7.6.6 depuis la branche `fix/activation-runtime-serialization`, après récupération du head final de code.
 
-Résultats obtenus sur le commit `d8beba5` avant le nettoyage Ruff final :
+Résultats obtenus :
 
 - `python -m unittest discover -s tests -v` : **109 tests exécutés, 109 réussites** ;
-- durée de la suite : **1,450 s** ;
-- `python main.py --check-config` : **Configuration valide** ;
-- Ruff : **40 diagnostics de style/qualité**, sans échec fonctionnel des tests.
+- durée de la suite : **1,368 s** ;
+- `python -m ruff check .` : **All checks passed!** ;
+- `python main.py --check-config` : **Configuration valide**.
 
-Les 40 diagnostics Ruff observés étaient composés de :
+La validation automatisée locale Windows est donc **réussie pour les tests unitaires, Ruff et le smoke test de configuration**.
 
-- 37 occurrences `E702` (plusieurs instructions sur une même ligne) dans `ui/main_window.py` ;
-- 2 imports inutilisés (`Iterable` et `time`) ;
-- 1 variable locale inutilisée (`current_enabled`).
-
-Ces diagnostics ont été corrigés sur la branche après cette exécution. **Ruff doit encore être relancé sur le nouveau head avant de déclarer Ruff OK.**
+Cette validation ne remplace pas les essais avec la vraie collection OBS : la campagne manuelle décrite dans `TESTING.md` reste nécessaire avant de qualifier la 2.0.13 de validée en production.
 
 ## GitHub Actions
 
