@@ -16,7 +16,7 @@ from stream_state_router.services.config import (
 class ConfigTests(unittest.TestCase):
     def sample(self):
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "router": {
                 "poll_ms": 50,
                 "debounce_ms": 150,
@@ -70,7 +70,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 4)
+        self.assertEqual(migrated["schema_version"], 5)
         self.assertEqual(migrated["router"]["fallback_state"]["LayoutProfile"], "Vanilla")
         self.assertIn("Vanilla", migrated["layout_profiles"])
         self.assertEqual(validate_config(migrated), [])
@@ -125,13 +125,80 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 4)
+        self.assertEqual(migrated["schema_version"], 5)
         modules = migrated["layout_profiles"]["Vanilla"]["modules"]
         self.assertEqual(set(modules), {"[Global] Date", "[Global] Signature"})
         self.assertEqual(modules["[Global] Date"]["module_type"], "Global")
         self.assertEqual(modules["[Global] Date"]["display_name"], "Date")
         self.assertEqual(len(modules["[Global] Date"]["elements"]), 1)
 
+
+    def test_schema_v4_adds_activation_policies(self):
+        data = self.sample()
+        data["schema_version"] = 4
+        data.pop("activation_policies", None)
+
+        migrated = migrate_config(data)
+
+        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["activation_policies"], {})
+        self.assertEqual(validate_config(migrated), [])
+
+    def test_random_activation_policy_is_valid_and_buildable(self):
+        data = self.sample()
+        data["activation_policies"] = {
+            "[Module] EasterEgg": {
+                "enabled": True,
+                "type": "random",
+                "active_when": "module_in_program_scene",
+                "chance": 0.01,
+                "interval_seconds": 60,
+                "cooldown_seconds": 600,
+                "default_duration_seconds": 10,
+                "exclusive": True,
+                "avoid_immediate_repeat": True,
+                "targets": [
+                    {
+                        "container": "[Module] EasterEgg",
+                        "source": "Cloud",
+                        "enabled": True,
+                        "weight": 1.0,
+                        "duration_seconds": 10,
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(validate_config(data), [])
+        policies = build_activation_policies(data)
+        self.assertEqual(policies["[Module] EasterEgg"].chance, 0.01)
+        self.assertEqual(policies["[Module] EasterEgg"].targets[0].source, "Cloud")
+
+    def test_invalid_activation_probability_and_weight_are_reported(self):
+        data = self.sample()
+        data["activation_policies"] = {
+            "[Module] EasterEgg": {
+                "type": "random",
+                "chance": 1.5,
+                "interval_seconds": 0,
+                "cooldown_seconds": -1,
+                "default_duration_seconds": 0,
+                "targets": [
+                    {
+                        "container": "[Module] EasterEgg",
+                        "source": "Cloud",
+                        "weight": -0.1,
+                    }
+                ],
+            }
+        }
+
+        errors = validate_config(data)
+        self.assertTrue(any(".chance" in item for item in errors))
+        self.assertTrue(any(".interval_seconds" in item for item in errors))
+        self.assertTrue(any(".cooldown_seconds" in item for item in errors))
+        self.assertTrue(any(".default_duration_seconds" in item for item in errors))
+        self.assertTrue(any(".weight" in item for item in errors))
 
 
 if __name__ == "__main__":

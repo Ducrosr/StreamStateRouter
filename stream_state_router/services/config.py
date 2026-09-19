@@ -14,7 +14,7 @@ from ..router.models import StreamState
 from ..router.rules import AppRule, ResolutionKind, RuleSet
 from .paths import backups_dir, config_path, default_config_path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SUPPORTED_ACTION_TYPES = {
     "set_program_scene",
     "scene_item_enabled",
@@ -273,9 +273,13 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
                     profile = entry.get("profile")
                     if isinstance(profile, dict):
                         _split_legacy_grouped_layout_modules(profile)
-        migrated["schema_version"] = SCHEMA_VERSION
-        return migrated
+        version = 4
 
+    if version == 4:
+        migrated.setdefault("activation_policies", {})
+        version = 5
+
+    migrated["schema_version"] = version
     return migrated
 
 
@@ -477,6 +481,67 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         except (TypeError, ValueError):
             errors.append("api.port doit être compris entre 1 et 65535")
 
+    activation_policies = data.get("activation_policies", {})
+    if not isinstance(activation_policies, Mapping):
+        errors.append("activation_policies doit être un objet")
+        activation_policies = {}
+    for policy_name, policy in activation_policies.items():
+        prefix = f"activation_policies.{policy_name}"
+        if not str(policy_name).strip() or not isinstance(policy, Mapping):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        policy_type = str(policy.get("type") or "random").casefold()
+        if policy_type != "random":
+            errors.append(f"{prefix}.type inconnu : {policy_type}")
+        active_when = str(policy.get("active_when") or "module_in_program_scene").casefold()
+        if active_when not in {"always", "streaming", "module_in_program_scene"}:
+            errors.append(f"{prefix}.active_when inconnu : {active_when}")
+        try:
+            chance = float(policy.get("chance", 0.01))
+            if not 0.0 <= chance <= 1.0:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            errors.append(f"{prefix}.chance doit être compris entre 0 et 1")
+        for key, default, allow_zero in (
+            ("interval_seconds", 60.0, False),
+            ("cooldown_seconds", 600.0, True),
+            ("default_duration_seconds", 10.0, False),
+        ):
+            try:
+                value = float(policy.get(key, default))
+                valid = value >= 0.0 if allow_zero else value > 0.0
+                if not valid:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                qualifier = ">= 0" if allow_zero else "> 0"
+                errors.append(f"{prefix}.{key} doit être {qualifier}")
+        targets = policy.get("targets", [])
+        if not isinstance(targets, list):
+            errors.append(f"{prefix}.targets doit être une liste")
+            continue
+        for target_index, target in enumerate(targets):
+            tprefix = f"{prefix}.targets[{target_index}]"
+            if not isinstance(target, Mapping):
+                errors.append(f"{tprefix} doit être un objet")
+                continue
+            if not str(target.get("container") or "").strip():
+                errors.append(f"{tprefix}.container est requis")
+            if not str(target.get("source") or "").strip():
+                errors.append(f"{tprefix}.source est requis")
+            try:
+                weight = float(target.get("weight", 1.0))
+                if not weight >= 0.0:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                errors.append(f"{tprefix}.weight doit être >= 0")
+            if target.get("duration_seconds") not in (None, ""):
+                try:
+                    duration = float(target.get("duration_seconds"))
+                    if not duration > 0.0:
+                        raise ValueError
+                except (TypeError, ValueError, OverflowError):
+                    errors.append(f"{tprefix}.duration_seconds doit être > 0")
+
     profiles = data.get("profiles")
     if not isinstance(profiles, Mapping):
         errors.append("profiles doit être un objet")
@@ -596,6 +661,17 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         check_state_refs(raw.get("state"), f"rules[{index}].state")
 
     return errors
+
+
+def build_activation_policies(data: Mapping[str, Any]) -> dict[str, TriggerPolicyConfig]:
+    raw = data.get("activation_policies", {})
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        str(name): TriggerPolicyConfig.from_mapping(str(name), policy)
+        for name, policy in raw.items()
+        if isinstance(policy, Mapping)
+    }
 
 
 def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
