@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 import unittest
 from urllib.request import Request, urlopen
 
@@ -17,6 +16,7 @@ from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, RuleSet
 from stream_state_router.services.api import APIConfig, LocalControlAPI
+from stream_state_router.ui.main_window import MainWindow
 
 
 class MutableLayoutClient:
@@ -783,6 +783,80 @@ class V2FeatureTests(unittest.TestCase):
         client.enabled[2] = True
         manager.cancel_preview()
         self.assertTrue(client.enabled[2])
+
+    def test_activation_candidates_default_to_direct_children_only(self):
+        profile = {
+            "modules": {
+                "[Module] EasterEgg": {
+                    "source_name": "[Module] EasterEgg",
+                    "elements": [],
+                },
+                "[Module] ChildScene": {
+                    "source_name": "[Module] ChildScene",
+                    "elements": [
+                        {
+                            "container": "[Module] EasterEgg",
+                            "container_kind": "scene",
+                            "source": "[Module] ChildScene",
+                            "path": ["In Game", "[Module] EasterEgg"],
+                        }
+                    ],
+                },
+                "[Module] Grandchild": {
+                    "source_name": "[Module] Grandchild",
+                    "elements": [
+                        {
+                            "container": "[Module] ChildScene",
+                            "container_kind": "scene",
+                            "source": "[Module] Grandchild",
+                            "path": [
+                                "In Game",
+                                "[Module] EasterEgg",
+                                "[Module] ChildScene",
+                            ],
+                        }
+                    ],
+                },
+            },
+            "support_items": [
+                {
+                    "container": "[Module] EasterEgg",
+                    "container_kind": "scene",
+                    "source": "Direct PNG",
+                    "path": ["In Game", "[Module] EasterEgg"],
+                },
+                {
+                    "container": "[Module] ChildScene",
+                    "container_kind": "scene",
+                    "source": "Nested PNG",
+                    "path": [
+                        "In Game",
+                        "[Module] EasterEgg",
+                        "[Module] ChildScene",
+                    ],
+                },
+            ],
+        }
+        module = profile["modules"]["[Module] EasterEgg"]
+
+        candidates = MainWindow._activation_candidates_for_module(
+            profile,
+            "[Module] EasterEgg",
+            module,
+        )
+
+        identities = {
+            (item["container"], item["container_kind"], item["source"])
+            for item in candidates
+        }
+        self.assertEqual(
+            identities,
+            {
+                ("[Module] EasterEgg", "scene", "[Module] ChildScene"),
+                ("[Module] EasterEgg", "scene", "Direct PNG"),
+            },
+        )
+
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from stream_state_router.obs.client import (
     OBSClientManager,
     OBSRequestError,
+    OBSResourceNotFoundError,
     OBSUnavailableError,
 )
 from stream_state_router.obs.models import OBSConnectionConfig
@@ -30,6 +31,14 @@ class _FakeReqClient:
         return {"obsVersion": "32.2.2"}
 
 
+class _GenericRequestFailReqClient:
+    def __init__(self, **_kwargs):
+        pass
+
+    def send(self, request, data=None, raw=False):
+        raise _FakeRequestError("Request refused by OBS")
+
+
 class _TransportFailReqClient:
     def __init__(self, **_kwargs):
         pass
@@ -48,7 +57,7 @@ class OBSClientManagerTests(unittest.TestCase):
             patch("stream_state_router.obs.client._obs", fake_obs),
             patch("stream_state_router.obs.client._OBS_REQUEST_ERRORS", (_FakeRequestError,)),
         ):
-            with self.assertRaises(OBSRequestError):
+            with self.assertRaises(OBSResourceNotFoundError):
                 manager.send("GetSceneItemTransform", {"sceneName": "Test", "sceneItemId": 7})
 
             self.assertTrue(manager.connected)
@@ -58,6 +67,20 @@ class OBSClientManagerTests(unittest.TestCase):
             response = manager.send("GetVersion")
             self.assertEqual(response["obsVersion"], "32.2.2")
             self.assertEqual(_FakeReqClient.instances, 1)
+
+    def test_generic_request_error_is_not_treated_as_confirmed_absence(self):
+        fake_obs = SimpleNamespace(ReqClient=_GenericRequestFailReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True, reconnect_seconds=3.0))
+
+        with (
+            patch("stream_state_router.obs.client._obs", fake_obs),
+            patch("stream_state_router.obs.client._OBS_REQUEST_ERRORS", (_FakeRequestError,)),
+        ):
+            with self.assertRaises(OBSRequestError) as captured:
+                manager.send("SetSceneItemEnabled", {"sceneName": "Test", "sceneItemId": 7})
+
+        self.assertNotIsInstance(captured.exception, OBSResourceNotFoundError)
+        self.assertTrue(manager.connected)
 
     def test_transport_error_marks_connection_unavailable(self):
         fake_obs = SimpleNamespace(ReqClient=_TransportFailReqClient)

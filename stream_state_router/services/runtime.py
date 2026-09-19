@@ -1,13 +1,27 @@
 from __future__ import annotations
 
+import copy
 import logging
+import queue
 import threading
 import time
+import uuid
 from collections import deque
-from dataclasses import dataclass
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
-from ..activation import ActivationEvent, ActivationScheduler, OBSActivationController, TriggerPolicyConfig
+from ..activation import (
+    ActivationBlocked,
+    ActivationCollectionChanged,
+    ActivationEvent,
+    ActivationScheduler,
+    ActivationTargetMissing,
+    ActivationVisibilityUncertain,
+    OBSActivationController,
+    TriggerPolicyConfig,
+    TriggerTargetIdentity,
+)
 from ..obs.dispatcher import DispatchResult, OBSDispatcher
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
@@ -18,6 +32,30 @@ from ..router.models import ForegroundApp, StreamState
 class RuntimeEvent:
     kind: str
     message: str
+    request_id: str = ""
+    payload: object | None = None
+    success: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationCommandResult:
+    request_id: str
+    action: str
+    policy: str
+    success: bool
+    result: object | None = None
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _ActivationCommand:
+    request_id: str
+    generation: int
+    action: str
+    policy: str = ""
+    target_identity: TriggerTargetIdentity | None = None
+    target_source: str | None = None
+    options: Mapping[str, object] = field(default_factory=dict)
 
 
 class RoutingService:
@@ -54,6 +92,7 @@ class RoutingService:
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._dispatch_lock = threading.RLock()
         self._paused = False
         self._last_app: ForegroundApp | None = None
         self._dispatch_generation = 0
@@ -61,6 +100,17 @@ class RoutingService:
         self._last_obs_connected: bool | None = None
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._activation_eligibility_cache: dict[str, tuple[bool, str]] = {}
+        self._activation_cleanup_cache: dict[str, int] = {}
+        self._activation_commands: queue.Queue[_ActivationCommand] = queue.Queue()
+        self._command_generation = 0
+        self._accept_activation_commands = False
+        self._runtime_operational = False
+        self._stopping = False
+        self._shutdown_complete = threading.Event()
+        self._simulation_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="SSR-Activation-Sim",
+        )
 
         self.on_foreground: Callable[[ForegroundApp | None], None] | None = None
         self.on_change: Callable[[StateChange], None] | None = None
@@ -80,25 +130,57 @@ class RoutingService:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._stop.clear()
+        with self._lock:
+            self._stop.clear()
+            self._shutdown_complete.clear()
+            self._stopping = False
+            self._runtime_operational = True
+            self._accept_activation_commands = True
         self._thread = threading.Thread(target=self._run, name="SSR-Router", daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 2.0) -> None:
-        self._stop.set()
-        self._wake.set()
+    def stop(self, timeout: float = 5.0) -> bool:
+        thread = self._thread
+        if thread is None or not thread.is_alive():
+            with self._lock:
+                self._accept_activation_commands = False
+                self._runtime_operational = False
+                self._stopping = True
+            return self._wait_for_dispatch_quiescence(timeout)
+
         with self._lock:
-            self._dispatch_generation += 1
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
-        if self.activation_controller is not None:
-            try:
-                for warning in self.activation_controller.reconcile():
-                    self.logger.warning("Activation stop fail-safe: %s", warning)
-            except Exception as exc:
-                self.logger.warning("Activation stop fail-safe failed: %s", exc)
-        if self.activation_scheduler is not None:
-            self.activation_scheduler.reset_all()
+            if not self._stopping:
+                self._accept_activation_commands = False
+                self._runtime_operational = False
+                self._stopping = True
+                self._dispatch_generation += 1
+                self._command_generation += 1
+                generation = self._command_generation
+                command = _ActivationCommand(
+                    request_id=f"shutdown-{uuid.uuid4().hex}",
+                    generation=generation,
+                    action="shutdown",
+                )
+                self._activation_commands.put(command)
+        self._wake.set()
+
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            self.logger.error(
+                "Routing service did not stop within %.1f s; refusing replacement runtime",
+                timeout,
+            )
+            return False
+
+        remaining = max(0.0, deadline - time.monotonic())
+        if not self._wait_for_dispatch_quiescence(remaining):
+            self.logger.error(
+                "An OBS dispatch from the previous runtime is still active; "
+                "refusing replacement runtime"
+            )
+            return False
+        return True
 
     def pause(self, paused: bool = True) -> None:
         with self._lock:
@@ -127,11 +209,14 @@ class RoutingService:
         return change
 
     def force_reapply(self) -> DispatchResult | None:
-        with self._lock:
-            state = self.engine.current_state
-        if state is None:
-            return None
-        result = self.dispatcher.dispatch_state(state, force=True)
+        with self._dispatch_lock:
+            with self._lock:
+                if self._stopping:
+                    return None
+                state = self.engine.current_state
+            if state is None:
+                return None
+            result = self.dispatcher.dispatch_state(state, force=True)
         if self.on_dispatch:
             self.on_dispatch(result)
         return result
@@ -148,6 +233,8 @@ class RoutingService:
                 policy_name,
                 (False, "en attente du prochain cycle runtime"),
             )
+            operational = self._runtime_operational and not self._stopping
+            cleanup_pending = self._activation_cleanup_cache.get(policy_name, 0)
         diagnostics = self.activation_diagnostics(policy_name, limit=16)
         return {
             "available": True,
@@ -155,6 +242,8 @@ class RoutingService:
             "active_source": state.active_source,
             "eligible": eligible,
             "eligibility_reason": eligibility_reason,
+            "operational": operational,
+            "cleanup_pending": cleanup_pending,
             "next_roll_seconds": (
                 max(0.0, state.next_roll_at - now) if state.next_roll_at is not None else None
             ),
@@ -168,105 +257,30 @@ class RoutingService:
             "diagnostics": diagnostics,
         }
 
-    def activation_test_roll(self, policy_name: str):
-        scheduler = self.activation_scheduler
-        if scheduler is None:
-            raise RuntimeError("Aucune politique de déclenchement active")
-        with self._lock:
-            result = scheduler.test_roll(policy_name)
-        verdict = "succès" if result.triggered else "échec"
-        source = f" → {result.source}" if result.source else ""
-        self._record_activation_diagnostic(
-            policy_name,
-            "test",
-            (
-                f"test tirage {result.roll * 100.0:.3f} % / "
-                f"{result.chance * 100.0:.3f} % : {verdict}{source}"
-            ),
-        )
-        return result
+    def activation_test_roll(self, policy_name: str) -> str:
+        return self.submit_activation_command("test_roll", policy_name)
 
     def activation_trigger_now(
         self,
         policy_name: str,
         *,
+        target_identity: TriggerTargetIdentity | None = None,
         target_source: str | None = None,
         ignore_cooldown: bool = False,
-    ) -> list[ActivationEvent]:
-        scheduler = self.activation_scheduler
-        controller = self.activation_controller
-        if scheduler is None or controller is None:
-            raise RuntimeError("Aucune politique de déclenchement active")
-        policy = scheduler.policies.get(policy_name)
-        if policy is None:
-            raise KeyError(f"Politique d'activation introuvable : {policy_name}")
-        eligible, eligibility_reason = self._activation_eligibility(policy_name, policy)
-        now = time.monotonic()
-        try:
-            with self._lock:
-                events = scheduler.trigger_now(
-                    policy_name,
-                    target_source=target_source,
-                    eligible=eligible,
-                    ignore_cooldown=ignore_cooldown,
-                    now=now,
-                )
-        except Exception as exc:
-            self._record_activation_diagnostic(
-                policy_name,
-                "bloqué",
-                f"déclenchement manuel refusé : {exc} ({eligibility_reason})",
-            )
-            raise
-        for event in events:
-            self._handle_activation_event(event, now=now)
-        self._wake.set()
-        return events
+    ) -> str:
+        return self.submit_activation_command(
+            "trigger",
+            policy_name,
+            target_identity=target_identity,
+            target_source=target_source,
+            options={"ignore_cooldown": bool(ignore_cooldown)},
+        )
 
-    def activation_stop(self, policy_name: str) -> list[ActivationEvent]:
-        scheduler = self.activation_scheduler
-        if scheduler is None:
-            raise RuntimeError("Aucune politique de déclenchement active")
-        now = time.monotonic()
-        with self._lock:
-            events = scheduler.stop(policy_name, enter_cooldown=True, now=now)
-        if not events:
-            self._record_activation_diagnostic(
-                policy_name,
-                "commande",
-                "arrêt manuel ignoré : aucune source visible",
-            )
-        for event in events:
-            self._handle_activation_event(event, now=now)
-        self._wake.set()
-        return events
+    def activation_stop(self, policy_name: str) -> str:
+        return self.submit_activation_command("stop", policy_name)
 
-    def activation_reset_cooldown(self, policy_name: str) -> list[ActivationEvent]:
-        scheduler = self.activation_scheduler
-        controller = self.activation_controller
-        if scheduler is None or controller is None:
-            raise RuntimeError("Aucune politique de déclenchement active")
-        policy = scheduler.policies.get(policy_name)
-        if policy is None:
-            raise KeyError(f"Politique d'activation introuvable : {policy_name}")
-        eligible, _reason = self._activation_eligibility(policy_name, policy)
-        now = time.monotonic()
-        with self._lock:
-            events = scheduler.reset_cooldown(policy_name, eligible=eligible, now=now)
-        if not events:
-            self._record_activation_diagnostic(
-                policy_name,
-                "commande",
-                "réinitialisation cooldown ignorée : aucun cooldown actif",
-            )
-        else:
-            self._record_activation_diagnostic(
-                policy_name,
-                "commande",
-                "cooldown réinitialisé manuellement",
-            )
-        self._wake.set()
-        return events
+    def activation_reset_cooldown(self, policy_name: str) -> str:
+        return self.submit_activation_command("reset_cooldown", policy_name)
 
     def activation_simulate(
         self,
@@ -274,26 +288,49 @@ class RoutingService:
         *,
         trials: int = 1000,
         seed: int = 12345,
-    ):
-        scheduler = self.activation_scheduler
-        if scheduler is None:
-            raise RuntimeError("Aucune politique de déclenchement active")
-        with self._lock:
-            result = scheduler.simulate(policy_name, trials=trials, seed=seed)
-        self._record_activation_diagnostic(
+    ) -> str:
+        return self.submit_activation_command(
+            "simulate",
             policy_name,
-            "simulation",
-            (
-                f"{result.trials} tirages seed={result.seed} : "
-                f"{result.trigger_count} déclenchements, "
-                f"{result.miss_count} échecs chance, {result.blocked_count} bloqués"
-            ),
+            options={"trials": int(trials), "seed": int(seed)},
         )
-        return result
 
-    def activation_reset_all(self) -> None:
-        self._reconcile_activation("réinitialisation manuelle")
+    def activation_reset_all(self) -> str:
+        return self.submit_activation_command("reset_all", "*")
+
+    def submit_activation_command(
+        self,
+        action: str,
+        policy_name: str,
+        *,
+        target_identity: TriggerTargetIdentity | None = None,
+        target_source: str | None = None,
+        options: Mapping[str, object] | None = None,
+    ) -> str:
+        with self._lock:
+            thread = self._thread
+            if (
+                not self._accept_activation_commands
+                or self._stopping
+                or thread is None
+                or not thread.is_alive()
+            ):
+                raise RuntimeError("Runtime d'activation indisponible ou en arrêt")
+            generation = self._command_generation
+        request_id = uuid.uuid4().hex
+        self._activation_commands.put(
+            _ActivationCommand(
+                request_id=request_id,
+                generation=generation,
+                action=str(action),
+                policy=str(policy_name),
+                target_identity=target_identity,
+                target_source=target_source,
+                options=dict(options or {}),
+            )
+        )
         self._wake.set()
+        return request_id
 
     def activation_diagnostics(
         self,
@@ -316,38 +353,46 @@ class RoutingService:
 
     def _run(self) -> None:
         self.logger.info("Routing service started")
-        while not self._stop.is_set():
-            started = time.monotonic()
-            try:
-                self._probe_obs_if_due()
-                app = self.provider.get()
-                with self._lock:
-                    changed_app = app != self._last_app
-                    self._last_app = app
-                    paused = self._paused
-                if changed_app:
-                    self.logger.info(
-                        "Foreground -> %s | %s",
-                        app.exe_name if app else "<none>",
-                        app.window_title if app else "",
-                    )
-                    if self.on_foreground:
-                        self.on_foreground(app)
-                if not paused:
+        try:
+            while not self._stop.is_set():
+                started = time.monotonic()
+                try:
+                    if self._drain_activation_commands():
+                        break
+                    self._probe_obs_if_due()
+                    app = self.provider.get()
                     with self._lock:
-                        change = self.engine.observe(app)
-                    if change:
-                        self._apply_change(change)
-                self._tick_activation(paused=paused)
-            except Exception as exc:
-                self.logger.exception("Routing loop error")
-                self._emit(RuntimeEvent("error", str(exc)))
+                        changed_app = app != self._last_app
+                        self._last_app = app
+                        paused = self._paused
+                    if changed_app:
+                        self.logger.info(
+                            "Foreground -> %s | %s",
+                            app.exe_name if app else "<none>",
+                            app.window_title if app else "",
+                        )
+                        if self.on_foreground:
+                            self.on_foreground(app)
+                    if not paused:
+                        with self._lock:
+                            change = self.engine.observe(app)
+                        if change:
+                            self._apply_change(change)
+                    self._tick_activation(paused=paused)
+                except Exception as exc:
+                    self.logger.exception("Routing loop error")
+                    self._emit(RuntimeEvent("error", str(exc)))
 
-            elapsed = time.monotonic() - started
-            wait_for = max(0.0, self.poll_seconds - elapsed)
-            self._wake.wait(wait_for)
-            self._wake.clear()
-        self.logger.info("Routing service stopped")
+                elapsed = time.monotonic() - started
+                wait_for = max(0.0, self.poll_seconds - elapsed)
+                self._wake.wait(wait_for)
+                self._wake.clear()
+        finally:
+            with self._lock:
+                self._runtime_operational = False
+                self._accept_activation_commands = False
+            self._shutdown_complete.set()
+            self.logger.info("Routing service stopped")
 
     def _probe_obs_if_due(self) -> None:
         client = getattr(self.dispatcher, "client", None)
@@ -375,14 +420,15 @@ class RoutingService:
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
 
-    def _reconcile_activation(self, reason: str) -> None:
+    def _reconcile_activation(self, reason: str) -> bool:
         scheduler = self.activation_scheduler
         controller = self.activation_controller
         if scheduler is None or controller is None:
-            return
+            return True
         with self._lock:
             scheduler.reset_all()
             self._activation_eligibility_cache.clear()
+            self._activation_cleanup_cache.clear()
         try:
             warnings = controller.reconcile()
         except Exception as exc:
@@ -393,13 +439,30 @@ class RoutingService:
                 f"réconciliation impossible ({reason}) : {exc}",
             )
             self._emit(RuntimeEvent("activation_error", str(exc)))
-            return
+            return False
+
         for warning in warnings:
             self.logger.warning("Activation reconcile: %s", warning)
             self._record_activation_diagnostic("*", "warning", warning)
+        pending = controller.pending_hides()
+        cleanup_counts: dict[str, int] = {}
+        for item in pending:
+            cleanup_counts[item.policy] = cleanup_counts.get(item.policy, 0) + 1
+        with self._lock:
+            self._activation_cleanup_cache.update(cleanup_counts)
+        if warnings or pending:
+            message = (
+                f"Nettoyage activation incomplet — {reason} "
+                f"({len(pending)} masquage(s) en attente)"
+            )
+            self._record_activation_diagnostic("*", "nettoyage", message)
+            self._emit(RuntimeEvent("activation_cleanup_pending", message, success=False))
+            return False
+
         message = f"Déclenchements réinitialisés — {reason}"
         self._record_activation_diagnostic("*", "fail-safe", message)
         self._emit(RuntimeEvent("activation_reconciled", message))
+        return True
 
     def _tick_activation(self, *, paused: bool) -> None:
         scheduler = self.activation_scheduler
@@ -411,16 +474,18 @@ class RoutingService:
             self._reconcile_activation("changement de Scene Collection")
             return
 
+        now = time.monotonic()
+        for message in controller.retry_pending_hides(now=now):
+            self._record_activation_diagnostic("*", "nettoyage", message)
+
         def eligibility(name: str, policy: TriggerPolicyConfig) -> bool:
-            if paused:
-                result = (False, "routage suspendu")
-            else:
-                result = self._activation_eligibility(name, policy)
+            result = self._effective_activation_eligibility(name, policy)
+            cleanup_count = len(controller.pending_hides(name))
             with self._lock:
                 self._activation_eligibility_cache[name] = result
+                self._activation_cleanup_cache[name] = cleanup_count
             return result[0]
 
-        now = time.monotonic()
         events = scheduler.tick(eligibility, now=now)
         for event in events:
             self._handle_activation_event(event, now=now)
@@ -449,11 +514,6 @@ class RoutingService:
             )
             return
         if event.kind == "cooldown_started":
-            self.logger.info(
-                "Activation cooldown [%s] %.1f s",
-                event.policy,
-                event.cooldown_seconds or 0.0,
-            )
             self._record_activation_diagnostic(
                 event.policy,
                 "cooldown",
@@ -472,7 +532,18 @@ class RoutingService:
 
         try:
             controller.apply_event(event)
-        except Exception as exc:
+        except ActivationCollectionChanged as exc:
+            self._record_activation_diagnostic(event.policy, "collection", str(exc))
+            with self._lock:
+                scheduler.reset_policy(event.policy, now=now)
+            self._reconcile_activation("changement de Scene Collection détecté pendant activation")
+            return
+        except (
+            ActivationVisibilityUncertain,
+            ActivationTargetMissing,
+            ActivationBlocked,
+            RuntimeError,
+        ) as exc:
             self.logger.warning(
                 "Activation OBS failed [%s/%s]: %s",
                 event.policy,
@@ -491,12 +562,6 @@ class RoutingService:
             return
 
         if event.kind == "show":
-            self.logger.info(
-                "Activation show [%s] %s for %.1f s",
-                event.policy,
-                event.source,
-                event.duration_seconds or 0.0,
-            )
             self._record_activation_diagnostic(
                 event.policy,
                 "déclenché",
@@ -512,7 +577,6 @@ class RoutingService:
                 )
             )
         else:
-            self.logger.info("Activation hide [%s] %s", event.policy, event.source)
             self._record_activation_diagnostic(
                 event.policy,
                 "masqué",
@@ -525,18 +589,7 @@ class RoutingService:
         policy_name: str,
         policy: TriggerPolicyConfig,
     ) -> tuple[bool, str]:
-        controller = self.activation_controller
-        if controller is None:
-            return False, "contrôleur OBS indisponible"
-        detailed = getattr(controller, "eligibility", None)
-        try:
-            if callable(detailed):
-                eligible, reason = detailed(policy_name, policy)
-                return bool(eligible), str(reason)
-            eligible = bool(controller.is_eligible(policy_name, policy))
-            return eligible, "éligible" if eligible else "condition non satisfaite"
-        except Exception as exc:
-            return False, f"évaluation impossible : {exc}"
+        return self._effective_activation_eligibility(policy_name, policy)
 
     def _record_activation_diagnostic(
         self,
@@ -553,6 +606,278 @@ class RoutingService:
             row[2],
             row[3],
         )
+
+    def _effective_activation_eligibility(
+        self,
+        policy_name: str,
+        policy: TriggerPolicyConfig,
+    ) -> tuple[bool, str]:
+        controller = self.activation_controller
+        if not policy.enabled:
+            return False, "politique désactivée"
+        with self._lock:
+            if not self._runtime_operational or self._stopping:
+                return False, "service runtime non opérationnel"
+            if self._paused:
+                return False, "routage suspendu"
+        if controller is None:
+            return False, "contrôleur OBS indisponible"
+        blocked, reason = controller.policy_cleanup_status(policy_name)
+        if blocked:
+            return False, reason
+        try:
+            return controller.eligibility(policy_name, policy)
+        except Exception as exc:
+            return False, f"évaluation impossible : {exc}"
+
+    def _drain_activation_commands(self) -> bool:
+        while True:
+            try:
+                command = self._activation_commands.get_nowait()
+            except queue.Empty:
+                return False
+
+            with self._lock:
+                current_generation = self._command_generation
+            if command.generation != current_generation:
+                self._emit_activation_result(
+                    command,
+                    success=False,
+                    error="Commande annulée par arrêt/reconfiguration du runtime",
+                )
+                continue
+
+            if command.action == "shutdown":
+                self._perform_activation_shutdown()
+                return True
+
+            if command.action == "simulate":
+                self._start_simulation(command)
+                continue
+
+            self._execute_activation_command(command)
+
+    def _execute_activation_command(self, command: _ActivationCommand) -> None:
+        scheduler = self.activation_scheduler
+        controller = self.activation_controller
+        if scheduler is None or controller is None:
+            self._emit_activation_result(
+                command,
+                success=False,
+                error="Aucune politique de déclenchement active",
+            )
+            return
+
+        now = time.monotonic()
+        try:
+            if command.action == "test_roll":
+                result = scheduler.test_roll(command.policy)
+                verdict = "succès" if result.triggered else "échec"
+                source = f" → {result.source}" if result.source else ""
+                self._record_activation_diagnostic(
+                    command.policy,
+                    "test",
+                    (
+                        f"test tirage {result.roll * 100.0:.3f} % / "
+                        f"{result.chance * 100.0:.3f} % : {verdict}{source}"
+                    ),
+                )
+                self._emit_activation_result(command, success=True, result=result)
+                return
+
+            if command.action == "reset_all":
+                clean = self._reconcile_activation("réinitialisation manuelle")
+                self._emit_activation_result(
+                    command,
+                    success=clean,
+                    result=clean,
+                    error="" if clean else "Nettoyage OBS incomplet",
+                )
+                return
+
+            policy = scheduler.policies.get(command.policy)
+            if policy is None:
+                raise KeyError(f"Politique d'activation introuvable : {command.policy}")
+            eligible, reason = self._effective_activation_eligibility(
+                command.policy,
+                policy,
+            )
+            with self._lock:
+                self._activation_eligibility_cache[command.policy] = (eligible, reason)
+
+            if command.action == "trigger":
+                events = scheduler.trigger_now(
+                    command.policy,
+                    target_identity=command.target_identity,
+                    target_source=command.target_source,
+                    eligible=eligible,
+                    ignore_cooldown=bool(command.options.get("ignore_cooldown", False)),
+                    now=now,
+                )
+                for event in events:
+                    self._handle_activation_event(event, now=now)
+                state = scheduler.state(command.policy)
+                if state.phase.value != "visible":
+                    raise RuntimeError(
+                        "Déclenchement non acquitté ; consulter le diagnostic runtime"
+                    )
+                self._emit_activation_result(command, success=True, result=events)
+                return
+
+            if command.action == "stop":
+                events = scheduler.stop(command.policy, enter_cooldown=True, now=now)
+                if not events:
+                    self._record_activation_diagnostic(
+                        command.policy,
+                        "commande",
+                        "arrêt manuel ignoré : aucune source visible",
+                    )
+                for event in events:
+                    self._handle_activation_event(event, now=now)
+                blocked, cleanup_reason = controller.policy_cleanup_status(command.policy)
+                if blocked:
+                    raise RuntimeError(cleanup_reason)
+                self._emit_activation_result(command, success=True, result=events)
+                return
+
+            if command.action == "reset_cooldown":
+                events = scheduler.reset_cooldown(
+                    command.policy,
+                    eligible=eligible,
+                    now=now,
+                )
+                if not events:
+                    self._record_activation_diagnostic(
+                        command.policy,
+                        "commande",
+                        "réinitialisation cooldown ignorée : aucun cooldown actif",
+                    )
+                else:
+                    self._record_activation_diagnostic(
+                        command.policy,
+                        "commande",
+                        "cooldown réinitialisé manuellement",
+                    )
+                self._emit_activation_result(command, success=True, result=events)
+                return
+
+            raise ValueError(f"Commande de déclenchement inconnue : {command.action}")
+        except Exception as exc:
+            self._record_activation_diagnostic(
+                command.policy or "*",
+                "commande",
+                f"{command.action} refusée : {exc}",
+            )
+            self._emit_activation_result(command, success=False, error=str(exc))
+
+    def _start_simulation(self, command: _ActivationCommand) -> None:
+        scheduler = self.activation_scheduler
+        if scheduler is None:
+            self._emit_activation_result(
+                command,
+                success=False,
+                error="Aucune politique de déclenchement active",
+            )
+            return
+        with self._lock:
+            policy = scheduler.policies.get(command.policy)
+            policy_snapshot = copy.deepcopy(policy) if policy is not None else None
+        if policy_snapshot is None:
+            self._emit_activation_result(
+                command,
+                success=False,
+                error=f"Politique d'activation introuvable : {command.policy}",
+            )
+            return
+        trials = int(command.options.get("trials", 1000))
+        seed = int(command.options.get("seed", 12345))
+
+        def run_simulation():
+            isolated = ActivationScheduler({command.policy: policy_snapshot})
+            return isolated.simulate(command.policy, trials=trials, seed=seed)
+
+        future = self._simulation_executor.submit(run_simulation)
+        future.add_done_callback(
+            lambda completed, cmd=command: self._finish_simulation(cmd, completed)
+        )
+
+    def _finish_simulation(
+        self,
+        command: _ActivationCommand,
+        future: Future,
+    ) -> None:
+        with self._lock:
+            if command.generation != self._command_generation or self._stopping:
+                return
+        try:
+            result = future.result()
+        except Exception as exc:
+            self._emit_activation_result(command, success=False, error=str(exc))
+            return
+        self._record_activation_diagnostic(
+            command.policy,
+            "simulation",
+            (
+                f"{result.trials} tirages seed={result.seed} "
+                f"config={result.config_fingerprint} : "
+                f"{result.trigger_count} déclenchements, "
+                f"{result.miss_count} échecs chance, {result.blocked_count} bloqués"
+            ),
+        )
+        self._emit_activation_result(command, success=True, result=result)
+
+    def _emit_activation_result(
+        self,
+        command: _ActivationCommand,
+        *,
+        success: bool,
+        result: object | None = None,
+        error: str = "",
+    ) -> None:
+        payload = ActivationCommandResult(
+            request_id=command.request_id,
+            action=command.action,
+            policy=command.policy,
+            success=bool(success),
+            result=result,
+            error=str(error),
+        )
+        self._emit(
+            RuntimeEvent(
+                "activation_command_result",
+                error or f"{command.action} terminé",
+                request_id=command.request_id,
+                payload=payload,
+                success=bool(success),
+            )
+        )
+
+    def _perform_activation_shutdown(self) -> None:
+        self._record_activation_diagnostic("*", "arrêt", "nettoyage runtime en cours")
+        self._reconcile_activation("arrêt du service")
+        controller = self.activation_controller
+        deadline = time.monotonic() + 1.5
+        while (
+            controller is not None
+            and controller.pending_hides()
+            and time.monotonic() < deadline
+        ):
+            now = time.monotonic()
+            for message in controller.retry_pending_hides(now=now):
+                self._record_activation_diagnostic("*", "nettoyage", message)
+            if controller.pending_hides():
+                time.sleep(0.05)
+        if controller is not None and controller.pending_hides():
+            self._record_activation_diagnostic(
+                "*",
+                "warning",
+                f"arrêt avec {len(controller.pending_hides())} masquage(s) non acquitté(s)",
+            )
+        try:
+            self._simulation_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        self._stop.set()
 
     def _apply_change(self, change: StateChange) -> None:
         self.logger.info(
@@ -584,28 +909,38 @@ class RoutingService:
             self._dispatch_if_current(change, generation)
 
     def _dispatch_if_current(self, change: StateChange, generation: int) -> None:
-        if self._stop.is_set():
-            return
-        with self._lock:
-            if generation != self._dispatch_generation:
+        with self._dispatch_lock:
+            if self._stop.is_set():
                 return
-            if self.engine.current_state != change.current:
-                return
-        try:
-            result = self.dispatcher.dispatch_change(change)
-            if self.on_dispatch:
-                self.on_dispatch(result)
-            if result.executed:
-                self.logger.info(
-                    "OBS dispatch: %d action(s), domains=%s",
-                    result.executed,
-                    ",".join(result.changed_domains),
-                )
-            for warning in result.warnings:
-                self.logger.warning("OBS: %s", warning)
-        except Exception as exc:
-            self.logger.error("OBS dispatch failed: %s", exc)
-            self._emit(RuntimeEvent("obs_error", str(exc)))
+            with self._lock:
+                if self._stopping:
+                    return
+                if generation != self._dispatch_generation:
+                    return
+                if self.engine.current_state != change.current:
+                    return
+            try:
+                result = self.dispatcher.dispatch_change(change)
+                if self.on_dispatch:
+                    self.on_dispatch(result)
+                if result.executed:
+                    self.logger.info(
+                        "OBS dispatch: %d action(s), domains=%s",
+                        result.executed,
+                        ",".join(result.changed_domains),
+                    )
+                for warning in result.warnings:
+                    self.logger.warning("OBS: %s", warning)
+            except Exception as exc:
+                self.logger.error("OBS dispatch failed: %s", exc)
+                self._emit(RuntimeEvent("obs_error", str(exc)))
+
+    def _wait_for_dispatch_quiescence(self, timeout: float) -> bool:
+        acquired = self._dispatch_lock.acquire(timeout=max(0.0, float(timeout)))
+        if not acquired:
+            return False
+        self._dispatch_lock.release()
+        return True
 
     def _emit(self, event: RuntimeEvent) -> None:
         if self.on_event:

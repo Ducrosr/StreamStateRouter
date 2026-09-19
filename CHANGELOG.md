@@ -1,5 +1,25 @@
 # Historique
 
+## 2.0.13 — sérialisation et acquittement des activations temporaires OBS
+
+- Les commandes d'activation Qt sont désormais asynchrones et consommées par le worker `SSR-Router`.
+- Tick, trigger, stop, reset cooldown, réconciliation et nettoyage d'arrêt partagent le même contexte d'exécution.
+- L'arrêt invalide les commandes en attente et attend aussi les dispatches OBS différés déjà engagés avant qu'un runtime de remplacement puisse démarrer.
+- Les hides non acquittés sont structurés par politique, cible exacte et Scene Collection, puis retentés avec backoff borné.
+- Un show au résultat incertain crée un hide compensatoire ; la politique reste bloquée jusqu'à acquittement.
+- En mode exclusif, une nouvelle cible n'est pas affichée si un concurrent n'a pas pu être masqué avec certitude.
+- Les absences OBS confirmées sont distinguées des erreurs de requête ou de transport incertaines.
+- Les opérations anciennes ne sont jamais rejouées dans une nouvelle Scene Collection.
+- Les cibles utilisent une identité exacte `container/container_kind/source`; le mode source seule reste compatible uniquement s'il est non ambigu.
+- Les enfants directs seulement sont proposés par défaut ; les conflits ancêtre/descendant et les doublons exacts sont rejetés.
+- Les mutations de visibilité d'activation utilisent une résolution fraîche du `sceneItemId` sans invalider globalement le cache de transforms.
+- L'éligibilité effective est centralisée et le statut UI reste un snapshot sans I/O OBS.
+- Les nombres non finis sont rejetés en config et dans le scheduler ; les poids très élevés sont normalisés avant sommation.
+- La simulation utilise une copie de la politique et un worker séparé, avec empreinte de configuration dans le résultat.
+- Les sémantiques historiques « perte d'éligibilité efface le cooldown » et « visibility_owner=runtime persisté survit à la suppression de politique » sont documentées et couvertes sans changement.
+- Correction du `NameError` dans `tests/test_config.py` par import de `build_activation_policies`.
+
+
 ## 2.0.12 — observabilité et validation bêta du scheduler
 
 - Affichage de l'état runtime d'une politique : inactif, éligible, déclenché/visible ou cooldown.

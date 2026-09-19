@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
-from .client import OBSClientManager
+from .client import OBSClientManager, OBSResourceNotFoundError
 
 
 # [Type] Module name and optional enriched form [Type:flag,flag] Module name.
@@ -324,11 +324,51 @@ class OBSLayoutManager:
         *,
         container_kind: str = "scene",
     ) -> None:
-        """Set one scene/group item visibility through the cache-safe path."""
+        """Set one scene/group item visibility through the normal cached path."""
         kind = str(container_kind or "scene").casefold()
         if kind not in {"scene", "group"}:
             raise ValueError(f"Type de conteneur OBS inconnu : {container_kind}")
         self._set_enabled(str(container), str(source), bool(enabled))
+
+    def set_activation_item_enabled(
+        self,
+        container: str,
+        source: str,
+        enabled: bool,
+        *,
+        container_kind: str = "scene",
+    ) -> None:
+        """Mutate activation visibility after a fresh pair-local id resolution.
+
+        Activation visibility must never trust a sceneItemId cached by layout
+        discovery/geometry. OBS can legally reuse the old numeric id for another
+        source after a structural edit while still accepting the mutation.
+        """
+        kind = str(container_kind or "scene").casefold()
+        if kind not in {"scene", "group"}:
+            raise ValueError(f"Type de conteneur OBS inconnu : {container_kind}")
+        container_name = str(container).strip()
+        source_name = str(source).strip()
+        if not container_name or not source_name:
+            raise OBSResourceNotFoundError(
+                "GetSceneItemId",
+                f"Source '{source_name}' introuvable dans '{container_name}'",
+            )
+
+        item_id = self._fresh_scene_item_id(container_name, source_name)
+        payload = {
+            "sceneName": container_name,
+            "sceneItemId": item_id,
+            "sceneItemEnabled": bool(enabled),
+        }
+        try:
+            self.client.send("SetSceneItemEnabled", payload)
+        except OBSResourceNotFoundError:
+            # The graph may have changed between resolution and mutation.
+            # Resolve the exact pair once more; confirmed absence then propagates.
+            item_id = self._fresh_scene_item_id(container_name, source_name)
+            payload["sceneItemId"] = item_id
+            self.client.send("SetSceneItemEnabled", payload)
 
     def canvas_size(self) -> tuple[int, int] | None:
         try:
@@ -1205,8 +1245,6 @@ class OBSLayoutManager:
             source = prepared["source"]
             target_transform = prepared["target_transform"]
             target_enabled = prepared["target_enabled"]
-            current_enabled = prepared["current_enabled"]
-
             # A zero-duration fade is just an immediate visibility change.
             if target_transform:
                 self._set_transform(container, source, target_transform)
@@ -1795,6 +1833,21 @@ class OBSLayoutManager:
             self._set_source_opacity(source, value)
             if index != steps:
                 time.sleep(delay)
+
+    def _fresh_scene_item_id(self, container: str, source: str) -> int:
+        self._invalidate_scene_item_id(container, source)
+        response = self.client.send(
+            "GetSceneItemId",
+            {"sceneName": container, "sourceName": source},
+        )
+        item_id = _int(response.get("sceneItemId"))
+        if not item_id:
+            raise OBSResourceNotFoundError(
+                "GetSceneItemId",
+                f"Source '{source}' introuvable dans '{container}'",
+            )
+        self._scene_item_cache[(container, source)] = item_id
+        return item_id
 
     def _scene_item_id(self, container: str, source: str) -> int:
         key = (container, source)

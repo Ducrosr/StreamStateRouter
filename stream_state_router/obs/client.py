@@ -20,14 +20,31 @@ class OBSUnavailableError(RuntimeError):
 
 
 class OBSRequestError(RuntimeError):
-    """OBS is connected, but rejected a valid WebSocket request.
+    """OBS is connected, but rejected a valid WebSocket request."""
 
-    Resource-not-found / invalid-request responses are application-level errors,
-    not transport failures. Keeping that distinction prevents one deleted scene
-    item from putting the whole OBS client into reconnect backoff.
-    """
+    def __init__(self, request: str, detail: str):
+        super().__init__(f"OBS WebSocket request {request}: {detail}")
+        self.request = str(request)
+        self.detail = str(detail)
 
-    pass
+
+class OBSResourceNotFoundError(OBSRequestError):
+    """OBS confirmed that the requested source/scene item does not exist."""
+
+
+def _is_confirmed_missing_request_error(exc: BaseException) -> bool:
+    code = getattr(exc, "code", None)
+    if code in {600, 601}:
+        return True
+    text = str(exc).casefold()
+    markers = (
+        "no scene items were found",
+        "scene item not found",
+        "source not found",
+        "no source was found",
+        "does not exist",
+    )
+    return any(marker in text for marker in markers)
 
 
 class OBSClientManager:
@@ -82,12 +99,16 @@ class OBSClientManager:
                 return response if isinstance(response, dict) else {}
             except _OBS_REQUEST_ERRORS as exc:
                 # OBS answered the request, so the WebSocket connection is still
-                # healthy. Do NOT start reconnect backoff for request-level
-                # errors such as "scene item not found". Callers can handle the
-                # missing resource and continue applying the rest of the layout.
+                # healthy. Distinguish confirmed absence from other request-level
+                # failures so activation cleanup can acknowledge only the former.
                 self._connected = True
                 self.last_error = str(exc)
-                raise OBSRequestError(f"OBS WebSocket request {request}: {exc}") from exc
+                error_type = (
+                    OBSResourceNotFoundError
+                    if _is_confirmed_missing_request_error(exc)
+                    else OBSRequestError
+                )
+                raise error_type(request, str(exc)) from exc
             except Exception as exc:
                 # Transport/session failures really do invalidate the ReqClient.
                 self._client = None

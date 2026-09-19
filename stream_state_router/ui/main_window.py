@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
 )
 
+from ..activation import TriggerTargetIdentity
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -73,12 +74,13 @@ class RuntimeBridge(QObject):
     state_change = Signal(object)
     dispatch = Signal(object)
     runtime_event = Signal(object)
+    activation_result = Signal(object)
 
 
 class MainWindow(QMainWindow):
     def __init__(self, config: dict, *, logger, start_minimized: bool = False):
         super().__init__()
-        self.setWindowTitle("Stream State Router 2.0.11")
+        self.setWindowTitle("Stream State Router 2.0.13")
         self.resize(1180, 760)
         self.config = copy.deepcopy(config)
         self.logger = logger
@@ -462,9 +464,12 @@ class MainWindow(QMainWindow):
 
         router_card, router_lay = self._card("Moteur de routage")
         form = QFormLayout()
-        self.poll_ms = QSpinBox(); self.poll_ms.setRange(20, 5000)
-        self.debounce_ms = QSpinBox(); self.debounce_ms.setRange(0, 5000)
-        self.fallback_debounce_ms = QSpinBox(); self.fallback_debounce_ms.setRange(0, 10000)
+        self.poll_ms = QSpinBox()
+        self.poll_ms.setRange(20, 5000)
+        self.debounce_ms = QSpinBox()
+        self.debounce_ms.setRange(0, 5000)
+        self.fallback_debounce_ms = QSpinBox()
+        self.fallback_debounce_ms.setRange(0, 10000)
         form.addRow("Intervalle de détection (ms)", self.poll_ms)
         form.addRow("Debounce règle (ms)", self.debounce_ms)
         form.addRow("Debounce fallback (ms)", self.fallback_debounce_ms)
@@ -475,8 +480,10 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.obs_enabled = QCheckBox("Piloter OBS")
         self.obs_host = QLineEdit()
-        self.obs_port = QSpinBox(); self.obs_port.setRange(1, 65535)
-        self.obs_password = QLineEdit(); self.obs_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.obs_port = QSpinBox()
+        self.obs_port.setRange(1, 65535)
+        self.obs_password = QLineEdit()
+        self.obs_password.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("", self.obs_enabled)
         form.addRow("Hôte", self.obs_host)
         form.addRow("Port", self.obs_port)
@@ -490,8 +497,10 @@ class MainWindow(QMainWindow):
         api_card, api_lay = self._card("API locale / Stream Deck")
         api_form = QFormLayout()
         self.api_enabled = QCheckBox("Activer l’API locale")
-        self.api_port = QSpinBox(); self.api_port.setRange(1, 65535)
-        self.api_token = QLineEdit(); self.api_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_port = QSpinBox()
+        self.api_port.setRange(1, 65535)
+        self.api_token = QLineEdit()
+        self.api_token.setEchoMode(QLineEdit.EchoMode.Password)
         api_form.addRow("", self.api_enabled)
         api_form.addRow("Port localhost", self.api_port)
         api_form.addRow("Token facultatif", self.api_token)
@@ -502,11 +511,16 @@ class MainWindow(QMainWindow):
         self.close_to_tray = QCheckBox("Fermer la fenêtre vers la zone de notification")
         self.start_with_windows = QCheckBox("Démarrer avec Windows")
         self.auto_detect_modules = QCheckBox("Détecter automatiquement les nouveaux modules OBS")
-        self.module_scan_seconds = QSpinBox(); self.module_scan_seconds.setRange(2, 120); self.module_scan_seconds.setSuffix(" s")
+        self.module_scan_seconds = QSpinBox()
+        self.module_scan_seconds.setRange(2, 120)
+        self.module_scan_seconds.setSuffix(" s")
         behavior_lay.addWidget(self.close_to_tray)
         behavior_lay.addWidget(self.start_with_windows)
         behavior_lay.addWidget(self.auto_detect_modules)
-        scan_row = QHBoxLayout(); scan_row.addWidget(QLabel("Intervalle détection modules")); scan_row.addWidget(self.module_scan_seconds); scan_row.addStretch(1)
+        scan_row = QHBoxLayout()
+        scan_row.addWidget(QLabel("Intervalle détection modules"))
+        scan_row.addWidget(self.module_scan_seconds)
+        scan_row.addStretch(1)
         behavior_lay.addLayout(scan_row)
         root.addWidget(behavior_card)
         root.addStretch(1)
@@ -620,7 +634,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Enregistrement", str(exc))
             return
-        self._restart_runtime()
+        if not self._restart_runtime():
+            self.unsaved.setText("Configuration enregistrée, application runtime incomplète")
+            self.statusBar().showMessage(
+                "Configuration enregistrée — runtime précédent encore actif",
+                6000,
+            )
+            return
         self._restart_api()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
@@ -656,12 +676,22 @@ class MainWindow(QMainWindow):
         self._service.start()
         self._update_obs_status()
 
-    def _restart_runtime(self) -> None:
-        if self._service:
-            self._service.stop()
+    def _restart_runtime(self) -> bool:
+        previous = self._service
+        if previous is not None and not previous.stop():
+            self._log(
+                "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
+            )
+            QMessageBox.critical(
+                self,
+                "Runtime",
+                "Le runtime précédent n'a pas terminé son nettoyage. "
+                "Le nouveau runtime n'a pas été démarré.",
+            )
+            return False
         self._start_runtime()
+        return True
 
-    # ---------- dashboard callbacks ----------
     def _on_foreground(self, app: ForegroundApp | None) -> None:
         if app is None:
             self.fg_exe.setText("Aucune fenêtre")
@@ -693,6 +723,9 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         self._log(f"{event.kind}: {event.message}")
+        if event.kind == "activation_command_result" and event.payload is not None:
+            self.bridge.activation_result.emit(event.payload)
+            return
         if event.kind in {"obs_connected", "obs_disconnected"}:
             self._update_obs_status()
         elif event.kind == "obs_error":
@@ -801,7 +834,8 @@ class MainWindow(QMainWindow):
         dlg = RuleDialog(self, profile_choices=self._state_profile_choices())
         if dlg.exec() == QDialog.Accepted:
             self.config.setdefault("rules", []).append(dlg.result_rule())
-            self._mark_dirty(); self._refresh_rules_table()
+            self._mark_dirty()
+            self._refresh_rules_table()
 
     def _edit_rule(self, *_args) -> None:
         idx = self._selected_rule_index()
@@ -814,7 +848,8 @@ class MainWindow(QMainWindow):
         )
         if dlg.exec() == QDialog.Accepted:
             self.config["rules"][idx] = dlg.result_rule()
-            self._mark_dirty(); self._refresh_rules_table()
+            self._mark_dirty()
+            self._refresh_rules_table()
 
     def _duplicate_rule(self) -> None:
         idx = self._selected_rule_index()
@@ -823,7 +858,8 @@ class MainWindow(QMainWindow):
         raw = copy.deepcopy(self.config["rules"][idx])
         raw["name"] = f"{raw.get('name', 'Règle')} (copie)"
         self.config["rules"].insert(idx + 1, raw)
-        self._mark_dirty(); self._refresh_rules_table()
+        self._mark_dirty()
+        self._refresh_rules_table()
 
     def _toggle_rule(self) -> None:
         idx = self._selected_rule_index()
@@ -831,7 +867,8 @@ class MainWindow(QMainWindow):
             return
         rule = self.config["rules"][idx]
         rule["enabled"] = not bool(rule.get("enabled", True))
-        self._mark_dirty(); self._refresh_rules_table()
+        self._mark_dirty()
+        self._refresh_rules_table()
 
     def _test_rule(self) -> None:
         idx = self._selected_rule_index()
@@ -869,7 +906,8 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Supprimer", f"Supprimer « {name} » ?") != QMessageBox.Yes:
             return
         self.config["rules"].pop(idx)
-        self._mark_dirty(); self._refresh_rules_table()
+        self._mark_dirty()
+        self._refresh_rules_table()
 
     # ---------- profiles/actions ----------
     def _profiles_for_domain(self, domain: str) -> dict:
@@ -951,7 +989,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Profil", "Ce profil existe déjà.")
             return
         profiles[name] = {"actions": [], "extends": "", "conditions": {}}
-        self._mark_dirty(); self._refresh_profile_names(); self.profile_name.setCurrentText(name)
+        self._mark_dirty()
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(name)
         self._refresh_override_boxes()
 
     def _duplicate_profile(self) -> None:
@@ -968,7 +1008,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Profil", "Ce profil existe déjà.")
             return
         profiles[name] = copy.deepcopy(profile)
-        self._mark_dirty(); self._refresh_profile_names(); self.profile_name.setCurrentText(name)
+        self._mark_dirty()
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(name)
         self._refresh_override_boxes()
 
     def _profile_references(self, domain: str, name: str) -> list[str]:
@@ -1027,7 +1069,9 @@ class MainWindow(QMainWindow):
         del profiles[old_name]
         profiles[name] = profile
         self._replace_profile_references(domain, old_name, name)
-        self._mark_dirty(); self._refresh_profile_names(); self.profile_name.setCurrentText(name)
+        self._mark_dirty()
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(name)
         self._refresh_rules_table()
         self._refresh_override_boxes()
 
@@ -1048,7 +1092,9 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Supprimer", f"Supprimer le profil « {name} » ?") != QMessageBox.Yes:
             return
         del self._profiles_for_domain(domain)[name]
-        self._mark_dirty(); self._refresh_profile_names(); self._refresh_override_boxes()
+        self._mark_dirty()
+        self._refresh_profile_names()
+        self._refresh_override_boxes()
 
     def _add_action(self) -> None:
         current = self._current_profile()
@@ -1057,43 +1103,53 @@ class MainWindow(QMainWindow):
         dlg = ActionDialog(self)
         if dlg.exec() == QDialog.Accepted:
             current[2].setdefault("actions", []).append(dlg.result_action())
-            self._mark_dirty(); self._refresh_actions_table()
+            self._mark_dirty()
+            self._refresh_actions_table()
 
     def _edit_action(self, *_args) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         actions = current[2].setdefault("actions", [])
         dlg = ActionDialog(self, actions[idx])
         if dlg.exec() == QDialog.Accepted:
             actions[idx] = dlg.result_action()
-            self._mark_dirty(); self._refresh_actions_table()
+            self._mark_dirty()
+            self._refresh_actions_table()
 
     def _duplicate_action(self) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         actions = current[2].setdefault("actions", [])
         actions.insert(idx + 1, copy.deepcopy(actions[idx]))
-        self._mark_dirty(); self._refresh_actions_table()
+        self._mark_dirty()
+        self._refresh_actions_table()
 
     def _toggle_action(self) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         action = current[2].setdefault("actions", [])[idx]
         action["enabled"] = not bool(action.get("enabled", True))
-        self._mark_dirty(); self._refresh_actions_table()
+        self._mark_dirty()
+        self._refresh_actions_table()
 
     def _delete_action(self) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         current[2].setdefault("actions", []).pop(idx)
-        self._mark_dirty(); self._refresh_actions_table()
+        self._mark_dirty()
+        self._refresh_actions_table()
 
     def _move_action(self, delta: int) -> None:
-        current = self._current_profile(); idx = self._selected_action_index()
+        current = self._current_profile()
+        idx = self._selected_action_index()
         if not current or idx is None:
             return
         actions = current[2].setdefault("actions", [])
@@ -1101,7 +1157,9 @@ class MainWindow(QMainWindow):
         if not 0 <= new_idx < len(actions):
             return
         actions[idx], actions[new_idx] = actions[new_idx], actions[idx]
-        self._mark_dirty(); self._refresh_actions_table(); self.actions_table.selectRow(new_idx)
+        self._mark_dirty()
+        self._refresh_actions_table()
+        self.actions_table.selectRow(new_idx)
 
     def _test_profile(self) -> None:
         current = self._current_profile()
@@ -1527,41 +1585,69 @@ class MainWindow(QMainWindow):
         item = self.layout_modules_table.item(rows[0].row(), 0)
         return item.text() if item else None
 
+    @staticmethod
     def _activation_candidates_for_module(
-        self,
         profile: dict,
         module_name: str,
         module: dict,
     ) -> list[dict]:
         module_source = str(module.get("source_name") or module_name).strip()
         candidates: list[dict] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
+
+        def add_candidate(raw) -> None:
+            if not isinstance(raw, dict):
+                return
+            path = (
+                [str(item) for item in raw.get("path", [])]
+                if isinstance(raw.get("path"), list)
+                else []
+            )
+            container = str(raw.get("container") or "").strip()
+            source = str(raw.get("source") or "").strip()
+            container_kind = str(raw.get("container_kind") or "scene").strip() or "scene"
+            if not container or not source or source == module_source:
+                return
+            direct_child = (
+                container == module_source
+                or bool(path and path[-1] == module_source)
+            )
+            if not direct_child:
+                return
+            key = (container, container_kind, source)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(
+                {
+                    "container": container,
+                    "container_kind": container_kind,
+                    "path": path,
+                    "source": source,
+                    "enabled": True,
+                    "weight": 1.0,
+                }
+            )
+
+        # Module-named descendants live in profile.modules, while ordinary
+        # implementation children live in support_items. Both are needed to
+        # present the actual direct children of a module scene/group.
+        modules = profile.get("modules") if isinstance(profile, dict) else None
+        if isinstance(modules, dict):
+            for child_name, child_module in modules.items():
+                if child_name == module_name or not isinstance(child_module, dict):
+                    continue
+                elements = child_module.get("elements")
+                if not isinstance(elements, list):
+                    continue
+                for element in elements:
+                    add_candidate(element)
+
         support_items = profile.get("support_items") if isinstance(profile, dict) else None
         if isinstance(support_items, list):
             for raw in support_items:
-                if not isinstance(raw, dict):
-                    continue
-                path = [str(item) for item in raw.get("path", [])] if isinstance(raw.get("path"), list) else []
-                if module_source not in path:
-                    continue
-                container = str(raw.get("container") or "").strip()
-                source = str(raw.get("source") or "").strip()
-                if not container or not source or source == module_source:
-                    continue
-                key = (container, source)
-                if key in seen:
-                    continue
-                seen.add(key)
-                candidates.append(
-                    {
-                        "container": container,
-                        "container_kind": str(raw.get("container_kind") or "scene"),
-                        "path": path,
-                        "source": source,
-                        "enabled": True,
-                        "weight": 1.0,
-                    }
-                )
+                add_candidate(raw)
+
         return candidates
 
     def _activation_status(self, policy_name: str) -> dict:
@@ -1573,16 +1659,28 @@ class MainWindow(QMainWindow):
         self,
         action: str,
         policy_name: str,
-        source: str | None = None,
+        target=None,
         options=None,
-    ):
+    ) -> str:
         service = self._service
         if service is None:
             raise RuntimeError("Runtime non disponible")
+        options = options or {}
+        identity = None
+        legacy_source = None
+        if isinstance(target, dict):
+            identity = TriggerTargetIdentity.from_mapping(target)
+        elif target:
+            legacy_source = str(target)
+
         if action == "test_roll":
             return service.activation_test_roll(policy_name)
         if action == "trigger":
-            return service.activation_trigger_now(policy_name, target_source=source)
+            return service.activation_trigger_now(
+                policy_name,
+                target_identity=identity,
+                target_source=legacy_source,
+            )
         if action == "stop":
             return service.activation_stop(policy_name)
         if action == "reset_cooldown":
@@ -1590,7 +1688,6 @@ class MainWindow(QMainWindow):
         if action == "reset_all":
             return service.activation_reset_all()
         if action == "simulate":
-            options = options or {}
             return service.activation_simulate(
                 policy_name,
                 trials=int(options.get("trials", 1000)),
@@ -1622,6 +1719,7 @@ class MainWindow(QMainWindow):
             activation_candidates=candidates,
             activation_status_provider=self._activation_status,
             activation_command=self._activation_command,
+            activation_result_signal=self.bridge.activation_result,
         )
         if dlg.exec() == QDialog.Accepted:
             updated = dlg.result_module()

@@ -7,6 +7,7 @@ from stream_state_router.activation import (
     ActivationScheduler,
     TriggerPolicyConfig,
     TriggerTargetConfig,
+    TriggerTargetIdentity,
 )
 
 
@@ -241,6 +242,94 @@ class ActivationSchedulerTests(unittest.TestCase):
 
         self.assertEqual([event.kind for event in events], ["roll", "blocked"])
         self.assertEqual(events[-1].reason, "no_target")
+
+    def test_manual_target_identity_disambiguates_same_source_name(self):
+        policy = self.policy(
+            targets=(
+                TriggerTargetConfig("Scene A", "Cloud", container_kind="scene"),
+                TriggerTargetConfig("Group B", "Cloud", container_kind="group"),
+            )
+        )
+        scheduler = ActivationScheduler({"egg": policy})
+
+        with self.assertRaisesRegex(RuntimeError, "ambiguë"):
+            scheduler.trigger_now("egg", target_source="Cloud")
+
+        events = scheduler.trigger_now(
+            "egg",
+            target_identity=TriggerTargetIdentity("Group B", "Cloud", "group"),
+        )
+        self.assertEqual(events[0].container, "Group B")
+        self.assertEqual(events[0].container_kind, "group")
+
+    def test_non_finite_direct_scheduler_values_are_rejected(self):
+        invalid_policies = (
+            self.policy(chance=float("nan")),
+            self.policy(interval_seconds=float("inf")),
+            self.policy(default_duration_seconds=float("nan")),
+            self.policy(cooldown_seconds=float("inf")),
+            self.policy(
+                targets=(
+                    TriggerTargetConfig(
+                        "[Module] EasterEgg",
+                        "A",
+                        weight=float("inf"),
+                    ),
+                )
+            ),
+            self.policy(
+                targets=(
+                    TriggerTargetConfig(
+                        "[Module] EasterEgg",
+                        "A",
+                        duration_seconds=float("nan"),
+                    ),
+                )
+            ),
+        )
+        for policy in invalid_policies:
+            with self.subTest(policy=policy):
+                with self.assertRaises(ValueError):
+                    ActivationScheduler({"egg": policy})
+
+    def test_large_finite_weights_do_not_overflow_sum(self):
+        policy = self.policy(
+            targets=(
+                TriggerTargetConfig("[Module] EasterEgg", "A", weight=1e308),
+                TriggerTargetConfig("[Module] EasterEgg", "B", weight=1e308),
+            )
+        )
+        scheduler = ActivationScheduler(
+            {"egg": policy},
+            rng=SequenceRng(0.0, 0.75),
+        )
+
+        result = scheduler.test_roll("egg")
+
+        self.assertTrue(result.triggered)
+        self.assertIn(result.source, {"A", "B"})
+
+    def test_losing_eligibility_characterization_clears_cooldown(self):
+        clock = FakeClock()
+        scheduler = ActivationScheduler(
+            {"egg": self.policy(cooldown_seconds=100.0)},
+            clock=clock,
+            rng=SequenceRng(0.0, 0.0),
+        )
+        scheduler.tick()
+        clock.value = 10.0
+        scheduler.tick()
+        clock.value = 15.0
+        scheduler.tick()
+        self.assertEqual(scheduler.state("egg").phase, ActivationPhase.COOLDOWN)
+
+        clock.value = 16.0
+        scheduler.tick(lambda _name, _policy: False)
+
+        state = scheduler.state("egg")
+        self.assertEqual(state.phase, ActivationPhase.IDLE)
+        self.assertIsNone(state.cooldown_until)
+
 
 
 if __name__ == "__main__":

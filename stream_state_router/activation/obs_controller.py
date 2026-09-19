@@ -1,13 +1,46 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Mapping
 
+from ..obs.client import (
+    OBSRequestError,
+    OBSResourceNotFoundError,
+    OBSUnavailableError,
+)
 from .models import ActivationEvent, TriggerPolicyConfig, TriggerTargetConfig
 
 
+class ActivationVisibilityUncertain(RuntimeError):
+    """OBS visibility may have changed, but the result was not acknowledged."""
+
+
+class ActivationTargetMissing(RuntimeError):
+    """OBS confirmed that the selected activation target is absent."""
+
+
+class ActivationBlocked(RuntimeError):
+    """A policy cannot activate while cleanup is still uncertain."""
+
+
+class ActivationCollectionChanged(RuntimeError):
+    """The active OBS collection changed before an operation could be applied."""
+
+
+@dataclass(slots=True)
+class PendingHide:
+    policy: str
+    target: TriggerTargetConfig
+    collection: str
+    created_at: float
+    attempts: int = 0
+    next_retry_at: float = 0.0
+    last_error: str = ""
+
+
 class OBSActivationController:
-    """Translate scheduler events into temporary OBS source visibility."""
+    """Translate scheduler events into acknowledged OBS visibility mutations."""
 
     def __init__(
         self,
@@ -17,6 +50,8 @@ class OBSActivationController:
         clock=time.monotonic,
         eligibility_cache_seconds: float = 0.5,
         collection_probe_seconds: float = 1.0,
+        retry_base_seconds: float = 0.25,
+        retry_max_seconds: float = 5.0,
     ) -> None:
         self.dispatcher = dispatcher
         self.client = dispatcher.client
@@ -25,9 +60,12 @@ class OBSActivationController:
         self._clock = clock
         self._eligibility_cache_seconds = max(0.05, float(eligibility_cache_seconds))
         self._collection_probe_seconds = max(0.1, float(collection_probe_seconds))
+        self._retry_base_seconds = max(0.05, float(retry_base_seconds))
+        self._retry_max_seconds = max(self._retry_base_seconds, float(retry_max_seconds))
         self._module_presence_cache: dict[tuple[str, str], tuple[float, bool, str]] = {}
         self._last_collection_probe = 0.0
         self._scene_collection: str | None = None
+        self._pending_hides: dict[tuple[str, str, str, str, str], PendingHide] = {}
         self._sync_visibility_owners()
 
     def configure(self, policies: Mapping[str, TriggerPolicyConfig]) -> None:
@@ -43,8 +81,36 @@ class OBSActivationController:
         )
 
     def invalidate_cache(self) -> None:
+        # Activation visibility uses pair-local fresh ids. Do not flush the
+        # LayoutProfile transform cache globally from this subsystem.
         self._module_presence_cache.clear()
-        self.layout_manager.reset_cache()
+
+    def pending_hides(self, policy_name: str | None = None) -> tuple[PendingHide, ...]:
+        values = tuple(self._pending_hides.values())
+        if policy_name is None:
+            return values
+        wanted = str(policy_name)
+        return tuple(item for item in values if item.policy == wanted)
+
+    def policy_cleanup_status(self, policy_name: str) -> tuple[bool, str]:
+        collection = self._scene_collection
+        pending = [
+            item
+            for item in self._pending_hides.values()
+            if item.policy == policy_name
+            and (collection is None or item.collection == collection)
+        ]
+        if not pending:
+            return False, ""
+        names = ", ".join(
+            sorted(
+                {
+                    f"{item.target.container_kind}:{item.target.container}/{item.target.source}"
+                    for item in pending
+                }
+            )
+        )
+        return True, f"nettoyage OBS en attente : {names}"
 
     def eligibility(
         self,
@@ -105,59 +171,168 @@ class OBSActivationController:
         target = self._target_for_event(policy, event)
         if target is None:
             raise RuntimeError(
-                f"Source d'activation introuvable pour {event.policy}: "
+                f"Source d'activation introuvable ou ambiguë pour {event.policy}: "
                 f"{event.container}/{event.source}"
             )
 
-        if event.kind == "show":
-            if policy.exclusive:
-                # A stale/missing alternate target must not prevent a valid
-                # selected target from being shown. The selected target itself
-                # still raises normally so the scheduler can fail safe/reset.
-                for candidate in policy.targets:
-                    if candidate == target:
-                        continue
-                    try:
-                        self._set_target_enabled(candidate, False)
-                    except Exception:
-                        continue
-                self._set_target_enabled(target, False)
-            self._set_target_enabled(target, True)
-            return
+        collection = self._operation_collection()
 
-        self._set_target_enabled(target, False)
+        if event.kind == "hide":
+            status, error = self._mutate_visibility(target, False)
+            if status in {"applied", "missing"}:
+                self._clear_pending_hide(event.policy, target, collection)
+                return
+            self._record_pending_hide(event.policy, target, collection, error)
+            raise ActivationVisibilityUncertain(
+                f"Masquage non acquitté pour {target.container}/{target.source}: {error}"
+            )
+
+        blocked, reason = self.policy_cleanup_status(event.policy)
+        if blocked:
+            raise ActivationBlocked(reason)
+
+        if policy.exclusive:
+            for candidate in policy.targets:
+                if candidate.identity == target.identity:
+                    continue
+                status, error = self._mutate_visibility(candidate, False)
+                if status in {"applied", "missing"}:
+                    self._clear_pending_hide(event.policy, candidate, collection)
+                    continue
+                self._record_pending_hide(event.policy, candidate, collection, error)
+                raise ActivationVisibilityUncertain(
+                    "Activation exclusive bloquée : masquage concurrent non acquitté "
+                    f"pour {candidate.container}/{candidate.source}: {error}"
+                )
+
+            # Force a clean false->true edge for sources whose media/browser
+            # animation needs to restart. Failure to acknowledge this hide blocks
+            # the show rather than allowing two potentially visible targets.
+            status, error = self._mutate_visibility(target, False)
+            if status == "missing":
+                raise ActivationTargetMissing(
+                    f"Source absente : {target.container}/{target.source}"
+                )
+            if status != "applied":
+                self._record_pending_hide(event.policy, target, collection, error)
+                raise ActivationVisibilityUncertain(
+                    f"Pré-masquage non acquitté pour {target.container}/{target.source}: {error}"
+                )
+
+        status, error = self._mutate_visibility(target, True)
+        if status == "applied":
+            return
+        if status == "missing":
+            raise ActivationTargetMissing(
+                f"Source absente : {target.container}/{target.source}"
+            )
+
+        # A lost/uncertain response after show may mean OBS applied the show.
+        # Compensate by scheduling a hide and block this policy until it is acked.
+        self._record_pending_hide(event.policy, target, collection, error)
+        raise ActivationVisibilityUncertain(
+            f"Affichage au résultat incertain pour {target.container}/{target.source}: {error}"
+        )
 
     def reconcile(self) -> tuple[str, ...]:
-        """Hide every owned target after startup/reconnect/collection change."""
-        self.invalidate_cache()
-        warnings = self.hide_all()
-        try:
-            self._scene_collection = self._current_scene_collection()
-        except Exception as exc:
-            warnings = (*warnings, f"Scene Collection: {exc}")
-        self._last_collection_probe = self._clock()
-        return warnings
+        """Hide every owned target in the current collection.
 
-    def hide_all(self) -> tuple[str, ...]:
+        A warning means cleanup is not complete. Unacknowledged hides remain
+        structured in _pending_hides and keep their policies blocked.
+        """
         warnings: list[str] = []
-        seen: set[tuple[str, str]] = set()
-        for policy in self._policies.values():
+        try:
+            collection = self._current_scene_collection()
+        except Exception as exc:
+            self._last_collection_probe = self._clock()
+            return (f"Scene Collection: {exc}",)
+
+        self._adopt_collection(collection)
+        self.invalidate_cache()
+        warnings.extend(self.hide_all(collection=collection))
+        self._last_collection_probe = self._clock()
+        return tuple(warnings)
+
+    def hide_all(self, *, collection: str | None = None) -> tuple[str, ...]:
+        collection_name = collection or self._operation_collection()
+        warnings: list[str] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for policy_name, policy in self._policies.items():
             for target in policy.targets:
-                key = (target.container, target.source)
+                key = (
+                    policy_name,
+                    target.container,
+                    target.container_kind,
+                    target.source,
+                )
                 if key in seen:
                     continue
                 seen.add(key)
-                try:
-                    self._set_target_enabled(target, False)
-                except Exception as exc:
-                    warnings.append(f"{target.container}/{target.source}: {exc}")
+                status, error = self._mutate_visibility(target, False)
+                if status in {"applied", "missing"}:
+                    self._clear_pending_hide(policy_name, target, collection_name)
+                    continue
+                self._record_pending_hide(
+                    policy_name,
+                    target,
+                    collection_name,
+                    error,
+                )
+                warnings.append(
+                    f"{target.container}/{target.source}: masquage non acquitté ({error})"
+                )
         return tuple(warnings)
+
+    def retry_pending_hides(self, *, now: float | None = None) -> tuple[str, ...]:
+        if not self._pending_hides:
+            return ()
+        timestamp = self._clock() if now is None else float(now)
+        due = [
+            pending
+            for pending in self._pending_hides.values()
+            if timestamp >= pending.next_retry_at
+        ]
+        if not due or not bool(getattr(self.client, "connected", False)):
+            return ()
+
+        try:
+            current = self._current_scene_collection()
+        except Exception:
+            return ()
+
+        if self._scene_collection != current:
+            self._adopt_collection(current)
+            self.invalidate_cache()
+            return (f"Anciennes opérations abandonnées après changement vers {current}",)
+
+        messages: list[str] = []
+        for key, pending in tuple(self._pending_hides.items()):
+            if pending.collection != current or timestamp < pending.next_retry_at:
+                continue
+            status, error = self._mutate_visibility(pending.target, False)
+            if status in {"applied", "missing"}:
+                self._pending_hides.pop(key, None)
+                messages.append(
+                    f"Masquage acquitté : {pending.target.container}/{pending.target.source}"
+                )
+                continue
+            pending.attempts += 1
+            pending.last_error = error
+            delay = min(
+                self._retry_max_seconds,
+                self._retry_base_seconds * (2 ** min(pending.attempts, 8)),
+            )
+            pending.next_retry_at = timestamp + delay
+        return tuple(messages)
 
     def scene_collection_changed(self) -> bool:
         if not bool(getattr(self.client, "connected", False)):
             return False
         now = self._clock()
-        if self._last_collection_probe and now - self._last_collection_probe < self._collection_probe_seconds:
+        if (
+            self._last_collection_probe
+            and now - self._last_collection_probe < self._collection_probe_seconds
+        ):
             return False
         self._last_collection_probe = now
         try:
@@ -165,24 +340,109 @@ class OBSActivationController:
         except Exception:
             return False
         if self._scene_collection is None:
-            self._scene_collection = current
+            self._adopt_collection(current)
             return False
         if current == self._scene_collection:
             return False
-        self._scene_collection = current
+        self._adopt_collection(current)
         self.invalidate_cache()
         return True
+
+    def _operation_collection(self) -> str:
+        current = self._current_scene_collection()
+        if self._scene_collection is None:
+            self._adopt_collection(current)
+            return current
+        if current != self._scene_collection:
+            previous = self._scene_collection
+            self._adopt_collection(current)
+            self.invalidate_cache()
+            raise ActivationCollectionChanged(
+                f"Scene Collection modifiée : {previous} -> {current}"
+            )
+        return current
+
+    def _adopt_collection(self, collection: str) -> None:
+        current = str(collection or "").strip()
+        if self._scene_collection == current:
+            return
+        # Never replay operations captured for another Scene Collection.
+        self._pending_hides.clear()
+        self._scene_collection = current
 
     def _current_scene_collection(self) -> str:
         response = self.client.send("GetSceneCollectionList")
         return str(response.get("currentSceneCollectionName") or "").strip()
 
-    def _set_target_enabled(self, target: TriggerTargetConfig, enabled: bool) -> None:
-        self.layout_manager.set_item_enabled(
+    def _mutate_visibility(
+        self,
+        target: TriggerTargetConfig,
+        enabled: bool,
+    ) -> tuple[str, str]:
+        try:
+            self.layout_manager.set_activation_item_enabled(
+                target.container,
+                target.source,
+                enabled,
+                container_kind=target.container_kind,
+            )
+            return "applied", ""
+        except OBSResourceNotFoundError as exc:
+            return "missing", str(exc)
+        except (OBSUnavailableError, OBSRequestError) as exc:
+            return "uncertain", str(exc)
+        except Exception as exc:
+            return "uncertain", str(exc)
+
+    def _record_pending_hide(
+        self,
+        policy_name: str,
+        target: TriggerTargetConfig,
+        collection: str,
+        error: str,
+    ) -> None:
+        now = self._clock()
+        key = self._pending_key(policy_name, target, collection)
+        pending = self._pending_hides.get(key)
+        if pending is None:
+            pending = PendingHide(
+                policy=policy_name,
+                target=target,
+                collection=collection,
+                created_at=now,
+            )
+            self._pending_hides[key] = pending
+        pending.attempts += 1
+        pending.last_error = str(error)
+        delay = min(
+            self._retry_max_seconds,
+            self._retry_base_seconds * (2 ** min(pending.attempts - 1, 8)),
+        )
+        pending.next_retry_at = now + delay
+
+    def _clear_pending_hide(
+        self,
+        policy_name: str,
+        target: TriggerTargetConfig,
+        collection: str,
+    ) -> None:
+        self._pending_hides.pop(
+            self._pending_key(policy_name, target, collection),
+            None,
+        )
+
+    @staticmethod
+    def _pending_key(
+        policy_name: str,
+        target: TriggerTargetConfig,
+        collection: str,
+    ) -> tuple[str, str, str, str, str]:
+        return (
+            str(policy_name),
+            str(collection),
             target.container,
+            target.container_kind,
             target.source,
-            enabled,
-            container_kind=target.container_kind,
         )
 
     def _policy(self, name: str) -> TriggerPolicyConfig:
@@ -196,19 +456,19 @@ class OBSActivationController:
         policy: TriggerPolicyConfig,
         event: ActivationEvent,
     ) -> TriggerTargetConfig | None:
-        exact = [
-            target
-            for target in policy.targets
-            if target.source == event.source
-            and (not event.container or target.container == event.container)
-        ]
-        if len(exact) == 1:
-            return exact[0]
         if event.container:
-            for target in exact:
-                if target.container_kind == event.container_kind:
-                    return target
-        for target in policy.targets:
-            if target.source == event.source:
-                return target
-        return None
+            matches = [
+                target
+                for target in policy.targets
+                if target.source == event.source
+                and target.container == event.container
+                and target.container_kind == event.container_kind
+            ]
+            return matches[0] if len(matches) == 1 else None
+
+        # Backward compatibility for old events that only carried source. This
+        # remains valid only while source alone is unambiguous.
+        matches = [
+            target for target in policy.targets if target.source == event.source
+        ]
+        return matches[0] if len(matches) == 1 else None
