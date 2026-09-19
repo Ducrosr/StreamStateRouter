@@ -40,6 +40,8 @@ class ActivationScheduler:
         self._clock = clock
         self._rng = rng or random.Random()
         self._policies: dict[str, TriggerPolicyConfig] = dict(policies or {})
+        for name, policy in self._policies.items():
+            self._validate_policy(name, policy)
         self._states: dict[str, ActivationRuntimeState] = {
             name: ActivationRuntimeState() for name in self._policies
         }
@@ -55,7 +57,10 @@ class ActivationScheduler:
         older policy definition. Reconciliation with OBS is handled by the
         runtime integration layer.
         """
-        self._policies = dict(policies)
+        candidate = dict(policies)
+        for name, policy in candidate.items():
+            self._validate_policy(name, policy)
+        self._policies = candidate
         self._states = {name: ActivationRuntimeState() for name in self._policies}
 
     def state(self, policy_name: str) -> ActivationRuntimeState:
@@ -516,6 +521,40 @@ class ActivationScheduler:
     def _state(self, policy_name: str) -> ActivationRuntimeState:
         self._policy(policy_name)
         return self._states.setdefault(policy_name, ActivationRuntimeState())
+
+    @classmethod
+    def _validate_policy(
+        cls,
+        name: str,
+        policy: TriggerPolicyConfig,
+    ) -> None:
+        cls._chance(policy)
+        cls._interval(policy)
+        cls._cooldown(policy)
+        default_duration = float(policy.default_duration_seconds)
+        if not math.isfinite(default_duration) or default_duration <= 0.0:
+            raise ValueError(
+                f"{name}: default_duration_seconds doit être un nombre fini > 0"
+            )
+        identities: set[TriggerTargetIdentity] = set()
+        for target in policy.targets:
+            if target.identity in identities:
+                raise ValueError(
+                    f"{name}: cible d'activation exacte dupliquée "
+                    f"{target.container}/{target.source}"
+                )
+            identities.add(target.identity)
+            weight = float(target.weight)
+            if not math.isfinite(weight) or weight < 0.0:
+                raise ValueError(
+                    f"{name}: poids invalide pour {target.container}/{target.source}"
+                )
+            if target.duration_seconds is not None:
+                duration = float(target.duration_seconds)
+                if not math.isfinite(duration) or duration <= 0.0:
+                    raise ValueError(
+                        f"{name}: durée invalide pour {target.container}/{target.source}"
+                    )
 
     @staticmethod
     def _chance(policy: TriggerPolicyConfig) -> float:
