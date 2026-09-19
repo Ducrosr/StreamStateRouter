@@ -1158,7 +1158,8 @@ class MainWindow(QMainWindow):
             return
         actions[idx], actions[new_idx] = actions[new_idx], actions[idx]
         self._mark_dirty()
-        self._refresh_actions_table(); self.actions_table.selectRow(new_idx)
+        self._refresh_actions_table()
+        self.actions_table.selectRow(new_idx)
 
     def _test_profile(self) -> None:
         current = self._current_profile()
