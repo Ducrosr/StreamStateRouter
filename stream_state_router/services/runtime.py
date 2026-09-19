@@ -133,6 +133,92 @@ class RoutingService:
             self.on_dispatch(result)
         return result
 
+    def activation_status(self, policy_name: str) -> dict[str, object]:
+        scheduler = self.activation_scheduler
+        controller = self.activation_controller
+        if scheduler is None or controller is None or policy_name not in scheduler.policies:
+            return {"available": False, "phase": "idle"}
+        now = time.monotonic()
+        with self._lock:
+            state = scheduler.state(policy_name)
+        return {
+            "available": True,
+            "phase": state.phase.value,
+            "active_source": state.active_source,
+            "next_roll_seconds": (
+                max(0.0, state.next_roll_at - now) if state.next_roll_at is not None else None
+            ),
+            "visible_seconds": (
+                max(0.0, state.visible_until - now) if state.visible_until is not None else None
+            ),
+            "cooldown_seconds": (
+                max(0.0, state.cooldown_until - now) if state.cooldown_until is not None else None
+            ),
+        }
+
+    def activation_test_roll(self, policy_name: str):
+        scheduler = self.activation_scheduler
+        if scheduler is None:
+            raise RuntimeError("Aucune politique de déclenchement active")
+        with self._lock:
+            return scheduler.test_roll(policy_name)
+
+    def activation_trigger_now(
+        self,
+        policy_name: str,
+        *,
+        target_source: str | None = None,
+        ignore_cooldown: bool = True,
+    ) -> list[ActivationEvent]:
+        scheduler = self.activation_scheduler
+        controller = self.activation_controller
+        if scheduler is None or controller is None:
+            raise RuntimeError("Aucune politique de déclenchement active")
+        policy = scheduler.policies.get(policy_name)
+        if policy is None:
+            raise KeyError(f"Politique d'activation introuvable : {policy_name}")
+        eligible = controller.is_eligible(policy_name, policy)
+        now = time.monotonic()
+        with self._lock:
+            events = scheduler.trigger_now(
+                policy_name,
+                target_source=target_source,
+                eligible=eligible,
+                ignore_cooldown=ignore_cooldown,
+                now=now,
+            )
+        for event in events:
+            self._handle_activation_event(event, now=now)
+        self._wake.set()
+        return events
+
+    def activation_stop(self, policy_name: str) -> list[ActivationEvent]:
+        scheduler = self.activation_scheduler
+        if scheduler is None:
+            raise RuntimeError("Aucune politique de déclenchement active")
+        now = time.monotonic()
+        with self._lock:
+            events = scheduler.stop(policy_name, enter_cooldown=True, now=now)
+        for event in events:
+            self._handle_activation_event(event, now=now)
+        self._wake.set()
+        return events
+
+    def activation_reset_cooldown(self, policy_name: str) -> list[ActivationEvent]:
+        scheduler = self.activation_scheduler
+        controller = self.activation_controller
+        if scheduler is None or controller is None:
+            raise RuntimeError("Aucune politique de déclenchement active")
+        policy = scheduler.policies.get(policy_name)
+        if policy is None:
+            raise KeyError(f"Politique d'activation introuvable : {policy_name}")
+        eligible = controller.is_eligible(policy_name, policy)
+        now = time.monotonic()
+        with self._lock:
+            events = scheduler.reset_cooldown(policy_name, eligible=eligible, now=now)
+        self._wake.set()
+        return events
+
     def _run(self) -> None:
         self.logger.info("Routing service started")
         while not self._stop.is_set():

@@ -236,6 +236,66 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(controller.events, [event])
 
+    def test_activation_status_reports_remaining_deadlines(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        scheduler.policies = {"egg": SimpleNamespace()}
+        scheduler.state = lambda _name: SimpleNamespace(
+            phase=SimpleNamespace(value="visible"),
+            active_source="Cloud",
+            next_roll_at=None,
+            visible_until=time.monotonic() + 5.0,
+            cooldown_until=None,
+        )
+        controller = FakeActivationController()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+
+        status = service.activation_status("egg")
+
+        self.assertTrue(status["available"])
+        self.assertEqual(status["phase"], "visible")
+        self.assertEqual(status["active_source"], "Cloud")
+        self.assertGreater(status["visible_seconds"], 0.0)
+
+    def test_activation_manual_trigger_is_applied_to_controller(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        scheduler.policies = {"egg": SimpleNamespace()}
+        scheduler.trigger_now = lambda *args, **kwargs: [
+            ActivationEvent(
+                "show",
+                "egg",
+                kwargs.get("now", 0.0),
+                source="Cloud",
+                container="[Module] EasterEgg",
+                duration_seconds=5.0,
+            )
+        ]
+        controller = FakeActivationController()
+        controller.is_eligible = lambda _name, _policy: True
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+
+        events = service.activation_trigger_now("egg", target_source="Cloud")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(controller.events, events)
+
 
 if __name__ == "__main__":
     unittest.main()
