@@ -168,11 +168,11 @@ class SimulationResult:
     policy: str
     trials: int
     seed: int
-    config_fingerprint: str = ""
     chance_hit_count: int
     trigger_count: int
     miss_count: int
     blocked_count: int
+    config_fingerprint: str = ""
     target_counts: tuple[tuple[str, int], ...] = ()
 
     @property
