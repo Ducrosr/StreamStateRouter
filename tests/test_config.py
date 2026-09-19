@@ -201,6 +201,119 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(any(".default_duration_seconds" in item for item in errors))
         self.assertTrue(any(".weight" in item for item in errors))
 
+    def test_non_finite_activation_numbers_are_reported(self):
+        for field, value in (
+            ("chance", float("nan")),
+            ("interval_seconds", float("inf")),
+            ("cooldown_seconds", 1e309),
+            ("default_duration_seconds", float("nan")),
+        ):
+            data = self.sample()
+            policy = {
+                "type": "random",
+                "chance": 0.5,
+                "interval_seconds": 10.0,
+                "cooldown_seconds": 0.0,
+                "default_duration_seconds": 2.0,
+                "targets": [
+                    {
+                        "container": "Egg",
+                        "source": "A",
+                        "weight": 1.0,
+                    }
+                ],
+            }
+            policy[field] = value
+            data["activation_policies"] = {"Egg": policy}
+            errors = validate_config(data)
+            self.assertTrue(
+                any(f".{field}" in error for error in errors),
+                (field, value, errors),
+            )
+
+        data = self.sample()
+        data["activation_policies"] = {
+            "Egg": {
+                "type": "random",
+                "targets": [
+                    {
+                        "container": "Egg",
+                        "source": "A",
+                        "weight": float("nan"),
+                        "duration_seconds": float("inf"),
+                    }
+                ],
+            }
+        }
+        errors = validate_config(data)
+        self.assertTrue(any(".weight" in error for error in errors))
+        self.assertTrue(any(".duration_seconds" in error for error in errors))
+
+    def test_exact_duplicate_activation_targets_are_rejected(self):
+        data = self.sample()
+        target = {
+            "container": "Egg",
+            "container_kind": "scene",
+            "source": "Cloud",
+            "path": ["Gameplay", "Egg"],
+        }
+        data["activation_policies"] = {
+            "Egg": {
+                "type": "random",
+                "targets": [dict(target), dict(target)],
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(any("duplique exactement" in error for error in errors))
+
+    def test_ancestor_descendant_activation_targets_are_rejected(self):
+        data = self.sample()
+        data["activation_policies"] = {
+            "Egg": {
+                "type": "random",
+                "targets": [
+                    {
+                        "container": "Egg",
+                        "container_kind": "scene",
+                        "source": "ChildScene",
+                        "path": ["Gameplay", "Egg"],
+                    },
+                    {
+                        "container": "ChildScene",
+                        "container_kind": "scene",
+                        "source": "Inner",
+                        "path": ["Gameplay", "Egg", "ChildScene"],
+                    },
+                ],
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(any("ancêtre/descendant" in error for error in errors))
+
+    def test_single_legacy_deep_target_remains_valid(self):
+        data = self.sample()
+        data["activation_policies"] = {
+            "Egg": {
+                "type": "random",
+                "targets": [
+                    {
+                        "container": "ChildScene",
+                        "container_kind": "scene",
+                        "source": "Inner",
+                        "path": ["Gameplay", "Egg", "ChildScene"],
+                        "weight": 0.0,
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(validate_config(data), [])
+
+
 
 if __name__ == "__main__":
     unittest.main()
