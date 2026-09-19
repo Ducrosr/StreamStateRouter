@@ -1,4 +1,28 @@
-# Stream State Router 2.0.12
+# Stream State Router 2.0.13
+
+## Correctif 2.0.13 — activations OBS sérialisées et acquittées
+
+Les activations temporaires OBS sont maintenant exécutées dans **un seul contexte runtime**. Les commandes Qt ne touchent plus directement au scheduler ni à OBS : elles sont placées dans une file, exécutées par le worker `SSR-Router`, puis leur résultat revient à l'interface par signal.
+
+Les principales garanties ajoutées sont :
+
+- `tick`, déclenchement manuel, arrêt, reset de cooldown et réconciliation utilisent le même worker ;
+- un arrêt refuse les nouvelles commandes, invalide les commandes en attente et attend qu'un ancien dispatch OBS soit terminé avant d'autoriser un runtime de remplacement ;
+- les masquages OBS non acquittés sont conservés avec l'identité exacte de la cible et la Scene Collection, puis retentés avec backoff borné ;
+- une réponse incertaine après un `show` programme un hide compensatoire et bloque la politique tant que le nettoyage n'est pas acquitté ;
+- une activation exclusive est refusée si une cible concurrente ne peut pas être masquée avec certitude ;
+- les mutations de visibilité d'activation résolvent toujours fraîchement le `sceneItemId` par `(container, source)`, sans vider le cache global utilisé par la géométrie ;
+- les cibles manuelles sont identifiées par `container + container_kind + source`; l'ancien identifiant par source seule n'est accepté que s'il est unique ;
+- l'éditeur propose par défaut uniquement les enfants directs du module ; une scène ou un groupe enfant reste une unité d'activation ;
+- les valeurs numériques non finies sont refusées et la pondération évite le débordement des sommes ;
+- la simulation copie la politique appliquée puis s'exécute dans un worker séparé du thread Qt **et** du worker d'activation.
+
+Deux comportements existants sont volontairement **caractérisés mais inchangés** dans cette version :
+
+1. perdre l'éligibilité remet la politique à `Idle` et efface son cooldown ;
+2. un marqueur persisté `visibility_owner=runtime` reste runtime-owned même si la politique correspondante disparaît.
+
+Aucune ancienne cible n'est automatiquement réactivée lors de la suppression d'une politique.
 
 ## Bêta 2.0.12 — observabilité du scheduler
 
