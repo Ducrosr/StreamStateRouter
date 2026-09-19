@@ -28,10 +28,21 @@ class OBSActivationController:
         self._module_presence_cache: dict[tuple[str, str], tuple[float, bool]] = {}
         self._last_collection_probe = 0.0
         self._scene_collection: str | None = None
+        self._sync_visibility_owners()
 
     def configure(self, policies: Mapping[str, TriggerPolicyConfig]) -> None:
         self._policies = dict(policies)
+        self._sync_visibility_owners()
         self.invalidate_cache()
+
+    def _sync_visibility_owners(self) -> None:
+        self.layout_manager.set_runtime_visibility_owners(
+            (target.container, target.source)
+            for policy in self._policies.values()
+            if policy.enabled
+            for target in policy.targets
+            if target.enabled
+        )
 
     def invalidate_cache(self) -> None:
         self._module_presence_cache.clear()
