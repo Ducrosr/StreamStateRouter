@@ -711,6 +711,9 @@ class RoutingService:
                     )
                 for event in events:
                     self._handle_activation_event(event, now=now)
+                blocked, cleanup_reason = controller.policy_cleanup_status(command.policy)
+                if blocked:
+                    raise RuntimeError(cleanup_reason)
                 self._emit_activation_result(command, success=True, result=events)
                 return
 
@@ -753,15 +756,16 @@ class RoutingService:
                 error="Aucune politique de déclenchement active",
             )
             return
-        policy = scheduler.policies.get(command.policy)
-        if policy is None:
+        with self._lock:
+            policy = scheduler.policies.get(command.policy)
+            policy_snapshot = copy.deepcopy(policy) if policy is not None else None
+        if policy_snapshot is None:
             self._emit_activation_result(
                 command,
                 success=False,
                 error=f"Politique d'activation introuvable : {command.policy}",
             )
             return
-        policy_snapshot = copy.deepcopy(policy)
         trials = int(command.options.get("trials", 1000))
         seed = int(command.options.get("seed", 12345))
 
@@ -828,6 +832,24 @@ class RoutingService:
     def _perform_activation_shutdown(self) -> None:
         self._record_activation_diagnostic("*", "arrêt", "nettoyage runtime en cours")
         self._reconcile_activation("arrêt du service")
+        controller = self.activation_controller
+        deadline = time.monotonic() + 1.5
+        while (
+            controller is not None
+            and controller.pending_hides()
+            and time.monotonic() < deadline
+        ):
+            now = time.monotonic()
+            for message in controller.retry_pending_hides(now=now):
+                self._record_activation_diagnostic("*", "nettoyage", message)
+            if controller.pending_hides():
+                time.sleep(0.05)
+        if controller is not None and controller.pending_hides():
+            self._record_activation_diagnostic(
+                "*",
+                "warning",
+                f"arrêt avec {len(controller.pending_hides())} masquage(s) non acquitté(s)",
+            )
         try:
             self._simulation_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
