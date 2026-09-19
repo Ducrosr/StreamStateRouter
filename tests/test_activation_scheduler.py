@@ -201,6 +201,47 @@ class ActivationSchedulerTests(unittest.TestCase):
         self.assertEqual([event.kind for event in events], ["cooldown_complete"])
         self.assertEqual(scheduler.state("egg").next_roll_at, 30.0)
 
+    def test_simulation_is_deterministic_and_does_not_mutate_runtime(self):
+        scheduler = ActivationScheduler({"egg": self.policy()})
+        before = scheduler.state("egg")
+
+        first = scheduler.simulate("egg", trials=1000, seed=42)
+        second = scheduler.simulate("egg", trials=1000, seed=42)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.trigger_count, 1000)
+        self.assertEqual(first.miss_count, 0)
+        self.assertEqual(first.blocked_count, 0)
+        self.assertEqual(sum(count for _name, count in first.target_counts), 1000)
+        self.assertEqual(before, scheduler.state("egg"))
+
+    def test_simulation_reports_hits_blocked_by_missing_targets(self):
+        policy = self.policy(targets=())
+        scheduler = ActivationScheduler({"egg": policy})
+
+        result = scheduler.simulate("egg", trials=25, seed=7)
+
+        self.assertEqual(result.chance_hit_count, 25)
+        self.assertEqual(result.trigger_count, 0)
+        self.assertEqual(result.blocked_count, 25)
+        self.assertEqual(result.miss_count, 0)
+
+    def test_successful_roll_without_target_emits_blocked_diagnostic_event(self):
+        policy = self.policy(targets=())
+        clock = FakeClock()
+        scheduler = ActivationScheduler(
+            {"egg": policy},
+            clock=clock,
+            rng=SequenceRng(0.0),
+        )
+        scheduler.tick()
+        clock.value = 10.0
+
+        events = scheduler.tick()
+
+        self.assertEqual([event.kind for event in events], ["roll", "blocked"])
+        self.assertEqual(events[-1].reason, "no_target")
+
 
 if __name__ == "__main__":
     unittest.main()

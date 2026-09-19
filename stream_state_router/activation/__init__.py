@@ -5,6 +5,7 @@ from .models import (
     ActivationPhase,
     ActivationRuntimeState,
     RollTestResult,
+    SimulationResult,
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "ActivationScheduler",
     "OBSActivationController",
     "RollTestResult",
+    "SimulationResult",
     "TriggerPolicyConfig",
     "TriggerTargetConfig",
 ]

@@ -58,6 +58,7 @@ class FakeActivationScheduler:
         self.reset_all_calls = 0
         self.reset_policy_calls = []
         self.tick_calls = 0
+        self.policies = {}
 
     def reset_all(self):
         self.reset_all_calls += 1
@@ -295,6 +296,83 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(controller.events, events)
+
+    def test_manual_trigger_respects_cooldown_by_default(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        scheduler.policies = {"egg": SimpleNamespace()}
+        seen = {}
+
+        def trigger_now(*args, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        scheduler.trigger_now = trigger_now
+        controller = FakeActivationController()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+
+        service.activation_trigger_now("egg")
+
+        self.assertFalse(seen["ignore_cooldown"])
+
+    def test_manual_reset_all_uses_fail_safe_reconciliation(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        controller = FakeActivationController()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+
+        service.activation_reset_all()
+
+        self.assertEqual(scheduler.reset_all_calls, 1)
+        self.assertEqual(controller.reconcile_calls, 1)
+        self.assertTrue(
+            any("réinitialisation manuelle" in row for row in service.activation_diagnostics())
+        )
+
+    def test_activation_status_includes_eligibility_and_diagnostics(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        scheduler.policies = {"egg": SimpleNamespace()}
+        scheduler.state = lambda _name: SimpleNamespace(
+            phase=SimpleNamespace(value="eligible"),
+            active_source="",
+            next_roll_at=None,
+            visible_until=None,
+            cooldown_until=None,
+        )
+        controller = FakeActivationController()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service._record_activation_diagnostic("egg", "test", "diagnostic visible")
+
+        status = service.activation_status("egg")
+
+        self.assertTrue(status["eligible"])
+        self.assertIn("diagnostic visible", status["last_event"])
+        self.assertTrue(status["diagnostics"])
 
 
 if __name__ == "__main__":

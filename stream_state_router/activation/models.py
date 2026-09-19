@@ -142,3 +142,19 @@ class RollTestResult:
     chance: float
     triggered: bool
     source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationResult:
+    policy: str
+    trials: int
+    seed: int
+    chance_hit_count: int
+    trigger_count: int
+    miss_count: int
+    blocked_count: int
+    target_counts: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def trigger_rate(self) -> float:
+        return self.trigger_count / self.trials if self.trials else 0.0

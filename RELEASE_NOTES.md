@@ -1,15 +1,15 @@
-# Stream State Router 2.0.11
+# Stream State Router 2.0.12
 
-## Changement principal
+## Bêta scheduler / Easter Eggs
 
-Les transitions de LayoutProfile (`Déplacement`, `Fondu`, `Déplacement + fondu`) sont maintenant synchronisées sur une **timeline globale**. Une transition de 2000 ms dure environ 2000 ms pour l'ensemble du layout au lieu de 2000 ms par source.
+Cette version prépare l'audit architectural en rendant le scheduler observable et testable sans modifier OBS.
 
-Cela corrige le gel/crash apparent observé sur une scène comportant de nombreux modules : l'ancienne implémentation bloquait le thread appelant pendant N × durée de transition.
-
-Les groupes OBS conservent leur passe de stabilisation finale afin de préserver les correctifs précédents sur les hiérarchies imbriquées.
+- état runtime lisible et raison d'éligibilité ;
+- journal détaillé des tirages et transitions ;
+- commandes manuelles alignées sur la machine d'état automatique ;
+- réinitialisation runtime globale / fail-safe ;
+- simulation déterministe par seed des chances, poids et anti-répétition.
 
 ## Validation
 
-- 50 tests unitaires passent.
-- Régression dédiée : deux sources avec `move = 2000 ms` partagent 8 frames et seulement 7 attentes temporelles globales.
-- Validation réelle Windows + OBS à confirmer par le test utilisateur.
+La CI Windows exécute les tests unitaires, Ruff, le smoke test de configuration et la validation du plugin Stream Deck.
