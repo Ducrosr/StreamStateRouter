@@ -8,6 +8,7 @@ from .models import (
     SimulationResult,
     TriggerPolicyConfig,
     TriggerTargetConfig,
+    TriggerTargetIdentity,
 )
 from .obs_controller import OBSActivationController
 from .scheduler import ActivationScheduler
@@ -22,4 +23,5 @@ __all__ = [
     "SimulationResult",
     "TriggerPolicyConfig",
     "TriggerTargetConfig",
+    "TriggerTargetIdentity",
 ]
