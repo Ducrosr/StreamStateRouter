@@ -218,6 +218,7 @@ class ModuleLayoutDialog(QDialog):
         activation_candidates: Sequence[Mapping[str, object]] | None = None,
         activation_status_provider=None,
         activation_command=None,
+        activation_result_signal=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"Module — {module_name}")
@@ -229,6 +230,10 @@ class ModuleLayoutDialog(QDialog):
         self._activation_source = deepcopy(activation_policy) if isinstance(activation_policy, dict) else None
         self._activation_status_provider = activation_status_provider
         self._activation_command = activation_command
+        self._activation_result_signal = activation_result_signal
+        self._pending_activation_requests: dict[str, str] = {}
+        if self._activation_result_signal is not None:
+            self._activation_result_signal.connect(self._on_activation_result)
         geometry = self._source.get("geometry") if isinstance(self._source.get("geometry"), dict) else {}
         base = self._source.get("base_bounds") if isinstance(self._source.get("base_bounds"), dict) else geometry
         self._aspect = max(0.0001, float(base.get("width", 1.0) or 1.0)) / max(0.0001, float(base.get("height", 1.0) or 1.0))
@@ -585,7 +590,7 @@ class ModuleLayoutDialog(QDialog):
         diagnostics = status.get("diagnostics") or []
         self.activation_diagnostics.setPlainText("\n".join(str(item) for item in diagnostics))
 
-    def _run_activation_command(self, action: str, source: str | None = None) -> None:
+    def _run_activation_command(self, action: str, target=None) -> None:
         if self._activation_command is None:
             QMessageBox.information(
                 self,
@@ -600,15 +605,37 @@ class ModuleLayoutDialog(QDialog):
                 "seed": self.activation_sim_seed.value(),
             }
         try:
-            result = self._activation_command(
+            request_id = self._activation_command(
                 action,
                 self._activation_policy_name,
-                source,
+                target,
                 options,
             )
         except Exception as exc:
             QMessageBox.warning(self, "Déclenchement", str(exc))
             return
+        if request_id:
+            self._pending_activation_requests[str(request_id)] = action
+            self.activation_last_event.setText(
+                f"Dernier événement : commande {action} en attente…"
+            )
+        self._refresh_activation_status()
+
+    def _on_activation_result(self, payload) -> None:
+        request_id = str(getattr(payload, "request_id", "") or "")
+        action = self._pending_activation_requests.pop(request_id, None)
+        if action is None:
+            return
+        if not bool(getattr(payload, "success", False)):
+            QMessageBox.warning(
+                self,
+                "Déclenchement",
+                str(getattr(payload, "error", "") or "Commande échouée"),
+            )
+            self._refresh_activation_status()
+            return
+
+        result = getattr(payload, "result", None)
         if action == "test_roll" and result is not None:
             verdict = "succès" if bool(getattr(result, "triggered", False)) else "échec"
             source_name = str(getattr(result, "source", "") or "")
@@ -617,18 +644,22 @@ class ModuleLayoutDialog(QDialog):
                 self,
                 "Test du tirage",
                 f"Tirage {float(getattr(result, 'roll', 0.0)) * 100.0:.3f} % "
-                f"/ seuil {float(getattr(result, 'chance', 0.0)) * 100.0:.3f} % : {verdict}{extra}.",
+                f"/ seuil {float(getattr(result, 'chance', 0.0)) * 100.0:.3f} % : "
+                f"{verdict}{extra}.",
             )
         elif action == "simulate" and result is not None:
             counts = getattr(result, "target_counts", ()) or ()
             distribution = "\n".join(
-                f"• {name} : {count} ({count / max(1, result.trigger_count) * 100.0:.2f} %)"
+                f"• {name} : {count} "
+                f"({count / max(1, result.trigger_count) * 100.0:.2f} %)"
                 for name, count in counts
             ) or "• aucune source sélectionnée"
+            fingerprint = str(getattr(result, "config_fingerprint", "") or "—")
             QMessageBox.information(
                 self,
                 "Simulation déterministe",
                 (
+                    f"Configuration : {fingerprint}\n"
                     f"{result.trials} tirages · seed {result.seed}\n"
                     f"Succès chance : {result.chance_hit_count}\n"
                     f"Déclenchements : {result.trigger_count} "
@@ -645,9 +676,24 @@ class ModuleLayoutDialog(QDialog):
         if row < 0:
             return
         item = self.activation_targets.item(row, 1)
-        source = item.text().strip() if item else ""
-        if source:
-            self._run_activation_command("trigger", source)
+        if item is None:
+            return
+        raw = item.data(Qt.UserRole)
+        target = dict(raw) if isinstance(raw, Mapping) else {
+            "source": item.text().strip()
+        }
+        target["source"] = item.text().strip()
+        if target.get("source"):
+            self._run_activation_command("trigger", target)
+
+    def done(self, result: int) -> None:
+        if self._activation_result_signal is not None:
+            try:
+                self._activation_result_signal.disconnect(self._on_activation_result)
+            except (RuntimeError, TypeError):
+                pass
+        self._pending_activation_requests.clear()
+        super().done(result)
 
     def _anchor_factors(self) -> tuple[float, float]:
         current = str(self.anchor.currentData() or "top_left")
