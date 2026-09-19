@@ -568,7 +568,7 @@ class ActivationScheduler:
         value = float(policy.interval_seconds)
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError("interval_seconds doit être un nombre fini > 0")
-        return value
+        return max(0.001, value)
 
     @staticmethod
     def _cooldown(policy: TriggerPolicyConfig) -> float:
@@ -585,7 +585,7 @@ class ActivationScheduler:
         number = float(value)
         if not math.isfinite(number) or number <= 0.0:
             raise ValueError("duration_seconds doit être un nombre fini > 0")
-        return number
+        return max(0.001, number)
 
     @staticmethod
     def _reset_to_idle(state: ActivationRuntimeState) -> None:
