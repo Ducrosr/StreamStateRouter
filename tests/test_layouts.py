@@ -442,6 +442,44 @@ class LayoutTests(unittest.TestCase):
         ]
         self.assertNotIn(2, visibility_ids)
 
+    def test_diff_detects_scale_change_below_position_tolerance(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        element = profile["modules"]["[Webcam] Cadre"]["elements"][0]
+        element["transform"]["scaleX"] = float(element["transform"].get("scaleX", 1.0)) + 0.1
+
+        diffs = manager.diff_profile(profile)
+
+        self.assertTrue(any("scaleX" in change for diff in diffs for change in diff.changes))
+
+    def test_diff_includes_support_items(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        if not profile.get("support_items"):
+            self.skipTest("Fake layout has no support items")
+        support = profile["support_items"][0]
+        support["transform"]["positionX"] = float(support["transform"].get("positionX", 0.0)) + 50.0
+
+        diffs = manager.diff_profile(profile)
+
+        self.assertTrue(any(diff.module == "[interne]" for diff in diffs))
+
+    def test_get_current_item_reports_unknown_visibility_instead_of_true(self):
+        class VisibilityFailureClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                if request == "GetSceneItemEnabled":
+                    raise RuntimeError("visibility timeout")
+                return super().send(request, data)
+
+        client = VisibilityFailureClient()
+        manager = OBSLayoutManager(client)
+        item = manager._get_current_item("Gameplay", "[Webcam] Cadre")
+
+        self.assertIsNone(item["enabled"])
+        self.assertIn("timeout", item["enabled_error"])
+
     def test_undo_snapshot_is_consumed_only_after_successful_restore(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)

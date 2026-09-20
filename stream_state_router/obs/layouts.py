@@ -1101,58 +1101,125 @@ class OBSLayoutManager:
                         f"Canvas différent : profil {pw}×{ph}, OBS {cw}×{ch}. Les coordonnées normalisées seront utilisées.",
                     )
                 )
-        try:
-            catalog = self.discover_scene(scene)
-        except Exception as exc:
-            issues.append(LayoutValidationIssue("error", f"Impossible de lire la scène '{scene}' : {exc}"))
-            return issues
-        existing = {element.source for values in catalog.values() for element in values}
-        modules = profile.get("modules", {}) if isinstance(profile.get("modules"), Mapping) else {}
-        for module_name, raw in modules.items():
-            if not isinstance(raw, Mapping):
-                continue
-            if bool(raw.get("locked", False)):
-                issues.append(LayoutValidationIssue("info", "Module verrouillé dans SSR.", str(module_name)))
-            for element in raw.get("elements", []) if isinstance(raw.get("elements"), list) else []:
-                if not isinstance(element, Mapping) or not bool(element.get("included", True)):
-                    continue
-                source = str(element.get("source") or "")
-                if source not in existing:
-                    issues.append(
-                        LayoutValidationIssue(
-                            "warning",
-                            "Source absente ou renommée dans OBS.",
-                            str(module_name),
-                            source,
-                        )
-                    )
-        return issues
 
-    def diff_profile(self, profile: Mapping[str, Any]) -> list[LayoutDiffItem]:
-        # Never compare against ids cached before an OBS structural edit.
         self.reset_cache()
         desired = self._build_desired_elements(profile)
+        desired.extend(self._build_support_desired(profile))
+        for item in desired:
+            module = str(item.get("module") or "")
+            source = str(item.get("source") or "")
+            container = str(item.get("container") or "")
+            try:
+                current = self._get_current_item(container, source)
+            except OBSResourceNotFoundError:
+                issues.append(
+                    LayoutValidationIssue(
+                        "warning",
+                        f"Source absente ou renommée dans le conteneur '{container}'.",
+                        module,
+                        source,
+                    )
+                )
+                continue
+            except Exception as exc:
+                issues.append(
+                    LayoutValidationIssue(
+                        "error",
+                        f"Lecture OBS impossible dans '{container}' : {exc}",
+                        module,
+                        source,
+                    )
+                )
+                continue
+            if item.get("enabled") is not None and current.get("enabled") is None:
+                issues.append(
+                    LayoutValidationIssue(
+                        "warning",
+                        f"Visibilité actuelle inconnue dans '{container}'.",
+                        module,
+                        source,
+                    )
+                )
+
+        modules = profile.get("modules", {}) if isinstance(profile.get("modules"), Mapping) else {}
+        for module_name, raw in modules.items():
+            if isinstance(raw, Mapping) and bool(raw.get("locked", False)):
+                issues.append(
+                    LayoutValidationIssue(
+                        "info",
+                        "Module verrouillé dans SSR.",
+                        str(module_name),
+                    )
+                )
+        return issues
+
+    @staticmethod
+    def _diff_tolerance(key: str) -> float:
+        if key in {"scaleX", "scaleY"}:
+            return 0.005
+        if key == "rotation":
+            return 0.1
+        return 0.5
+
+    def diff_profile(self, profile: Mapping[str, Any]) -> list[LayoutDiffItem]:
+        self.reset_cache()
+        desired = self._build_desired_elements(profile)
+        desired.extend(self._build_support_desired(profile))
         diffs: list[LayoutDiffItem] = []
         for item in desired:
+            container = str(item["container"])
+            source = str(item["source"])
             try:
-                current = self._get_current_item(item["container"], item["source"])
-            except Exception:
-                diffs.append(LayoutDiffItem(item["module"], item["source"], ("source absente",)))
+                current = self._get_current_item(container, source)
+            except OBSResourceNotFoundError:
+                diffs.append(
+                    LayoutDiffItem(
+                        str(item.get("module") or ""),
+                        source,
+                        (f"source absente dans {container}",),
+                    )
+                )
+                continue
+            except Exception as exc:
+                diffs.append(
+                    LayoutDiffItem(
+                        str(item.get("module") or ""),
+                        source,
+                        (f"lecture OBS impossible dans {container}: {exc}",),
+                    )
+                )
                 continue
             changes: list[str] = []
             current_transform = current["transform"]
             desired_transform = self._resolve_runtime_transform(
                 item["transform"], current_transform
             )
-            for key in ("positionX", "positionY", "scaleX", "scaleY", "boundsWidth", "boundsHeight"):
+            for key in (
+                "positionX", "positionY", "scaleX", "scaleY", "rotation",
+                "boundsWidth", "boundsHeight",
+            ):
                 if key not in desired_transform:
                     continue
-                if abs(_float(current_transform.get(key)) - _float(desired_transform.get(key))) > 0.5:
-                    changes.append(f"{key} {_float(current_transform.get(key)):.1f}→{_float(desired_transform.get(key)):.1f}")
-            if item["enabled"] is not None and bool(current["enabled"]) != bool(item["enabled"]):
-                changes.append(f"visible {bool(current['enabled'])}→{bool(item['enabled'])}")
+                before = _float(current_transform.get(key))
+                after = _float(desired_transform.get(key))
+                if abs(before - after) > self._diff_tolerance(key):
+                    changes.append(f"{key} {before:.3f}→{after:.3f}")
+            if item["enabled"] is not None:
+                current_enabled = current.get("enabled")
+                if current_enabled is None:
+                    changes.append("visibilité actuelle inconnue")
+                elif bool(current_enabled) != bool(item["enabled"]):
+                    changes.append(
+                        f"visible {bool(current_enabled)}→{bool(item['enabled'])}"
+                    )
             if changes:
-                diffs.append(LayoutDiffItem(item["module"], item["source"], tuple(changes)))
+                diffs.append(
+                    LayoutDiffItem(
+                        str(item.get("module") or ""),
+                        source,
+                        tuple(changes),
+                    )
+                )
         return diffs
 
     def preview_profile(self, profile: Mapping[str, Any]) -> LayoutApplyResult:
@@ -1199,6 +1266,11 @@ class OBSLayoutManager:
                 current = self._get_current_item(item["container"], item["source"])
             except Exception:
                 continue
+            if current.get("enabled") is None and item.get("enabled") is not None:
+                raise RuntimeError(
+                    f"Visibilité inconnue pour {item['container']}/{item['source']}: "
+                    f"{current.get('enabled_error') or 'lecture OBS impossible'}"
+                )
             by_module.setdefault(item["module"], []).append(
                 CatalogElement(
                     scene=scene,
@@ -1282,6 +1354,11 @@ class OBSLayoutManager:
             item = copy.deepcopy(dict(raw))
             item["transform"] = dict(current["transform"])
             runtime_visibility = self.runtime_visibility_owned(container, source, raw)
+            if current.get("enabled") is None and not runtime_visibility:
+                raise RuntimeError(
+                    f"Visibilité inconnue pour {container}/{source}: "
+                    f"{current.get('enabled_error') or 'lecture OBS impossible'}"
+                )
             if runtime_visibility:
                 item["enabled"] = False
                 item["visibility_owner"] = "runtime"
@@ -1400,7 +1477,7 @@ class OBSLayoutManager:
                 "source": source,
                 "current_transform": current["transform"],
                 "target_transform": target_transform,
-                "current_enabled": bool(current["enabled"]),
+                "current_enabled": current.get("enabled"),
                 "target_enabled": item["enabled"],
             }
 
@@ -1515,7 +1592,17 @@ class OBSLayoutManager:
             current_enabled = prepared["current_enabled"]
             source = prepared["source"]
             container = prepared["container"]
-            if target_enabled is None or bool(target_enabled) == current_enabled:
+            if target_enabled is None:
+                continue
+            if current_enabled is None:
+                warnings.append(
+                    f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
+                )
+                fallback_visibility.add(index)
+                if bool(target_enabled):
+                    self._set_enabled(container, source, True)
+                continue
+            if bool(target_enabled) == current_enabled:
                 continue
 
             if fade:
@@ -1576,7 +1663,9 @@ class OBSLayoutManager:
                 self._set_transform(
                     prepared["container"], prepared["source"], prepared["target_transform"]
                 )
-            if target_enabled is None or bool(target_enabled) == current_enabled:
+            if target_enabled is None:
+                continue
+            if current_enabled is not None and bool(target_enabled) == current_enabled:
                 continue
 
             if index in fade_state:
@@ -1887,18 +1976,23 @@ class OBSLayoutManager:
             transform_response = self.client.send(
                 "GetSceneItemTransform", {"sceneName": container, "sceneItemId": item_id}
             )
+        enabled = None
+        enabled_error = ""
         try:
             enabled_response = self.client.send(
                 "GetSceneItemEnabled", {"sceneName": container, "sceneItemId": item_id}
             )
-            enabled = bool(enabled_response.get("sceneItemEnabled", True))
-        except Exception:
-            # Some lightweight test/fallback clients do not expose this request.
-            enabled = True
+            if "sceneItemEnabled" in enabled_response:
+                enabled = bool(enabled_response.get("sceneItemEnabled"))
+            else:
+                enabled_error = "GetSceneItemEnabled n'a pas renvoyé sceneItemEnabled"
+        except Exception as exc:
+            enabled_error = str(exc)
         return {
             "id": item_id,
             "transform": dict(transform_response.get("sceneItemTransform") or {}),
             "enabled": enabled,
+            "enabled_error": enabled_error,
         }
 
     def _set_transform(self, container: str, source: str, transform: Mapping[str, Any]) -> None:
