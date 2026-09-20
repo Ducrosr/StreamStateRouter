@@ -418,6 +418,63 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(manager.retry_pending_fade_cleanup(), ())
         self.assertEqual(manager.pending_fade_cleanup(), ())
 
+    def test_fade_cleanup_export_import_preserves_collection_context(self):
+        from stream_state_router.obs.client import OBSUnavailableError
+
+        class FadeCleanupClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.fail_cleanup = True
+
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.calls.append((request, dict(data or {})))
+                    if self.fail_cleanup:
+                        raise OBSUnavailableError("offline")
+                    return {}
+                return super().send(request, data)
+
+        client_a = FadeCleanupClient()
+        client_a.scene_collection = "Collection A"
+        manager_a = OBSLayoutManager(client_a)
+        self.assertTrue(manager_a._neutralize_fade_sources(["[Webcam] Avatar"]))
+        exported = manager_a.export_pending_fade_cleanup()
+
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["kind"], "layout_fade")
+        self.assertEqual(exported[0]["collection"], "Collection A")
+
+        client_b = FadeCleanupClient()
+        client_b.fail_cleanup = False
+        client_b.scene_collection = "Collection B"
+        manager_b = OBSLayoutManager(client_b)
+        self.assertEqual(manager_b.import_pending_fade_cleanup(exported), 1)
+        client_b.calls.clear()
+
+        self.assertEqual(manager_b.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager_b.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertFalse(
+            any(request == "SetSourceFilterSettings" for request, _ in client_b.calls)
+        )
+
+        client_b.scene_collection = "Collection A"
+        self.assertEqual(manager_b.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager_b.pending_fade_cleanup(), ())
+        self.assertTrue(
+            any(request == "SetSourceFilterSettings" for request, _ in client_b.calls)
+        )
+
+    def test_fade_transition_context_probe_overrides_stale_collection(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        manager._last_scene_collection = "Collection A"
+        client.scene_collection = "Collection B"
+
+        self.assertEqual(
+            manager._fade_collection_context(probe=True),
+            "Collection B",
+        )
+
     def test_move_transition_uses_one_global_timeline_for_all_sources(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
