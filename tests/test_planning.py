@@ -9,6 +9,7 @@ from stream_state_router.planning import (
     DesiredStateConflict,
     ObservedProperty,
     ObservedState,
+    ObservedStateConflict,
     ResourceKey,
 )
 
@@ -86,6 +87,28 @@ class DeclarativePlanningTests(unittest.TestCase):
                     DesiredProperty.create(key, True, provenance="B"),
                 ]
             )
+
+    def test_observed_state_rejects_conflicting_known_values(self):
+        key = ResourceKey.input_setting("Capture de jeu", "window")
+        with self.assertRaises(ObservedStateConflict):
+            ObservedState.build(
+                [
+                    ObservedProperty.known_value(key, "A"),
+                    ObservedProperty.known_value(key, "B"),
+                ]
+            )
+
+    def test_observed_state_prefers_known_value_over_unknown(self):
+        key = ResourceKey.filter_enabled("Avatar Dynamic", "Avatar FX")
+        state = ObservedState.build(
+            [
+                ObservedProperty.unknown(key, "not_read"),
+                ObservedProperty.known_value(key, False),
+            ]
+        )
+        observed = state.lookup(key)
+        self.assertTrue(observed.known)
+        self.assertFalse(observed.value)
 
     def test_converged_state_produces_empty_plan(self):
         key = ResourceKey.input_setting("Capture de jeu", "rgb10a2_space")
