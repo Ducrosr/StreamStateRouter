@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from ..planning import (
     DesiredAssignment,
+    DesiredOwnershipConflict,
     DesiredState,
     DesiredStateConflict,
     PropertyKey,
@@ -285,7 +286,7 @@ class OBSDispatcher:
     ) -> tuple[
         list[dict[str, object]],
         DesiredState | None,
-        DesiredStateConflict | None,
+        DesiredStateConflict | DesiredOwnershipConflict | None,
         list[dict[str, str]],
     ]:
         """Resolve legacy profiles and declarative intent in one read-only pass."""
@@ -403,7 +404,7 @@ class OBSDispatcher:
                 action_sets,
                 extra_assignments=extra_assignments,
             )
-        except DesiredStateConflict as exc:
+        except (DesiredStateConflict, DesiredOwnershipConflict) as exc:
             return domains, None, exc, declarative_blocks
         return domains, declarative, None, declarative_blocks
 
@@ -456,7 +457,11 @@ class OBSDispatcher:
         }
         if conflict is not None:
             result["declarative_error"] = {
-                "code": "property_conflict",
+                "code": (
+                    "property_ownership_conflict"
+                    if isinstance(conflict, DesiredOwnershipConflict)
+                    else "property_conflict"
+                ),
                 "message": conflict.diagnostic_message(),
                 "property": conflict.key.as_mapping(),
             }
