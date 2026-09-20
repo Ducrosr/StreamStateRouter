@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from stream_state_router.activation import (
+    ActivationCollectionChanged,
     ActivationEvent,
     ActivationVisibilityUncertain,
     OBSActivationController,
@@ -635,6 +636,40 @@ class OBSActivationControllerTests(unittest.TestCase):
                 in dispatcher.layout_manager.enabled_calls
             )
         )
+
+    def test_hide_batch_keeps_original_collection_after_first_switch_detection(self):
+        dispatcher = FakeDispatcher()
+        controller = OBSActivationController(dispatcher, {"egg": self.policy()})
+        controller.reconcile()
+        dispatcher.layout_manager.enabled_calls.clear()
+        dispatcher.client.scene_collection = "Collection B"
+
+        first = ActivationEvent(
+            "hide",
+            "egg",
+            10.0,
+            source="A",
+            container="[Module] EasterEgg",
+            collection="Collection A",
+        )
+        second = ActivationEvent(
+            "hide",
+            "egg",
+            10.0,
+            source="B",
+            container="[Module] EasterEgg",
+            collection="Collection A",
+        )
+
+        with self.assertRaises(ActivationCollectionChanged):
+            controller.apply_event(first)
+        with self.assertRaises(ActivationCollectionChanged):
+            controller.apply_event(second)
+
+        self.assertEqual(dispatcher.layout_manager.enabled_calls, [])
+        pending = controller.pending_hides("egg")
+        self.assertEqual(len(pending), 2)
+        self.assertEqual({item.collection for item in pending}, {"Collection A"})
 
     def test_pending_hide_from_old_collection_is_suspended_until_original_collection_returns(self):
         dispatcher = FakeDispatcher()
