@@ -83,6 +83,19 @@ class OBSClientManager:
             self.last_error = ""
             self._last_failure = 0.0
 
+    def close(self) -> None:
+        """Close the owned ReqClient after runtime cleanup has finished."""
+        with self._lock:
+            client = self._client
+            self._client = None
+            self._connected = False
+            self.last_error = ""
+        if client is None:
+            return
+        disconnect = getattr(client, "disconnect", None)
+        if callable(disconnect):
+            disconnect()
+
     def probe(self) -> tuple[bool, str]:
         try:
             response = self.send("GetVersion")
