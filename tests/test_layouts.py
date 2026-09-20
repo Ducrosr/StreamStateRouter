@@ -551,6 +551,7 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 8), 61)
         self.assertEqual(OBSLayoutManager._effective_transition_steps(2000, 8), 121)
         self.assertEqual(OBSLayoutManager._effective_transition_steps(3000, 8), 181)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(6000, 8), 361)
         self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 45), 61)
 
     def test_transition_timeline_skips_frames_that_are_already_stale(self):
