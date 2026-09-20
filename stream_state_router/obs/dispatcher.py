@@ -278,6 +278,78 @@ class OBSDispatcher:
             description["setting_keys"] = sorted(str(key) for key in settings) if isinstance(settings, Mapping) else []
         return description
 
+    @staticmethod
+    def _layout_visibility_owners(
+        profile: Mapping[str, Any],
+        *,
+        owner: str,
+    ) -> dict[PropertyKey, str]:
+        """Expose only LayoutProfile visibility ownership for conflict checks.
+
+        Geometry remains opaque and delegated to OBSLayoutManager. This helper
+        does not calculate transforms or create executable visibility actions.
+        """
+
+        claims: dict[PropertyKey, str] = {}
+        scene = str(profile.get("scene") or "").strip()
+        modules = profile.get("modules")
+        if isinstance(modules, Mapping):
+            for raw_module in modules.values():
+                if (
+                    not isinstance(raw_module, Mapping)
+                    or not bool(raw_module.get("managed", True))
+                    or bool(raw_module.get("locked", False))
+                ):
+                    continue
+                elements = raw_module.get("elements")
+                if not isinstance(elements, list):
+                    continue
+                for element in elements:
+                    if (
+                        not isinstance(element, Mapping)
+                        or not bool(element.get("included", True))
+                        or bool(element.get("locked", False))
+                        or not bool(element.get("follow_visibility", True))
+                        or str(element.get("visibility_owner") or "").casefold()
+                        == "runtime"
+                    ):
+                        continue
+                    source = str(element.get("source") or "").strip()
+                    container = str(
+                        element.get("container")
+                        or raw_module.get("container")
+                        or scene
+                    ).strip()
+                    if not source or not container:
+                        continue
+                    claims[
+                        PropertyKey.scene_item_visibility(
+                            collection="",
+                            container=container,
+                            source=source,
+                        )
+                    ] = owner
+
+        support = profile.get("support_items")
+        if isinstance(support, list):
+            for item in support:
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("visibility_owner") or "").casefold() == "runtime":
+                    continue
+                source = str(item.get("source") or "").strip()
+                container = str(item.get("container") or "").strip()
+                if not source or not container:
+                    continue
+                claims[
+                    PropertyKey.scene_item_visibility(
+                        collection="",
+                        container=container,
+                        source=source,
+                    )
+                ] = owner
+        return claims
+
     def _resolve_state_plan(
         self,
         state: StreamState,
@@ -294,6 +366,7 @@ class OBSDispatcher:
         domains: list[dict[str, object]] = []
         action_sets: list[tuple[str, tuple[OBSAction, ...]]] = []
         extra_assignments: list[DesiredAssignment] = []
+        reserved_owners: dict[PropertyKey, str] = {}
         declarative_blocks: list[dict[str, str]] = []
 
         for domain in STATE_DOMAINS:
@@ -360,6 +433,12 @@ class OBSDispatcher:
                     }
                 ]
                 row["extends"] = str(profile.get("extends") or "")
+                reserved_owners.update(
+                    self._layout_visibility_owners(
+                        profile,
+                        owner=f"{domain}:{desired}",
+                    )
+                )
                 extra_assignments.append(
                     DesiredAssignment.create(
                         PropertyKey.layout_profile(
@@ -403,6 +482,7 @@ class OBSDispatcher:
             declarative = desired_state_from_action_sets(
                 action_sets,
                 extra_assignments=extra_assignments,
+                reserved_owners=reserved_owners,
             )
         except (DesiredStateConflict, DesiredOwnershipConflict) as exc:
             return domains, None, exc, declarative_blocks
