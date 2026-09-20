@@ -1,5 +1,11 @@
 # Historique
 
+## 2.0.15 — reconnexion OBS silencieuse et statut de démarrage
+
+- Les erreurs transitoires produites par `obsws-python` lors d'un OBS absent, en démarrage ou en reconnexion ne polluent plus la console avec des tracebacks répétés ; SSR conserve son propre statut synthétique et son journal rotatif.
+- La réponse OBS 207 (« OBS is not ready ») est affichée comme un état d'initialisation transitoire plutôt que comme une erreur brute.
+- Le titre de la fenêtre utilise désormais `stream_state_router.__version__` au lieu d'une chaîne figée, évitant les décalages de version dans l'UI.
+
 ## 2.0.14 — feuille de route d'architecture Astra
 
 - **A2 — IDs OBS frais** : les actions classiques de visibilité résolvent désormais le `sceneItemId` à chaque mutation au lieu de conserver un cache durable susceptible de cibler un autre item après une modification structurelle d'OBS.
