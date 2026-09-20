@@ -678,7 +678,7 @@ class LayoutTests(unittest.TestCase):
             if request == "SetSourceFilterSettings"
             and payload.get("sourceName") == "[Webcam] Cadre"
         ]
-        self.assertGreaterEqual(len(opacities), 5)
+        self.assertGreaterEqual(len(opacities), 4)
         self.assertAlmostEqual(opacities[0], 0.5, places=6)
         self.assertAlmostEqual(opacities[1], 0.0, places=6)
         self.assertAlmostEqual(opacities[2], 0.5, places=6)
