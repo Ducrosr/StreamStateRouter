@@ -102,7 +102,16 @@ class OBSActivationController:
         self._last_collection_probe = 0.0
         self._scene_collection: str | None = None
         self._pending_hides: dict[tuple[str, str, str, str, str], PendingHide] = {}
+        self._cooperative_yield = None
         self._sync_visibility_owners()
+
+    def set_cooperative_yield(self, callback) -> None:
+        self._cooperative_yield = callback
+
+    def _yield_runtime(self) -> None:
+        callback = self._cooperative_yield
+        if callback is not None:
+            callback()
 
     def configure(self, policies: Mapping[str, TriggerPolicyConfig]) -> None:
         self._policies = dict(policies)
@@ -367,6 +376,7 @@ class OBSActivationController:
         structured in _pending_hides and keep their policies blocked.
         """
         warnings: list[str] = []
+        self._yield_runtime()
         try:
             collection = self._current_scene_collection()
         except Exception as exc:
@@ -385,6 +395,7 @@ class OBSActivationController:
         seen: set[tuple[str, str, str, str]] = set()
         for policy_name, policy in self._policies.items():
             for target in policy.targets:
+                self._yield_runtime()
                 key = (
                     policy_name,
                     target.container,
@@ -422,6 +433,7 @@ class OBSActivationController:
         if not due or not bool(getattr(self.client, "connected", False)):
             return ()
 
+        self._yield_runtime()
         try:
             current = self._current_scene_collection()
         except Exception:
@@ -443,6 +455,7 @@ class OBSActivationController:
             # replay, obligations belonging to another collection.
             if pending.collection != current or timestamp < pending.next_retry_at:
                 continue
+            self._yield_runtime()
             status, error = self._mutate_visibility(pending.target, False)
             if status in {"applied", "missing"}:
                 self._pending_hides.pop(key, None)
@@ -470,6 +483,7 @@ class OBSActivationController:
         ):
             return False
         self._last_collection_probe = now
+        self._yield_runtime()
         try:
             current = self._current_scene_collection()
         except Exception:
