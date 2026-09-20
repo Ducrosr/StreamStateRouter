@@ -1922,15 +1922,54 @@ class OBSLayoutManager:
     def _effective_transition_steps(duration_ms: int, configured_steps: int) -> int:
         """Return a smooth but bounded number of animation frames.
 
-        Historical profiles store 8 steps, which is only about 8 FPS for a
-        one-second transition and is visibly jerky. Treat the stored value as
-        a minimum quality hint and target about 30 FPS, capped at 60 frames.
+        Historical profiles store 8 steps, which is visibly jerky. Treat the
+        stored value as a minimum quality hint and target the OBS render-friendly
+        cadence of about 60 FPS. The UI caps duration at 3 seconds, so 181
+        timeline points bounds the amount of WebSocket work.
         """
         configured = max(1, min(60, int(configured_steps or 1)))
         if duration_ms <= 0:
             return configured
-        cadence = int(math.ceil((float(duration_ms) / 1000.0) * 30.0)) + 1
-        return max(configured, min(60, cadence))
+        cadence = int(math.ceil((float(duration_ms) / 1000.0) * 60.0)) + 1
+        return max(configured, min(181, cadence))
+
+    def _transition_progress(self, duration_ms: int, steps: int) -> Iterable[float]:
+        """Yield wall-clock driven animation progress while dropping stale frames.
+
+        A synchronous OBS request can occasionally take longer than one render
+        interval. Replaying every missed frame afterwards creates visible bursts
+        and pauses. Instead, jump directly to the newest frame that should have
+        been visible at the current time while always emitting the exact final
+        state.
+        """
+        if duration_ms <= 0 or steps <= 1:
+            yield 1.0
+            return
+
+        total_seconds = max(0.000001, duration_ms / 1000.0)
+        intervals = max(1, steps - 1)
+        frame_seconds = total_seconds / intervals
+        started = time.monotonic()
+        frame = 1
+        last_progress = 0.0
+
+        while frame <= intervals:
+            deadline = started + frame_seconds * frame
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                self._cooperative_sleep(remaining)
+
+            elapsed = max(0.0, time.monotonic() - started)
+            due_frame = min(
+                intervals,
+                max(frame, int(elapsed / frame_seconds)),
+            )
+            scheduled_progress = due_frame / intervals
+            elapsed_progress = min(1.0, elapsed / total_seconds)
+            progress = min(1.0, max(last_progress, scheduled_progress, elapsed_progress))
+            yield progress
+            last_progress = progress
+            frame = due_frame + 1
 
     def _animate_opacity_batch(
         self,
@@ -1945,15 +1984,7 @@ class OBSLayoutManager:
             for source, (_start, end) in states.items():
                 self._set_source_opacity(source, end)
             return
-        total_seconds = max(0.0, duration_ms / 1000.0)
-        started = time.monotonic()
-        for frame in range(steps):
-            if frame > 0:
-                deadline = started + total_seconds * (frame / (steps - 1))
-                remaining = deadline - time.monotonic()
-                if remaining > 0:
-                    self._cooperative_sleep(remaining)
-            t = frame / (steps - 1)
+        for t in self._transition_progress(duration_ms, steps):
             for source, (start, end) in states.items():
                 self._yield_runtime()
                 self._set_source_opacity(source, start + (end - start) * t)
@@ -2138,15 +2169,7 @@ class OBSLayoutManager:
                 self._set_enabled(container, source, True)
 
         try:
-            total_seconds = max(0.0, duration_ms / 1000.0)
-            started = time.monotonic()
-            for frame in range(1, steps + 1):
-                if frame > 1 and steps > 1:
-                    deadline = started + total_seconds * ((frame - 1) / (steps - 1))
-                    remaining = deadline - time.monotonic()
-                    if remaining > 0:
-                        self._cooperative_sleep(remaining)
-                t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
+            for t in self._transition_progress(duration_ms, steps):
                 for index, prepared in enumerate(prepared_items):
                     self._yield_runtime()
                     if move and prepared["transform_changed"]:
