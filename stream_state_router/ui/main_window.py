@@ -786,10 +786,23 @@ class MainWindow(QMainWindow):
                 blocked = list(event.payload.get("blocked_domains") or [])
                 pending = list(event.payload.get("pending_domains") or [])
                 details = failed or blocked or pending
-                suffix = f" — {', '.join(str(item) for item in details)}" if details else ""
+                detail_rows = event.payload.get("domain_details") or []
+                precise = ""
+                if isinstance(detail_rows, list):
+                    for row in detail_rows:
+                        if not isinstance(row, dict):
+                            continue
+                        if str(row.get("status") or "") in {"failed", "missing", "partial", "blocked"}:
+                            message = str(row.get("message") or "").strip()
+                            if message:
+                                precise = f" — {row.get('domain', '')}: {message}"
+                                break
+                suffix = precise or (
+                    f" — {', '.join(str(item) for item in details)}" if details else ""
+                )
                 self.statusBar().showMessage(
                     f"OBS connecté mais application incomplète{suffix}",
-                    8000,
+                    10000,
                 )
             self._update_obs_status()
             return
