@@ -2187,6 +2187,7 @@ class MainWindow(QMainWindow):
                 "applied": self._applied_revision,
             },
             "routing": service.routing_status() if service else {},
+            "obs_catalog": service.catalog_summary() if service else {},
         }
 
     def _api_request_status(self, request_id: str) -> dict | None:
@@ -2208,6 +2209,11 @@ class MainWindow(QMainWindow):
             return {"paused": False}
         if action == "reapply":
             request_id = self._service.request_force_reapply()
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "catalog.sync":
+            request_id = self._service.request_catalog_sync(
+                include_settings=bool(payload.get("include_settings", False))
+            )
             return {"request_id": request_id, "status": "accepted"}
         if action == "override":
             state = StreamState.from_mapping(payload.get("state") if isinstance(payload.get("state"), dict) else {})
