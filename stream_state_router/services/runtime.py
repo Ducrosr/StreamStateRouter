@@ -79,6 +79,7 @@ class RoutingDecisionStatus:
     blocked_domains: tuple[str, ...]
     failed_domains: tuple[str, ...]
     pending_domains: tuple[str, ...]
+    domain_details: tuple[dict[str, str], ...]
     duration_ms: float
     obs_requests: int
     success: bool
@@ -96,6 +97,7 @@ class RoutingDecisionStatus:
             "blocked_domains": list(self.blocked_domains),
             "failed_domains": list(self.failed_domains),
             "pending_domains": list(self.pending_domains),
+            "domain_details": [dict(item) for item in self.domain_details],
             "duration_ms": round(float(self.duration_ms), 3),
             "obs_requests": int(self.obs_requests),
             "success": bool(self.success),
@@ -677,6 +679,16 @@ class RoutingService:
             blocked_domains=tuple(dict.fromkeys(blocked)),
             failed_domains=tuple(dict.fromkeys(failed)),
             pending_domains=tuple(dict.fromkeys(pending)),
+            domain_details=tuple(
+                {
+                    "domain": str(getattr(item, "domain", "")),
+                    "status": str(getattr(item, "status", "")),
+                    "desired_profile": str(getattr(item, "desired_profile", "")),
+                    "applied_profile": str(getattr(item, "applied_profile", "")),
+                    "message": str(getattr(item, "message", "")),
+                }
+                for item in statuses
+            ),
             duration_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
             obs_requests=max(0, self._obs_request_count() - obs_requests_before),
             success=success,
@@ -1473,6 +1485,7 @@ class RoutingService:
                 blocked_domains=(),
                 failed_domains=(),
                 pending_domains=pending_domains,
+                domain_details=(),
                 duration_ms=0.0,
                 obs_requests=0,
                 success=False,
