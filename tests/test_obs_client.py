@@ -47,7 +47,33 @@ class _TransportFailReqClient:
         raise TimeoutError("timed out")
 
 
+class _ClosableReqClient:
+    def __init__(self, **_kwargs):
+        self.disconnected = False
+
+    def send(self, request, data=None, raw=False):
+        return {"obsVersion": "32.2.2"}
+
+    def disconnect(self):
+        self.disconnected = True
+
+
 class OBSClientManagerTests(unittest.TestCase):
+    def test_close_disconnects_owned_req_client_and_marks_manager_disconnected(self):
+        fake_obs = SimpleNamespace(ReqClient=_ClosableReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True))
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            client = manager._client
+            self.assertTrue(manager.connected)
+
+            manager.close()
+
+        self.assertTrue(client.disconnected)
+        self.assertIsNone(manager._client)
+        self.assertFalse(manager.connected)
+
     def test_request_error_keeps_connection_alive_and_does_not_start_backoff(self):
         _FakeReqClient.instances = 0
         fake_obs = SimpleNamespace(ReqClient=_FakeReqClient)
