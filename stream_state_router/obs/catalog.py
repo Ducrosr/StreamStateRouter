@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 
 class OBSReadClient(Protocol):
@@ -169,8 +169,19 @@ class OBSResourceCatalogReader:
     never mutates OBS, and never scans on the foreground-routing tick.
     """
 
-    def __init__(self, client: OBSReadClient):
+    def __init__(
+        self,
+        client: OBSReadClient,
+        *,
+        cooperative_yield: Callable[[], None] | None = None,
+    ):
         self.client = client
+        self._cooperative_yield = cooperative_yield
+
+    def _send(self, request: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._cooperative_yield is not None:
+            self._cooperative_yield()
+        return self._send(request, data)
 
     def sync(self, *, include_settings: bool = False) -> OBSResourceCatalog:
         before = self._request_count()
@@ -230,7 +241,7 @@ class OBSResourceCatalogReader:
 
     def _scene_collection(self, state: _CatalogBuildState) -> str:
         try:
-            response = self.client.send("GetSceneCollectionList")
+            response = self._send("GetSceneCollectionList")
         except Exception as exc:
             state.warnings.append(f"Scene Collection non lisible : {exc}")
             return ""
@@ -238,7 +249,7 @@ class OBSResourceCatalogReader:
 
     def _scenes(self, state: _CatalogBuildState) -> tuple[list[OBSSceneRef], str]:
         try:
-            response = self.client.send("GetSceneList")
+            response = self._send("GetSceneList")
         except Exception as exc:
             state.warnings.append(f"Liste des scènes non lisible : {exc}")
             return [], ""
@@ -260,7 +271,7 @@ class OBSResourceCatalogReader:
         out: list[OBSSceneItemRef] = []
         for scene in scenes:
             try:
-                response = self.client.send("GetSceneItemList", {"sceneName": scene.name})
+                response = self._send("GetSceneItemList", {"sceneName": scene.name})
             except Exception as exc:
                 state.warnings.append(f"Scène '{scene.name}' non lisible : {exc}")
                 continue
@@ -333,7 +344,7 @@ class OBSResourceCatalogReader:
             children = state.group_cache.get(source_name)
             if children is None:
                 try:
-                    response = self.client.send(
+                    response = self._send(
                         "GetGroupSceneItemList",
                         {"sceneName": source_name},
                     )
@@ -366,7 +377,7 @@ class OBSResourceCatalogReader:
         include_settings: bool,
     ) -> list[OBSInputRef]:
         try:
-            response = self.client.send("GetInputList")
+            response = self._send("GetInputList")
         except Exception as exc:
             state.warnings.append(f"Liste des inputs non lisible : {exc}")
             return []
@@ -380,7 +391,7 @@ class OBSResourceCatalogReader:
             settings: Mapping[str, object] | None = None
             if include_settings:
                 try:
-                    details = self.client.send("GetInputSettings", {"inputName": name})
+                    details = self._send("GetInputSettings", {"inputName": name})
                     raw_settings = details.get("inputSettings")
                     if isinstance(raw_settings, Mapping):
                         settings = dict(raw_settings)
@@ -417,7 +428,7 @@ class OBSResourceCatalogReader:
         out: list[OBSFilterRef] = []
         for source_name in sorted(source_names, key=str.casefold):
             try:
-                response = self.client.send(
+                response = self._send(
                     "GetSourceFilterList",
                     {"sourceName": source_name},
                 )
@@ -436,7 +447,7 @@ class OBSResourceCatalogReader:
                     settings = dict(raw_settings)
                 if include_settings and settings is None:
                     try:
-                        details = self.client.send(
+                        details = self._send(
                             "GetSourceFilter",
                             {"sourceName": source_name, "filterName": name},
                         )
@@ -461,7 +472,7 @@ class OBSResourceCatalogReader:
 
     def _transitions(self, state: _CatalogBuildState) -> list[OBSTransitionRef]:
         try:
-            response = self.client.send("GetSceneTransitionList")
+            response = self._send("GetSceneTransitionList")
         except Exception as exc:
             state.warnings.append(f"Transitions non lisibles : {exc}")
             return []
@@ -476,7 +487,7 @@ class OBSResourceCatalogReader:
 
     def _video_settings(self, state: _CatalogBuildState) -> tuple[int, int]:
         try:
-            response = self.client.send("GetVideoSettings")
+            response = self._send("GetVideoSettings")
         except Exception as exc:
             state.warnings.append(f"Canvas OBS non lisible : {exc}")
             return 0, 0
