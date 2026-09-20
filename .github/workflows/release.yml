@@ -70,6 +70,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed: $LASTEXITCODE" }
           $Path = ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe"
           if (-not (Test-Path $Path)) { throw "Expected installer missing: $Path" }
+      - name: Record build provenance
+        shell: pwsh
+        run: |
+          $Manifest = [ordered]@{
+            version = "${{ steps.version.outputs.version }}"
+            commit = "${{ github.sha }}"
+            tag = "${{ github.ref_name }}"
+            python = (python --version 2>&1).ToString().Trim()
+            pyinstaller = (pyinstaller --version 2>&1).ToString().Trim()
+            node = (node --version 2>&1).ToString().Trim()
+            npm = (npm --version 2>&1).ToString().Trim()
+            runner_os = "${{ runner.os }}"
+            runner_arch = "${{ runner.arch }}"
+          }
+          $Manifest | ConvertTo-Json | Set-Content -Encoding UTF8 .\release\build-manifest.json
+
       - name: Verify release artifacts
         shell: pwsh
         run: |
@@ -89,4 +105,5 @@ jobs:
             release/Stream-State-Router-v${{ steps.version.outputs.version }}-portable.zip
             release/Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe
             streamdeck-plugin/*.streamDeckPlugin
+            release/build-manifest.json
           generate_release_notes: true

@@ -73,5 +73,21 @@ if ($Iscc) {
     Write-Host "Inno Setup absent : portable créé, installateur ignoré." -ForegroundColor Yellow
 }
 
+$Commit = (& git rev-parse HEAD 2>$null).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $Commit) { $Commit = "unknown" }
+$PythonVersion = (& $Python --version 2>&1).ToString().Trim()
+$PyInstallerVersion = (& .\.venv\Scripts\pyinstaller.exe --version 2>&1).ToString().Trim()
+$NodeVersion = if (Get-Command node -ErrorAction SilentlyContinue) { (& node --version 2>&1).ToString().Trim() } else { "not-installed" }
+$NpmVersion = if (Get-Command npm -ErrorAction SilentlyContinue) { (& npm --version 2>&1).ToString().Trim() } else { "not-installed" }
+$Manifest = [ordered]@{
+    version = $Version
+    commit = $Commit
+    python = $PythonVersion
+    pyinstaller = $PyInstallerVersion
+    node = $NodeVersion
+    npm = $NpmVersion
+}
+$Manifest | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $Release "build-manifest.json")
+
 Write-Host "Build terminé : $Portable" -ForegroundColor Green
 Write-Host "Artefacts : $Release" -ForegroundColor Green
