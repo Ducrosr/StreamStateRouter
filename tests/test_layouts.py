@@ -211,6 +211,66 @@ class LayoutTests(unittest.TestCase):
         self.assertIn(20, avatar_reads)
         self.assertNotEqual(avatar_reads[0], 2)
 
+    def test_fade_opacity_recovery_is_bounded_on_missing_filter(self):
+        class MissingOnceClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.settings_attempts = 0
+
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.settings_attempts += 1
+                    if self.settings_attempts == 1:
+                        from stream_state_router.obs.client import OBSResourceNotFoundError
+                        raise OBSResourceNotFoundError(request, "missing filter")
+                    self.calls.append((request, dict(data or {})))
+                    return {}
+                if request == "GetSourceFilterList":
+                    self.calls.append((request, dict(data or {})))
+                    return {"filters": []}
+                if request == "CreateSourceFilter":
+                    self.calls.append((request, dict(data or {})))
+                    return {}
+                return super().send(request, data)
+
+        client = MissingOnceClient()
+        manager = OBSLayoutManager(client)
+
+        manager._set_source_opacity("[Webcam] Avatar", 0.5)
+
+        self.assertEqual(client.settings_attempts, 2)
+        self.assertEqual(
+            [request for request, _payload in client.calls if request == "CreateSourceFilter"],
+            ["CreateSourceFilter"],
+        )
+
+    def test_fade_persistent_settings_error_does_not_recurse(self):
+        class PersistentFailureClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.settings_attempts = 0
+
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.settings_attempts += 1
+                    from stream_state_router.obs.client import OBSResourceNotFoundError
+                    raise OBSResourceNotFoundError(request, "missing filter")
+                if request == "GetSourceFilterList":
+                    self.calls.append((request, dict(data or {})))
+                    return {"filters": []}
+                if request == "CreateSourceFilter":
+                    self.calls.append((request, dict(data or {})))
+                    return {}
+                return super().send(request, data)
+
+        client = PersistentFailureClient()
+        manager = OBSLayoutManager(client)
+
+        with self.assertRaises(Exception):
+            manager._set_source_opacity("[Webcam] Avatar", 0.5)
+
+        self.assertEqual(client.settings_attempts, 2)
+
     def test_move_transition_uses_one_global_timeline_for_all_sources(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)

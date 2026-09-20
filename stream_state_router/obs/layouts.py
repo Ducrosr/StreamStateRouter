@@ -1785,6 +1785,11 @@ class OBSLayoutManager:
                 time.sleep(delay)
 
     def _ensure_fade_filter(self, source: str, opacity: float) -> None:
+        """Ensure the helper filter exists without recursively setting it.
+
+        Filter creation is a bounded recovery path. Transport/protocol errors
+        are not interpreted as absence and therefore propagate unchanged.
+        """
         response = self.client.send("GetSourceFilterList", {"sourceName": source})
         filters = response.get("filters", []) or []
         found = any(
@@ -1798,29 +1803,32 @@ class OBSLayoutManager:
                     "sourceName": source,
                     "filterName": SSR_FADE_FILTER,
                     "filterKind": SSR_FADE_FILTER_KIND,
-                    "filterSettings": {"opacity": float(opacity)},
+                    "filterSettings": {
+                        "opacity": max(0.0, min(1.0, float(opacity)))
+                    },
                 },
             )
-        else:
-            self.client.send(
-                "SetSourceFilterEnabled",
-                {"sourceName": source, "filterName": SSR_FADE_FILTER, "filterEnabled": True},
-            )
-            self._set_source_opacity(source, opacity)
+            return
+        self.client.send(
+            "SetSourceFilterEnabled",
+            {"sourceName": source, "filterName": SSR_FADE_FILTER, "filterEnabled": True},
+        )
 
     def _set_source_opacity(self, source: str, opacity: float) -> None:
+        payload = {
+            "sourceName": source,
+            "filterName": SSR_FADE_FILTER,
+            "filterSettings": {"opacity": max(0.0, min(1.0, float(opacity)))},
+            "overlay": True,
+        }
         try:
-            self.client.send(
-                "SetSourceFilterSettings",
-                {
-                    "sourceName": source,
-                    "filterName": SSR_FADE_FILTER,
-                    "filterSettings": {"opacity": max(0.0, min(1.0, float(opacity)))},
-                    "overlay": True,
-                },
-            )
-        except Exception:
+            self.client.send("SetSourceFilterSettings", payload)
+            return
+        except OBSResourceNotFoundError:
+            # Confirmed absence is the only error that may create/re-enable the
+            # helper filter. Retry the settings write once, never recursively.
             self._ensure_fade_filter(source, opacity)
+        self.client.send("SetSourceFilterSettings", payload)
 
     def _animate_opacity(self, source: str, start: float, end: float, duration_ms: int, steps: int) -> None:
         self._ensure_fade_filter(source, start)
