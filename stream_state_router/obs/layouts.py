@@ -1931,7 +1931,7 @@ class OBSLayoutManager:
         if duration_ms <= 0:
             return configured
         cadence = int(math.ceil((float(duration_ms) / 1000.0) * 60.0)) + 1
-        return max(configured, min(181, cadence))
+        return max(configured, min(361, cadence))
 
     def _transition_progress(self, duration_ms: int, steps: int) -> Iterable[float]:
         """Yield wall-clock driven animation progress while dropping stale frames.
@@ -2180,7 +2180,10 @@ class OBSLayoutManager:
         # Opacity is intentionally half the geometry cadence. A source-level
         # filter write is an additional synchronous WebSocket round trip and
         # sending it at 60 Hz noticeably harms transform smoothness.
-        opacity_points = max(2, min(91, int(math.ceil(total_duration_ms / 1000.0 * 30.0)) + 1))
+        opacity_points = max(
+            2,
+            min(181, int(math.ceil(total_duration_ms / 1000.0 * 30.0)) + 1),
+        )
         opacity_interval = 1.0 / max(1, opacity_points - 1)
         next_opacity_progress = opacity_interval
         previous_t = 0.0
