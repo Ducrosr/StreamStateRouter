@@ -247,12 +247,15 @@ class OBSResourceCatalogTests(unittest.TestCase):
         client = FakeClient()
         checkpoints = []
 
+        class ShutdownRequested(BaseException):
+            pass
+
         def checkpoint():
             checkpoints.append(client.request_count)
             if len(checkpoints) == 3:
-                raise RuntimeError("shutdown requested")
+                raise ShutdownRequested("shutdown requested")
 
-        with self.assertRaisesRegex(RuntimeError, "shutdown requested"):
+        with self.assertRaises(ShutdownRequested):
             OBSResourceCatalogReader(
                 client,
                 cooperative_yield=checkpoint,
