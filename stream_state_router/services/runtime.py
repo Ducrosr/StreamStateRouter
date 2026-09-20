@@ -128,6 +128,10 @@ class RuntimeShutdownResult:
     dispatch_quiescent: bool
     cleanup_complete: bool
     pending_cleanup: tuple[dict[str, object], ...] = ()
+    elapsed_ms: float = 0.0
+    pending_commands: int = 0
+    shutdown_phase: str = ""
+    active_operation: str = ""
 
     @property
     def success(self) -> bool:
@@ -135,6 +139,17 @@ class RuntimeShutdownResult:
 
     def __bool__(self) -> bool:
         return self.success
+
+    def diagnostic_summary(self) -> str:
+        return (
+            f"routing_thread={'stopped' if self.worker_stopped else 'alive'}; "
+            f"obs_dispatch={'quiescent' if self.dispatch_quiescent else 'active'}; "
+            f"activation_cleanup={'complete' if self.cleanup_complete else f'pending({len(self.pending_cleanup)})'}; "
+            f"pending_commands={self.pending_commands}; "
+            f"phase={self.shutdown_phase or 'unknown'}; "
+            f"active_operation={self.active_operation or 'none'}; "
+            f"elapsed_ms={self.elapsed_ms:.1f}"
+        )
 
 
 class RoutingService:
@@ -198,6 +213,8 @@ class RoutingService:
         self._runtime_operational = False
         self._stopping = False
         self._shutdown_complete = threading.Event()
+        self._shutdown_phase = "idle"
+        self._active_operation = ""
         self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
         self._command_status: dict[str, dict[str, object]] = {}
         self._simulation_executor = ThreadPoolExecutor(
@@ -230,6 +247,8 @@ class RoutingService:
             self._stop.clear()
             self._shutdown_complete.clear()
             self._stopping = False
+            self._shutdown_phase = "running"
+            self._active_operation = ""
             self._runtime_operational = True
             self._accept_activation_commands = True
             self._accept_obs_commands = True
@@ -244,9 +263,39 @@ class RoutingService:
         controller = self.activation_controller
         if controller is None:
             return ()
-        return controller.export_pending_hides()
+        exporter = getattr(controller, "export_pending_hides", None)
+        if not callable(exporter):
+            return ()
+        return tuple(exporter())
+
+    def _build_shutdown_result(
+        self,
+        *,
+        worker_stopped: bool,
+        dispatch_quiescent: bool,
+        pending_cleanup: tuple[dict[str, object], ...],
+        started_at: float,
+    ) -> RuntimeShutdownResult:
+        with self._lock:
+            phase = self._shutdown_phase
+            active_operation = self._active_operation
+        result = RuntimeShutdownResult(
+            worker_stopped=worker_stopped,
+            dispatch_quiescent=dispatch_quiescent,
+            cleanup_complete=not pending_cleanup,
+            pending_cleanup=pending_cleanup,
+            elapsed_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+            pending_commands=max(0, self._runtime_commands.qsize()),
+            shutdown_phase=phase,
+            active_operation=active_operation,
+        )
+        self._shutdown_result = result
+        log = self.logger.info if result else self.logger.error
+        log("runtime_stop: %s", result.diagnostic_summary())
+        return result
 
     def stop(self, timeout: float = 5.0) -> RuntimeShutdownResult:
+        started_at = time.monotonic()
         thread = self._thread
         if thread is None or not thread.is_alive():
             with self._lock:
@@ -254,15 +303,15 @@ class RoutingService:
                 self._accept_obs_commands = False
                 self._runtime_operational = False
                 self._stopping = True
+                self._shutdown_phase = "already_stopped"
             quiescent = self._wait_for_dispatch_quiescence(timeout)
             pending = self.pending_cleanup_snapshot()
-            self._shutdown_result = RuntimeShutdownResult(
-                True,
-                quiescent,
-                not pending,
-                pending,
+            return self._build_shutdown_result(
+                worker_stopped=True,
+                dispatch_quiescent=quiescent,
+                pending_cleanup=pending,
+                started_at=started_at,
             )
-            return self._shutdown_result
 
         with self._lock:
             if not self._stopping:
@@ -270,6 +319,7 @@ class RoutingService:
                 self._accept_obs_commands = False
                 self._runtime_operational = False
                 self._stopping = True
+                self._shutdown_phase = "requested"
                 self._dispatch_generation += 1
                 self._pending_dispatch = None
                 self._command_generation += 1
@@ -291,13 +341,12 @@ class RoutingService:
                 timeout,
             )
             pending = self.pending_cleanup_snapshot()
-            self._shutdown_result = RuntimeShutdownResult(
-                False,
-                False,
-                not pending,
-                pending,
+            return self._build_shutdown_result(
+                worker_stopped=False,
+                dispatch_quiescent=False,
+                pending_cleanup=pending,
+                started_at=started_at,
             )
-            return self._shutdown_result
 
         remaining = max(0.0, deadline - time.monotonic())
         quiescent = self._wait_for_dispatch_quiescence(remaining)
@@ -307,13 +356,12 @@ class RoutingService:
                 "refusing replacement runtime"
             )
         pending = self.pending_cleanup_snapshot()
-        self._shutdown_result = RuntimeShutdownResult(
-            True,
-            quiescent,
-            not pending,
-            pending,
+        return self._build_shutdown_result(
+            worker_stopped=True,
+            dispatch_quiescent=quiescent,
+            pending_cleanup=pending,
+            started_at=started_at,
         )
-        return self._shutdown_result
 
     def pause(self, paused: bool = True) -> None:
         with self._lock:
@@ -778,6 +826,8 @@ class RoutingService:
                 self._runtime_operational = False
                 self._accept_activation_commands = False
                 self._accept_obs_commands = False
+                self._shutdown_phase = "stopped"
+                self._active_operation = ""
             self._shutdown_complete.set()
             self.logger.info("Routing service stopped")
 
@@ -1091,7 +1141,7 @@ class RoutingService:
             return False, f"évaluation impossible : {exc}"
 
     def _drain_runtime_commands(self, *, allow_obs: bool = True) -> bool:
-        deferred: list[_OBSCommand] = []
+        deferred: list[_ActivationCommand | _OBSCommand] = []
         should_stop = False
         while True:
             try:
@@ -1124,6 +1174,14 @@ class RoutingService:
                 continue
 
             if command.action == "shutdown":
+                if not allow_obs:
+                    # A cooperative checkpoint may run while a layout command
+                    # owns _dispatch_lock. Defer shutdown until that command has
+                    # unwound so cleanup never re-enters OBS from inside an OBS
+                    # mutation.
+                    deferred.append(command)
+                    should_stop = True
+                    break
                 self._perform_activation_shutdown()
                 should_stop = True
                 break
@@ -1147,6 +1205,8 @@ class RoutingService:
             raise RuntimeError("Runtime arrêté pendant une opération OBS")
 
     def _execute_obs_command(self, command: _OBSCommand) -> None:
+        with self._lock:
+            self._active_operation = command.action
         try:
             with self._dispatch_lock:
                 if command.action == "reapply":
@@ -1211,6 +1271,10 @@ class RoutingService:
         except Exception as exc:
             self.logger.error("OBS command failed [%s]: %s", command.action, exc)
             self._emit_obs_result(command, success=False, error=str(exc))
+        finally:
+            with self._lock:
+                if self._active_operation == command.action:
+                    self._active_operation = ""
 
     def _emit_obs_result(
         self,
@@ -1448,8 +1512,56 @@ class RoutingService:
 
     def _perform_activation_shutdown(self) -> None:
         self._record_activation_diagnostic("*", "arrêt", "nettoyage runtime en cours")
-        self._reconcile_activation("arrêt du service")
+        scheduler = self.activation_scheduler
         controller = self.activation_controller
+
+        # Full activation reconciliation is deliberately reserved for
+        # OBS connect/reconnect. It hides every configured target and therefore
+        # performs O(targets) synchronous OBS mutations. During an orderly stop
+        # the scheduler already knows which targets are actually visible, while
+        # uncertain visibility is tracked in controller.pending_hides().
+        with self._lock:
+            self._shutdown_phase = "activation_reset"
+        hide_events: list[ActivationEvent] = []
+        if scheduler is not None:
+            try:
+                hide_events = [
+                    event
+                    for event in scheduler.reset_all()
+                    if getattr(event, "kind", "") == "hide"
+                ]
+            except Exception as exc:
+                self.logger.warning("Activation scheduler reset failed during shutdown: %s", exc)
+                self._record_activation_diagnostic(
+                    "*",
+                    "warning",
+                    f"réinitialisation scheduler impossible : {exc}",
+                )
+            with self._lock:
+                self._activation_eligibility_cache.clear()
+                self._activation_cleanup_cache.clear()
+
+        if controller is not None:
+            for event in hide_events:
+                with self._lock:
+                    self._shutdown_phase = (
+                        f"activation_hide:{getattr(event, 'policy', '*')}/"
+                        f"{getattr(event, 'source', '')}"
+                    )
+                try:
+                    controller.apply_event(event)
+                except Exception as exc:
+                    # OBSActivationController records uncertain hide results in
+                    # pending_hides, which are transferred to the next runtime.
+                    self.logger.warning("Activation hide during shutdown failed: %s", exc)
+                    self._record_activation_diagnostic(
+                        getattr(event, "policy", "*"),
+                        "nettoyage",
+                        f"masquage de sortie non acquitté : {exc}",
+                    )
+
+        with self._lock:
+            self._shutdown_phase = "activation_pending_cleanup"
         deadline = time.monotonic() + 1.5
         while (
             controller is not None
@@ -1475,11 +1587,15 @@ class RoutingService:
                     success=False,
                 )
             )
+        with self._lock:
+            self._shutdown_phase = "simulation_shutdown"
         try:
             self._simulation_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
         self._stop.set()
+        with self._lock:
+            self._shutdown_phase = "stop_signalled"
 
     def _apply_change(self, change: StateChange) -> None:
         self.logger.info(
