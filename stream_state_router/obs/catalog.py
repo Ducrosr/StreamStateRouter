@@ -158,6 +158,7 @@ class OBSResourceCatalog:
             ],
             "transitions": [item.as_mapping() for item in self.transitions],
             "warnings": list(self.warnings),
+            "complete": not self.warnings,
             "requests_used": self.requests_used,
         }
 
@@ -172,6 +173,7 @@ class OBSResourceCatalog:
             "filter_count": len(self.filters),
             "transition_count": len(self.transitions),
             "warnings": list(self.warnings),
+            "complete": not self.warnings,
             "requests_used": self.requests_used,
         }
 
