@@ -272,6 +272,24 @@ class DeclarativePlanningTests(unittest.TestCase):
         self.assertEqual(plan.operations, ())
         self.assertEqual(plan.diagnostics[0].code, "invalid_desired_value")
 
+    def test_non_json_setting_target_is_blocked_without_signature_crash(self):
+        key = PropertyKey.input_setting(
+            collection="Main",
+            input_name="Capture",
+            setting="unsupported",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, {1, 2}, provenance="test")]
+        )
+
+        signature = desired.target_signature()
+        plan = build_execution_plan(desired, ObservedState.empty())
+
+        self.assertEqual(len(signature), 64)
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.operations, ())
+        self.assertEqual(plan.diagnostics[0].code, "invalid_desired_value")
+
     def test_non_finite_volume_target_is_blocked(self):
         key = PropertyKey.input_volume_db(
             collection="Main",
