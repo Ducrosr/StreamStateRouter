@@ -219,7 +219,7 @@ Chaque LayoutProfile peut utiliser :
 - `fade` ;
 - `move_fade`.
 
-La durée est configurable. Le déplacement interpole les transforms. Le fondu utilise temporairement un filtre OBS `[SSR] Layout Fade`, remis à 100 % à la fin.
+La durée est configurable. Le déplacement interpole les transforms sur une timeline fluide pilotée par l'horloge. Le fondu utilise temporairement un filtre OBS `[SSR] Layout Fade`, remis à 100 % à la fin. En mode `move_fade`, un élément visible avant et après la transition se déplace continûment pendant un cycle d'opacité `100 % → 0 % → 100 %` ; `duration_ms` correspond à chaque demi-cycle, donc 1000 ms produit environ 2 s au total.
 
 > Le filtre de fondu est un filtre **au niveau de la source OBS**. Si une même source est réutilisée simultanément dans plusieurs scènes, son opacité peut donc être affectée brièvement pendant la transition. Utilisez `instant` ou `move` si ce comportement n'est pas souhaité.
 
