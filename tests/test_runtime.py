@@ -95,10 +95,30 @@ class CommandDispatcher(FakeDispatcher):
     def __init__(self):
         super().__init__()
         self.profile_threads = []
+        self.layout_threads = []
 
     def execute_profile(self, domain, profile_name):
         self.profile_threads.append((domain, profile_name, threading.current_thread().name))
         return DispatchResult(1, 0, (domain,))
+
+    def execute_layout_profile(self, profile_name, preview=False):
+        self.layout_threads.append(
+            (profile_name, bool(preview), threading.current_thread().name)
+        )
+        return SimpleNamespace(warnings=(), missing_sources=())
+
+
+class BlockingLayoutDispatcher(CommandDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.layout_entered = threading.Event()
+        self.release_layout = threading.Event()
+
+    def execute_layout_profile(self, profile_name, preview=False):
+        self.layout_entered.set()
+        if not self.release_layout.wait(2.0):
+            raise RuntimeError("layout barrier timed out")
+        return super().execute_layout_profile(profile_name, preview=preview)
 
 
 class BlockingDispatcher(FakeDispatcher):
@@ -164,6 +184,9 @@ class FakeActivationController:
         self.reconcile_calls += 1
         return ()
 
+    def export_pending_hides(self):
+        return ()
+
     def pending_hides(self, _policy_name=None):
         return ()
 
@@ -187,6 +210,17 @@ class FakeActivationController:
     def apply_event(self, event):
         self.thread_names.append(threading.current_thread().name)
         self.events.append(event)
+
+
+class SlowReconcileController(FakeActivationController):
+    def __init__(self, delay=0.4):
+        super().__init__()
+        self.delay = delay
+
+    def reconcile(self):
+        self.reconcile_calls += 1
+        time.sleep(self.delay)
+        return ()
 
 
 class CleanupBlockingController(FakeActivationController):
@@ -313,6 +347,116 @@ class RuntimeTests(unittest.TestCase):
             )
         finally:
             self.assertTrue(service.stop())
+
+    def test_completed_layout_apply_stops_before_replacement_runtime_starts(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine_a = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher_a = CommandDispatcher()
+        service_a = RoutingService(
+            engine_a,
+            dispatcher_a,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service_a.on_event = collector.callback
+        service_a.start()
+        service_b = None
+        try:
+            request_id = service_a.request_layout("apply", "Test A")
+            command_result = collector.wait(request_id)
+            self.assertTrue(command_result.success, command_result.error)
+            self.assertEqual(
+                dispatcher_a.layout_threads,
+                [("Test A", False, "SSR-Router")],
+            )
+
+            shutdown = service_a.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertIsNotNone(service_a._thread)
+            self.assertFalse(service_a._thread.is_alive())
+
+            engine_b = StateRouterEngine(RuleSet([]), debounce_ms=0)
+            service_b = RoutingService(
+                engine_b,
+                CommandDispatcher(),
+                poll_ms=20,
+                provider=FakeProvider(app),
+            )
+            # Runtime B is started only after A has proved fully stopped.
+            service_b.start()
+            self.assertTrue(service_b._thread.is_alive())
+            self.assertFalse(service_a._thread.is_alive())
+        finally:
+            service_a.stop()
+            if service_b is not None:
+                self.assertTrue(service_b.stop())
+
+    def test_stop_waits_for_inflight_layout_command_then_stops_cleanly(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = BlockingLayoutDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        stopped = {}
+        try:
+            request_id = service.request_layout("apply", "Test A")
+            self.assertTrue(dispatcher.layout_entered.wait(1.0))
+
+            def stop_service():
+                stopped["value"] = service.stop(timeout=1.0)
+
+            stopper = threading.Thread(target=stop_service)
+            stopper.start()
+            time.sleep(0.05)
+            self.assertTrue(stopper.is_alive())
+
+            # Non-cooperative OBS work already in flight is allowed to finish;
+            # the replacement runtime remains forbidden until it does.
+            dispatcher.release_layout.set()
+            stopper.join(1.0)
+            self.assertFalse(stopper.is_alive())
+            self.assertTrue(stopped["value"], stopped["value"].diagnostic_summary())
+            self.assertFalse(service._thread.is_alive())
+
+            command_result = collector.wait(request_id)
+            self.assertTrue(command_result.success, command_result.error)
+        finally:
+            dispatcher.release_layout.set()
+            service.stop()
+
+    def test_shutdown_does_not_run_full_activation_reconcile(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        controller = SlowReconcileController(delay=0.4)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service.start()
+        try:
+            # The old shutdown path called controller.reconcile() here. That
+            # operation can hide every configured target with synchronous OBS
+            # requests and could outlive the whole stop budget.
+            shutdown = service.stop(timeout=0.2)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertEqual(controller.reconcile_calls, 0)
+            self.assertFalse(service._thread.is_alive())
+        finally:
+            service.stop()
 
     def test_delayed_dispatch_uses_runtime_deadline_not_timer_thread(self):
         app = ForegroundApp(1, 1, "game.exe")
