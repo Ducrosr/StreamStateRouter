@@ -17,11 +17,21 @@ STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
 
 
 @dataclass(frozen=True, slots=True)
+class DomainDispatchStatus:
+    domain: str
+    desired_profile: str
+    applied_profile: str
+    status: str
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class DispatchResult:
     executed: int
     skipped: int
     changed_domains: tuple[str, ...]
     warnings: tuple[str, ...] = ()
+    domain_statuses: tuple[DomainDispatchStatus, ...] = ()
 
 
 class OBSDispatcher:
@@ -44,7 +54,8 @@ class OBSDispatcher:
         }
         self._layout_manager = OBSLayoutManager(client)
         self._last_state: StreamState | None = None
-        self._scene_item_cache: dict[tuple[str, str], int] = {}
+        self._desired_state: StreamState | None = None
+        self._applied_profiles: dict[str, str] = {}
         self._context_cache: tuple[float, dict[str, Any]] | None = None
 
     @property
@@ -57,7 +68,8 @@ class OBSDispatcher:
     ) -> None:
         self._profiles = {domain: dict(values) for domain, values in profiles.items()}
         self._last_state = None
-        self._scene_item_cache.clear()
+        self._desired_state = None
+        self._applied_profiles.clear()
         self._layout_manager.reset_cache()
         self._context_cache = None
 
@@ -65,13 +77,38 @@ class OBSDispatcher:
         self._layout_profiles = {str(name): dict(value) for name, value in profiles.items()}
         self._layout_manager.reset_cache()
         self._last_state = None
+        self._desired_state = None
+        self._applied_profiles.clear()
         self._context_cache = None
 
     def reset(self) -> None:
         self._last_state = None
-        self._scene_item_cache.clear()
+        self._desired_state = None
+        self._applied_profiles.clear()
         self._layout_manager.reset_cache()
         self._context_cache = None
+
+    def invalidate_applied_state(self) -> None:
+        """Forget OBS-side convergence knowledge after reconnect/session changes."""
+        self._applied_profiles.clear()
+        self._context_cache = None
+
+    @property
+    def desired_state(self) -> StreamState | None:
+        return self._desired_state
+
+    def applied_profiles(self) -> dict[str, str]:
+        return dict(self._applied_profiles)
+
+    def pending_domains(self, state: StreamState | None = None) -> tuple[str, ...]:
+        wanted = state or self._desired_state
+        if wanted is None:
+            return ()
+        return tuple(
+            domain
+            for domain in STATE_DOMAINS
+            if self._applied_profiles.get(domain) != wanted.profile_name(domain)
+        )
 
     def obs_context(self) -> dict[str, Any]:
         """Return a small current OBS context for conditional rules/profiles.
@@ -108,10 +145,26 @@ class OBSDispatcher:
         self._context_cache = (now, dict(context))
         return context
 
-    def conditions_match(self, conditions: Mapping[str, Any] | None) -> bool:
+    def cached_obs_context(self) -> dict[str, Any]:
+        """Return the last OBS context snapshot without issuing any request."""
+        if self._context_cache is not None:
+            return dict(self._context_cache[1])
+        enabled = bool(getattr(getattr(self.client, "config", None), "enabled", False))
+        return {
+            "obs_enabled": enabled,
+            "streaming": None if enabled else False,
+            "recording": None if enabled else False,
+            "program_scene": "",
+            "snapshot_available": False,
+        }
+
+    @staticmethod
+    def conditions_match_context(
+        conditions: Mapping[str, Any] | None,
+        context: Mapping[str, Any],
+    ) -> bool:
         if not conditions:
             return True
-        context = self.obs_context()
         if "streaming" in conditions:
             wanted = bool(conditions.get("streaming"))
             if context.get("streaming") is None or bool(context.get("streaming")) != wanted:
@@ -127,8 +180,122 @@ class OBSDispatcher:
             return False
         return True
 
+    def conditions_match(self, conditions: Mapping[str, Any] | None) -> bool:
+        return self.conditions_match_context(conditions, self.obs_context())
+
+    @staticmethod
+    def _describe_action(action: OBSAction) -> dict[str, object]:
+        params = dict(action.params)
+        kind = action.type.strip().casefold()
+        description: dict[str, object] = {
+            "type": action.type,
+            "enabled": bool(action.enabled),
+        }
+        if kind == "set_program_scene":
+            description["target"] = str(params.get("scene") or "")
+        elif kind == "scene_item_enabled":
+            description["target"] = (
+                f"{params.get('scene', '')}/{params.get('source', '')}"
+            )
+            description["value"] = bool(params.get("enabled", True))
+        elif kind == "source_filter_enabled":
+            description["target"] = (
+                f"{params.get('source', '')}/{params.get('filter', '')}"
+            )
+            description["value"] = bool(params.get("enabled", True))
+        elif kind == "input_mute":
+            description["target"] = str(params.get("input") or "")
+            description["value"] = bool(params.get("muted", True))
+        elif kind == "input_volume_db":
+            description["target"] = str(params.get("input") or "")
+            description["value"] = params.get("volume_db", 0.0)
+        elif kind == "set_input_settings":
+            # Do not expose arbitrary settings content in diagnostics.
+            description["target"] = str(params.get("input") or "")
+            settings = params.get("settings")
+            description["setting_keys"] = sorted(str(key) for key in settings) if isinstance(settings, Mapping) else []
+        return description
+
+    def plan_state(
+        self,
+        state: StreamState,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> dict[str, object]:
+        """Describe what a dispatch would do without mutating OBS or dispatcher state."""
+        frozen_context = dict(context) if context is not None else self.cached_obs_context()
+        domains: list[dict[str, object]] = []
+        for domain in STATE_DOMAINS:
+            desired = state.profile_name(domain)
+            applied = self._applied_profiles.get(domain, "")
+            row: dict[str, object] = {
+                "domain": domain,
+                "desired_profile": desired,
+                "applied_profile": applied,
+                "needs_apply": applied != desired,
+                "status": "noop" if applied == desired else "planned",
+                "operations": [],
+            }
+            if domain == "layout":
+                if desired not in self._layout_profiles:
+                    row.update(status="missing", message="LayoutProfile introuvable")
+                    domains.append(row)
+                    continue
+                try:
+                    profile = resolve_layout_profile(desired, self._layout_profiles)
+                except Exception as exc:
+                    row.update(status="failed", message=str(exc))
+                    domains.append(row)
+                    continue
+                conditions = profile.get("conditions")
+                condition_match = not isinstance(conditions, Mapping) or self.conditions_match_context(
+                    conditions, frozen_context
+                )
+                row["condition_match"] = condition_match
+                if row["needs_apply"] and not condition_match:
+                    row.update(status="blocked", message="conditions OBS non satisfaites")
+                modules = profile.get("modules")
+                support = profile.get("support_items")
+                transition = profile.get("transition")
+                row["operations"] = [{
+                    "type": "layout",
+                    "scene": str(profile.get("scene") or ""),
+                    "modules": len(modules) if isinstance(modules, Mapping) else 0,
+                    "support_items": len(support) if isinstance(support, list) else 0,
+                    "transition": str(transition.get("mode") or "instant") if isinstance(transition, Mapping) else "instant",
+                }]
+                row["extends"] = str(profile.get("extends") or "")
+                domains.append(row)
+                continue
+
+            try:
+                profile = self._resolve_action_profile(domain, desired)
+            except Exception as exc:
+                row.update(status="failed", message=str(exc))
+                domains.append(row)
+                continue
+            if profile is None:
+                row.update(status="missing", message="Profil OBS introuvable")
+                domains.append(row)
+                continue
+            condition_match = self.conditions_match_context(profile.conditions, frozen_context)
+            row["condition_match"] = condition_match
+            if row["needs_apply"] and not condition_match:
+                row.update(status="blocked", message="conditions OBS non satisfaites")
+            row["operations"] = [self._describe_action(action) for action in profile.actions]
+            row["extends"] = profile.extends
+            domains.append(row)
+
+        return {
+            "state": state.as_variables(),
+            "context": frozen_context,
+            "domains": domains,
+        }
+
     def dispatch_change(self, change: StateChange) -> DispatchResult:
-        return self.dispatch_state(change.current, previous=change.previous)
+        # change.previous is the router's previous *decision*, not necessarily
+        # what OBS actually acknowledged. Always diff against applied state.
+        return self.dispatch_state(change.current)
 
     def dispatch_state(
         self,
@@ -137,35 +304,71 @@ class OBSDispatcher:
         previous: StreamState | None = None,
         force: bool = False,
     ) -> DispatchResult:
-        baseline = self._last_state if previous is None else previous
-        changed = []
-        for domain in STATE_DOMAINS:
-            if force or baseline is None or state.profile_name(domain) != baseline.profile_name(domain):
-                changed.append(domain)
+        del previous  # compatibility only: router history is not OBS applied state
+        self._desired_state = state
+        self._last_state = state
+        changed = [
+            domain
+            for domain in STATE_DOMAINS
+            if force or self._applied_profiles.get(domain) != state.profile_name(domain)
+        ]
 
         executed = 0
         skipped = 0
         warnings: list[str] = []
+        statuses: list[DomainDispatchStatus] = []
+
+        def status(domain: str, desired: str, value: str, message: str = "") -> None:
+            statuses.append(
+                DomainDispatchStatus(
+                    domain=domain,
+                    desired_profile=desired,
+                    applied_profile=self._applied_profiles.get(domain, ""),
+                    status=value,
+                    message=message,
+                )
+            )
+
         for domain in changed:
             profile_name = state.profile_name(domain)
             if domain == "layout":
                 if profile_name not in self._layout_profiles:
                     skipped += 1
+                    status(domain, profile_name, "missing", "LayoutProfile introuvable")
                     continue
                 try:
                     layout = resolve_layout_profile(profile_name, self._layout_profiles)
                 except Exception as exc:
                     skipped += 1
                     warnings.append(str(exc))
+                    status(domain, profile_name, "failed", str(exc))
                     continue
                 conditions = layout.get("conditions")
                 if isinstance(conditions, Mapping) and not self.conditions_match(conditions):
                     skipped += 1
+                    status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
                     continue
-                result = self._layout_manager.apply_profile(layout)
+                try:
+                    result = self._layout_manager.apply_profile(layout)
+                except Exception as exc:
+                    skipped += 1
+                    warnings.append(str(exc))
+                    status(domain, profile_name, "failed", str(exc))
+                    continue
                 executed += result.elements_applied
                 skipped += result.elements_skipped
                 warnings.extend(result.warnings)
+                if result.missing_sources or result.warnings:
+                    message = "; ".join(
+                        [
+                            *(f"source manquante: {name}" for name in result.missing_sources),
+                            *result.warnings,
+                        ]
+                    )
+                    status(domain, profile_name, "partial", message)
+                    continue
+                self._applied_profiles[domain] = profile_name
+                status(domain, profile_name, "applied")
                 continue
 
             try:
@@ -173,22 +376,46 @@ class OBSDispatcher:
             except Exception as exc:
                 skipped += 1
                 warnings.append(str(exc))
+                status(domain, profile_name, "failed", str(exc))
                 continue
             if profile is None:
                 skipped += 1
+                status(domain, profile_name, "missing", "Profil OBS introuvable")
                 continue
             if not self.conditions_match(profile.conditions):
                 skipped += len(profile.actions) or 1
+                status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
                 continue
+
+            domain_executed = 0
+            domain_skipped = 0
+            failed = ""
             for action in profile.actions:
                 if not action.enabled:
                     skipped += 1
+                    domain_skipped += 1
                     continue
-                self.execute_action(action)
+                try:
+                    self.execute_action(action)
+                except Exception as exc:
+                    failed = str(exc)
+                    warnings.append(f"{domain}/{profile_name}: {exc}")
+                    break
                 executed += 1
+                domain_executed += 1
+            if failed:
+                status(domain, profile_name, "failed", failed)
+                continue
+            self._applied_profiles[domain] = profile_name
+            status(domain, profile_name, "applied")
 
-        self._last_state = state
-        return DispatchResult(executed, skipped, tuple(changed), tuple(warnings))
+        return DispatchResult(
+            executed,
+            skipped,
+            tuple(changed),
+            tuple(warnings),
+            tuple(statuses),
+        )
 
     def execute_profile(self, domain: str, profile_name: str) -> DispatchResult:
         if domain not in ACTION_PROFILE_DOMAINS:
@@ -321,9 +548,9 @@ class OBSDispatcher:
         raise ValueError(f"Type d'action OBS inconnu : {action.type}")
 
     def _scene_item_id(self, scene: str, source: str) -> int:
-        key = (scene, source)
-        if key in self._scene_item_cache:
-            return self._scene_item_cache[key]
+        # sceneItemId is ephemeral OBS state. Resolve the logical
+        # (scene, source) identity for every visibility operation so an ID
+        # reused after an OBS scene edit can never target another item.
         response = self.client.send(
             "GetSceneItemId",
             {"sceneName": scene, "sourceName": source},
@@ -331,7 +558,6 @@ class OBSDispatcher:
         item_id = int(response.get("sceneItemId") or 0)
         if not item_id:
             raise RuntimeError(f"Source '{source}' introuvable dans la scène '{scene}'")
-        self._scene_item_cache[key] = item_id
         return item_id
 
     @staticmethod

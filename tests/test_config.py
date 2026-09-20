@@ -3,14 +3,20 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
+import copy
 
 from stream_state_router.services.config import (
     build_activation_policies,
     build_ruleset,
+    export_config,
     load_config,
     migrate_config,
+    save_config,
     validate_config,
+    config_revision,
+    release_runtime_visibility_ownership,
 )
 
 
@@ -133,6 +139,44 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(modules["[Global] Date"]["display_name"], "Date")
         self.assertEqual(len(modules["[Global] Date"]["elements"]), 1)
 
+
+    def test_shareable_export_redacts_secrets_and_is_valid(self):
+        data = self.sample()
+        data["obs"]["password"] = "obs-secret"
+        data["api"]["token"] = "api-secret"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(exported["obs"]["password"], "")
+        self.assertEqual(exported["api"]["token"], "")
+        self.assertEqual(validate_config(exported), [])
+
+    def test_backup_names_do_not_collide_and_retention_is_bounded(self):
+        data = self.sample()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "config.json"
+            backup_dir = root / "backups"
+            with patch("stream_state_router.services.config.backups_dir", return_value=backup_dir):
+                save_config(data, target, backup_limit=2)
+                for value in (51, 52, 53):
+                    data["router"]["poll_ms"] = value
+                    save_config(data, target, backup_limit=2)
+                backups = list(backup_dir.glob("config-*.json"))
+        self.assertLessEqual(len(backups), 2)
+        self.assertEqual(len({item.name for item in backups}), len(backups))
+
+    def test_config_revision_is_stable_and_changes_with_content(self):
+        data = self.sample()
+        first = config_revision(data)
+        second = config_revision(copy.deepcopy(data))
+        changed = copy.deepcopy(data)
+        changed["router"]["poll_ms"] += 1
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, config_revision(changed))
+        self.assertEqual(len(first), 12)
 
     def test_schema_v4_adds_activation_policies(self):
         data = self.sample()
@@ -294,6 +338,48 @@ class ConfigTests(unittest.TestCase):
 
         self.assertTrue(any("ancêtre/descendant" in error for error in errors))
 
+    def test_cross_policy_activation_target_ownership_is_rejected(self):
+        data = self.sample()
+        target = {"container": "Egg", "container_kind": "scene", "source": "Cloud"}
+        data["activation_policies"] = {
+            "One": {"type": "random", "targets": [dict(target)]},
+            "Two": {"type": "random", "targets": [dict(target)]},
+        }
+        errors = validate_config(data)
+        self.assertTrue(any("partage la cible" in error for error in errors), errors)
+
+    def test_runtime_visibility_marker_can_be_explicitly_released(self):
+        data = self.sample()
+        data["layout_profiles"]["Vanilla"] = {
+            "scene": "Gameplay",
+            "modules": {
+                "Egg": {
+                    "base_bounds": {"x": 0, "y": 0, "width": 100, "height": 100},
+                    "geometry": {"x": 0, "y": 0, "width": 100, "height": 100},
+                    "elements": [{
+                        "container": "Egg",
+                        "source": "Cloud",
+                        "transform": {},
+                        "visibility_owner": "runtime",
+                        "follow_visibility": False,
+                    }],
+                }
+            },
+            "support_items": [{
+                "container": "Egg",
+                "source": "Cloud",
+                "transform": {},
+                "visibility_owner": "runtime",
+            }],
+        }
+
+        changed = release_runtime_visibility_ownership(data, container="Egg", source="Cloud")
+
+        self.assertEqual(changed, 2)
+        element = data["layout_profiles"]["Vanilla"]["modules"]["Egg"]["elements"][0]
+        self.assertEqual(element["visibility_owner"], "")
+        self.assertTrue(element["follow_visibility"])
+
     def test_single_legacy_deep_target_remains_valid(self):
         data = self.sample()
         data["activation_policies"] = {
@@ -313,6 +399,61 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(validate_config(data), [])
 
+
+    def test_non_finite_layout_numbers_are_rejected(self):
+        for key, value in (("x", float("nan")), ("width", float("inf"))):
+            data = self.sample()
+            data["layout_profiles"]["Vanilla"] = {
+                "scene": "Gameplay",
+                "modules": {
+                    "Webcam": {
+                        "base_bounds": {"x": 0, "y": 0, "width": 100, "height": 100},
+                        "geometry": {"x": 0, "y": 0, "width": 100, "height": 100},
+                        "elements": [],
+                    }
+                },
+            }
+            data["layout_profiles"]["Vanilla"]["modules"]["Webcam"]["geometry"][key] = value
+            errors = validate_config(data)
+            self.assertTrue(any(f".geometry.{key}" in error for error in errors), errors)
+
+    def test_invalid_rule_regex_is_rejected(self):
+        data = self.sample()
+        data["rules"][1]["title_regex"] = "([unterminated"
+        errors = validate_config(data)
+        self.assertTrue(any("title_regex est invalide" in error for error in errors), errors)
+
+    def test_action_parameters_are_validated(self):
+        data = self.sample()
+        data["profiles"]["game"]["Game"]["actions"] = [
+            {"type": "scene_item_enabled", "params": {"scene": "", "source": "X", "enabled": "yes"}},
+            {"type": "input_volume_db", "params": {"input": "Music", "volume_db": float("nan")}},
+        ]
+        errors = validate_config(data)
+        self.assertTrue(any(".params.scene est requis" in error for error in errors), errors)
+        self.assertTrue(any(".params.enabled doit être booléen" in error for error in errors), errors)
+        self.assertTrue(any(".params.volume_db doit être un nombre fini" in error for error in errors), errors)
+
+    def test_non_finite_obs_and_transition_values_are_rejected(self):
+        data = self.sample()
+        data["obs"]["timeout_seconds"] = float("inf")
+        data["obs"]["reconnect_seconds"] = float("nan")
+        data["layout_profiles"]["Vanilla"]["transition"] = {
+            "mode": "move",
+            "duration_ms": float("inf"),
+            "steps": 0,
+        }
+        errors = validate_config(data)
+        self.assertTrue(any("obs.timeout_seconds" in error for error in errors), errors)
+        self.assertTrue(any("obs.reconnect_seconds" in error for error in errors), errors)
+        self.assertTrue(any("transition.duration_ms" in error for error in errors), errors)
+        self.assertTrue(any("transition.steps" in error for error in errors), errors)
+
+    def test_condition_types_are_rejected_when_not_boolean(self):
+        data = self.sample()
+        data["profiles"]["game"]["Game"]["conditions"] = {"streaming": "true"}
+        errors = validate_config(data)
+        self.assertTrue(any(".conditions.streaming doit être booléen" in error for error in errors), errors)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ class ActivationScheduler:
         self._policies: dict[str, TriggerPolicyConfig] = dict(policies or {})
         for name, policy in self._policies.items():
             self._validate_policy(name, policy)
+        self._validate_ownership(self._policies)
         self._states: dict[str, ActivationRuntimeState] = {
             name: ActivationRuntimeState() for name in self._policies
         }
@@ -60,6 +61,7 @@ class ActivationScheduler:
         candidate = dict(policies)
         for name, policy in candidate.items():
             self._validate_policy(name, policy)
+        self._validate_ownership(candidate)
         self._policies = candidate
         self._states = {name: ActivationRuntimeState() for name in self._policies}
 
@@ -92,11 +94,20 @@ class ActivationScheduler:
         roll = self._rng.random()
         triggered = roll < self._chance(policy)
         source = ""
+        identity = None
         if triggered:
             target = self._choose_target(policy, state)
             source = target.source if target is not None else ""
+            identity = target.identity if target is not None else None
             triggered = target is not None
-        return RollTestResult(policy_name, roll, self._chance(policy), triggered, source)
+        return RollTestResult(
+            policy_name,
+            roll,
+            self._chance(policy),
+            triggered,
+            source,
+            identity,
+        )
 
     def simulate(
         self,
@@ -111,7 +122,7 @@ class ActivationScheduler:
         sample_seed = int(seed)
         rng = random.Random(sample_seed)
         chance = self._chance(policy)
-        last_source = ""
+        last_identity: TriggerTargetIdentity | None = None
         hit_count = 0
         trigger_count = 0
         miss_count = 0
@@ -123,7 +134,7 @@ class ActivationScheduler:
                 miss_count += 1
                 continue
             hit_count += 1
-            target = self._choose_target_with_rng(policy, last_source, rng)
+            target = self._choose_target_with_rng(policy, last_identity, rng)
             if target is None:
                 blocked_count += 1
                 continue
@@ -134,7 +145,7 @@ class ActivationScheduler:
                 else target.source
             )
             counts[label] = counts.get(label, 0) + 1
-            last_source = target.source
+            last_identity = target.identity
 
         fingerprint = hashlib.sha256(
             json.dumps(
@@ -373,6 +384,7 @@ class ActivationScheduler:
         state.cooldown_until = None
         state.next_roll_at = None
         state.last_source = target.source
+        state.last_identity = target.identity
         state.last_trigger_at = now
         return [
             ActivationEvent(
@@ -472,12 +484,12 @@ class ActivationScheduler:
         policy: TriggerPolicyConfig,
         state: ActivationRuntimeState,
     ) -> TriggerTargetConfig | None:
-        return self._choose_target_with_rng(policy, state.last_source, self._rng)
+        return self._choose_target_with_rng(policy, state.last_identity, self._rng)
 
     @staticmethod
     def _choose_target_with_rng(
         policy: TriggerPolicyConfig,
-        last_source: str,
+        last_identity: TriggerTargetIdentity | None,
         rng: random.Random,
     ) -> TriggerTargetConfig | None:
         weighted: list[tuple[TriggerTargetConfig, float]] = []
@@ -494,9 +506,9 @@ class ActivationScheduler:
         if not weighted:
             return None
 
-        if policy.avoid_immediate_repeat and last_source and len(weighted) > 1:
+        if policy.avoid_immediate_repeat and last_identity is not None and len(weighted) > 1:
             alternatives = [
-                item for item in weighted if item[0].source != last_source
+                item for item in weighted if item[0].identity != last_identity
             ]
             if alternatives:
                 weighted = alternatives
@@ -515,6 +527,21 @@ class ActivationScheduler:
             if needle < cumulative:
                 return target
         return scaled[-1][0]
+
+    @staticmethod
+    def _validate_ownership(policies: Mapping[str, TriggerPolicyConfig]) -> None:
+        owners: dict[TriggerTargetIdentity, str] = {}
+        for policy_name, policy in policies.items():
+            for target in policy.targets:
+                identity = target.identity
+                previous = owners.get(identity)
+                if previous is not None and previous != policy_name:
+                    raise ValueError(
+                        "Cible d'activation possédée par plusieurs politiques : "
+                        f"{identity.container_kind}:{identity.container}/{identity.source} "
+                        f"({previous}, {policy_name})"
+                    )
+                owners[identity] = policy_name
 
     def _policy(self, policy_name: str) -> TriggerPolicyConfig:
         try:

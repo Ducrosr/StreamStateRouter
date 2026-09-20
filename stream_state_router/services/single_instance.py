@@ -2,6 +2,17 @@ from __future__ import annotations
 
 import ctypes
 import os
+from ctypes import wintypes
+
+
+ERROR_ALREADY_EXISTS = 183
+
+
+def _configure_kernel32(kernel32) -> None:
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
 
 
 class SingleInstanceGuard:
@@ -11,8 +22,12 @@ class SingleInstanceGuard:
         if os.name != "nt":
             return
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _configure_kernel32(kernel32)
         self._handle = kernel32.CreateMutexW(None, False, name)
-        self.already_running = ctypes.get_last_error() == 183
+        if not self._handle:
+            error = ctypes.get_last_error()
+            raise OSError(error, "CreateMutexW a échoué")
+        self.already_running = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
         self._kernel32 = kernel32
 
     def close(self) -> None:

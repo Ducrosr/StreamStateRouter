@@ -45,6 +45,14 @@ class LayoutDiffItem:
 
 
 @dataclass(frozen=True, slots=True)
+class LayoutCaptureResult:
+    profile: dict[str, Any]
+    complete: bool
+    warnings: tuple[str, ...] = ()
+    captured_modules: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class LayoutValidationIssue:
     level: str
     message: str
@@ -67,11 +75,26 @@ class CatalogElement:
     flags: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True, slots=True)
+class SceneTopologyItem:
+    scene: str
+    container: str
+    path: tuple[str, ...]
+    container_kind: str
+    source: str
+    source_type: str
+    flags: frozenset[str] = frozenset()
+
+
 @dataclass(slots=True)
 class LayoutSnapshot:
     profile: dict[str, Any]
     label: str = ""
     created_at: float = field(default_factory=time.time)
+    collection: str = ""
+    generation: int = 0
+    complete: bool = True
+    warnings: tuple[str, ...] = ()
 
 
 def parse_module_source(source_name: str) -> ModuleSourceName | None:
@@ -281,9 +304,141 @@ class OBSLayoutManager:
     def __init__(self, client: OBSClientManager):
         self.client = client
         self._scene_item_cache: dict[tuple[str, str], int] = {}
+        self._cooperative_yield = None
         self._runtime_visibility_owners: set[tuple[str, str]] = set()
         self._undo_stack: list[LayoutSnapshot] = []
         self._preview_snapshot: LayoutSnapshot | None = None
+        self._snapshot_generation = 0
+        self._last_discovery_warnings: list[str] = []
+        self._pending_fade_cleanup: set[str] = set()
+
+    def pending_fade_cleanup(self) -> tuple[str, ...]:
+        return tuple(sorted(self._pending_fade_cleanup, key=str.casefold))
+
+    def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
+        """Best-effort neutralization of helper fade filters left uncertain."""
+        warnings: list[str] = []
+        for source in tuple(self._pending_fade_cleanup):
+            try:
+                self._set_source_opacity(source, 1.0)
+            except Exception as exc:
+                warnings.append(f"{source}: neutralisation du fondu impossible ({exc})")
+                continue
+            self._pending_fade_cleanup.discard(source)
+        return tuple(warnings)
+
+    def _neutralize_fade_sources(self, sources: Iterable[str]) -> tuple[str, ...]:
+        warnings: list[str] = []
+        for source in {str(item) for item in sources if str(item)}:
+            try:
+                self._set_source_opacity(source, 1.0)
+            except Exception as exc:
+                self._pending_fade_cleanup.add(source)
+                warnings.append(f"{source}: opacité neutre non acquittée ({exc})")
+            else:
+                self._pending_fade_cleanup.discard(source)
+        return tuple(warnings)
+
+    def set_cooperative_yield(self, callback) -> None:
+        """Install a lightweight runtime checkpoint used during long transitions."""
+        self._cooperative_yield = callback
+
+    def _yield_runtime(self) -> None:
+        callback = self._cooperative_yield
+        if callback is not None:
+            callback()
+
+    def _cooperative_sleep(self, seconds: float) -> None:
+        remaining = max(0.0, float(seconds))
+        if remaining <= 0:
+            self._yield_runtime()
+            return
+        if self._cooperative_yield is None:
+            time.sleep(remaining)
+            return
+        deadline = time.monotonic() + remaining
+        while True:
+            self._yield_runtime()
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(0.02, left))
+
+    def invalidate_session(self) -> None:
+        """Invalidate transient restore points after an OBS reconnect/session reset."""
+        self._snapshot_generation += 1
+        self.reset_cache()
+
+    def _scene_collection_name(self) -> str:
+        response = self.client.send("GetSceneCollectionList")
+        return str(response.get("currentSceneCollectionName") or "").strip()
+
+    def _snapshot_target_count(self, profile: Mapping[str, Any]) -> int:
+        return len(self._build_desired_elements(profile)) + len(self._build_support_desired(profile))
+
+    @staticmethod
+    def _captured_snapshot_count(profile: Mapping[str, Any]) -> int:
+        count = 0
+        modules = profile.get("modules")
+        if isinstance(modules, Mapping):
+            for module in modules.values():
+                if not isinstance(module, Mapping):
+                    continue
+                elements = module.get("elements")
+                if isinstance(elements, list):
+                    count += sum(1 for item in elements if isinstance(item, Mapping))
+        support = profile.get("support_items")
+        if isinstance(support, list):
+            count += sum(1 for item in support if isinstance(item, Mapping))
+        return count
+
+    def _capture_snapshot(self, profile: Mapping[str, Any], label: str) -> LayoutSnapshot:
+        collection = ""
+        warnings: list[str] = []
+        try:
+            collection = self._scene_collection_name()
+        except Exception as exc:
+            warnings.append(f"Scene Collection non lisible : {exc}")
+        expected = self._snapshot_target_count(profile)
+        captured = self.snapshot_profile(profile)
+        actual = self._captured_snapshot_count(captured)
+        complete = bool(collection) and actual >= expected
+        if actual < expected:
+            warnings.append(f"Snapshot incomplet : {actual}/{expected} élément(s) capturé(s)")
+        return LayoutSnapshot(
+            captured,
+            label,
+            collection=collection,
+            generation=self._snapshot_generation,
+            complete=complete,
+            warnings=tuple(warnings),
+        )
+
+    def _snapshot_context_error(self, snapshot: LayoutSnapshot) -> str:
+        if snapshot.generation != self._snapshot_generation:
+            return "Snapshot issu d'une session OBS précédente ; restauration refusée."
+        try:
+            current = self._scene_collection_name()
+        except Exception as exc:
+            return f"Scene Collection non lisible ; restauration refusée : {exc}"
+        if snapshot.collection and current != snapshot.collection:
+            return (
+                f"Snapshot lié à la Scene Collection '{snapshot.collection}', "
+                f"collection active '{current}' ; restauration refusée."
+            )
+        if not snapshot.complete:
+            return "Snapshot incomplet ; restauration sûre impossible."
+        return ""
+
+    def _restore_snapshot(self, snapshot: LayoutSnapshot) -> LayoutApplyResult:
+        context_error = self._snapshot_context_error(snapshot)
+        if context_error:
+            return LayoutApplyResult(warnings=(context_error, *snapshot.warnings))
+        return self.apply_profile(
+            snapshot.profile,
+            record_undo=False,
+            transition_override={"mode": "instant", "duration_ms": 0},
+        )
 
     def set_runtime_visibility_owners(
         self,
@@ -395,10 +550,132 @@ class OBSLayoutManager:
                 current = ""
         return names, current
 
+    def scan_scene_topology(
+        self,
+        scene: str,
+        *,
+        recursive: bool = True,
+    ) -> tuple[SceneTopologyItem, ...]:
+        """Read scene/group membership without fetching any item transforms.
+
+        This is intentionally lightweight and is used for runtime eligibility
+        checks. Scene-item IDs are not retained after the scan.
+        """
+        scene = str(scene or "").strip()
+        if not scene:
+            return ()
+        self._last_discovery_warnings = []
+        out: list[SceneTopologyItem] = []
+        self._scan_topology_container(
+            root_scene=scene,
+            container=scene,
+            path=(scene,),
+            out=out,
+            recursive=recursive,
+            depth=0,
+            prefetched=None,
+            container_kind="scene",
+        )
+        return tuple(out)
+
+    def _scan_topology_container(
+        self,
+        *,
+        root_scene: str,
+        container: str,
+        path: tuple[str, ...],
+        out: list[SceneTopologyItem],
+        recursive: bool,
+        depth: int,
+        prefetched: list[Mapping[str, Any]] | None,
+        container_kind: str,
+    ) -> None:
+        if depth > 8:
+            return
+        if prefetched is None:
+            response = self.client.send("GetSceneItemList", {"sceneName": container})
+            items = response.get("sceneItems", []) or []
+        else:
+            items = prefetched
+
+        for raw in items:
+            if not isinstance(raw, Mapping):
+                continue
+            source = str(raw.get("sourceName") or "").strip()
+            if not source:
+                continue
+            is_group = bool(raw.get("isGroup", False))
+            source_type = str(raw.get("sourceType") or "")
+            input_kind = str(raw.get("inputKind") or "")
+            is_scene = (
+                not is_group
+                and (source_type == "OBS_SOURCE_TYPE_SCENE" or input_kind == "scene")
+            )
+            source_kind = "group" if is_group else ("scene" if is_scene else "input")
+            parsed = parse_module_source(source)
+            hard_locked = parsed is not None and "locked" in parsed.flags
+            if parsed is not None and not hard_locked:
+                out.append(
+                    SceneTopologyItem(
+                        scene=root_scene,
+                        container=container,
+                        path=path,
+                        container_kind=container_kind,
+                        source=source,
+                        source_type=source_kind,
+                        flags=parsed.flags,
+                    )
+                )
+            if hard_locked or not recursive:
+                continue
+            if is_group:
+                try:
+                    group = self.client.send(
+                        "GetGroupSceneItemList",
+                        {"sceneName": source},
+                    )
+                    children = [
+                        item
+                        for item in group.get("sceneItems", []) or []
+                        if isinstance(item, Mapping)
+                    ]
+                    self._scan_topology_container(
+                        root_scene=root_scene,
+                        container=source,
+                        path=(*path, source),
+                        out=out,
+                        recursive=True,
+                        depth=depth + 1,
+                        prefetched=children,
+                        container_kind="group",
+                    )
+                except Exception as exc:
+                    self._last_discovery_warnings.append(
+                        f"Groupe '{source}' non lisible depuis '{container}' : {exc}"
+                    )
+                continue
+            if is_scene:
+                try:
+                    self._scan_topology_container(
+                        root_scene=root_scene,
+                        container=source,
+                        path=(*path, source),
+                        out=out,
+                        recursive=True,
+                        depth=depth + 1,
+                        prefetched=None,
+                        container_kind="scene",
+                    )
+                except Exception as exc:
+                    self._last_discovery_warnings.append(
+                        f"Scène imbriquée '{source}' non lisible depuis '{container}' : {exc}"
+                    )
+
     def discover_scene(self, scene: str, *, recursive: bool = True) -> dict[str, list[CatalogElement]]:
         scene = str(scene or "").strip()
         if not scene:
             return {}
+        self._last_discovery_warnings = []
         # Scene-item ids are ephemeral. A structural edit in OBS can invalidate
         # or even reuse ids without producing an error for the old id. Discovery
         # must therefore always rebuild the cache from the current scene graph.
@@ -523,8 +800,10 @@ class OBSLayoutManager:
                         prefetched=children,
                         container_kind="group",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._last_discovery_warnings.append(
+                        f"Groupe '{source}' non lisible depuis '{container}' : {exc}"
+                    )
                 continue
 
             if is_scene:
@@ -539,8 +818,33 @@ class OBSLayoutManager:
                         prefetched=None,
                         container_kind="scene",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._last_discovery_warnings.append(
+                        f"Scène imbriquée '{source}' non lisible depuis '{container}' : {exc}"
+                    )
+
+    def capture_profile_result(
+        self,
+        scene: str,
+        *,
+        selected_sources: Iterable[str] | None = None,
+        extends: str = "",
+        transition: Mapping[str, Any] | None = None,
+    ) -> LayoutCaptureResult:
+        profile = self.capture_profile(
+            scene,
+            selected_sources=selected_sources,
+            extends=extends,
+            transition=transition,
+        )
+        modules = profile.get("modules") if isinstance(profile.get("modules"), Mapping) else {}
+        warnings = tuple(self._last_discovery_warnings)
+        return LayoutCaptureResult(
+            profile=profile,
+            complete=not warnings,
+            warnings=warnings,
+            captured_modules=len(modules),
+        )
 
     def capture_profile(
         self,
@@ -691,7 +995,10 @@ class OBSLayoutManager:
                 return
             try:
                 response = self.client.send("GetGroupSceneItemList", {"sceneName": group})
-            except Exception:
+            except Exception as exc:
+                self._last_discovery_warnings.append(
+                    f"Groupe de support '{group}' non lisible : {exc}"
+                )
                 return
             for raw in response.get("sceneItems", []) or []:
                 if not isinstance(raw, Mapping):
@@ -755,7 +1062,10 @@ class OBSLayoutManager:
             visited_scenes.add(scene_name)
             try:
                 response = self.client.send("GetSceneItemList", {"sceneName": scene_name})
-            except Exception:
+            except Exception as exc:
+                self._last_discovery_warnings.append(
+                    f"Scène de support '{scene_name}' non lisible : {exc}"
+                )
                 return
             for raw in response.get("sceneItems", []) or []:
                 if not isinstance(raw, Mapping):
@@ -951,79 +1261,159 @@ class OBSLayoutManager:
                         f"Canvas différent : profil {pw}×{ph}, OBS {cw}×{ch}. Les coordonnées normalisées seront utilisées.",
                     )
                 )
-        try:
-            catalog = self.discover_scene(scene)
-        except Exception as exc:
-            issues.append(LayoutValidationIssue("error", f"Impossible de lire la scène '{scene}' : {exc}"))
-            return issues
-        existing = {element.source for values in catalog.values() for element in values}
-        modules = profile.get("modules", {}) if isinstance(profile.get("modules"), Mapping) else {}
-        for module_name, raw in modules.items():
-            if not isinstance(raw, Mapping):
-                continue
-            if bool(raw.get("locked", False)):
-                issues.append(LayoutValidationIssue("info", "Module verrouillé dans SSR.", str(module_name)))
-            for element in raw.get("elements", []) if isinstance(raw.get("elements"), list) else []:
-                if not isinstance(element, Mapping) or not bool(element.get("included", True)):
-                    continue
-                source = str(element.get("source") or "")
-                if source not in existing:
-                    issues.append(
-                        LayoutValidationIssue(
-                            "warning",
-                            "Source absente ou renommée dans OBS.",
-                            str(module_name),
-                            source,
-                        )
-                    )
-        return issues
 
-    def diff_profile(self, profile: Mapping[str, Any]) -> list[LayoutDiffItem]:
-        # Never compare against ids cached before an OBS structural edit.
         self.reset_cache()
         desired = self._build_desired_elements(profile)
+        desired.extend(self._build_support_desired(profile))
+        for item in desired:
+            module = str(item.get("module") or "")
+            source = str(item.get("source") or "")
+            container = str(item.get("container") or "")
+            try:
+                current = self._get_current_item(container, source)
+            except OBSResourceNotFoundError:
+                issues.append(
+                    LayoutValidationIssue(
+                        "warning",
+                        f"Source absente ou renommée dans le conteneur '{container}'.",
+                        module,
+                        source,
+                    )
+                )
+                continue
+            except Exception as exc:
+                issues.append(
+                    LayoutValidationIssue(
+                        "error",
+                        f"Lecture OBS impossible dans '{container}' : {exc}",
+                        module,
+                        source,
+                    )
+                )
+                continue
+            if item.get("enabled") is not None and current.get("enabled") is None:
+                issues.append(
+                    LayoutValidationIssue(
+                        "warning",
+                        f"Visibilité actuelle inconnue dans '{container}'.",
+                        module,
+                        source,
+                    )
+                )
+
+        modules = profile.get("modules", {}) if isinstance(profile.get("modules"), Mapping) else {}
+        for module_name, raw in modules.items():
+            if isinstance(raw, Mapping) and bool(raw.get("locked", False)):
+                issues.append(
+                    LayoutValidationIssue(
+                        "info",
+                        "Module verrouillé dans SSR.",
+                        str(module_name),
+                    )
+                )
+        return issues
+
+    @staticmethod
+    def _diff_tolerance(key: str) -> float:
+        if key in {"scaleX", "scaleY"}:
+            return 0.005
+        if key == "rotation":
+            return 0.1
+        return 0.5
+
+    def diff_profile(self, profile: Mapping[str, Any]) -> list[LayoutDiffItem]:
+        self.reset_cache()
+        desired = self._build_desired_elements(profile)
+        desired.extend(self._build_support_desired(profile))
         diffs: list[LayoutDiffItem] = []
         for item in desired:
+            container = str(item["container"])
+            source = str(item["source"])
             try:
-                current = self._get_current_item(item["container"], item["source"])
-            except Exception:
-                diffs.append(LayoutDiffItem(item["module"], item["source"], ("source absente",)))
+                current = self._get_current_item(container, source)
+            except OBSResourceNotFoundError:
+                diffs.append(
+                    LayoutDiffItem(
+                        str(item.get("module") or ""),
+                        source,
+                        (f"source absente dans {container}",),
+                    )
+                )
+                continue
+            except Exception as exc:
+                diffs.append(
+                    LayoutDiffItem(
+                        str(item.get("module") or ""),
+                        source,
+                        (f"lecture OBS impossible dans {container}: {exc}",),
+                    )
+                )
                 continue
             changes: list[str] = []
             current_transform = current["transform"]
             desired_transform = self._resolve_runtime_transform(
                 item["transform"], current_transform
             )
-            for key in ("positionX", "positionY", "scaleX", "scaleY", "boundsWidth", "boundsHeight"):
+            for key in (
+                "positionX", "positionY", "scaleX", "scaleY", "rotation",
+                "boundsWidth", "boundsHeight",
+            ):
                 if key not in desired_transform:
                     continue
-                if abs(_float(current_transform.get(key)) - _float(desired_transform.get(key))) > 0.5:
-                    changes.append(f"{key} {_float(current_transform.get(key)):.1f}→{_float(desired_transform.get(key)):.1f}")
-            if item["enabled"] is not None and bool(current["enabled"]) != bool(item["enabled"]):
-                changes.append(f"visible {bool(current['enabled'])}→{bool(item['enabled'])}")
+                before = _float(current_transform.get(key))
+                after = _float(desired_transform.get(key))
+                if abs(before - after) > self._diff_tolerance(key):
+                    changes.append(f"{key} {before:.3f}→{after:.3f}")
+            if item["enabled"] is not None:
+                current_enabled = current.get("enabled")
+                if current_enabled is None:
+                    changes.append("visibilité actuelle inconnue")
+                elif bool(current_enabled) != bool(item["enabled"]):
+                    changes.append(
+                        f"visible {bool(current_enabled)}→{bool(item['enabled'])}"
+                    )
             if changes:
-                diffs.append(LayoutDiffItem(item["module"], item["source"], tuple(changes)))
+                diffs.append(
+                    LayoutDiffItem(
+                        str(item.get("module") or ""),
+                        source,
+                        tuple(changes),
+                    )
+                )
         return diffs
 
     def preview_profile(self, profile: Mapping[str, Any]) -> LayoutApplyResult:
         if self._preview_snapshot is not None:
-            self.cancel_preview()
-        snapshot = LayoutSnapshot(self.snapshot_profile(profile), "preview")
-        self._preview_snapshot = snapshot
-        return self.apply_profile(profile, record_undo=False)
+            cancelled = self.cancel_preview()
+            if cancelled.warnings or cancelled.missing_sources:
+                return cancelled
+        snapshot = self._capture_snapshot(profile, "preview")
+        if not snapshot.complete:
+            return LayoutApplyResult(warnings=(
+                "Aperçu refusé : impossible de garantir une restauration complète.",
+                *snapshot.warnings,
+            ))
+        result = self.apply_profile(profile, record_undo=False)
+        if result.elements_applied or not result.warnings:
+            self._preview_snapshot = snapshot
+        return result
 
     def cancel_preview(self) -> LayoutApplyResult:
         if self._preview_snapshot is None:
             return LayoutApplyResult()
         snapshot = self._preview_snapshot
-        self._preview_snapshot = None
-        return self.apply_profile(snapshot.profile, record_undo=False, transition_override={"mode": "instant", "duration_ms": 0})
+        result = self._restore_snapshot(snapshot)
+        if not result.warnings and not result.missing_sources:
+            self._preview_snapshot = None
+        return result
 
     def commit_preview(self) -> None:
         if self._preview_snapshot is not None:
-            self._undo_stack.append(self._preview_snapshot)
+            snapshot = self._preview_snapshot
+            if not self._snapshot_context_error(snapshot):
+                self._undo_stack.append(snapshot)
+                self._undo_stack = self._undo_stack[-20:]
             self._preview_snapshot = None
-            self._undo_stack = self._undo_stack[-20:]
 
     def snapshot_profile(self, profile: Mapping[str, Any]) -> dict[str, Any]:
         # Scene-item ids are only valid for the current OBS scene graph.
@@ -1036,6 +1426,11 @@ class OBSLayoutManager:
                 current = self._get_current_item(item["container"], item["source"])
             except Exception:
                 continue
+            if current.get("enabled") is None and item.get("enabled") is not None:
+                raise RuntimeError(
+                    f"Visibilité inconnue pour {item['container']}/{item['source']}: "
+                    f"{current.get('enabled_error') or 'lecture OBS impossible'}"
+                )
             by_module.setdefault(item["module"], []).append(
                 CatalogElement(
                     scene=scene,
@@ -1119,6 +1514,11 @@ class OBSLayoutManager:
             item = copy.deepcopy(dict(raw))
             item["transform"] = dict(current["transform"])
             runtime_visibility = self.runtime_visibility_owned(container, source, raw)
+            if current.get("enabled") is None and not runtime_visibility:
+                raise RuntimeError(
+                    f"Visibilité inconnue pour {container}/{source}: "
+                    f"{current.get('enabled_error') or 'lecture OBS impossible'}"
+                )
             if runtime_visibility:
                 item["enabled"] = False
                 item["visibility_owner"] = "runtime"
@@ -1140,8 +1540,26 @@ class OBSLayoutManager:
     def undo_last(self) -> LayoutApplyResult:
         if not self._undo_stack:
             return LayoutApplyResult(warnings=("Aucun état précédent à restaurer.",))
-        snapshot = self._undo_stack.pop()
-        return self.apply_profile(snapshot.profile, record_undo=False, transition_override={"mode": "instant", "duration_ms": 0})
+        snapshot = self._undo_stack[-1]
+        result = self._restore_snapshot(snapshot)
+        if not result.warnings and not result.missing_sources:
+            self._undo_stack.pop()
+        return result
+
+    def _transform_needs_update(
+        self,
+        current: Mapping[str, Any],
+        target: Mapping[str, Any],
+    ) -> bool:
+        for key, value in target.items():
+            if str(key).startswith("__ssr_"):
+                continue
+            if isinstance(value, (int, float)):
+                if abs(_float(current.get(key)) - _float(value)) > self._diff_tolerance(str(key)):
+                    return True
+            elif current.get(key) != value:
+                return True
+        return False
 
     def apply_profile(
         self,
@@ -1159,12 +1577,14 @@ class OBSLayoutManager:
         # an old numeric id for another source. Resolve every apply from a clean
         # cache by (container, source name).
         self.reset_cache()
+        undo_snapshot: LayoutSnapshot | None = None
         if record_undo:
             try:
-                self._undo_stack.append(LayoutSnapshot(self.snapshot_profile(profile), "apply"))
-                self._undo_stack = self._undo_stack[-20:]
+                candidate = self._capture_snapshot(profile, "apply")
+                if candidate.complete:
+                    undo_snapshot = candidate
             except Exception:
-                pass
+                undo_snapshot = None
 
         desired = self._build_desired_elements(profile)
         desired.extend(self._build_support_desired(profile))
@@ -1209,6 +1629,7 @@ class OBSLayoutManager:
 
         missing: list[str] = []
         warnings: list[str] = []
+        mutated_any = False
 
         def prepare_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
             nonlocal skipped
@@ -1226,18 +1647,30 @@ class OBSLayoutManager:
             target_transform = self._resolve_runtime_transform(
                 item["transform"], current["transform"]
             )
+            target_enabled = item["enabled"]
+            current_enabled = current.get("enabled")
             return {
                 "item": item,
                 "container": container,
                 "source": source,
                 "current_transform": current["transform"],
                 "target_transform": target_transform,
-                "current_enabled": bool(current["enabled"]),
-                "target_enabled": item["enabled"],
+                "transform_changed": self._transform_needs_update(
+                    current["transform"], target_transform
+                ),
+                "current_enabled": current_enabled,
+                "target_enabled": target_enabled,
+                "visibility_changed": (
+                    target_enabled is not None
+                    and (
+                        current_enabled is None
+                        or bool(target_enabled) != bool(current_enabled)
+                    )
+                ),
             }
 
         def apply_item_immediate(item: Mapping[str, Any]) -> None:
-            nonlocal applied
+            nonlocal applied, mutated_any
             prepared = prepare_item(item)
             if prepared is None:
                 return
@@ -1246,10 +1679,12 @@ class OBSLayoutManager:
             target_transform = prepared["target_transform"]
             target_enabled = prepared["target_enabled"]
             # A zero-duration fade is just an immediate visibility change.
-            if target_transform:
+            if target_transform and prepared["transform_changed"]:
                 self._set_transform(container, source, target_transform)
-            if target_enabled is not None:
+                mutated_any = True
+            if prepared["visibility_changed"]:
                 self._set_enabled(container, source, bool(target_enabled))
+                mutated_any = True
             applied += 1
 
         animated = mode in {"move", "fade", "move_fade"} and duration_ms > 0
@@ -1259,15 +1694,21 @@ class OBSLayoutManager:
                 prepared = prepare_item(item)
                 if prepared is not None:
                     prepared_items.append(prepared)
-            if prepared_items:
+            actionable = [
+                prepared
+                for prepared in prepared_items
+                if prepared["transform_changed"] or prepared["visibility_changed"]
+            ]
+            if actionable:
+                mutated_any = True
                 self._animate_layout_transition(
-                    prepared_items,
+                    actionable,
                     mode=mode,
                     duration_ms=duration_ms,
                     steps=steps,
                     warnings=warnings,
                 )
-                applied += len(prepared_items)
+            applied += len(prepared_items)
         else:
             for item in regular_items:
                 apply_item_immediate(item)
@@ -1281,7 +1722,9 @@ class OBSLayoutManager:
         # Groups need a final correction after descendants have settled. This is
         # intentionally outside the animation timeline: the transition itself is
         # global and lasts duration_ms once, not duration_ms once per source.
-        if group_items:
+        # Keep the fact that a mutation happened *before* the writes; re-reading
+        # after convergence would incorrectly suppress group stabilization.
+        if group_items and mutated_any:
             self._wait_group_resize_settle()
             for item in sorted(
                 group_items, key=lambda value: len(value.get("path") or ()), reverse=True
@@ -1295,7 +1738,9 @@ class OBSLayoutManager:
                 target_transform = self._resolve_runtime_transform(
                     item["transform"], current["transform"]
                 )
-                if target_transform:
+                if target_transform and self._transform_needs_update(
+                    current["transform"], target_transform
+                ):
                     self._set_transform(container, source, target_transform)
 
             # One more render frame prevents the group's automatic resize pass
@@ -1316,7 +1761,11 @@ class OBSLayoutManager:
                 if target_transform:
                     self._set_transform(container, source, target_transform)
 
-        return LayoutApplyResult(applied, skipped, tuple(sorted(set(missing))), tuple(warnings))
+        result = LayoutApplyResult(applied, skipped, tuple(sorted(set(missing))), tuple(warnings))
+        if undo_snapshot is not None and applied > 0:
+            self._undo_stack.append(undo_snapshot)
+            self._undo_stack = self._undo_stack[-20:]
+        return result
 
     def _animate_layout_transition(
         self,
@@ -1327,33 +1776,39 @@ class OBSLayoutManager:
         steps: int,
         warnings: list[str],
     ) -> None:
-        """Animate one layout on a single global timeline.
-
-        Older builds animated every source independently. A 2 s transition on
-        40 sources therefore blocked the UI for roughly 80 s. All transforms
-        and fades now advance together and sleep only once per frame.
-        """
+        """Animate one layout on a single global timeline with bounded fade cleanup."""
         move = mode in {"move", "move_fade"}
         fade = mode in {"fade", "move_fade"}
         fade_state: dict[int, tuple[float, float]] = {}
         fallback_visibility: set[int] = set()
+        touched_fades: set[str] = set()
 
         for index, prepared in enumerate(prepared_items):
             target_enabled = prepared["target_enabled"]
             current_enabled = prepared["current_enabled"]
             source = prepared["source"]
             container = prepared["container"]
-            if target_enabled is None or bool(target_enabled) == current_enabled:
+            if target_enabled is None or not prepared["visibility_changed"]:
+                continue
+            if current_enabled is None:
+                warnings.append(
+                    f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
+                )
+                fallback_visibility.add(index)
+                if bool(target_enabled):
+                    self._set_enabled(container, source, True)
                 continue
 
             if fade:
                 try:
                     if bool(target_enabled):
                         self._set_source_opacity(source, 0.0)
+                        touched_fades.add(source)
                         self._set_enabled(container, source, True)
                         fade_state[index] = (0.0, 1.0)
                     else:
                         self._ensure_fade_filter(source, 1.0)
+                        touched_fades.add(source)
                         fade_state[index] = (1.0, 0.0)
                 except Exception as exc:
                     warnings.append(f"Fondu indisponible pour {source}: {exc}")
@@ -1361,62 +1816,89 @@ class OBSLayoutManager:
                     if bool(target_enabled):
                         self._set_enabled(container, source, True)
             elif move and bool(target_enabled):
-                # Newly visible sources must be enabled before they can move.
                 self._set_enabled(container, source, True)
 
-        total_seconds = max(0.0, duration_ms / 1000.0)
-        started = time.monotonic()
-        for frame in range(1, steps + 1):
-            if frame > 1 and steps > 1:
-                deadline = started + total_seconds * ((frame - 1) / (steps - 1))
-                remaining = deadline - time.monotonic()
-                if remaining > 0:
-                    time.sleep(remaining)
-            t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
+        try:
+            total_seconds = max(0.0, duration_ms / 1000.0)
+            started = time.monotonic()
+            for frame in range(1, steps + 1):
+                if frame > 1 and steps > 1:
+                    deadline = started + total_seconds * ((frame - 1) / (steps - 1))
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        self._cooperative_sleep(remaining)
+                t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
+                for index, prepared in enumerate(prepared_items):
+                    if move and prepared["transform_changed"]:
+                        target = prepared["target_transform"]
+                        current = prepared["current_transform"]
+                        if target:
+                            keys = [
+                                key
+                                for key in target
+                                if isinstance(target.get(key), (int, float))
+                            ]
+                            update = {
+                                key: _float(current.get(key), _float(target.get(key)))
+                                + (
+                                    _float(target.get(key))
+                                    - _float(current.get(key), _float(target.get(key)))
+                                )
+                                * t
+                                for key in keys
+                            }
+                            if update:
+                                self._set_transform(
+                                    prepared["container"],
+                                    prepared["source"],
+                                    update,
+                                )
+
+                    opacity = fade_state.get(index)
+                    if opacity is not None:
+                        start_opacity, end_opacity = opacity
+                        self._set_source_opacity(
+                            prepared["source"],
+                            start_opacity + (end_opacity - start_opacity) * t,
+                        )
+
             for index, prepared in enumerate(prepared_items):
-                if move:
-                    target = prepared["target_transform"]
-                    current = prepared["current_transform"]
-                    if target:
-                        keys = [key for key in target if isinstance(target.get(key), (int, float))]
-                        update = {
-                            key: _float(current.get(key), _float(target.get(key)))
-                            + (_float(target.get(key)) - _float(current.get(key), _float(target.get(key)))) * t
-                            for key in keys
-                        }
-                        if update:
-                            self._set_transform(prepared["container"], prepared["source"], update)
-
-                opacity = fade_state.get(index)
-                if opacity is not None:
-                    start, end = opacity
-                    self._set_source_opacity(
+                target_enabled = prepared["target_enabled"]
+                current_enabled = prepared["current_enabled"]
+                if (
+                    not move
+                    and prepared["target_transform"]
+                    and prepared["transform_changed"]
+                ):
+                    self._set_transform(
+                        prepared["container"],
                         prepared["source"],
-                        start + (end - start) * t,
+                        prepared["target_transform"],
                     )
+                if target_enabled is None:
+                    continue
+                if current_enabled is not None and bool(target_enabled) == current_enabled:
+                    continue
 
-        for index, prepared in enumerate(prepared_items):
-            target_enabled = prepared["target_enabled"]
-            current_enabled = prepared["current_enabled"]
-            if not move and prepared["target_transform"]:
-                # Fade-only transitions still apply geometry, but geometry is
-                # not itself animated.
-                self._set_transform(
-                    prepared["container"], prepared["source"], prepared["target_transform"]
-                )
-            if target_enabled is None or bool(target_enabled) == current_enabled:
-                continue
-
-            if index in fade_state:
-                if not bool(target_enabled):
-                    self._set_enabled(prepared["container"], prepared["source"], False)
-                    # Leave the helper filter neutral for the next transition.
-                    self._set_source_opacity(prepared["source"], 1.0)
-            elif index in fallback_visibility or move:
-                if not bool(target_enabled):
-                    self._set_enabled(prepared["container"], prepared["source"], False)
-                elif index in fallback_visibility:
-                    self._set_enabled(prepared["container"], prepared["source"], True)
+                if index in fade_state:
+                    if not bool(target_enabled):
+                        self._set_enabled(prepared["container"], prepared["source"], False)
+                        self._set_source_opacity(prepared["source"], 1.0)
+                elif index in fallback_visibility or move:
+                    if not bool(target_enabled):
+                        self._set_enabled(prepared["container"], prepared["source"], False)
+                    elif index in fallback_visibility:
+                        self._set_enabled(prepared["container"], prepared["source"], True)
+        except Exception as exc:
+            cleanup_warnings = self._neutralize_fade_sources(touched_fades)
+            warnings.extend(cleanup_warnings)
+            detail = ""
+            if cleanup_warnings:
+                detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
+            raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
+        else:
+            cleanup_warnings = self._neutralize_fade_sources(touched_fades)
+            warnings.extend(cleanup_warnings)
 
     def _wait_group_resize_settle(self) -> None:
         """Allow OBS to finish automatic group-bound recomputation.
@@ -1425,7 +1907,7 @@ class OBSLayoutManager:
         callers. obs-websocket does not expose those calls, so SSR waits a very
         short interval between child updates and the final group transform.
         """
-        time.sleep(GROUP_RESIZE_SETTLE_SECONDS)
+        self._cooperative_sleep(GROUP_RESIZE_SETTLE_SECONDS)
 
     def _build_desired_elements(self, profile: Mapping[str, Any]) -> list[dict[str, Any]]:
         scene = str(profile.get("scene") or "").strip()
@@ -1715,18 +2197,23 @@ class OBSLayoutManager:
             transform_response = self.client.send(
                 "GetSceneItemTransform", {"sceneName": container, "sceneItemId": item_id}
             )
+        enabled = None
+        enabled_error = ""
         try:
             enabled_response = self.client.send(
                 "GetSceneItemEnabled", {"sceneName": container, "sceneItemId": item_id}
             )
-            enabled = bool(enabled_response.get("sceneItemEnabled", True))
-        except Exception:
-            # Some lightweight test/fallback clients do not expose this request.
-            enabled = True
+            if "sceneItemEnabled" in enabled_response:
+                enabled = bool(enabled_response.get("sceneItemEnabled"))
+            else:
+                enabled_error = "GetSceneItemEnabled n'a pas renvoyé sceneItemEnabled"
+        except Exception as exc:
+            enabled_error = str(exc)
         return {
             "id": item_id,
             "transform": dict(transform_response.get("sceneItemTransform") or {}),
             "enabled": enabled,
+            "enabled_error": enabled_error,
         }
 
     def _set_transform(self, container: str, source: str, transform: Mapping[str, Any]) -> None:
@@ -1782,9 +2269,14 @@ class OBSLayoutManager:
             }
             self._set_transform(container, source, update)
             if index != steps:
-                time.sleep(delay)
+                self._cooperative_sleep(delay)
 
     def _ensure_fade_filter(self, source: str, opacity: float) -> None:
+        """Ensure the helper filter exists without recursively setting it.
+
+        Filter creation is a bounded recovery path. Transport/protocol errors
+        are not interpreted as absence and therefore propagate unchanged.
+        """
         response = self.client.send("GetSourceFilterList", {"sourceName": source})
         filters = response.get("filters", []) or []
         found = any(
@@ -1798,29 +2290,32 @@ class OBSLayoutManager:
                     "sourceName": source,
                     "filterName": SSR_FADE_FILTER,
                     "filterKind": SSR_FADE_FILTER_KIND,
-                    "filterSettings": {"opacity": float(opacity)},
+                    "filterSettings": {
+                        "opacity": max(0.0, min(1.0, float(opacity)))
+                    },
                 },
             )
-        else:
-            self.client.send(
-                "SetSourceFilterEnabled",
-                {"sourceName": source, "filterName": SSR_FADE_FILTER, "filterEnabled": True},
-            )
-            self._set_source_opacity(source, opacity)
+            return
+        self.client.send(
+            "SetSourceFilterEnabled",
+            {"sourceName": source, "filterName": SSR_FADE_FILTER, "filterEnabled": True},
+        )
 
     def _set_source_opacity(self, source: str, opacity: float) -> None:
+        payload = {
+            "sourceName": source,
+            "filterName": SSR_FADE_FILTER,
+            "filterSettings": {"opacity": max(0.0, min(1.0, float(opacity)))},
+            "overlay": True,
+        }
         try:
-            self.client.send(
-                "SetSourceFilterSettings",
-                {
-                    "sourceName": source,
-                    "filterName": SSR_FADE_FILTER,
-                    "filterSettings": {"opacity": max(0.0, min(1.0, float(opacity)))},
-                    "overlay": True,
-                },
-            )
-        except Exception:
+            self.client.send("SetSourceFilterSettings", payload)
+            return
+        except OBSResourceNotFoundError:
+            # Confirmed absence is the only error that may create/re-enable the
+            # helper filter. Retry the settings write once, never recursively.
             self._ensure_fade_filter(source, opacity)
+        self.client.send("SetSourceFilterSettings", payload)
 
     def _animate_opacity(self, source: str, start: float, end: float, duration_ms: int, steps: int) -> None:
         self._ensure_fade_filter(source, start)

@@ -39,6 +39,41 @@ class PendingHide:
     last_error: str = ""
 
 
+def pending_hide_to_mapping(pending: PendingHide) -> dict[str, object]:
+    return {
+        "policy": pending.policy,
+        "collection": pending.collection,
+        "target": pending.target.to_mapping(),
+        "created_at": float(pending.created_at),
+        "attempts": int(pending.attempts),
+        "next_retry_at": float(pending.next_retry_at),
+        "last_error": pending.last_error,
+    }
+
+
+def pending_hide_from_mapping(raw: Mapping[str, object]) -> PendingHide | None:
+    target_raw = raw.get("target")
+    if not isinstance(target_raw, Mapping):
+        return None
+    policy = str(raw.get("policy") or "").strip()
+    collection = str(raw.get("collection") or "").strip()
+    if not policy or not collection:
+        return None
+    try:
+        target = TriggerTargetConfig.from_mapping(target_raw)
+        return PendingHide(
+            policy=policy,
+            target=target,
+            collection=collection,
+            created_at=float(raw.get("created_at", 0.0) or 0.0),
+            attempts=max(0, int(raw.get("attempts", 0) or 0)),
+            next_retry_at=float(raw.get("next_retry_at", 0.0) or 0.0),
+            last_error=str(raw.get("last_error") or ""),
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 class OBSActivationController:
     """Translate scheduler events into acknowledged OBS visibility mutations."""
 
@@ -62,7 +97,7 @@ class OBSActivationController:
         self._collection_probe_seconds = max(0.1, float(collection_probe_seconds))
         self._retry_base_seconds = max(0.05, float(retry_base_seconds))
         self._retry_max_seconds = max(self._retry_base_seconds, float(retry_max_seconds))
-        self._module_presence_cache: dict[tuple[str, str], tuple[float, bool, str]] = {}
+        self._scene_topology_cache: dict[str, tuple[float, frozenset[str], str]] = {}
         self._last_collection_probe = 0.0
         self._scene_collection: str | None = None
         self._pending_hides: dict[tuple[str, str, str, str, str], PendingHide] = {}
@@ -74,16 +109,55 @@ class OBSActivationController:
         self.invalidate_cache()
 
     def _sync_visibility_owners(self) -> None:
-        self.layout_manager.set_runtime_visibility_owners(
+        owners = {
             (target.container, target.source)
             for policy in self._policies.values()
             for target in policy.targets
+        }
+        owners.update(
+            (pending.target.container, pending.target.source)
+            for pending in self._pending_hides.values()
         )
+        self.layout_manager.set_runtime_visibility_owners(owners)
+
+    def export_pending_hides(self) -> tuple[dict[str, object], ...]:
+        return tuple(
+            pending_hide_to_mapping(item)
+            for item in sorted(
+                self._pending_hides.values(),
+                key=lambda value: (
+                    value.collection,
+                    value.policy,
+                    value.target.container,
+                    value.target.source,
+                ),
+            )
+        )
+
+    def import_pending_hides(self, raw_items) -> int:
+        imported = 0
+        collections: set[str] = set()
+        for raw in raw_items or ():
+            if not isinstance(raw, Mapping):
+                continue
+            pending = pending_hide_from_mapping(raw)
+            if pending is None:
+                continue
+            key = self._pending_key(pending.policy, pending.target, pending.collection)
+            self._pending_hides[key] = pending
+            collections.add(pending.collection)
+            imported += 1
+        if len(collections) == 1 and self._scene_collection is None:
+            # Remember the collection the obligation belongs to. The first real
+            # OBS probe will keep it only if the same collection is active.
+            self._scene_collection = next(iter(collections))
+        self._sync_visibility_owners()
+        return imported
 
     def invalidate_cache(self) -> None:
         # Activation visibility uses pair-local fresh ids. Do not flush the
         # LayoutProfile transform cache globally from this subsystem.
-        self._module_presence_cache.clear()
+        self._scene_topology_cache.clear()
 
     def pending_hides(self, policy_name: str | None = None) -> tuple[PendingHide, ...]:
         values = tuple(self._pending_hides.values())
@@ -141,24 +215,33 @@ class OBSActivationController:
         if not module_source:
             return False, "module OBS non défini"
 
-        key = (scene, module_source)
         now = self._clock()
-        cached = self._module_presence_cache.get(key)
+        cached = self._scene_topology_cache.get(scene)
         if cached is not None and now - cached[0] < self._eligibility_cache_seconds:
-            return cached[1], cached[2]
+            sources = cached[1]
+            scan_error = cached[2]
+        else:
+            try:
+                if hasattr(self.layout_manager, "scan_scene_topology"):
+                    topology = self.layout_manager.scan_scene_topology(scene, recursive=True)
+                    sources = frozenset(str(item.source) for item in topology)
+                else:  # compatibility for lightweight integrations/fakes
+                    catalog = self.layout_manager.discover_scene(scene, recursive=True)
+                    sources = frozenset(
+                        str(element.source)
+                        for elements in catalog.values()
+                        for element in elements
+                    )
+                scan_error = ""
+            except Exception as exc:
+                sources = frozenset()
+                scan_error = str(exc)
+            self._scene_topology_cache[scene] = (now, sources, scan_error)
 
-        try:
-            catalog = self.layout_manager.discover_scene(scene, recursive=True)
-            present = any(
-                element.source == module_source
-                for elements in catalog.values()
-                for element in elements
-            )
-            reason = f"module présent dans {scene}" if present else f"module absent de {scene}"
-        except Exception as exc:
-            present = False
-            reason = f"scan OBS impossible : {exc}"
-        self._module_presence_cache[key] = (now, present, reason)
+        if scan_error:
+            return False, f"scan OBS impossible : {scan_error}"
+        present = module_source in sources
+        reason = f"module présent dans {scene}" if present else f"module absent de {scene}"
         return present, reason
 
     def is_eligible(self, policy_name: str, policy: TriggerPolicyConfig) -> bool:
@@ -312,6 +395,7 @@ class OBSActivationController:
             status, error = self._mutate_visibility(pending.target, False)
             if status in {"applied", "missing"}:
                 self._pending_hides.pop(key, None)
+                self._sync_visibility_owners()
                 messages.append(
                     f"Masquage acquitté : {pending.target.container}/{pending.target.source}"
                 )
@@ -369,6 +453,7 @@ class OBSActivationController:
         # Never replay operations captured for another Scene Collection.
         self._pending_hides.clear()
         self._scene_collection = current
+        self._sync_visibility_owners()
 
     def _current_scene_collection(self) -> str:
         response = self.client.send("GetSceneCollectionList")
@@ -419,6 +504,7 @@ class OBSActivationController:
             self._retry_base_seconds * (2 ** min(pending.attempts - 1, 8)),
         )
         pending.next_retry_at = now + delay
+        self._sync_visibility_owners()
 
     def _clear_pending_hide(
         self,
@@ -430,6 +516,7 @@ class OBSActivationController:
             self._pending_key(policy_name, target, collection),
             None,
         )
+        self._sync_visibility_owners()
 
     @staticmethod
     def _pending_key(

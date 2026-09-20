@@ -58,6 +58,45 @@ class RuleSetTests(unittest.TestCase):
         self.assertEqual(result.kind, ResolutionKind.FALLBACK)
         self.assertEqual(result.state, fallback)
 
+    def test_explanation_uses_same_resolution_for_match_ignore_and_fallback(self):
+        fallback = StreamState(game="Vanilla")
+        rules = RuleSet(
+            [
+                AppRule("ignore", priority=300, exe="launcher.exe", behavior=ResolutionKind.IGNORE),
+                AppRule("ranked", StreamState(game="Ranked"), priority=200, exe="game.exe", title_regex="Ranked$"),
+                AppRule("generic", StreamState(game="Generic"), priority=100, exe="game.exe"),
+            ],
+            fallback=fallback,
+        )
+        cases = [
+            ForegroundApp(1, 1, "game.exe", window_title="Game Ranked"),
+            ForegroundApp(2, 2, "launcher.exe", window_title="Launcher"),
+            ForegroundApp(3, 3, "notepad.exe", window_title="Notes"),
+        ]
+
+        for app in cases:
+            with self.subTest(app=app.exe_name, title=app.window_title):
+                resolved = rules.resolve(app, {})
+                explained = rules.explain(app, {})
+                self.assertEqual(explained.resolution, resolved)
+
+    def test_explanation_reports_condition_rejection(self):
+        rule = AppRule(
+            "stream-only",
+            StreamState(game="Live"),
+            exe="game.exe",
+            conditions={"streaming": True},
+        )
+        rules = RuleSet([rule], fallback=StreamState(game="Vanilla"))
+        app = ForegroundApp(1, 1, "game.exe")
+
+        explanation = rules.explain(app, {"streaming": False})
+
+        self.assertEqual(explanation.resolution.kind, ResolutionKind.FALLBACK)
+        self.assertEqual(len(explanation.checks), 1)
+        self.assertFalse(explanation.checks[0].matched)
+        self.assertIn("streaming=False", explanation.checks[0].reason)
+
     def test_no_foreground_is_ignored_to_avoid_transient_fallback(self):
         result = RuleSet([]).resolve(None)
         self.assertEqual(result.kind, ResolutionKind.IGNORE)

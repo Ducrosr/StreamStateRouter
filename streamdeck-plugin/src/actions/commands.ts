@@ -1,9 +1,10 @@
 import type { KeyDownEvent } from "@elgato/streamdeck";
 import streamDeck, { action, SingletonAction } from "@elgato/streamdeck";
-import { ssrClient } from "../ssr-client";
+import { saveConnectionSettings, ssrClient } from "../ssr-client";
 
 type EmptySettings = Record<string, never>;
 type LayoutSettings = { layout?: string; mode?: "apply" | "preview" };
+type ConnectionSettings = { port?: number; token?: string };
 
 abstract class CommandAction<T extends object> extends SingletonAction<T> {
   protected async run(ev: KeyDownEvent<T>, fn: () => Promise<unknown>): Promise<void> {
@@ -65,5 +66,15 @@ export class UndoLayoutAction extends CommandAction<EmptySettings> {
 export class CancelPreviewAction extends CommandAction<EmptySettings> {
   override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
     await this.run(ev, () => ssrClient.cancelPreview());
+  }
+}
+
+@action({ UUID: "com.remyducros.streamstaterouter.connection" })
+export class ConnectionSettingsAction extends CommandAction<ConnectionSettings> {
+  override async onKeyDown(ev: KeyDownEvent<ConnectionSettings>): Promise<void> {
+    await this.run(ev, async () => {
+      await saveConnectionSettings(ev.payload.settings);
+      await ssrClient.status();
+    });
   }
 }

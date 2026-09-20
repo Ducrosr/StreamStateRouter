@@ -75,17 +75,22 @@ def run_gui(config: dict, *, minimized: bool, marker: RuntimeMarker) -> int:
     app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(APP_STYLE)
     logger = configure_logging()
-    window = MainWindow(config, logger=logger, start_minimized=minimized)
+    window = MainWindow(
+        config,
+        logger=logger,
+        start_minimized=minimized,
+        runtime_marker=marker,
+    )
     if not minimized:
         window.show()
-    if marker.previous_unclean:
+    if marker.previous_unclean or marker.previous_cleanup_incomplete:
         logger.warning("Previous session appears to have ended unexpectedly")
         if not minimized:
             QMessageBox.warning(
                 window,
                 "Session précédente",
-                "La session précédente semble s'être terminée brutalement. "
-                "La configuration a été conservée et les journaux restent disponibles.",
+                "La session précédente s'est terminée brutalement ou avec un nettoyage OBS incomplet. "
+                "SSR tentera de reprendre les obligations de nettoyage compatibles avec la Scene Collection active.",
             )
     code = app.exec()
     return int(code)
@@ -120,7 +125,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_headless(config)
         return run_gui(config, minimized=args.minimized, marker=marker)
     finally:
-        marker.clean_shutdown()
+        if not marker.finalized:
+            marker.clean_shutdown()
         guard.close()
 
 

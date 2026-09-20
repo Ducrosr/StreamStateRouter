@@ -39,10 +39,13 @@ class FakeLayoutClient:
             "Unrelated": 3,
             "[Webcam:locked] Permanent": 4,
         }
+        self.enabled = {1: True, 2: True, 3: True, 4: True}
 
     def send(self, request, data=None):
         payload = dict(data or {})
         self.calls.append((request, payload))
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": getattr(self, "scene_collection", "Collection A")}
         if request == "GetSceneList":
             return {
                 "currentProgramSceneName": "Gameplay",
@@ -61,7 +64,15 @@ class FakeLayoutClient:
             return {"sceneItemTransform": dict(self.transforms[int(payload["sceneItemId"])])}
         if request == "GetSceneItemId":
             return {"sceneItemId": self.items.get(payload["sourceName"], 0)}
-        if request in {"SetSceneItemTransform", "SetSceneItemEnabled"}:
+        if request == "GetSceneItemEnabled":
+            return {"sceneItemEnabled": self.enabled.get(int(payload["sceneItemId"]), True)}
+        if request == "SetSceneItemTransform":
+            item_id = int(payload["sceneItemId"])
+            if item_id in self.transforms:
+                self.transforms[item_id].update(dict(payload.get("sceneItemTransform") or {}))
+            return {}
+        if request == "SetSceneItemEnabled":
+            self.enabled[int(payload["sceneItemId"])] = bool(payload["sceneItemEnabled"])
             return {}
         raise AssertionError(f"Unexpected request: {request}")
 
@@ -72,6 +83,87 @@ class LayoutTests(unittest.TestCase):
         self.assertIsNone(split_module_source("Webcam Cadre"))
         self.assertIsNone(split_module_source("[Webcam]"))
 
+    def test_lightweight_topology_scan_does_not_read_transforms(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+
+        topology = manager.scan_scene_topology("Gameplay")
+
+        self.assertEqual(
+            {item.source for item in topology},
+            {"[Webcam] Cadre", "[Webcam] Avatar"},
+        )
+        self.assertFalse(any(request == "GetSceneItemTransform" for request, _ in client.calls))
+
+    def test_apply_matching_layout_performs_no_mutation_writes(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        client.calls.clear()
+
+        result = manager.apply_profile(profile, record_undo=False)
+
+        self.assertEqual(result.missing_sources, ())
+        writes = [
+            request
+            for request, _payload in client.calls
+            if request in {"SetSceneItemTransform", "SetSceneItemEnabled"}
+        ]
+        self.assertEqual(writes, [])
+
+    def test_noop_apply_scales_to_hundred_elements_without_writes(self):
+        class LargeClient(FakeLayoutClient):
+            def __init__(self, count):
+                super().__init__()
+                self.items = {f"[Test] Item {index:03d}": index + 1 for index in range(count)}
+                self.transforms = {
+                    index + 1: {
+                        "positionX": float(index * 10),
+                        "positionY": float(index * 5),
+                        "width": 100.0,
+                        "height": 50.0,
+                        "scaleX": 1.0,
+                        "scaleY": 1.0,
+                        "alignment": 5,
+                        "rotation": 0.0,
+                        "boundsType": "OBS_BOUNDS_NONE",
+                    }
+                    for index in range(count)
+                }
+                self.enabled = {index + 1: True for index in range(count)}
+
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSceneItemList":
+                    self.calls.append((request, payload))
+                    return {
+                        "sceneItems": [
+                            {
+                                "sourceName": source,
+                                "sceneItemId": item_id,
+                                "sceneItemEnabled": True,
+                            }
+                            for source, item_id in self.items.items()
+                        ]
+                    }
+                return super().send(request, data)
+
+        for count in (10, 100):
+            with self.subTest(count=count):
+                client = LargeClient(count)
+                manager = OBSLayoutManager(client)
+                profile = manager.capture_profile("Gameplay")
+                client.calls.clear()
+
+                manager.apply_profile(profile, record_undo=False)
+
+                writes = [
+                    request
+                    for request, _payload in client.calls
+                    if request in {"SetSceneItemTransform", "SetSceneItemEnabled"}
+                ]
+                self.assertEqual(writes, [])
+
     def test_discovery_keeps_each_source_as_a_distinct_module(self):
         manager = OBSLayoutManager(FakeLayoutClient())
         modules = manager.discover_scene("Gameplay")
@@ -79,6 +171,34 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(modules["[Webcam] Avatar"][0].module, "Webcam")
         self.assertEqual(modules["[Webcam] Avatar"][0].element, "Avatar")
 
+
+    def test_capture_result_reports_partial_nested_read(self):
+        class PartialClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSceneItemList" and payload.get("sceneName") == "[Webcam] Cadre":
+                    raise RuntimeError("nested read failed")
+                return super().send(request, data)
+
+        client = PartialClient()
+        manager = OBSLayoutManager(client)
+
+        result = manager.capture_profile_result("Gameplay")
+
+        self.assertFalse(result.complete)
+        self.assertTrue(result.warnings)
+        self.assertGreater(result.captured_modules, 0)
+
+    def test_compacted_child_may_have_no_module_overrides(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        parent = manager.capture_profile("Gameplay")
+        child = manager.capture_profile("Gameplay", extends="Base")
+
+        compact = compact_layout_overrides(child, parent)
+
+        self.assertEqual(compact.get("modules"), {})
+        self.assertEqual(compact.get("extends"), "Base")
 
     def test_locked_convention_is_excluded_from_discovery_and_recapture(self):
         client = FakeLayoutClient()
@@ -210,6 +330,93 @@ class LayoutTests(unittest.TestCase):
         ]
         self.assertIn(20, avatar_reads)
         self.assertNotEqual(avatar_reads[0], 2)
+
+    def test_fade_opacity_recovery_is_bounded_on_missing_filter(self):
+        class MissingOnceClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.settings_attempts = 0
+
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.settings_attempts += 1
+                    if self.settings_attempts == 1:
+                        from stream_state_router.obs.client import OBSResourceNotFoundError
+                        raise OBSResourceNotFoundError(request, "missing filter")
+                    self.calls.append((request, dict(data or {})))
+                    return {}
+                if request == "GetSourceFilterList":
+                    self.calls.append((request, dict(data or {})))
+                    return {"filters": []}
+                if request == "CreateSourceFilter":
+                    self.calls.append((request, dict(data or {})))
+                    return {}
+                return super().send(request, data)
+
+        client = MissingOnceClient()
+        manager = OBSLayoutManager(client)
+
+        manager._set_source_opacity("[Webcam] Avatar", 0.5)
+
+        self.assertEqual(client.settings_attempts, 2)
+        self.assertEqual(
+            [request for request, _payload in client.calls if request == "CreateSourceFilter"],
+            ["CreateSourceFilter"],
+        )
+
+    def test_fade_persistent_settings_error_does_not_recurse(self):
+        class PersistentFailureClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.settings_attempts = 0
+
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.settings_attempts += 1
+                    from stream_state_router.obs.client import OBSResourceNotFoundError
+                    raise OBSResourceNotFoundError(request, "missing filter")
+                if request == "GetSourceFilterList":
+                    self.calls.append((request, dict(data or {})))
+                    return {"filters": []}
+                if request == "CreateSourceFilter":
+                    self.calls.append((request, dict(data or {})))
+                    return {}
+                return super().send(request, data)
+
+        client = PersistentFailureClient()
+        manager = OBSLayoutManager(client)
+
+        with self.assertRaises(Exception):
+            manager._set_source_opacity("[Webcam] Avatar", 0.5)
+
+        self.assertEqual(client.settings_attempts, 2)
+
+    def test_pending_fade_cleanup_is_retained_until_neutralization_succeeds(self):
+        from stream_state_router.obs.client import OBSUnavailableError
+
+        class FadeCleanupClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.fail_cleanup = True
+
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.calls.append((request, dict(data or {})))
+                    if self.fail_cleanup:
+                        raise OBSUnavailableError("offline")
+                    return {}
+                return super().send(request, data)
+
+        client = FadeCleanupClient()
+        manager = OBSLayoutManager(client)
+
+        warnings = manager._neutralize_fade_sources(["[Webcam] Avatar"])
+        self.assertTrue(warnings)
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
+        client.fail_cleanup = False
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
 
     def test_move_transition_uses_one_global_timeline_for_all_sources(self):
         client = FakeLayoutClient()
@@ -351,6 +558,96 @@ class LayoutTests(unittest.TestCase):
             if request == "SetSceneItemEnabled"
         ]
         self.assertNotIn(2, visibility_ids)
+
+    def test_diff_detects_scale_change_below_position_tolerance(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        element = profile["modules"]["[Webcam] Cadre"]["elements"][0]
+        element["transform"]["scaleX"] = float(element["transform"].get("scaleX", 1.0)) + 0.1
+
+        diffs = manager.diff_profile(profile)
+
+        self.assertTrue(any("scaleX" in change for diff in diffs for change in diff.changes))
+
+    def test_diff_includes_support_items(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        if not profile.get("support_items"):
+            self.skipTest("Fake layout has no support items")
+        support = profile["support_items"][0]
+        support["transform"]["positionX"] = float(support["transform"].get("positionX", 0.0)) + 50.0
+
+        diffs = manager.diff_profile(profile)
+
+        self.assertTrue(any(diff.module == "[interne]" for diff in diffs))
+
+    def test_get_current_item_reports_unknown_visibility_instead_of_true(self):
+        class VisibilityFailureClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                if request == "GetSceneItemEnabled":
+                    raise RuntimeError("visibility timeout")
+                return super().send(request, data)
+
+        client = VisibilityFailureClient()
+        manager = OBSLayoutManager(client)
+        item = manager._get_current_item("Gameplay", "[Webcam] Cadre")
+
+        self.assertIsNone(item["enabled"])
+        self.assertIn("timeout", item["enabled_error"])
+
+    def test_undo_snapshot_is_consumed_only_after_successful_restore(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] += 10.0
+        manager.apply_profile(profile)
+        self.assertEqual(len(manager._undo_stack), 1)
+
+        original_apply = manager.apply_profile
+        def fail_restore(*args, **kwargs):
+            from stream_state_router.obs.layouts import LayoutApplyResult
+            return LayoutApplyResult(warnings=("temporary failure",))
+        manager.apply_profile = fail_restore
+        failed = manager.undo_last()
+        self.assertTrue(failed.warnings)
+        self.assertEqual(len(manager._undo_stack), 1)
+
+        manager.apply_profile = original_apply
+        restored = manager.undo_last()
+        self.assertFalse(restored.warnings)
+        self.assertEqual(len(manager._undo_stack), 0)
+
+    def test_undo_refuses_snapshot_from_another_scene_collection(self):
+        client = FakeLayoutClient()
+        client.scene_collection = "Collection A"
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] += 10.0
+        manager.apply_profile(profile)
+        self.assertEqual(len(manager._undo_stack), 1)
+        client.scene_collection = "Collection B"
+        client.calls.clear()
+
+        result = manager.undo_last()
+
+        self.assertTrue(any("Scene Collection" in warning for warning in result.warnings))
+        self.assertEqual(len(manager._undo_stack), 1)
+        self.assertFalse(any(request.startswith("SetSceneItem") for request, _ in client.calls))
+
+    def test_reconnect_session_invalidates_existing_snapshot(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] += 10.0
+        manager.apply_profile(profile)
+        manager.invalidate_session()
+
+        result = manager.undo_last()
+
+        self.assertTrue(any("session OBS précédente" in warning for warning in result.warnings))
+        self.assertEqual(len(manager._undo_stack), 1)
 
     def test_preview_and_undo_preserve_runtime_owned_visibility(self):
         client = FakeLayoutClient()

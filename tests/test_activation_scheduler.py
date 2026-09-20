@@ -143,6 +143,40 @@ class ActivationSchedulerTests(unittest.TestCase):
         clock.value = 25.0
         self.assertEqual(scheduler.tick()[-1].source, "B")
 
+    def test_avoid_immediate_repeat_uses_exact_target_identity(self):
+        policy = self.policy(
+            targets=(
+                TriggerTargetConfig("Scene A", "Same", container_kind="scene", weight=1.0),
+                TriggerTargetConfig("Scene B", "Same", container_kind="scene", weight=1.0),
+            )
+        )
+        clock = FakeClock()
+        scheduler = ActivationScheduler(
+            {"egg": policy},
+            clock=clock,
+            rng=SequenceRng(0.0, 0.0, 0.0, 0.0),
+        )
+        scheduler.tick()
+        clock.value = 10.0
+        first = scheduler.tick()[-1]
+        self.assertEqual(first.container, "Scene A")
+        clock.value = 15.0
+        scheduler.tick()
+        clock.value = 25.0
+        second = scheduler.tick()[-1]
+        self.assertEqual(second.container, "Scene B")
+        self.assertEqual(second.source, "Same")
+
+    def test_scheduler_rejects_cross_policy_target_ownership_conflict(self):
+        target = TriggerTargetConfig("Egg", "Cloud")
+        with self.assertRaisesRegex(ValueError, "plusieurs politiques"):
+            ActivationScheduler(
+                {
+                    "one": self.policy(targets=(target,)),
+                    "two": self.policy(targets=(target,)),
+                }
+            )
+
     def test_manual_specific_target_can_test_zero_weight_source(self):
         policy = self.policy(
             targets=(

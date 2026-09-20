@@ -1,43 +1,47 @@
-# Stream State Router 2.0.13
+# Stream State Router 2.0.14
 
-## Activations temporaires OBS
+## Feuille de route d'architecture Astra
 
-Cette version applique le handoff d'audit de la 2.0.12 sans réécrire l'architecture : le scheduler reste pur, le contrôleur OBS possède les mutations de visibilité, le runtime orchestre les threads et les LayoutProfiles conservent la géométrie.
+La 2.0.14 applique les propositions du rapport d'architecture dans l'ordre recommandé :
 
-### Correctifs principaux
+1. A2 — IDs frais pour les actions OBS classiques ;
+2. A6 — récupération du fondu bornée ;
+3. A7 — validation stricte et homogène ;
+4. A8 — signatures Win32 explicites ;
+5. A16 — chaîne de build/release fiabilisée ;
+6. A3 — orchestration sérialisée des mutations OBS ;
+7. A1 — séparation état désiré / état acquitté ;
+8. A4 — obligations de nettoyage durables ;
+9. A5 — preview/undo récupérables ;
+10. A9 — identité exacte et propriété de visibilité ;
+11. A10 — capture complète des LayoutProfiles ;
+12. A11 — diagnostics alignés sur l'application réelle ;
+13. A13 — brouillon / enregistré / appliqué ;
+14. A14 — acquittement API et Stream Deck ;
+15. A15 — sauvegardes/export robustes ;
+16. A17 — diagnostic transversal ;
+17. A12 — réduction des scans et écritures no-op ;
+18. A18 — explication de décision sans effet de bord.
 
-- sérialisation des activations sur le worker runtime ;
-- résultats de commandes asynchrones vers Qt ;
-- arrêt sécurisé et refus d'un runtime de remplacement tant que l'ancien peut encore écrire dans OBS ;
-- hides non acquittés structurés, blocage de politique et retry borné ;
-- hide compensatoire après show incertain ;
-- exclusivité sûre en présence d'un concurrent non masqué ;
-- distinction source absente / erreur OBS incertaine ;
-- isolation par Scene Collection ;
-- identité exacte des cibles et compatibilité legacy si source unique ;
-- sélection des enfants directs et validation des conflits hiérarchiques ;
-- résolution fraîche des IDs OBS pour la visibilité d'activation ;
-- éligibilité effective unique pour tick, commandes et statut ;
-- validation des valeurs finies et pondération sans overflow ;
-- simulation hors thread Qt et hors worker d'activation, avec fingerprint de configuration.
+## Principales garanties
 
-### Sémantiques volontairement inchangées
+- Aucun `sceneItemId` OBS n'est traité comme identité durable dans les chemins corrigés.
+- Une mutation OBS différée ne peut plus faire confondre état demandé et état réellement appliqué.
+- Les opérations live concurrentes sont sérialisées au niveau runtime au lieu de modifier OBS depuis plusieurs chemins indépendants.
+- Les erreurs de nettoyage restent visibles et retentables au lieu d'être oubliées.
+- Les LayoutProfiles et la visibilité runtime restent séparés.
+- Preview et Undo sont liés au contexte OBS dans lequel leur snapshot a été créé.
+- Les diagnostics indiquent désormais une application partielle au lieu de présenter un succès global trompeur.
+- L'explication de routage réutilise les résolveurs métier et n'envoie aucune mutation à OBS.
 
-- une perte d'éligibilité efface actuellement le cooldown ;
-- un `visibility_owner=runtime` persisté peut rester présent après suppression d'une politique.
+## Build et release
 
-Ces deux comportements sont maintenant couverts par des tests de caractérisation et ne seront modifiés qu'après décision explicite.
+La version du paquet est désormais dérivée de `stream_state_router.__version__`. Le workflow de release vérifie la concordance tag/version, les codes de sortie et les artefacts attendus, exécute un smoke test du binaire PyInstaller et construit l'installateur avec la même version.
 
-### Validation
+## Validation
 
-Le rapport Astra sur la base 2.0.12 indiquait **85 tests exécutés en mémoire : 84 réussites et un NameError**, avec un test écrivant sur disque exclu. Le NameError (`build_activation_policies` non importé dans `tests/test_config.py`) est corrigé en 2.0.13.
+Les modifications incluent des tests de régression dédiés à chaque étape, dont A → B différé → C, ciblage après réutilisation d'un `sceneItemId`, fondu en erreur persistante, contexte Preview/Undo, capture/héritage, diagnostics, scans mutualisés et explication sans mutation.
 
-Les nouveaux tests de concurrence utilisent des barrières/événements et couvrent notamment show→stop sérialisé, cleanup incertain, show à réponse perdue, exclusivité, changement de collection, arrêt/redémarrage, valeurs non finies et simulation concurrente.
+La validation automatique complète de cette branche doit encore être exécutée dans un environnement Windows disposant des dépendances. Les GitHub-hosted runners de ce dépôt ont récemment échoué avant toute étape de job ; un tel échec d'infrastructure ne doit pas être interprété comme un échec de la suite Python.
 
-Validation locale Windows 11 / PowerShell 7.6.6 réussie :
-
-- **109/109 tests unitaires réussis** ;
-- **Ruff : All checks passed!** ;
-- **smoke test de configuration : Configuration valide**.
-
-GitHub Actions reste indisponible sur le dépôt privé parce que les jobs échouent avant toute étape (`steps=null`). La validation avec la vraie collection OBS reste à effectuer séparément.
+Une validation avec la vraie collection OBS reste requise avant de qualifier la 2.0.14 de validée en production.

@@ -13,10 +13,10 @@ from stream_state_router.activation import (
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
-from stream_state_router.obs.dispatcher import DispatchResult
+from stream_state_router.obs.dispatcher import DispatchResult, DomainDispatchStatus
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
-from stream_state_router.router.rules import AppRule, RuleSet
+from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
 from stream_state_router.services.runtime import RoutingService
 
 
@@ -38,6 +38,67 @@ class FakeDispatcher:
 
     def dispatch_state(self, state, force=False):
         return DispatchResult(0, 0, ("game",))
+
+
+class DiagnosticDispatcher(FakeDispatcher):
+    def __init__(self, *, incomplete: bool = False):
+        super().__init__()
+        self.client = SimpleNamespace(request_count=0)
+        self.incomplete = incomplete
+        self._pending = ("game",)
+
+    def pending_domains(self, _state=None):
+        return self._pending
+
+    def dispatch_change(self, change):
+        self.changes.append(change)
+        self.client.request_count += 3
+        if self.incomplete:
+            return DispatchResult(
+                0,
+                1,
+                ("game",),
+                ("blocked for test",),
+                (DomainDispatchStatus("game", change.current.game, "", "blocked", "test"),),
+            )
+        self._pending = ()
+        return DispatchResult(
+            1,
+            0,
+            ("game",),
+            (),
+            (DomainDispatchStatus("game", change.current.game, change.current.game, "applied"),),
+        )
+
+    def dispatch_state(self, state, force=False):
+        change = SimpleNamespace(current=state)
+        return self.dispatch_change(change)
+
+
+    def cached_obs_context(self):
+        return {
+            "obs_enabled": True,
+            "streaming": False,
+            "recording": False,
+            "program_scene": "Gameplay",
+        }
+
+    def plan_state(self, state, *, context=None):
+        return {
+            "state": state.as_variables(),
+            "context": dict(context or {}),
+            "domains": [{"domain": "game", "status": "planned"}],
+        }
+
+
+class CommandDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.profile_threads = []
+
+    def execute_profile(self, domain, profile_name):
+        self.profile_threads.append((domain, profile_name, threading.current_thread().name))
+        return DispatchResult(1, 0, (domain,))
 
 
 class BlockingDispatcher(FakeDispatcher):
@@ -183,6 +244,31 @@ class ResultCollector:
             return self._results[request_id]
 
 
+class OBSResultCollector:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._results = {}
+        self._events = {}
+
+    def callback(self, event):
+        if event.kind != "obs_command_result" or event.payload is None:
+            return
+        with self._lock:
+            self._results[event.request_id] = event.payload
+            waiter = self._events.setdefault(event.request_id, threading.Event())
+            waiter.set()
+
+    def wait(self, request_id, timeout=2.0):
+        with self._lock:
+            if request_id in self._results:
+                return self._results[request_id]
+            waiter = self._events.setdefault(request_id, threading.Event())
+        if not waiter.wait(timeout):
+            raise AssertionError(f"OBS command result timeout: {request_id}")
+        with self._lock:
+            return self._results[request_id]
+
+
 def activation_policy(*, enabled=True, cooldown=20.0):
     return TriggerPolicyConfig(
         module_source="[Module] EasterEgg",
@@ -204,6 +290,49 @@ def activation_policy(*, enabled=True, cooldown=20.0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_live_obs_profile_command_runs_on_runtime_worker(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_profile("game", "Vanilla")
+            result = collector.wait(request_id)
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(
+                dispatcher.profile_threads,
+                [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_delayed_dispatch_uses_runtime_deadline_not_timer_thread(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", state, exe="game.exe", apply_delay_ms=60)]),
+            debounce_ms=0,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(engine, dispatcher, poll_ms=10, provider=FakeProvider(app))
+        seen = threading.Event()
+        service.on_dispatch = lambda _result: seen.set()
+        service.start()
+        try:
+            self.assertFalse(seen.wait(0.02))
+            self.assertTrue(seen.wait(1.0))
+            self.assertEqual(len(dispatcher.changes), 1)
+        finally:
+            self.assertTrue(service.stop())
+
     def test_service_routes_foreground_in_background(self):
         app = ForegroundApp(1, 1, "game.exe")
         state = StreamState(game="Game")
@@ -224,6 +353,112 @@ class RuntimeTests(unittest.TestCase):
             service.start()
             self.assertTrue(seen.wait(1.0))
             self.assertEqual(dispatcher.changes[0].current.game, "Game")
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_explain_decision_is_read_only_and_matches_router_resolution(self):
+        app = ForegroundApp(1, 1, "game.exe", window_title="Gameplay")
+        wanted = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", wanted, exe="game.exe")]),
+            debounce_ms=0,
+        )
+        dispatcher = DiagnosticDispatcher()
+        service = RoutingService(engine, dispatcher, provider=FakeProvider(app))
+        service._last_app = app
+        before = dispatcher.client.request_count
+
+        explanation = service.explain_decision()
+
+        self.assertEqual(dispatcher.client.request_count, before)
+        self.assertEqual(explanation["routing"]["kind"], "match")
+        self.assertEqual(explanation["routing"]["rule_name"], "Game")
+        self.assertEqual(explanation["routing"]["effective_state"]["Game"], "Game")
+        self.assertEqual(explanation["obs_plan"]["domains"][0]["status"], "planned")
+
+    def test_explain_ignore_preserves_current_state_without_obs_plan(self):
+        app = ForegroundApp(1, 1, "launcher.exe")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Launcher", priority=100, exe="launcher.exe", behavior=ResolutionKind.IGNORE)]),
+            debounce_ms=0,
+        )
+        dispatcher = DiagnosticDispatcher()
+        service = RoutingService(engine, dispatcher, provider=FakeProvider(app))
+        service._last_app = app
+        before = dispatcher.client.request_count
+
+        explanation = service.explain_decision()
+
+        self.assertEqual(dispatcher.client.request_count, before)
+        self.assertEqual(explanation["routing"]["kind"], "ignore")
+        self.assertEqual(explanation["obs_plan"]["domains"], [])
+        self.assertIn("IGNORE", explanation["obs_plan"]["reason"])
+
+    def test_routing_diagnostic_keeps_decision_id_through_result(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", state, exe="game.exe")]),
+            debounce_ms=0,
+        )
+        dispatcher = DiagnosticDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(app),
+            config_revision="rev-safe",
+        )
+        events = []
+        completed = threading.Event()
+
+        def on_event(event):
+            events.append(event)
+            if event.kind == "routing_result":
+                completed.set()
+
+        service.on_event = on_event
+        service.start()
+        try:
+            self.assertTrue(completed.wait(1.0))
+            decision = next(event for event in events if event.kind == "routing_decision")
+            result = next(event for event in events if event.kind == "routing_result")
+            self.assertEqual(decision.request_id, result.request_id)
+            self.assertTrue(result.success)
+            self.assertEqual(result.payload["config_revision"], "rev-safe")
+            self.assertEqual(result.payload["requested_domains"], ["game"])
+            self.assertEqual(result.payload["applied_domains"], ["game"])
+            self.assertEqual(result.payload["obs_requests"], 3)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_routing_diagnostic_classifies_blocked_domain_as_incomplete(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", state, exe="game.exe")]),
+            debounce_ms=0,
+        )
+        dispatcher = DiagnosticDispatcher(incomplete=True)
+        service = RoutingService(engine, dispatcher, poll_ms=10, provider=FakeProvider(app))
+        completed = threading.Event()
+        service.on_event = lambda event: completed.set() if event.kind == "routing_result" else None
+        service.start()
+        try:
+            self.assertTrue(completed.wait(1.0))
+            status = service.routing_status()
+            before = dispatcher.client.request_count
+            snapshots = service.routing_diagnostics(limit=5)
+            self.assertEqual(dispatcher.client.request_count, before)
+            self.assertFalse(status["success"])
+            self.assertEqual(status["blocked_domains"], ["game"])
+            self.assertEqual(status["pending_domains"], ["game"])
+            self.assertEqual(status["domain_details"][0]["domain"], "game")
+            self.assertEqual(status["domain_details"][0]["message"], "test")
+            self.assertTrue(snapshots)
+            serialized = repr(status).casefold()
+            self.assertNotIn("password", serialized)
+            self.assertNotIn("token", serialized)
         finally:
             self.assertTrue(service.stop())
 
@@ -658,6 +893,33 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(scheduler.state("egg").phase, ActivationPhase.IDLE)
         self.assertIsNone(scheduler.state("egg").cooldown_until)
+
+    def test_shutdown_result_preserves_unacknowledged_cleanup(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        controller = FakeActivationController()
+        controller.export_pending_hides = lambda: (
+            {
+                "policy": "egg",
+                "collection": "Collection A",
+                "target": {"container": "Egg", "source": "Cloud"},
+            },
+        )
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+
+        result = service.stop()
+
+        self.assertTrue(result)
+        self.assertFalse(result.cleanup_complete)
+        self.assertEqual(len(result.pending_cleanup), 1)
 
     def test_stop_waits_for_inflight_old_obs_dispatch(self):
         app = ForegroundApp(1, 1, "game.exe")

@@ -68,6 +68,87 @@ class StateRouterEngine:
     def manual_override_until(self) -> float | None:
         return self._manual_override_until
 
+    def explain(
+        self,
+        app: ForegroundApp | None,
+        *,
+        context: Mapping[str, Any] | None = None,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """Explain the current routing decision without mutating engine state.
+
+        The caller supplies a frozen context. This method never invokes the
+        context provider, so diagnostics cannot accidentally poll OBS.
+        """
+        timestamp = self._clock() if now is None else float(now)
+        if self._manual_override is not None:
+            remaining = None
+            if self._manual_override_until is not None:
+                remaining = max(0.0, self._manual_override_until - timestamp)
+            return {
+                "kind": "manual_override",
+                "rule_name": "manual",
+                "state": self._manual_override.as_variables(),
+                "effective_state": self._manual_override.as_variables(),
+                "current_state": (
+                    self._current_state.as_variables() if self._current_state is not None else None
+                ),
+                "would_change": self._manual_override != self._current_state,
+                "debounce_ms": 0,
+                "apply_delay_ms": 0,
+                "override_remaining_seconds": remaining,
+                "checks": [],
+            }
+
+        explanation = self._rules.explain(app, context or {})
+        resolution = explanation.resolution
+        if resolution.kind is ResolutionKind.IGNORE:
+            effective = self._current_state
+            debounce_ms = 0
+        else:
+            effective = resolution.state
+            debounce_ms = int(
+                round(
+                    1000.0
+                    * (
+                        self._fallback_debounce_seconds
+                        if resolution.kind is ResolutionKind.FALLBACK
+                        else self._debounce_seconds
+                    )
+                )
+            )
+        candidate_matches = (
+            self._candidate is not None
+            and self._candidate == resolution
+        )
+        candidate_elapsed_ms = (
+            max(0.0, (timestamp - self._candidate_since) * 1000.0)
+            if candidate_matches and self._candidate_since
+            else 0.0
+        )
+        would_change = effective is not None and effective != self._current_state
+        return {
+            **explanation.as_mapping(),
+            "effective_state": effective.as_variables() if effective is not None else None,
+            "current_state": (
+                self._current_state.as_variables() if self._current_state is not None else None
+            ),
+            "would_change": would_change,
+            "debounce_ms": debounce_ms,
+            "candidate_active": candidate_matches,
+            "candidate_elapsed_ms": round(candidate_elapsed_ms, 3),
+            "would_commit_now": (
+                bool(would_change)
+                and (
+                    debounce_ms == 0
+                    or (
+                        candidate_matches
+                        and candidate_elapsed_ms >= float(debounce_ms)
+                    )
+                )
+            ),
+        }
+
     def set_manual_override(
         self,
         state: StreamState,

@@ -43,16 +43,19 @@ from ..router.engine import StateChange, StateRouterEngine
 from ..router.models import ForegroundApp, StreamState
 from ..services.config import (
     build_activation_policies,
+    config_revision,
     build_obs_config,
     build_profiles,
     build_layout_profiles,
     build_ruleset,
     export_config,
     import_config,
+    latest_valid_backup,
     save_config,
     validate_config,
     push_layout_history,
     pop_layout_history,
+    release_runtime_visibility_ownership,
 )
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
@@ -78,13 +81,26 @@ class RuntimeBridge(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, config: dict, *, logger, start_minimized: bool = False):
+    def __init__(
+        self,
+        config: dict,
+        *,
+        logger,
+        start_minimized: bool = False,
+        runtime_marker=None,
+    ):
         super().__init__()
         self.setWindowTitle("Stream State Router 2.0.13")
         self.resize(1180, 760)
         self.config = copy.deepcopy(config)
+        self._saved_revision = config_revision(self.config)
+        self._applied_revision = ""
         self.logger = logger
         self.start_minimized = start_minimized
+        self._runtime_marker = runtime_marker
+        self._pending_cleanup_transfer = tuple(
+            getattr(runtime_marker, "previous_pending_cleanup", ()) or ()
+        )
         self._service: RoutingService | None = None
         self._dispatcher: OBSDispatcher | None = None
         self._client: OBSClientManager | None = None
@@ -95,6 +111,7 @@ class MainWindow(QMainWindow):
         self._api: LocalControlAPI | None = None
         self._known_catalog_sources: set[str] = set()
         self._preview_active = False
+        self._routing_incomplete = False
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -197,6 +214,9 @@ class MainWindow(QMainWindow):
         self.rule_label.setObjectName("Muted")
         state_lay.addLayout(state_form)
         state_lay.addWidget(self.rule_label)
+        explain_button = QPushButton("Expliquer cette décision")
+        explain_button.clicked.connect(self._explain_current_decision)
+        state_lay.addWidget(explain_button, 0, Qt.AlignLeft)
         root.addWidget(state_card)
 
         override_card, override_lay = self._card("Override manuel")
@@ -543,6 +563,7 @@ class MainWindow(QMainWindow):
             ("Enregistrer et appliquer", self.save_and_apply),
             ("Exporter la configuration…", self._export_config),
             ("Importer une configuration…", self._import_config),
+            ("Restaurer la dernière sauvegarde valide…", self._restore_config_backup),
             ("Quitter", self._quit_app),
         ]:
             action = QAction(text, self)
@@ -630,6 +651,7 @@ class MainWindow(QMainWindow):
             return
         try:
             save_config(self.config)
+            self._saved_revision = config_revision(self.config)
             set_startup_enabled(self.start_with_windows.isChecked())
         except Exception as exc:
             QMessageBox.critical(self, "Enregistrement", str(exc))
@@ -644,7 +666,7 @@ class MainWindow(QMainWindow):
         self._restart_api()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
-        self.unsaved.setText("")
+        self._refresh_config_revision_status()
         self.statusBar().showMessage("Configuration enregistrée et appliquée", 4000)
         self._log("Configuration enregistrée et appliquée.")
 
@@ -668,27 +690,42 @@ class MainWindow(QMainWindow):
             poll_ms=poll_ms,
             logger=self.logger,
             activation_policies=build_activation_policies(self.config),
+            pending_activation_cleanup=self._pending_cleanup_transfer,
+            config_revision=config_revision(self.config),
         )
+        self._pending_cleanup_transfer = ()
         self._service.on_foreground = self.bridge.foreground.emit
         self._service.on_change = self.bridge.state_change.emit
         self._service.on_dispatch = self.bridge.dispatch.emit
         self._service.on_event = self.bridge.runtime_event.emit
         self._service.start()
+        self._applied_revision = self._service.config_revision
+        self._layout_sync_manager = None
+        self._obs_module_catalog = {}
         self._update_obs_status()
+        self._refresh_config_revision_status()
 
     def _restart_runtime(self) -> bool:
         previous = self._service
-        if previous is not None and not previous.stop():
-            self._log(
-                "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
-            )
-            QMessageBox.critical(
-                self,
-                "Runtime",
-                "Le runtime précédent n'a pas terminé son nettoyage. "
-                "Le nouveau runtime n'a pas été démarré.",
-            )
-            return False
+        if previous is not None:
+            result = previous.stop()
+            if not result:
+                self._log(
+                    "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
+                )
+                QMessageBox.critical(
+                    self,
+                    "Runtime",
+                    "Le runtime précédent n'a pas pu être arrêté proprement. "
+                    "Le nouveau runtime n'a pas été démarré.",
+                )
+                return False
+            self._pending_cleanup_transfer = result.pending_cleanup
+            if not result.cleanup_complete:
+                self._log(
+                    f"Transfert de {len(result.pending_cleanup)} obligation(s) de nettoyage OBS "
+                    "au nouveau runtime."
+                )
         self._start_runtime()
         return True
 
@@ -726,7 +763,52 @@ class MainWindow(QMainWindow):
         if event.kind == "activation_command_result" and event.payload is not None:
             self.bridge.activation_result.emit(event.payload)
             return
+        if event.kind == "obs_command_result" and event.payload is not None:
+            payload = event.payload
+            action = str(getattr(payload, "action", "") or "")
+            if bool(getattr(payload, "success", False)):
+                if action == "layout.preview":
+                    self._preview_active = True
+                elif action in {"layout.cancel-preview", "layout.apply"}:
+                    self._preview_active = False
+                self.statusBar().showMessage(f"OBS : {action} terminé", 5000)
+            else:
+                self.statusBar().showMessage(
+                    f"OBS : {action} échoué — {getattr(payload, 'error', '')}",
+                    8000,
+                )
+            self._update_obs_status()
+            return
+        if event.kind == "routing_result" and isinstance(event.payload, dict):
+            self._routing_incomplete = not bool(event.payload.get("success", False))
+            if self._routing_incomplete:
+                failed = list(event.payload.get("failed_domains") or [])
+                blocked = list(event.payload.get("blocked_domains") or [])
+                pending = list(event.payload.get("pending_domains") or [])
+                details = failed or blocked or pending
+                detail_rows = event.payload.get("domain_details") or []
+                precise = ""
+                if isinstance(detail_rows, list):
+                    for row in detail_rows:
+                        if not isinstance(row, dict):
+                            continue
+                        if str(row.get("status") or "") in {"failed", "missing", "partial", "blocked"}:
+                            message = str(row.get("message") or "").strip()
+                            if message:
+                                precise = f" — {row.get('domain', '')}: {message}"
+                                break
+                suffix = precise or (
+                    f" — {', '.join(str(item) for item in details)}" if details else ""
+                )
+                self.statusBar().showMessage(
+                    f"OBS connecté mais application incomplète{suffix}",
+                    10000,
+                )
+            self._update_obs_status()
+            return
         if event.kind in {"obs_connected", "obs_disconnected"}:
+            if event.kind == "obs_disconnected":
+                self._routing_incomplete = False
             self._update_obs_status()
         elif event.kind == "obs_error":
             self.obs_status.setText("OBS : erreur")
@@ -739,6 +821,8 @@ class MainWindow(QMainWindow):
             return
         if not self._client.config.enabled:
             text, style = "OBS : désactivé", "Muted"
+        elif self._client.connected and self._routing_incomplete:
+            text, style = "OBS : connecté · application incomplète", "Warn"
         elif self._client.connected:
             text, style = "OBS : connecté", "Good"
         elif self._client.last_error:
@@ -749,6 +833,64 @@ class MainWindow(QMainWindow):
         self.obs_status.setObjectName(style)
         self.obs_status.style().unpolish(self.obs_status)
         self.obs_status.style().polish(self.obs_status)
+
+    def _explain_current_decision(self) -> None:
+        service = self._service
+        if service is None:
+            QMessageBox.information(self, "Explication", "Runtime non disponible.")
+            return
+        try:
+            explanation = service.explain_decision()
+        except Exception as exc:
+            QMessageBox.critical(self, "Explication", str(exc))
+            return
+
+        routing = explanation.get("routing", {}) if isinstance(explanation, dict) else {}
+        plan = explanation.get("obs_plan", {}) if isinstance(explanation, dict) else {}
+        foreground = explanation.get("foreground", {}) if isinstance(explanation, dict) else {}
+        lines = [
+            f"Application : {foreground.get('exe') or '—'}",
+            f"Décision : {routing.get('kind') or '—'} · {routing.get('rule_name') or '—'}",
+            f"Debounce : {routing.get('debounce_ms', 0)} ms · délai OBS : {routing.get('apply_delay_ms', 0)} ms",
+        ]
+        if explanation.get("paused"):
+            lines.append("Runtime : routage suspendu")
+        lines.append("")
+        lines.append("Règles évaluées :")
+        checks = routing.get("checks") if isinstance(routing, dict) else None
+        if isinstance(checks, list) and checks:
+            for check in checks:
+                if not isinstance(check, dict):
+                    continue
+                marker = "✓" if check.get("matched") else "·"
+                lines.append(
+                    f"{marker} {check.get('name', '')} — {check.get('reason', '')}"
+                )
+        else:
+            lines.append("— aucune règle évaluée —")
+
+        lines.append("")
+        lines.append("Plan OBS :")
+        domains = plan.get("domains") if isinstance(plan, dict) else None
+        if isinstance(domains, list) and domains:
+            for domain in domains:
+                if not isinstance(domain, dict):
+                    continue
+                lines.append(
+                    f"• {domain.get('domain', '')}: {domain.get('status', '')} "
+                    f"({domain.get('applied_profile') or '—'} → {domain.get('desired_profile') or '—'})"
+                )
+                for operation in domain.get("operations", []) or []:
+                    if not isinstance(operation, dict):
+                        continue
+                    target = str(operation.get("target") or operation.get("scene") or "")
+                    lines.append(
+                        f"    {operation.get('type', '')}" + (f" → {target}" if target else "")
+                    )
+        else:
+            lines.append(str(plan.get("reason") or "Aucune mutation OBS prévue."))
+
+        QMessageBox.information(self, "Expliquer cette décision", "\n".join(lines))
 
     def _apply_override(self) -> None:
         if not self._service:
@@ -779,15 +921,9 @@ class MainWindow(QMainWindow):
         if not self._service:
             return
         try:
-            result = self._service.force_reapply()
-            if result is None:
-                QMessageBox.information(self, "OBS", "Aucun état courant à réappliquer.")
-            else:
-                QMessageBox.information(
-                    self,
-                    "OBS",
-                    f"{result.executed} action(s) réappliquée(s).",
-                )
+            request_id = self._service.request_force_reapply()
+            self._log(f"Réapplication OBS mise en file ({request_id[:8]}).")
+            self.statusBar().showMessage("Réapplication OBS en cours…", 3000)
         except Exception as exc:
             QMessageBox.critical(self, "OBS", str(exc))
 
@@ -1536,46 +1672,72 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            push_layout_history(self.config, name, old_profile)
-            captured = self._layout_sync_manager.capture_profile(
+            capture = self._layout_sync_manager.capture_profile_result(
                 scene,
                 selected_sources=selected,
                 extends=str(old_profile.get("extends") or ""),
-                transition=old_profile.get("transition") if isinstance(old_profile.get("transition"), dict) else None,
+                transition=(
+                    old_profile.get("transition")
+                    if isinstance(old_profile.get("transition"), dict)
+                    else None
+                ),
             )
-            captured["coordinate_mode"] = str(old_profile.get("coordinate_mode") or "normalized")
-            captured["conditions"] = copy.deepcopy(old_profile.get("conditions") or {})
-            parent_name = str(captured.get("extends") or "")
+            raw_captured = capture.profile
+            if capture.captured_modules <= 0:
+                QMessageBox.warning(
+                    self,
+                    "Capturer le layout",
+                    "Aucune source correspondant à « [Type de module] Nom du module » "
+                    "n'a été trouvée parmi la sélection.",
+                )
+                return
+            if not capture.complete:
+                QMessageBox.warning(
+                    self,
+                    "Capture OBS incomplète",
+                    "Le profil existant n'a pas été remplacé. Certains sous-arbres OBS "
+                    "n'ont pas pu être lus :\n\n- " + "\n- ".join(capture.warnings[:20]),
+                )
+                return
+
+            candidate = copy.deepcopy(raw_captured)
+            candidate["coordinate_mode"] = str(old_profile.get("coordinate_mode") or "normalized")
+            candidate["conditions"] = copy.deepcopy(old_profile.get("conditions") or {})
+            parent_name = str(candidate.get("extends") or "")
             if parent_name and parent_name in self._layout_profiles():
                 parent = resolve_layout_profile(parent_name, self._layout_profiles())
-                captured = compact_layout_overrides(captured, parent)
+                candidate = compact_layout_overrides(candidate, parent)
+
+            candidate_profiles = copy.deepcopy(self._layout_profiles())
+            candidate_profiles[name] = candidate
+            resolved = resolve_layout_profile(name, candidate_profiles)
+            issues = self._layout_sync_manager.validate_profile(resolved)
+            errors = [issue for issue in issues if issue.level == "error"]
+            if errors:
+                QMessageBox.warning(
+                    self,
+                    "Capture OBS refusée",
+                    "Le profil existant n'a pas été remplacé :\n\n"
+                    + "\n".join(f"• {issue.message}" for issue in errors[:20]),
+                )
+                return
         except Exception as exc:
             QMessageBox.critical(self, "Capturer le layout", str(exc))
             return
-        if not captured.get("modules"):
-            QMessageBox.warning(
-                self,
-                "Capturer le layout",
-                "Aucune source correspondant à « [Type de module] Nom du module » n'a été trouvée parmi la sélection.",
-            )
-            return
-        self._layout_profiles()[name] = captured
+
+        push_layout_history(self.config, name, old_profile)
+        self._layout_profiles()[name] = candidate
         self._mark_dirty()
         self._refresh_layout_profile_view()
         self._refresh_override_boxes()
         self.statusBar().showMessage(f"Layout « {name} » capturé depuis OBS", 4000)
-        try:
-            resolved = resolve_layout_profile(name, self._layout_profiles())
-            issues = self._layout_sync_manager.validate_profile(resolved)
-        except Exception:
-            issues = []
-        errors = [issue for issue in issues if issue.level == "error"]
-        if errors:
-            QMessageBox.warning(
+        warnings = [issue for issue in issues if issue.level != "error"]
+        if warnings:
+            QMessageBox.information(
                 self,
-                "Layout capturé avec avertissements",
-                "Le layout a été enregistré, mais certains éléments devront être vérifiés :\n\n"
-                + "\n".join(f"• {issue.message}" for issue in errors[:20]),
+                "Layout capturé",
+                "Capture valide avec informations :\n\n"
+                + "\n".join(f"• {issue.message}" for issue in warnings[:20]),
             )
 
     def _selected_layout_module_name(self) -> str | None:
@@ -1649,6 +1811,25 @@ class MainWindow(QMainWindow):
                 add_candidate(raw)
 
         return candidates
+
+    def _release_runtime_visibility_ownership(self, container: str, source: str) -> int:
+        configured = build_activation_policies(self.config)
+        identity = TriggerTargetIdentity(container, source)
+        for policy_name, policy in configured.items():
+            if any(target.identity.container == identity.container and target.identity.source == identity.source for target in policy.targets):
+                raise RuntimeError(
+                    f"Cette source appartient encore à la politique d'activation {policy_name}. "
+                    "Retirez-la d'abord de la politique puis enregistrez."
+                )
+        changed = release_runtime_visibility_ownership(
+            self.config,
+            container=container,
+            source=source,
+        )
+        if changed:
+            self._mark_dirty()
+            self._refresh_layout_profile_view()
+        return changed
 
     def _activation_status(self, policy_name: str) -> dict:
         if self._service is None:
@@ -1759,22 +1940,15 @@ class MainWindow(QMainWindow):
 
     def _apply_layout_profile(self) -> None:
         current = self._current_layout_profile()
-        if not current:
+        if not current or self._service is None:
             return
         self._collect_settings()
         try:
-            manager = self._layout_manager_for_tools()
-            resolved = resolve_layout_profile(current[0], self._layout_profiles())
-            result = manager.apply_profile(resolved)
+            request_id = self._service.request_layout("apply", current[0])
+            self._log(f"Application layout {current[0]} mise en file ({request_id[:8]}).")
+            self.statusBar().showMessage(f"Application du layout {current[0]}…", 3000)
         except Exception as exc:
             QMessageBox.critical(self, "Appliquer le layout", str(exc))
-            return
-        details = f"{result.elements_applied} élément(s) appliqué(s), {result.elements_skipped} ignoré(s)."
-        if result.missing_sources:
-            details += "\n\nSources introuvables :\n- " + "\n- ".join(result.missing_sources)
-        if result.warnings:
-            details += "\n\nAvertissements :\n- " + "\n- ".join(result.warnings)
-        QMessageBox.information(self, "Layout appliqué", details)
 
     def _layout_manager_for_tools(self) -> OBSLayoutManager:
         self._collect_settings()
@@ -1783,39 +1957,35 @@ class MainWindow(QMainWindow):
             raise RuntimeError("Activez le pilotage OBS avant d'utiliser cet outil.")
         if self._dispatcher is not None:
             return self._dispatcher.layout_manager
-        if self._layout_sync_manager is not None:
-            return self._layout_sync_manager
+        # Tools must never silently use a manager kept from an older runtime.
+        self._layout_sync_manager = None
         return OBSLayoutManager(OBSClientManager(cfg))
 
     def _preview_layout_profile(self) -> None:
         current = self._current_layout_profile()
-        if not current:
+        if not current or self._service is None:
             return
         try:
-            manager = self._layout_manager_for_tools()
-            resolved = resolve_layout_profile(current[0], self._layout_profiles())
-            result = manager.preview_profile(resolved)
-            self._preview_active = True
-            self._log(f"Aperçu layout {current[0]} : {result.elements_applied} élément(s).")
+            request_id = self._service.request_layout("preview", current[0])
+            self._log(f"Aperçu layout {current[0]} mis en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Aperçu layout", str(exc))
 
     def _cancel_layout_preview(self) -> None:
+        if self._service is None:
+            return
         try:
-            manager = self._layout_manager_for_tools()
-            result = manager.cancel_preview()
-            self._preview_active = False
-            self._log(f"Aperçu annulé : {result.elements_applied} élément(s) restauré(s).")
+            request_id = self._service.request_layout("cancel-preview")
+            self._log(f"Annulation aperçu mise en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Aperçu layout", str(exc))
 
     def _undo_layout_obs(self) -> None:
+        if self._service is None:
+            return
         try:
-            manager = self._layout_manager_for_tools()
-            result = manager.undo_last()
-            self._log(f"Undo OBS : {result.elements_applied} élément(s) restauré(s).")
-            if result.warnings:
-                QMessageBox.information(self, "Undo OBS", "\n".join(result.warnings))
+            request_id = self._service.request_layout("undo")
+            self._log(f"Undo OBS mis en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Undo OBS", str(exc))
 
@@ -1936,7 +2106,12 @@ class MainWindow(QMainWindow):
             port=int(raw.get("port", 8765)),
             token=str(raw.get("token") or ""),
         )
-        self._api = LocalControlAPI(cfg, status=self._api_status, action=self._api_action)
+        self._api = LocalControlAPI(
+            cfg,
+            status=self._api_status,
+            action=self._api_action,
+            request_status=self._api_request_status,
+        )
         try:
             self._api.start()
             if cfg.enabled:
@@ -1959,11 +2134,23 @@ class MainWindow(QMainWindow):
             "rule": service.engine.current_rule if service else "",
             "state": state.as_variables() if state else {},
             "obs_connected": bool(self._client.connected) if self._client else False,
+            "config_revision": {
+                "saved": self._saved_revision,
+                "applied": self._applied_revision,
+            },
+            "routing": service.routing_status() if service else {},
         }
+
+    def _api_request_status(self, request_id: str) -> dict | None:
+        if self._service is None:
+            return None
+        return self._service.command_status(request_id)
 
     def _api_action(self, action: str, payload: dict) -> dict:
         if self._service is None or self._dispatcher is None:
             raise RuntimeError("Runtime non disponible")
+        if action == "explain":
+            return {"explanation": self._service.explain_decision()}
         if action == "pause":
             self._service.pause(bool(payload.get("paused", True)))
             return {"paused": self._service.paused}
@@ -1972,8 +2159,8 @@ class MainWindow(QMainWindow):
             self._service.clear_manual_override()
             return {"paused": False}
         if action == "reapply":
-            result = self._service.force_reapply()
-            return {"executed": result.executed if result else 0}
+            request_id = self._service.request_force_reapply()
+            return {"request_id": request_id, "status": "accepted"}
         if action == "override":
             state = StreamState.from_mapping(payload.get("state") if isinstance(payload.get("state"), dict) else {})
             duration = float(payload.get("duration_seconds", 0) or 0)
@@ -1983,20 +2170,20 @@ class MainWindow(QMainWindow):
             name = str(payload.get("name") or "").strip()
             if not name:
                 raise ValueError("name requis")
-            result = self._dispatcher.execute_layout_profile(name)
-            return {"executed": result.executed}
+            request_id = self._service.request_layout("apply", name)
+            return {"request_id": request_id, "status": "accepted"}
         if action == "layout.preview":
             name = str(payload.get("name") or "").strip()
             if not name:
                 raise ValueError("name requis")
-            result = self._dispatcher.execute_layout_profile(name, preview=True)
-            return {"executed": result.executed}
+            request_id = self._service.request_layout("preview", name)
+            return {"request_id": request_id, "status": "accepted"}
         if action == "layout.cancel-preview":
-            result = self._dispatcher.layout_manager.cancel_preview()
-            return {"executed": result.elements_applied}
+            request_id = self._service.request_layout("cancel-preview")
+            return {"request_id": request_id, "status": "accepted"}
         if action == "layout.undo":
-            result = self._dispatcher.layout_manager.undo_last()
-            return {"executed": result.elements_applied}
+            request_id = self._service.request_layout("undo")
+            return {"request_id": request_id, "status": "accepted"}
         raise ValueError(f"Action inconnue : {action}")
 
     def _edit_layout_in_obs(self) -> None:
@@ -2004,16 +2191,16 @@ class MainWindow(QMainWindow):
         if not current:
             return
         try:
-            manager = self._layout_manager_for_tools()
-            resolved = resolve_layout_profile(current[0], self._layout_profiles())
-            result = manager.apply_profile(resolved)
+            if self._service is None:
+                raise RuntimeError("Runtime non disponible")
+            request_id = self._service.request_layout("apply", current[0])
             self._log(
-                f"Mode édition OBS — layout {current[0]} appliqué ({result.elements_applied} élément(s)). "
-                "Ajustez dans OBS puis utilisez Capturer depuis OBS."
+                f"Mode édition OBS — application de {current[0]} mise en file "
+                f"({request_id[:8]}). Ajustez dans OBS après confirmation runtime puis capturez."
             )
             self.statusBar().showMessage(
-                "Mode édition : ajustez le layout dans OBS puis cliquez Capturer depuis OBS",
-                8000,
+                "Mode édition : application OBS en cours…",
+                5000,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Mode édition OBS", str(exc))
@@ -2044,11 +2231,31 @@ class MainWindow(QMainWindow):
 
     def _export_config(self) -> None:
         self._collect_settings()
-        path, _ = QFileDialog.getSaveFileName(self, "Exporter la configuration", "stream-state-router-config.json", "JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exporter la configuration",
+            "stream-state-router-config.json",
+            "JSON (*.json)",
+        )
         if not path:
             return
+        include_secrets = QMessageBox.question(
+            self,
+            "Secrets de l'export",
+            "Inclure le mot de passe OBS et le jeton API dans cet export ?\n\n"
+            "Choisissez Non pour un fichier partageable.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) == QMessageBox.Yes
         try:
-            export_config(self.config, path)
+            export_config(self.config, path, include_secrets=include_secrets)
+            QMessageBox.information(
+                self,
+                "Export",
+                "Configuration exportée avec secrets."
+                if include_secrets
+                else "Configuration partageable exportée sans mot de passe OBS ni jeton API.",
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Export", str(exc))
 
@@ -2071,8 +2278,44 @@ class MainWindow(QMainWindow):
         self._load_config_into_ui()
         self._mark_dirty()
 
+    def _restore_config_backup(self) -> None:
+        try:
+            found = latest_valid_backup()
+        except Exception as exc:
+            QMessageBox.critical(self, "Sauvegarde", str(exc))
+            return
+        if found is None:
+            QMessageBox.information(self, "Sauvegarde", "Aucune sauvegarde valide n'a été trouvée.")
+            return
+        incoming, path = found
+        if QMessageBox.question(
+            self,
+            "Restaurer une sauvegarde",
+            f"Charger « {path.name} » comme brouillon ?\n\n"
+            "La configuration active ne changera qu'après « Enregistrer et appliquer ».",
+        ) != QMessageBox.Yes:
+            return
+        self.config = copy.deepcopy(incoming)
+        self._load_config_into_ui()
+        self._mark_dirty()
+        self._log(f"Sauvegarde valide chargée en brouillon : {path}")
+
+    def _refresh_config_revision_status(self, *, draft_dirty: bool = False) -> None:
+        saved = self._saved_revision or "—"
+        applied = self._applied_revision or "—"
+        if draft_dirty:
+            self.unsaved.setText(
+                f"Brouillon modifié · enregistré {saved} · appliqué {applied}"
+            )
+        elif saved != applied:
+            self.unsaved.setText(
+                f"Enregistré {saved} · runtime encore sur {applied}"
+            )
+        else:
+            self.unsaved.setText(f"Enregistré / appliqué {applied}")
+
     def _mark_dirty(self, *_args) -> None:
-        self.unsaved.setText("Modifications non enregistrées")
+        self._refresh_config_revision_status(draft_dirty=True)
 
     def _log(self, message: str) -> None:
         self.log_view.appendPlainText(message)
@@ -2087,6 +2330,23 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _stop_runtime_for_exit(self):
+        if self._service is None:
+            return None
+        result = self._service.stop()
+        marker = self._runtime_marker
+        if marker is not None:
+            marker.finish(
+                clean_shutdown=bool(result),
+                cleanup_complete=bool(result.cleanup_complete),
+                pending_cleanup=result.pending_cleanup,
+            )
+        if not result.cleanup_complete:
+            self._log(
+                f"Arrêt avec {len(result.pending_cleanup)} obligation(s) de nettoyage OBS conservée(s)."
+            )
+        return result
+
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._quitting and self.close_to_tray.isChecked() and self.tray.isVisible():
             event.ignore()
@@ -2100,8 +2360,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
-        if self._service:
-            self._service.stop()
+        self._stop_runtime_for_exit()
         event.accept()
         QApplication.instance().quit()
 
@@ -2109,7 +2368,6 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
-        if self._service:
-            self._service.stop()
+        self._stop_runtime_for_exit()
         self.tray.hide()
         QApplication.instance().quit()

@@ -230,6 +230,7 @@ class ModuleLayoutDialog(QDialog):
         self._activation_source = deepcopy(activation_policy) if isinstance(activation_policy, dict) else None
         self._activation_status_provider = activation_status_provider
         self._activation_command = activation_command
+        self._visibility_release_command = visibility_release_command
         self._activation_result_signal = activation_result_signal
         self._pending_activation_requests: dict[str, str] = {}
         if self._activation_result_signal is not None:
@@ -396,6 +397,9 @@ class ModuleLayoutDialog(QDialog):
             button = QPushButton(label)
             button.clicked.connect(lambda _checked=False, a=action: self._run_activation_command(a))
             action_row.addWidget(button)
+        release_button = QPushButton("Restituer visibilité au LayoutProfile")
+        release_button.clicked.connect(self._release_selected_visibility)
+        action_row.addWidget(release_button)
         action_row.addStretch(1)
         root.addLayout(action_row)
 
@@ -685,6 +689,32 @@ class ModuleLayoutDialog(QDialog):
         target["source"] = item.text().strip()
         if target.get("source"):
             self._run_activation_command("trigger", target)
+
+    def _release_selected_visibility(self) -> None:
+        row = self.activation_targets.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Visibilité", "Sélectionnez d'abord une source participante.")
+            return
+        item = self.activation_targets.item(row, 1)
+        raw = item.data(Qt.UserRole) if item is not None else None
+        if not isinstance(raw, Mapping):
+            return
+        if self._visibility_release_command is None:
+            QMessageBox.information(self, "Visibilité", "Action de restitution indisponible.")
+            return
+        container = str(raw.get("container") or "").strip()
+        source = str(raw.get("source") or item.text() or "").strip()
+        try:
+            changed = int(self._visibility_release_command(container, source) or 0)
+        except Exception as exc:
+            QMessageBox.warning(self, "Visibilité", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Visibilité",
+            f"{changed} marqueur(s) runtime restitué(s) aux LayoutProfiles. "
+            "Recapturez le layout si vous souhaitez enregistrer l'état visible actuel.",
+        )
 
     def done(self, result: int) -> None:
         if self._activation_result_signal is not None:

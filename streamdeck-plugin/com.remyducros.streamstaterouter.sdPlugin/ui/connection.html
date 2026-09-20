@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Connexion SSR</title>
+  <script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+</head>
+<body>
+  <sdpi-item label="Port SSR">
+    <sdpi-textfield setting="port" placeholder="8765"></sdpi-textfield>
+  </sdpi-item>
+  <sdpi-item label="Jeton API">
+    <sdpi-password setting="token" placeholder="Optionnel"></sdpi-password>
+  </sdpi-item>
+  <p style="margin:12px;color:#aaa;font:12px system-ui">
+    Ces valeurs sont enregistrées comme paramètres globaux du plugin lorsque vous appuyez sur cette touche. Toutes les actions SSR les réutilisent.
+  </p>
+</body>
+</html>

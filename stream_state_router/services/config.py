@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
+import re
 import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -305,31 +308,114 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     return data
 
 
-def save_config(data: Mapping[str, Any], path: str | Path | None = None) -> Path:
+def _validated_payload(data: Mapping[str, Any]) -> dict[str, Any]:
     payload = migrate_config(data)
     errors = validate_config(payload)
     if errors:
         raise ConfigError("Configuration invalide :\n- " + "\n- ".join(errors))
+    try:
+        json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Configuration non sérialisable strictement : {exc}") from exc
+    return payload
+
+
+def _atomic_write_json(target: Path, payload: Mapping[str, Any]) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
+        temp.replace(target)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _prune_backups(*, keep: int = 20) -> None:
+    directory = backups_dir()
+    if not directory.exists():
+        return
+    files = sorted(
+        directory.glob("config-*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in files[max(1, int(keep)) :]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def save_config(
+    data: Mapping[str, Any],
+    path: str | Path | None = None,
+    *,
+    backup_limit: int = 20,
+) -> Path:
+    payload = _validated_payload(data)
     target = Path(path) if path else config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        shutil.copy2(target, backups_dir() / f"config-{stamp}.json")
-    temp = target.with_suffix(".tmp")
-    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(target)
+        directory = backups_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup = directory / f"config-{stamp}-{uuid.uuid4().hex[:8]}.json"
+        shutil.copy2(target, backup)
+        _prune_backups(keep=backup_limit)
+    _atomic_write_json(target, payload)
     return target
 
 
-def export_config(data: Mapping[str, Any], destination: str | Path) -> Path:
-    payload = migrate_config(data)
+def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(payload)
+    obs = result.get("obs")
+    if isinstance(obs, dict):
+        obs["password"] = ""
+    api = result.get("api")
+    if isinstance(api, dict):
+        api["token"] = ""
+    return result
+
+
+def export_config(
+    data: Mapping[str, Any],
+    destination: str | Path,
+    *,
+    include_secrets: bool = True,
+) -> Path:
+    payload = _validated_payload(data)
+    if not include_secrets:
+        payload = _redact_secrets(payload)
     target = Path(destination)
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(target, payload)
     return target
 
 
 def import_config(source: str | Path) -> dict[str, Any]:
     return load_config(Path(source))
+
+
+def latest_valid_backup() -> tuple[dict[str, Any], Path] | None:
+    directory = backups_dir()
+    if not directory.exists():
+        return None
+    candidates = sorted(
+        directory.glob("config-*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        try:
+            return load_config(candidate), candidate
+        except ConfigError:
+            continue
+    return None
 
 
 def push_layout_history(data: dict[str, Any], name: str, profile: Mapping[str, Any], *, limit: int = 10) -> None:
@@ -360,11 +446,34 @@ def pop_layout_history(data: dict[str, Any], name: str) -> dict[str, Any] | None
 
 
 def _valid_number(value: Any, *, positive: bool = False) -> bool:
+    if isinstance(value, bool):
+        return False
     try:
         parsed = float(value)
     except (TypeError, ValueError, OverflowError):
         return False
+    if not math.isfinite(parsed):
+        return False
     return parsed > 0 if positive else True
+
+
+def _valid_int(
+    value: Any,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if minimum is not None and parsed < minimum:
+        return False
+    if maximum is not None and parsed > maximum:
+        return False
+    return True
 
 
 def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
@@ -377,6 +486,11 @@ def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
     unknown = set(raw) - allowed
     if unknown:
         errors.append(f"{prefix} contient des conditions inconnues : {', '.join(sorted(unknown))}")
+    for key in ("streaming", "recording", "obs_enabled"):
+        if key in raw and not isinstance(raw.get(key), bool):
+            errors.append(f"{prefix}.{key} doit être booléen")
+    if "program_scene" in raw and not isinstance(raw.get("program_scene"), str):
+        errors.append(f"{prefix}.program_scene doit être une chaîne")
 
 
 def _check_inheritance_cycles(mapping: Mapping[str, Any], prefix: str, errors: list[str]) -> None:
@@ -399,6 +513,18 @@ def _check_inheritance_cycles(mapping: Mapping[str, Any], prefix: str, errors: l
         visit(str(name), ())
 
 
+def config_revision(data: Mapping[str, Any]) -> str:
+    """Stable short revision for draft/saved/applied UI state."""
+    payload = json.dumps(
+        dict(data),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:12]
+
+
 def validate_config(data: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
     try:
@@ -414,11 +540,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         router = {}
     else:
         for key in ("poll_ms", "debounce_ms", "fallback_debounce_ms"):
-            try:
-                value = int(router.get(key, 0))
-                if value < 0:
-                    raise ValueError
-            except (TypeError, ValueError):
+            if not _valid_int(router.get(key, 0), minimum=0):
                 errors.append(f"router.{key} doit être un entier >= 0")
 
     fallback = router.get("fallback_state") if isinstance(router, Mapping) else None
@@ -447,13 +569,16 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             errors.append(f"{prefix}.behavior doit être match ou ignore")
         if not any(str(raw.get(key) or "").strip() for key in ("exe", "path", "title_regex")):
             errors.append(f"{prefix} doit définir exe, path ou title_regex")
+        title_regex = str(raw.get("title_regex") or "").strip()
+        if title_regex:
+            try:
+                re.compile(title_regex)
+            except re.error as exc:
+                errors.append(f"{prefix}.title_regex est invalide : {exc}")
         if behavior == "match" and not isinstance(raw.get("state"), Mapping):
             errors.append(f"{prefix}.state est requis pour une règle match")
-        try:
-            if int(raw.get("apply_delay_ms", 0)) < 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            errors.append(f"{prefix}.apply_delay_ms doit être >= 0")
+        if not _valid_int(raw.get("apply_delay_ms", 0), minimum=0):
+            errors.append(f"{prefix}.apply_delay_ms doit être un entier >= 0")
         _validate_conditions(raw.get("conditions", {}), f"{prefix}.conditions", errors)
 
     obs = data.get("obs")
@@ -463,12 +588,12 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         host = str(obs.get("host") or "127.0.0.1").strip().casefold()
         if host not in {"127.0.0.1", "localhost", "::1"}:
             errors.append("obs.host doit rester local (127.0.0.1, localhost ou ::1)")
-        try:
-            port = int(obs.get("port", 4455))
-            if not 1 <= port <= 65535:
-                raise ValueError
-        except (TypeError, ValueError):
+        if not _valid_int(obs.get("port", 4455), minimum=1, maximum=65535):
             errors.append("obs.port doit être compris entre 1 et 65535")
+        if not _valid_number(obs.get("timeout_seconds", 2.0), positive=True):
+            errors.append("obs.timeout_seconds doit être un nombre fini > 0")
+        if not _valid_number(obs.get("reconnect_seconds", 3.0)) or float(obs.get("reconnect_seconds", 3.0)) < 0:
+            errors.append("obs.reconnect_seconds doit être un nombre fini >= 0")
 
     api = data.get("api", {})
     if not isinstance(api, Mapping):
@@ -476,11 +601,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
     else:
         if str(api.get("host") or "127.0.0.1").strip() not in {"127.0.0.1", "localhost", "::1"}:
             errors.append("api.host doit rester local")
-        try:
-            port = int(api.get("port", 8765))
-            if not 1 <= port <= 65535:
-                raise ValueError
-        except (TypeError, ValueError):
+        if not _valid_int(api.get("port", 8765), minimum=1, maximum=65535):
             errors.append("api.port doit être compris entre 1 et 65535")
 
     activation_policies = data.get("activation_policies", {})
@@ -587,6 +708,32 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     "sont en conflit ancêtre/descendant"
                 )
 
+    activation_owners: dict[tuple[str, str, str], str] = {}
+    if isinstance(activation_policies, Mapping):
+        for policy_name, policy in activation_policies.items():
+            if not isinstance(policy, Mapping):
+                continue
+            targets = policy.get("targets", [])
+            if not isinstance(targets, list):
+                continue
+            for target_index, target in enumerate(targets):
+                if not isinstance(target, Mapping):
+                    continue
+                container = str(target.get("container") or "").strip()
+                source = str(target.get("source") or "").strip()
+                kind = str(target.get("container_kind") or "scene").strip() or "scene"
+                if not container or not source:
+                    continue
+                identity = (container, kind, source)
+                previous = activation_owners.get(identity)
+                if previous is not None and previous != str(policy_name):
+                    errors.append(
+                        f"activation_policies.{policy_name}.targets[{target_index}] partage la cible "
+                        f"{kind}:{container}/{source} avec activation_policies.{previous}"
+                    )
+                else:
+                    activation_owners[identity] = str(policy_name)
+
     profiles = data.get("profiles")
     if not isinstance(profiles, Mapping):
         errors.append("profiles doit être un objet")
@@ -617,6 +764,45 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     errors.append(f"profiles.{domain}.{name}.actions[{action_index}].type est requis")
                 elif action_type not in SUPPORTED_ACTION_TYPES:
                     errors.append(f"profiles.{domain}.{name}.actions[{action_index}].type inconnu : {action_type}")
+                    continue
+                aprefix = f"profiles.{domain}.{name}.actions[{action_index}]"
+                params = action.get("params", {})
+                if not isinstance(params, Mapping):
+                    errors.append(f"{aprefix}.params doit être un objet")
+                    continue
+                if "enabled" in action and not isinstance(action.get("enabled"), bool):
+                    errors.append(f"{aprefix}.enabled doit être booléen")
+
+                def required_text(key: str) -> None:
+                    if not str(params.get(key) or "").strip():
+                        errors.append(f"{aprefix}.params.{key} est requis")
+
+                if action_type == "set_program_scene":
+                    required_text("scene")
+                elif action_type == "scene_item_enabled":
+                    required_text("scene")
+                    required_text("source")
+                    if "enabled" in params and not isinstance(params.get("enabled"), bool):
+                        errors.append(f"{aprefix}.params.enabled doit être booléen")
+                elif action_type == "source_filter_enabled":
+                    required_text("source")
+                    required_text("filter")
+                    if "enabled" in params and not isinstance(params.get("enabled"), bool):
+                        errors.append(f"{aprefix}.params.enabled doit être booléen")
+                elif action_type == "input_mute":
+                    required_text("input")
+                    if "muted" in params and not isinstance(params.get("muted"), bool):
+                        errors.append(f"{aprefix}.params.muted doit être booléen")
+                elif action_type == "input_volume_db":
+                    required_text("input")
+                    if not _valid_number(params.get("volume_db", 0.0)):
+                        errors.append(f"{aprefix}.params.volume_db doit être un nombre fini")
+                elif action_type == "set_input_settings":
+                    required_text("input")
+                    if not isinstance(params.get("settings"), Mapping):
+                        errors.append(f"{aprefix}.params.settings doit être un objet")
+                    if "overlay" in params and not isinstance(params.get("overlay"), bool):
+                        errors.append(f"{aprefix}.params.overlay doit être booléen")
 
     layout_profiles = data.get("layout_profiles")
     if not isinstance(layout_profiles, Mapping):
@@ -638,6 +824,10 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             mode = str(transition.get("mode") or "instant")
             if mode not in LAYOUT_TRANSITIONS:
                 errors.append(f"{prefix}.transition.mode inconnu : {mode}")
+            if not _valid_int(transition.get("duration_ms", 0), minimum=0):
+                errors.append(f"{prefix}.transition.duration_ms doit être un entier >= 0")
+            if not _valid_int(transition.get("steps", 8), minimum=1, maximum=60):
+                errors.append(f"{prefix}.transition.steps doit être compris entre 1 et 60")
         modules = profile.get("modules", {})
         if not isinstance(modules, Mapping):
             errors.append(f"{prefix}.modules doit être un objet")
@@ -672,8 +862,20 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     continue
                 if not str(element.get("source") or "").strip():
                     errors.append(f"{eprefix}.source est requis")
-                if not isinstance(element.get("transform"), Mapping):
+                transform = element.get("transform")
+                if not isinstance(transform, Mapping):
                     errors.append(f"{eprefix}.transform doit être un objet")
+                    continue
+                for key in (
+                    "positionX", "positionY", "scaleX", "scaleY", "rotation",
+                    "boundsWidth", "boundsHeight", "width", "height",
+                    "sourceWidth", "sourceHeight",
+                ):
+                    if key in transform and not _valid_number(transform.get(key)):
+                        errors.append(f"{eprefix}.transform.{key} doit être un nombre fini")
+                for key in ("included", "enabled", "follow_position", "follow_size", "follow_visibility", "locked"):
+                    if key in element and not isinstance(element.get(key), bool):
+                        errors.append(f"{eprefix}.{key} doit être booléen")
 
     profile_keys = {
         "game": "Game",
@@ -706,6 +908,71 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         check_state_refs(raw.get("state"), f"rules[{index}].state")
 
     return errors
+
+
+def release_runtime_visibility_ownership(
+    data: dict[str, Any],
+    *,
+    container: str,
+    source: str,
+) -> int:
+    """Explicitly return one orphaned visibility marker to LayoutProfile ownership."""
+    wanted = (str(container).strip(), str(source).strip())
+    if not all(wanted):
+        return 0
+    changed = 0
+
+    def release_profile(profile: Any) -> None:
+        nonlocal changed
+        if not isinstance(profile, Mapping):
+            return
+        modules = profile.get("modules")
+        if isinstance(modules, Mapping):
+            for module in modules.values():
+                if not isinstance(module, Mapping):
+                    continue
+                elements = module.get("elements")
+                if not isinstance(elements, list):
+                    continue
+                for element in elements:
+                    if not isinstance(element, dict):
+                        continue
+                    identity = (
+                        str(element.get("container") or "").strip(),
+                        str(element.get("source") or "").strip(),
+                    )
+                    if identity != wanted:
+                        continue
+                    if str(element.get("visibility_owner") or "").casefold() == "runtime":
+                        element["visibility_owner"] = ""
+                        element["follow_visibility"] = True
+                        changed += 1
+        support = profile.get("support_items")
+        if isinstance(support, list):
+            for item in support:
+                if not isinstance(item, dict):
+                    continue
+                identity = (
+                    str(item.get("container") or "").strip(),
+                    str(item.get("source") or "").strip(),
+                )
+                if identity == wanted and str(item.get("visibility_owner") or "").casefold() == "runtime":
+                    item["visibility_owner"] = ""
+                    changed += 1
+
+    layouts = data.get("layout_profiles")
+    if isinstance(layouts, Mapping):
+        for profile in layouts.values():
+            release_profile(profile)
+    history = data.get("layout_history")
+    if isinstance(history, Mapping):
+        for entries in history.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if isinstance(entry, Mapping):
+                    release_profile(entry.get("profile"))
+    return changed
 
 
 def build_activation_policies(data: Mapping[str, Any]) -> dict[str, TriggerPolicyConfig]:

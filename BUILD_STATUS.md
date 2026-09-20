@@ -1,103 +1,46 @@
-# Build / validation status — 2.0.13
+# Build / validation status — 2.0.14
 
 ## Base
 
-- Base auditée : **2.0.12**
-- Commit audité : `6f4eb032edfd4d7f8148563956427ee8f8e60d9d`
-- La branche de correction a été créée directement depuis ce commit ; aucun changement ultérieur de `main` n'était présent au démarrage.
+- Base de travail : **2.0.13**.
+- Branche d'intégration : `feat/astra-architecture-roadmap`.
+- Objectif : appliquer la feuille de route d'architecture Astra sans créer d'architecture parallèle.
 
-## Résultat communiqué par l'audit Astra
+## État d'implémentation
 
-Le handoff Astra indique qu'il a exécuté **85 tests en mémoire** sur la base 2.0.12 :
+Les 18 propositions du plan recommandé sont présentes sur la branche, dans l'ordre de développement indiqué par l'audit :
 
-- **84 réussites** ;
-- **1 échec par `NameError`** dans `tests/test_config.py` : `build_activation_policies` était utilisé sans être importé ;
-- **1 test écrivant sur disque exclu** de cette exécution en mémoire.
+- Phase A : A2, A6, A7, A8, A16 ;
+- Phase B : A3, A1, A4, A5 ;
+- Phase C : A9, A10, A11, A13, A14, A15 ;
+- Phase D : A17, A12, A18.
 
-Ces chiffres décrivent **l'exécution de l'audit**, pas une validation 2.0.13 et pas un essai Windows/OBS réel.
+Des commits de stabilisation supplémentaires corrigent les interactions relevées pendant la revue : nettoyage de fondu interrompu, diagnostics d'applications partielles, provenance de build, import de validation regex et contexte de restauration.
 
-Le `NameError` a été corrigé en 2.0.13 par ajout de l'import manquant.
+## Validation source
 
-## Implémentation 2.0.13
+Les tests de régression correspondants ont été ajoutés au dépôt. Dans l'environnement de cette session, l'accès réseau direct au dépôt depuis le conteneur est indisponible, ce qui empêche de cloner la branche et d'exécuter localement la suite complète.
 
-Réalisé :
+À exécuter sur Windows avant fusion/release :
 
-- file de commandes d'activation consommée par `SSR-Router` ;
-- résultats asynchrones vers Qt par `request_id` et signal ;
-- sérialisation tick/trigger/stop/reset/reconcile ;
-- arrêt avec refus des nouvelles commandes, invalidation des commandes anciennes et attente des dispatches OBS déjà engagés ;
-- pending hides structurés par politique/cible/collection ;
-- retry borné, hide compensatoire après show incertain, exclusivité sûre ;
-- distinction absence OBS confirmée / résultat incertain ;
-- isolation des opérations entre Scene Collections ;
-- identité exacte `container/container_kind/source` et legacy source-only seulement si unique ;
-- cibles par défaut limitées aux enfants directs ;
-- rejet des doublons exacts et conflits ancêtre/descendant ;
-- résolution fraîche pair-local du `sceneItemId` pour les mutations de visibilité ;
-- éligibilité effective centralisée et statut snapshot sans I/O OBS ;
-- validation `math.isfinite` côté config et scheduler ;
-- somme de poids protégée contre l'overflow ;
-- simulation sur copie de politique dans un executor distinct, avec fingerprint de configuration ;
-- tests de caractérisation des deux comportements laissés volontairement inchangés.
+```powershell
+python -m unittest discover -s tests -v
+python -m ruff check .
+python main.py --check-config
 
-L'isolation du RNG de `test_roll()` n'a pas été modifiée : ce point était facultatif dans l'audit. Le RNG de simulation reste indépendant du live.
+Set-Location .\streamdeck-plugin
+npm install --ignore-scripts --no-audit --no-fund
+npm run typecheck
+npm run build
+npm run validate
+```
 
-## Tests ajoutés/modifiés
-
-La suite source contient maintenant des tests dédiés pour :
-
-- course show/stop avec barrières ;
-- commandes annulées pendant l'arrêt ;
-- dispatch OBS ancien encore actif pendant l'arrêt ;
-- cleanup pending qui bloque statut/tick/trigger ;
-- hide échoué puis repris ;
-- absence confirmée ;
-- show avec réponse perdue ;
-- échec du hide d'un concurrent exclusif ;
-- changement de Scene Collection ;
-- identité exacte/ambiguë ;
-- cibles directes et conflit parent/enfant ;
-- `sceneItemId` réutilisé mais encore accepté ;
-- NaN/Infinity/`1e309` et poids `1e308 + 1e308` ;
-- simulation concurrente ;
-- preview/undo et visibilité runtime ;
-- sémantiques de cooldown et de `visibility_owner=runtime`.
-
-## Exécution locale Windows 2.0.13
-
-Une validation locale complète a été exécutée sur Windows 11 / PowerShell 7.6.6 depuis la branche `fix/activation-runtime-serialization`, après récupération du head final de code.
-
-Résultats obtenus :
-
-- `python -m unittest discover -s tests -v` : **109 tests exécutés, 109 réussites** ;
-- durée de la suite : **1,368 s** ;
-- `python -m ruff check .` : **All checks passed!** ;
-- `python main.py --check-config` : **Configuration valide**.
-
-La validation automatisée locale Windows est donc **réussie pour les tests unitaires, Ruff et le smoke test de configuration**.
-
-Cette validation ne remplace pas les essais avec la vraie collection OBS : la campagne manuelle décrite dans `TESTING.md` reste nécessaire avant de qualifier la 2.0.13 de validée en production.
+Le workflow de release 2.0.14 ajoute en plus un build PyInstaller, un smoke test de l'EXE, la construction du plugin Stream Deck et de l'installateur Inno Setup avec vérification explicite des artefacts.
 
 ## GitHub Actions
 
-GitHub Actions continue à échouer au niveau infrastructure **avant toute étape de job**, le quota Actions du dépôt privé étant épuisé. Les jobs retournent `conclusion=failure` avec `steps=null`.
+Les exécutions GitHub-hosted récentes du dépôt ont échoué avant toute étape de job (`runner_id = 0` / `steps = null`). Tant que ce comportement persiste, ces runs ne constituent pas une validation du code.
 
-Ces échecs ne constituent donc pas un résultat de test du code 2.0.13.
+## Validation réelle OBS
 
-Une tentative de récupération directe de l'archive GitHub dans l'environnement d'exécution a également été bloquée par l'accès réseau.
-
-## Revue statique effectuée pendant l'implémentation
-
-La revue du diff a notamment détecté et corrigé avant fusion :
-
-- ordre invalide des champs dataclass de `SimulationResult` après ajout du fingerprint ;
-- risque de mutation partielle d'état avec nombres non finis, corrigé par validation des politiques avant installation dans le scheduler ;
-- possibilité qu'un ancien dispatch OBS différé écrive encore après l'arrêt du worker principal, corrigée par une barrière de dispatch ;
-- message UI « appliqué » incorrect si le runtime précédent ne s'arrête pas ;
-- risque de proposer des descendants profonds comme alternatives d'activation au lieu des seuls enfants directs.
-
-## Validation Windows / OBS réelle
-
-**Non réalisée dans cette session.**
-
-La campagne manuelle détaillée dans `TESTING.md` reste nécessaire sur la vraie collection OBS avant de qualifier la 2.0.13 de validée en production.
+Toujours requise. La campagne détaillée dans `TESTING.md` doit notamment couvrir : ciblage après modification structurelle de scène, routage différé A→B→C, reconnexion, preview/undo, recapture héritée, diagnostic partiel et coût des scans sur la vraie collection.
