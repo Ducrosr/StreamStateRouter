@@ -6,6 +6,7 @@ managed properties and computes dry-run execution plans from frozen inputs.
 
 from .coverage import CoverageIssue, validate_state_coverage
 from .intent import (
+    DesiredOwnershipConflict,
     UnsupportedIntentAction,
     desired_assignments_from_actions,
     desired_state_from_action_sets,
@@ -30,6 +31,7 @@ from .planner import (
 __all__ = [
     "CoverageIssue",
     "DesiredAssignment",
+    "DesiredOwnershipConflict",
     "UnsupportedIntentAction",
     "desired_assignments_from_actions",
     "desired_state_from_action_sets",
