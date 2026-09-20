@@ -81,8 +81,10 @@ class DeclarativePlanner:
     def plan(self, desired: DesiredState, observed: ObservedState) -> ExecutionPlan:
         operations: list[PlannedOperation] = []
         diagnostics: list[PlanDiagnostic] = []
+        effective_observed = []
         for item in desired.properties:
             current = observed.lookup(item.key)
+            effective_observed.append(current)
             if current.known and values_equal(current.value, item.value):
                 continue
             if current.known:
@@ -113,7 +115,7 @@ class DeclarativePlanner:
             )
         return ExecutionPlan(
             desired_state=desired,
-            observed_state=observed,
+            observed_state=ObservedState.build(effective_observed),
             operations=tuple(operations),
             diagnostics=tuple(diagnostics),
         )
