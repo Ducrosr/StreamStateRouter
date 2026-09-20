@@ -165,6 +165,33 @@ class BlockingDispatcher(FakeDispatcher):
         return super().dispatch_change(change)
 
 
+class CooperativeBackgroundDispatcher(FakeDispatcher):
+    """Model a long automatic OBS reconciliation, not an explicit command."""
+
+    def __init__(self):
+        super().__init__()
+        self._yield = None
+        self.reconcile_entered = threading.Event()
+        self.reconcile_exited = threading.Event()
+
+    def set_cooperative_yield(self, callback):
+        self._yield = callback
+
+    def pending_domains(self, _state=None):
+        return ("game",)
+
+    def dispatch_state(self, state, force=False):
+        del state, force
+        self.reconcile_entered.set()
+        try:
+            while True:
+                if self._yield is not None:
+                    self._yield()
+                time.sleep(0.01)
+        finally:
+            self.reconcile_exited.set()
+
+
 class FakeOBSHeartbeatClient:
     def __init__(self):
         self.config = SimpleNamespace(enabled=True)
@@ -708,6 +735,34 @@ class RuntimeTests(unittest.TestCase):
             service_a.stop()
             if service_b is not None:
                 self.assertTrue(service_b.stop())
+
+    def test_shutdown_interrupts_cooperative_background_reconciliation(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        dispatcher = CooperativeBackgroundDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        try:
+            self.assertTrue(dispatcher.reconcile_entered.wait(1.0))
+
+            started = time.monotonic()
+            shutdown = service.stop(timeout=0.5)
+            elapsed = time.monotonic() - started
+
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertTrue(dispatcher.reconcile_exited.is_set())
+            self.assertFalse(service._thread.is_alive())
+            self.assertEqual(shutdown.pending_commands, 0)
+            self.assertLess(elapsed, 0.5)
+        finally:
+            service.stop()
 
     def test_stop_waits_for_inflight_layout_command_then_stops_cleanly(self):
         app = ForegroundApp(1, 1, "terminal.exe")
