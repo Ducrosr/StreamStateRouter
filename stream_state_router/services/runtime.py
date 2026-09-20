@@ -261,8 +261,14 @@ class RoutingService:
         self.on_change: Callable[[StateChange], None] | None = None
         self.on_dispatch: Callable[[DispatchResult], None] | None = None
         self.on_event: Callable[[RuntimeEvent], None] | None = None
-        if layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
+        if hasattr(self.dispatcher, "set_cooperative_yield"):
+            self.dispatcher.set_cooperative_yield(self._cooperative_obs_yield)
+        elif layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
             layout_manager.set_cooperative_yield(self._cooperative_obs_yield)
+        if self.activation_controller is not None and hasattr(
+            self.activation_controller, "set_cooperative_yield"
+        ):
+            self.activation_controller.set_cooperative_yield(self._cooperative_obs_yield)
 
     @property
     def paused(self) -> bool:
@@ -830,6 +836,9 @@ class RoutingService:
                     if self._drain_runtime_commands():
                         break
                     self._probe_obs_if_due()
+                    with self._lock:
+                        if self._stopping:
+                            continue
                     app = self.provider.get()
                     with self._lock:
                         changed_app = app != self._last_app
@@ -849,7 +858,13 @@ class RoutingService:
                         if change:
                             self._apply_change(change)
                     self._process_due_dispatch()
+                    with self._lock:
+                        if self._stopping:
+                            continue
                     self._reconcile_desired_state_if_due()
+                    with self._lock:
+                        if self._stopping:
+                            continue
                     self._tick_activation(paused=paused)
                 except Exception as exc:
                     self.logger.exception("Routing loop error")
