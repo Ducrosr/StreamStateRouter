@@ -374,3 +374,48 @@ La migration depuis Advanced Scene Switcher doit rester progressive. La synchron
 ### Modules OBS imbriqués
 
 SSR distingue maintenant deux espaces de coordonnées : `root_canvas` pour les modules directement présents dans la scène du LayoutProfile, et `container_local` pour les modules situés dans une scène ou un groupe imbriqué. Seuls les modules racine sont adaptés au changement de résolution du canvas ; les descendants conservent leurs transforms locaux et suivent naturellement l’échelle de leur parent.
+
+## Fondation déclarative expérimentale
+
+SSR évolue vers un modèle où la configuration décrit principalement l'état final
+souhaité et où un planner calcule les différences avant toute exécution.
+
+La première fondation est volontairement **read-only** :
+
+- `OBSResourceCatalogReader` synchronise un index léger des scènes, groupes,
+  occurrences de Scene Items, inputs, transitions, dimensions du canvas et
+  requêtes réellement annoncées par la session OBS ;
+- les UUID fournis par OBS sont conservés comme indices de référence, tandis que
+  les `sceneItemId` restent considérés comme éphémères ;
+- les settings d'inputs et de filtres sont lus à la demande plutôt que scannés
+  à chaque tick ;
+- `DesiredState` décrit uniquement les propriétés explicitement gérées par SSR,
+  conserve leur provenance et refuse les valeurs contradictoires ;
+- les intentions sans Scene Collection explicite sont liées au snapshot de
+  collection actif avant le diff ;
+- `observe_desired_state()` relit uniquement les propriétés physiques
+  nécessaires au plan ; le catalogue structurel n'est pas assimilé à l'état
+  physique courant ;
+- `build_execution_plan()` est pur, déterministe et ne réalise aucun I/O ;
+- les références manquantes, capacités indisponibles et ressources déléguées
+  bloquent la propriété concernée avant toute écriture ;
+- une valeur physique inconnue bloque le plan au lieu de produire une écriture
+  aveugle ;
+- `validate_state_coverage()` peut détecter une propriété gérée par un état mais
+  laissée accidentellement indéfinie par un autre état ;
+- `OBSDispatcher.plan_state()` réutilise désormais la résolution existante des
+  profils et héritages pour exposer aussi l'intention déclarative, au lieu de
+  créer une seconde logique de sélection parallèle ;
+- un fingerprint de cible permet d'identifier deux résolutions conduisant au
+  même résultat physique sans inclure la provenance.
+
+À ce stade, cette architecture reste un outil de **diagnostic/dry-run** :
+l'exécution existante du dispatcher n'est pas remplacée et aucune nouvelle
+opération générée par le planner n'est envoyée à OBS. Les LayoutProfiles
+conservent leur moteur spécialisé validé.
+
+Les scopes d'ownership sont génériques et provider-agnostic. Ils permettent de
+déléguer l'intérieur d'un composant OBS à son propriétaire sans introduire de
+logique Dofus/Shinra dans le cœur du planner. Une future capture dynamique peut
+donc être ajoutée comme extension sans déplacer aujourd'hui le fonctionnement
+validé de DWM dans SSR.

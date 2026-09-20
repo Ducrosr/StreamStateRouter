@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+from ..planning.models import DesiredState, ObservedState, ObservedValue, PropertyKey
+from .catalog import OBSResourceCatalog
+from .client import OBSClientManager, OBSRequestError
+
+
+def observe_desired_state(
+    client: OBSClientManager,
+    catalog: OBSResourceCatalog,
+    desired: DesiredState,
+) -> ObservedState:
+    """Read only the physical values needed by one desired state.
+
+    The planner itself remains pure.  This adapter is deliberately targeted and
+    never scans unrelated input/filter settings.
+    """
+    values: dict[PropertyKey, ObservedValue] = {}
+    input_cache: dict[str, Mapping[str, Any] | None] = {}
+    filter_cache: dict[tuple[str, str], Mapping[str, Any] | None] = {}
+    for assignment in desired.assignments:
+        key = assignment.key
+        if key.collection and catalog.collection and key.collection != catalog.collection:
+            values[key] = ObservedValue.unknown()
+            continue
+
+        if key.kind == "program_scene":
+            try:
+                response = client.send("GetCurrentProgramScene")
+            except OBSRequestError:
+                values[key] = ObservedValue.unknown()
+            else:
+                scene = str(response.get("currentProgramSceneName") or "").strip()
+                values[key] = (
+                    ObservedValue.known_value(scene)
+                    if scene
+                    else ObservedValue.unknown()
+                )
+            continue
+
+        if key.kind == "scene_item_visibility":
+            try:
+                lookup = client.send(
+                    "GetSceneItemId",
+                    {
+                        "sceneName": key.container,
+                        "sourceName": key.source,
+                        "searchOffset": int(key.occurrence),
+                    },
+                )
+                item_id = int(lookup.get("sceneItemId") or 0)
+                if not item_id:
+                    values[key] = ObservedValue.unknown()
+                    continue
+                response = client.send(
+                    "GetSceneItemEnabled",
+                    {
+                        "sceneName": key.container,
+                        "sceneItemId": item_id,
+                    },
+                )
+            except OBSRequestError:
+                values[key] = ObservedValue.unknown()
+            else:
+                if "sceneItemEnabled" in response:
+                    values[key] = ObservedValue.known_value(
+                        bool(response.get("sceneItemEnabled"))
+                    )
+                else:
+                    values[key] = ObservedValue.unknown()
+            continue
+
+        if key.kind == "input_mute":
+            try:
+                response = client.send(
+                    "GetInputMute",
+                    {"inputName": key.source},
+                )
+            except OBSRequestError:
+                values[key] = ObservedValue.unknown()
+            else:
+                if "inputMuted" in response:
+                    values[key] = ObservedValue.known_value(
+                        bool(response.get("inputMuted"))
+                    )
+                else:
+                    values[key] = ObservedValue.unknown()
+            continue
+
+        if key.kind == "input_volume_db":
+            try:
+                response = client.send(
+                    "GetInputVolume",
+                    {"inputName": key.source},
+                )
+            except OBSRequestError:
+                values[key] = ObservedValue.unknown()
+            else:
+                if "inputVolumeDb" in response:
+                    values[key] = ObservedValue.known_value(
+                        float(response.get("inputVolumeDb"))
+                    )
+                else:
+                    values[key] = ObservedValue.unknown()
+            continue
+
+        if key.kind == "input_setting":
+            settings = input_cache.get(key.source)
+            if key.source not in input_cache:
+                try:
+                    response = client.send(
+                        "GetInputSettings",
+                        {"inputName": key.source},
+                    )
+                    raw = response.get("inputSettings") or {}
+                    settings = dict(raw) if isinstance(raw, Mapping) else None
+                except OBSRequestError:
+                    settings = None
+                input_cache[key.source] = settings
+            if settings is not None and key.setting in settings:
+                values[key] = ObservedValue.known_value(settings[key.setting])
+            else:
+                values[key] = ObservedValue.unknown()
+            continue
+
+        if key.kind in {"filter_enabled", "filter_setting"}:
+            identity = (key.source, key.filter_name)
+            response = filter_cache.get(identity)
+            if identity not in filter_cache:
+                try:
+                    raw_response = client.send(
+                        "GetSourceFilter",
+                        {
+                            "sourceName": key.source,
+                            "filterName": key.filter_name,
+                        },
+                    )
+                    response = dict(raw_response)
+                except OBSRequestError:
+                    response = None
+                filter_cache[identity] = response
+
+            if response is None:
+                values[key] = ObservedValue.unknown()
+                continue
+            if key.kind == "filter_enabled":
+                if "filterEnabled" in response:
+                    values[key] = ObservedValue.known_value(
+                        bool(response.get("filterEnabled"))
+                    )
+                else:
+                    values[key] = ObservedValue.unknown()
+                continue
+            settings = response.get("filterSettings") or {}
+            if isinstance(settings, Mapping) and key.setting in settings:
+                values[key] = ObservedValue.known_value(settings[key.setting])
+            else:
+                values[key] = ObservedValue.unknown()
+            continue
+
+        # Layout convergence is intentionally not inferred from geometry here.
+        # OBSLayoutManager / future AppliedState integration owns that evidence.
+        values[key] = ObservedValue.unknown()
+
+    return ObservedState(values)

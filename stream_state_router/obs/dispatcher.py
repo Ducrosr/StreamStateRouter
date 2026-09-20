@@ -4,6 +4,13 @@ from dataclasses import dataclass
 import time
 from typing import Any, Mapping
 
+from ..planning import (
+    DesiredAssignment,
+    DesiredState,
+    DesiredStateConflict,
+    PropertyKey,
+    desired_state_from_action_sets,
+)
 from ..router.engine import StateChange
 from ..router.models import StreamState
 from .client import OBSClientManager
@@ -270,15 +277,24 @@ class OBSDispatcher:
             description["setting_keys"] = sorted(str(key) for key in settings) if isinstance(settings, Mapping) else []
         return description
 
-    def plan_state(
+    def _resolve_state_plan(
         self,
         state: StreamState,
         *,
-        context: Mapping[str, Any] | None = None,
-    ) -> dict[str, object]:
-        """Describe what a dispatch would do without mutating OBS or dispatcher state."""
-        frozen_context = dict(context) if context is not None else self.cached_obs_context()
+        context: Mapping[str, Any],
+    ) -> tuple[
+        list[dict[str, object]],
+        DesiredState | None,
+        DesiredStateConflict | None,
+        list[dict[str, str]],
+    ]:
+        """Resolve legacy profiles and declarative intent in one read-only pass."""
+
         domains: list[dict[str, object]] = []
+        action_sets: list[tuple[str, tuple[OBSAction, ...]]] = []
+        extra_assignments: list[DesiredAssignment] = []
+        declarative_blocks: list[dict[str, str]] = []
+
         for domain in STATE_DOMAINS:
             desired = state.profile_name(domain)
             applied = self._applied_profiles.get(domain, "")
@@ -292,6 +308,7 @@ class OBSDispatcher:
                 "status": "held" if held else ("noop" if applied == desired else "planned"),
                 "operations": [],
             }
+
             if domain == "layout":
                 if desired not in self._layout_profiles:
                     row.update(status="missing", message="LayoutProfile introuvable")
@@ -304,23 +321,47 @@ class OBSDispatcher:
                     domains.append(row)
                     continue
                 conditions = profile.get("conditions")
-                condition_match = not isinstance(conditions, Mapping) or self.conditions_match_context(
-                    conditions, frozen_context
+                condition_match = (
+                    not isinstance(conditions, Mapping)
+                    or self.conditions_match_context(conditions, context)
                 )
                 row["condition_match"] = condition_match
                 if row["needs_apply"] and not condition_match:
                     row.update(status="blocked", message="conditions OBS non satisfaites")
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": "conditions OBS non satisfaites",
+                        }
+                    )
                 modules = profile.get("modules")
                 support = profile.get("support_items")
                 transition = profile.get("transition")
-                row["operations"] = [{
-                    "type": "layout",
-                    "scene": str(profile.get("scene") or ""),
-                    "modules": len(modules) if isinstance(modules, Mapping) else 0,
-                    "support_items": len(support) if isinstance(support, list) else 0,
-                    "transition": str(transition.get("mode") or "instant") if isinstance(transition, Mapping) else "instant",
-                }]
+                scene = str(profile.get("scene") or "")
+                row["operations"] = [
+                    {
+                        "type": "layout",
+                        "scene": scene,
+                        "modules": len(modules) if isinstance(modules, Mapping) else 0,
+                        "support_items": len(support) if isinstance(support, list) else 0,
+                        "transition": (
+                            str(transition.get("mode") or "instant")
+                            if isinstance(transition, Mapping)
+                            else "instant"
+                        ),
+                    }
+                ]
                 row["extends"] = str(profile.get("extends") or "")
+                extra_assignments.append(
+                    DesiredAssignment.create(
+                        PropertyKey.layout_profile(
+                            collection="",
+                            scene=scene,
+                        ),
+                        desired,
+                        provenance=f"{domain}:{desired}",
+                    )
+                )
                 domains.append(row)
                 continue
 
@@ -334,19 +375,85 @@ class OBSDispatcher:
                 row.update(status="missing", message="Profil OBS introuvable")
                 domains.append(row)
                 continue
-            condition_match = self.conditions_match_context(profile.conditions, frozen_context)
+
+            condition_match = self.conditions_match_context(profile.conditions, context)
             row["condition_match"] = condition_match
             if row["needs_apply"] and not condition_match:
                 row.update(status="blocked", message="conditions OBS non satisfaites")
+                declarative_blocks.append(
+                    {
+                        "provenance": f"{domain}:{desired}",
+                        "reason": "conditions OBS non satisfaites",
+                    }
+                )
             row["operations"] = [self._describe_action(action) for action in profile.actions]
             row["extends"] = profile.extends
+            action_sets.append((f"{domain}:{desired}", profile.actions))
             domains.append(row)
 
-        return {
+        try:
+            declarative = desired_state_from_action_sets(
+                action_sets,
+                extra_assignments=extra_assignments,
+            )
+        except DesiredStateConflict as exc:
+            return domains, None, exc, declarative_blocks
+        return domains, declarative, None, declarative_blocks
+
+    def resolve_desired_state(
+        self,
+        state: StreamState,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> DesiredState:
+        """Resolve the selected profiles into one declarative target without I/O."""
+
+        frozen_context = dict(context) if context is not None else self.cached_obs_context()
+        _domains, desired, conflict, _blocks = self._resolve_state_plan(
+            state,
+            context=frozen_context,
+        )
+        if conflict is not None:
+            raise conflict
+        assert desired is not None
+        return desired
+
+    def plan_state(
+        self,
+        state: StreamState,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> dict[str, object]:
+        """Describe routing intent without mutating OBS or dispatcher state.
+
+        The legacy domain view remains for compatibility, while the declarative
+        target is resolved by the same pass that future dry-run/execution will
+        consume.  No OBS read is performed here.
+        """
+
+        frozen_context = dict(context) if context is not None else self.cached_obs_context()
+        domains, desired, conflict, declarative_blocks = self._resolve_state_plan(
+            state,
+            context=frozen_context,
+        )
+        result: dict[str, object] = {
             "state": state.as_variables(),
             "context": frozen_context,
             "domains": domains,
+            "declarative_desired": (
+                desired.as_mapping(diagnostic=True)
+                if desired is not None
+                else {"properties": []}
+            ),
+            "declarative_blocks": declarative_blocks,
         }
+        if conflict is not None:
+            result["declarative_error"] = {
+                "code": "property_conflict",
+                "message": conflict.diagnostic_message(),
+                "property": conflict.key.as_mapping(),
+            }
+        return result
 
     def dispatch_change(self, change: StateChange) -> DispatchResult:
         # change.previous is the router's previous *decision*, not necessarily

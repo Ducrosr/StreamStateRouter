@@ -286,6 +286,165 @@ class OBSDispatcherTests(unittest.TestCase):
             ["input_mute", "set_program_scene"],
         )
 
+    def test_read_only_plan_exposes_declarative_intent_from_same_resolution(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Base": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Capture",
+                                    "settings": {"rgb10a2_space": "srgb"},
+                                },
+                            }
+                        ]
+                    },
+                    "Overwatch": {
+                        "extends": "Base",
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Input Overlay",
+                                    "enabled": True,
+                                },
+                            }
+                        ],
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            profiles,
+            {"OW": {"scene": "In Game", "modules": {}}},
+        )
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Overwatch", layout_profile="OW"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(plan["declarative_blocks"], [])
+        properties = plan["declarative_desired"]["properties"]
+        identities = {
+            (
+                row["property"]["kind"],
+                row["property"]["source"],
+                row["property"]["setting"],
+            )
+            for row in properties
+        }
+        self.assertIn(("input_setting", "Capture", "rgb10a2_space"), identities)
+        self.assertIn(("scene_item_visibility", "Input Overlay", ""), identities)
+        self.assertIn(("layout_profile", "", ""), identities)
+
+    def test_read_only_plan_reports_cross_domain_declarative_conflict(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "A": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Chat",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                },
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Chat",
+                                    "enabled": False,
+                                },
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+
+        plan = dispatcher.plan_state(
+            StreamState(game="A", overlay_profile="B"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(plan["declarative_error"]["code"], "property_conflict")
+        self.assertEqual(plan["declarative_desired"], {"properties": []})
+
+    def test_resolve_desired_state_raises_same_cross_domain_conflict(self):
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "A": {
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Avatar",
+                                    "filter": "Glitch",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                },
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Avatar",
+                                    "filter": "Glitch",
+                                    "enabled": False,
+                                },
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+
+        with self.assertRaisesRegex(ValueError, "Conflicting desired values"):
+            dispatcher.resolve_desired_state(
+                StreamState(game="A", overlay_profile="B"),
+                context={
+                    "obs_enabled": True,
+                    "streaming": False,
+                    "recording": False,
+                    "program_scene": "In Game",
+                },
+            )
+
     def test_read_only_plan_reports_blocked_conditions_without_mutation(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
@@ -308,6 +467,23 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertEqual(client.calls, [])
         game = next(row for row in plan["domains"] if row["domain"] == "game")
         self.assertEqual(game["status"], "blocked")
+        self.assertEqual(
+            plan["declarative_blocks"],
+            [
+                {
+                    "provenance": "game:Live",
+                    "reason": "conditions OBS non satisfaites",
+                }
+            ],
+        )
+        properties = plan["declarative_desired"]["properties"]
+        self.assertTrue(
+            any(
+                row["property"]["kind"] == "program_scene"
+                and row["value"] == "Live"
+                for row in properties
+            )
+        )
 
     def test_supported_action_shapes(self):
         client = FakeClient()
