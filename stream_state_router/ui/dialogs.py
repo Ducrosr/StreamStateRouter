@@ -218,6 +218,7 @@ class ModuleLayoutDialog(QDialog):
         activation_candidates: Sequence[Mapping[str, object]] | None = None,
         activation_status_provider=None,
         activation_command=None,
+        visibility_release_command=None,
         activation_result_signal=None,
     ):
         super().__init__(parent)
