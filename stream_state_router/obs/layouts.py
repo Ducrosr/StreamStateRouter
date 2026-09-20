@@ -37,6 +37,15 @@ class LayoutApplyResult:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(slots=True)
+class PendingFadeCleanup:
+    source: str
+    collection: str
+    created_at: float
+    attempts: int = 0
+    last_error: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class LayoutDiffItem:
     module: str
@@ -310,33 +319,120 @@ class OBSLayoutManager:
         self._preview_snapshot: LayoutSnapshot | None = None
         self._snapshot_generation = 0
         self._last_discovery_warnings: list[str] = []
-        self._pending_fade_cleanup: set[str] = set()
+        self._pending_fade_cleanup: dict[tuple[str, str], PendingFadeCleanup] = {}
+        self._last_scene_collection = ""
 
     def pending_fade_cleanup(self) -> tuple[str, ...]:
-        return tuple(sorted(self._pending_fade_cleanup, key=str.casefold))
+        """Compatibility view of pending fade sources."""
+        return tuple(
+            sorted(
+                {item.source for item in self._pending_fade_cleanup.values()},
+                key=str.casefold,
+            )
+        )
+
+    def export_pending_fade_cleanup(self) -> tuple[dict[str, object], ...]:
+        return tuple(
+            {
+                "kind": "layout_fade",
+                "source": item.source,
+                "collection": item.collection,
+                "created_at": float(item.created_at),
+                "attempts": int(item.attempts),
+                "last_error": item.last_error,
+            }
+            for item in sorted(
+                self._pending_fade_cleanup.values(),
+                key=lambda value: (value.collection.casefold(), value.source.casefold()),
+            )
+        )
+
+    def import_pending_fade_cleanup(self, raw_items) -> int:
+        imported = 0
+        for raw in raw_items or ():
+            if not isinstance(raw, Mapping):
+                continue
+            if str(raw.get("kind") or "").strip().casefold() != "layout_fade":
+                continue
+            source = str(raw.get("source") or "").strip()
+            collection = str(raw.get("collection") or "").strip()
+            if not source or not collection:
+                continue
+            try:
+                pending = PendingFadeCleanup(
+                    source=source,
+                    collection=collection,
+                    created_at=float(raw.get("created_at", 0.0) or 0.0),
+                    attempts=max(0, int(raw.get("attempts", 0) or 0)),
+                    last_error=str(raw.get("last_error") or ""),
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+            self._pending_fade_cleanup[(collection, source)] = pending
+            imported += 1
+        return imported
 
     def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
-        """Best-effort neutralization of helper fade filters left uncertain."""
+        """Retry only obligations belonging to the active Scene Collection."""
+        if not self._pending_fade_cleanup:
+            return ()
+        try:
+            current = self._scene_collection_name()
+        except Exception as exc:
+            return (f"Scene Collection non lisible pour le cleanup fondu ({exc})",)
+
         warnings: list[str] = []
-        for source in tuple(self._pending_fade_cleanup):
-            try:
-                self._set_source_opacity(source, 1.0)
-            except Exception as exc:
-                warnings.append(f"{source}: neutralisation du fondu impossible ({exc})")
+        for key, pending in tuple(self._pending_fade_cleanup.items()):
+            if pending.collection != current:
                 continue
-            self._pending_fade_cleanup.discard(source)
+            try:
+                self._set_source_opacity(pending.source, 1.0)
+            except Exception as exc:
+                pending.attempts += 1
+                pending.last_error = str(exc)
+                warnings.append(
+                    f"{pending.source}: neutralisation du fondu impossible ({exc})"
+                )
+                continue
+            self._pending_fade_cleanup.pop(key, None)
         return tuple(warnings)
+
+    def _fade_collection_context(self) -> str:
+        collection = str(self._last_scene_collection or "").strip()
+        if collection:
+            return collection
+        try:
+            return self._scene_collection_name()
+        except Exception:
+            # Unknown context is deliberately non-replayable. It is still
+            # exported for diagnostics/recovery rather than being silently lost.
+            return "<unknown>"
+
+    def _ensure_pending_fade(self, source: str, collection: str) -> PendingFadeCleanup:
+        key = (str(collection), str(source))
+        pending = self._pending_fade_cleanup.get(key)
+        if pending is None:
+            pending = PendingFadeCleanup(
+                source=str(source),
+                collection=str(collection),
+                created_at=time.monotonic(),
+            )
+            self._pending_fade_cleanup[key] = pending
+        return pending
 
     def _neutralize_fade_sources(self, sources: Iterable[str]) -> tuple[str, ...]:
         warnings: list[str] = []
+        collection = self._fade_collection_context()
         for source in {str(item) for item in sources if str(item)}:
+            pending = self._ensure_pending_fade(source, collection)
             try:
                 self._set_source_opacity(source, 1.0)
             except Exception as exc:
-                self._pending_fade_cleanup.add(source)
+                pending.attempts += 1
+                pending.last_error = str(exc)
                 warnings.append(f"{source}: opacité neutre non acquittée ({exc})")
             else:
-                self._pending_fade_cleanup.discard(source)
+                self._pending_fade_cleanup.pop((collection, source), None)
         return tuple(warnings)
 
     def set_cooperative_yield(self, callback) -> None:
@@ -371,7 +467,10 @@ class OBSLayoutManager:
 
     def _scene_collection_name(self) -> str:
         response = self.client.send("GetSceneCollectionList")
-        return str(response.get("currentSceneCollectionName") or "").strip()
+        collection = str(response.get("currentSceneCollectionName") or "").strip()
+        if collection:
+            self._last_scene_collection = collection
+        return collection
 
     def _snapshot_target_count(self, profile: Mapping[str, Any]) -> int:
         return len(self._build_desired_elements(profile)) + len(self._build_support_desired(profile))
