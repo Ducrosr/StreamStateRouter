@@ -19,6 +19,11 @@ Le premier lot reste volontairement sans nouvel exécuteur :
 - le planner pur produit un `ExecutionPlan` déterministe, avec provenance et
   diagnostics, sans I/O et sans écriture OBS ;
 - un état déjà convergé produit zéro opération ;
+- les doublons d'intention contradictoires sont refusés au lieu d'appliquer une
+  règle implicite « dernier arrivé gagne » ;
+- un validateur pur confronte les propriétés désirées au catalogue et distingue
+  `verified`, `partial`, `missing` et `unknown` sans conclure abusivement
+  qu'un paramètre plugin absent du snapshot est invalide ;
 - les LayoutProfiles existants restent un moteur spécialisé : le planner les
   référence, il ne réimplémente pas leur géométrie ni leurs transitions.
 
