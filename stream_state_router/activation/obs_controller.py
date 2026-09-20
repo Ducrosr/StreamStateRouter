@@ -170,6 +170,15 @@ class OBSActivationController:
         wanted = str(policy_name)
         return tuple(item for item in values if item.policy == wanted)
 
+    def pending_hides_for_current_collection(self) -> tuple[PendingHide, ...]:
+        collection = str(self._scene_collection or "").strip()
+        if not collection:
+            return ()
+        return tuple(
+            item for item in self._pending_hides.values()
+            if item.collection == collection
+        )
+
     def policy_cleanup_status(self, policy_name: str) -> tuple[bool, str]:
         collection = self._scene_collection
         pending = [
