@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Callable, Mapping
 
 from ..activation import (
@@ -513,7 +513,11 @@ class RoutingService:
             "updated_at": time.time(),
         }
         if result is not None:
-            if hasattr(result, "__dict__"):
+            if is_dataclass(result):
+                row["result"] = asdict(result)
+            elif isinstance(result, Mapping):
+                row["result"] = dict(result)
+            elif hasattr(result, "__dict__"):
                 row["result"] = dict(result.__dict__)
             else:
                 row["result"] = str(result)
@@ -1188,7 +1192,22 @@ class RoutingService:
                     result = self.dispatcher.layout_manager.undo_last()
                 else:
                     raise ValueError(f"Commande OBS inconnue : {command.action}")
-            self._emit_obs_result(command, success=True, result=result)
+            warnings = tuple(getattr(result, "warnings", ()) or ()) if result is not None else ()
+            missing = tuple(getattr(result, "missing_sources", ()) or ()) if result is not None else ()
+            incomplete = bool(warnings or missing)
+            if incomplete:
+                details = [
+                    *(f"source manquante: {name}" for name in missing),
+                    *warnings,
+                ]
+                self._emit_obs_result(
+                    command,
+                    success=False,
+                    result=result,
+                    error="Application OBS incomplète: " + "; ".join(details),
+                )
+            else:
+                self._emit_obs_result(command, success=True, result=result)
         except Exception as exc:
             self.logger.error("OBS command failed [%s]: %s", command.action, exc)
             self._emit_obs_result(command, success=False, error=str(exc))
