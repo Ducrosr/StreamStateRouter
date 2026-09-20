@@ -273,13 +273,16 @@ class OBSActivationController:
                 f"{event.container}/{event.source}"
             )
 
-        collection = self._operation_collection()
-
         if event.kind == "hide":
-            # Arm the cleanup obligation before the OBS mutation. A transport
-            # failure is therefore never able to erase the fact that this item
-            # still needs to be hidden.
-            self._ensure_pending_hide(event.policy, target, collection)
+            # A hide consumes scheduler-visible state. Arm its obligation before
+            # even probing OBS for the current Scene Collection. If that read
+            # fails, the last known origin (or <unknown>) still survives.
+            origin_collection = str(self._scene_collection or "").strip() or "<unknown>"
+            self._ensure_pending_hide(event.policy, target, origin_collection)
+            collection = self._operation_collection()
+            if origin_collection != collection:
+                self._ack_pending_hide(event.policy, target, origin_collection)
+                self._ensure_pending_hide(event.policy, target, collection)
             status, error = self._mutate_visibility(target, False)
             if status in {"applied", "missing"}:
                 self._ack_pending_hide(event.policy, target, collection)
@@ -288,6 +291,8 @@ class OBSActivationController:
             raise ActivationVisibilityUncertain(
                 f"Masquage non acquitté pour {target.container}/{target.source}: {error}"
             )
+
+        collection = self._operation_collection()
 
         blocked, reason = self.policy_cleanup_status(event.policy)
         if blocked:
