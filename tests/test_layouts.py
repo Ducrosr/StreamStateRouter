@@ -548,10 +548,25 @@ class LayoutTests(unittest.TestCase):
         )
 
     def test_transition_steps_raise_historical_eight_steps_to_smooth_cadence(self):
-        self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 8), 31)
-        self.assertEqual(OBSLayoutManager._effective_transition_steps(2000, 8), 60)
-        self.assertEqual(OBSLayoutManager._effective_transition_steps(3000, 8), 60)
-        self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 45), 45)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 8), 61)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(2000, 8), 121)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(3000, 8), 181)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 45), 61)
+
+    def test_transition_timeline_skips_frames_that_are_already_stale(self):
+        manager = OBSLayoutManager(FakeLayoutClient())
+        with (
+            patch.object(manager, "_cooperative_sleep", return_value=None),
+            patch(
+                "stream_state_router.obs.layouts.time.monotonic",
+                side_effect=[0.0, 0.0, 0.5, 0.5, 1.0],
+            ),
+        ):
+            progress = list(manager._transition_progress(1000, 61))
+
+        self.assertEqual(len(progress), 2)
+        self.assertAlmostEqual(progress[0], 0.5, places=6)
+        self.assertAlmostEqual(progress[1], 1.0, places=6)
 
     def test_fade_repositions_visible_item_only_while_fully_transparent(self):
         class FadeClient(FakeLayoutClient):
@@ -620,13 +635,13 @@ class LayoutTests(unittest.TestCase):
             result = manager.apply_profile(profile, record_undo=False)
 
         self.assertEqual(result.elements_applied, 2)
-        # A two-second transition targets ~30 FPS and is capped at 60 frames.
-        # All sources still share the same global timeline.
-        self.assertEqual(sleep_mock.call_count, 59)
+        # A two-second transition targets ~60 FPS (120 intervals). All sources
+        # still share the same wall-clock timeline.
+        self.assertEqual(sleep_mock.call_count, 120)
         transform_calls = [
             payload for request, payload in client.calls if request == "SetSceneItemTransform"
         ]
-        self.assertEqual(len(transform_calls), 120)
+        self.assertEqual(len(transform_calls), 240)
 
     def test_excluded_module_element_is_left_untouched(self):
         client = FakeLayoutClient()
