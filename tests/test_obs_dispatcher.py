@@ -14,6 +14,7 @@ class FakeClient:
         self.calls = []
         self.scene_item_ids = [42]
         self.streaming = False
+        self.config = SimpleNamespace(enabled=True)
 
     def send(self, request, data=None):
         self.calls.append((request, data))
