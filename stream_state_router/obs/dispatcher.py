@@ -248,9 +248,11 @@ class OBSDispatcher:
                     domains.append(row)
                     continue
                 conditions = profile.get("conditions")
-                if isinstance(conditions, Mapping) and not self.conditions_match_context(
+                condition_match = not isinstance(conditions, Mapping) or self.conditions_match_context(
                     conditions, frozen_context
-                ):
+                )
+                row["condition_match"] = condition_match
+                if row["needs_apply"] and not condition_match:
                     row.update(status="blocked", message="conditions OBS non satisfaites")
                 modules = profile.get("modules")
                 support = profile.get("support_items")
@@ -276,7 +278,9 @@ class OBSDispatcher:
                 row.update(status="missing", message="Profil OBS introuvable")
                 domains.append(row)
                 continue
-            if not self.conditions_match_context(profile.conditions, frozen_context):
+            condition_match = self.conditions_match_context(profile.conditions, frozen_context)
+            row["condition_match"] = condition_match
+            if row["needs_apply"] and not condition_match:
                 row.update(status="blocked", message="conditions OBS non satisfaites")
             row["operations"] = [self._describe_action(action) for action in profile.actions]
             row["extends"] = profile.extends
