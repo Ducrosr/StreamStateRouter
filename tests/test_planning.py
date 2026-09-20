@@ -42,6 +42,30 @@ class DeclarativePlanningTests(unittest.TestCase):
         color_space = ResourceKey.input_setting("Capture de jeu", "rgb10a2_space")
         self.assertNotEqual(window, color_space)
 
+    def test_input_and_filter_resources_are_collection_contextual(self):
+        input_a = ResourceKey.input_setting(
+            "Capture de jeu",
+            "window",
+            collection="Collection A",
+        )
+        input_b = ResourceKey.input_setting(
+            "Capture de jeu",
+            "window",
+            collection="Collection B",
+        )
+        filter_a = ResourceKey.filter_enabled(
+            "Avatar Dynamic",
+            "Avatar FX",
+            collection="Collection A",
+        )
+        filter_b = ResourceKey.filter_enabled(
+            "Avatar Dynamic",
+            "Avatar FX",
+            collection="Collection B",
+        )
+        self.assertNotEqual(input_a, input_b)
+        self.assertNotEqual(filter_a, filter_b)
+
     def test_duplicate_identical_property_merges_provenance(self):
         key = ResourceKey.filter_enabled("Avatar Dynamic", "Avatar FX")
         state = DesiredState.build(
@@ -113,7 +137,7 @@ class DeclarativePlanningTests(unittest.TestCase):
         self.assertEqual(effective.detail, "not_observed")
         self.assertFalse(any(item.key == unrelated_key for item in plan.observed_state.properties))
 
-    def test_mapping_values_with_string_collisions_compare_without_type_errors(self):
+    def test_mapping_keys_keep_their_types_without_ordering_errors(self):
         key = ResourceKey.input_setting("Source", "settings")
         desired = DesiredState.build(
             [DesiredProperty.create(key, {1: {"a": 1}, "1": ["x"]})]
@@ -123,6 +147,16 @@ class DeclarativePlanningTests(unittest.TestCase):
         plan = DeclarativePlanner().plan(desired, observed)
 
         self.assertTrue(plan.converged)
+
+    def test_boolean_and_number_values_are_not_conflated(self):
+        key = ResourceKey.input_setting("Source", "flag")
+        desired = DesiredState.build([DesiredProperty.create(key, True)])
+        observed = ObservedState.from_values({key: 1})
+
+        plan = DeclarativePlanner().plan(desired, observed)
+
+        self.assertFalse(plan.converged)
+        self.assertEqual(len(plan.operations), 1)
 
     def test_multiple_independent_properties_are_deterministic(self):
         chat = ResourceKey.scene_item_visibility(
