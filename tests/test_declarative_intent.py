@@ -4,6 +4,7 @@ import unittest
 
 from stream_state_router.obs.models import OBSAction
 from stream_state_router.planning import (
+    DesiredOwnershipConflict,
     DesiredStateConflict,
     PropertyKey,
     UnsupportedIntentAction,
@@ -94,13 +95,49 @@ class DeclarativeIntentTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaises(DesiredStateConflict):
+        with self.assertRaises(DesiredOwnershipConflict):
             desired_state_from_action_sets(
                 [
                     ("overlay:Base", first),
                     ("game:Overwatch", second),
                 ]
             )
+
+    def test_cross_domain_same_value_still_has_ownership_conflict(self):
+        action = (
+            OBSAction(
+                "scene_item_enabled",
+                {
+                    "scene": "Gameplay",
+                    "source": "Chat",
+                    "enabled": True,
+                },
+            ),
+        )
+
+        with self.assertRaises(DesiredOwnershipConflict):
+            desired_state_from_action_sets(
+                [
+                    ("game:A", action),
+                    ("overlay:B", action),
+                ]
+            )
+
+    def test_duplicate_same_owner_is_allowed_when_value_matches(self):
+        action = OBSAction(
+            "scene_item_enabled",
+            {
+                "scene": "Gameplay",
+                "source": "Chat",
+                "enabled": True,
+            },
+        )
+
+        state = desired_state_from_action_sets(
+            [("game:A", (action, action))]
+        )
+
+        self.assertEqual(len(state.assignments), 1)
 
     def test_unknown_action_is_not_interpreted_as_macro(self):
         with self.assertRaises(UnsupportedIntentAction):
