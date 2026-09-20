@@ -623,7 +623,7 @@ class LayoutTests(unittest.TestCase):
         self.assertAlmostEqual(before[-1], 0.0, places=6)
         self.assertAlmostEqual(after[0], 0.0, places=6)
         self.assertAlmostEqual(after[-1], 1.0, places=6)
-    def test_move_fade_moves_continuously_through_zero_opacity_midpoint(self):
+    def test_move_fade_uses_fast_edge_fades_and_invisible_middle(self):
         class MoveFadeClient(FakeLayoutClient):
             def __init__(self):
                 super().__init__()
@@ -655,7 +655,9 @@ class LayoutTests(unittest.TestCase):
         client.calls.clear()
 
         with patch.object(
-            manager, "_transition_progress", return_value=iter((0.25, 0.5, 0.75, 1.0))
+            manager,
+            "_transition_progress",
+            return_value=iter((0.075, 0.15, 0.50, 0.85, 0.925, 1.0)),
         ):
             result = manager.apply_profile(profile, record_undo=False)
 
@@ -665,7 +667,10 @@ class LayoutTests(unittest.TestCase):
             for request, payload in client.calls
             if request == "SetSceneItemTransform" and int(payload["sceneItemId"]) == 1
         ]
-        self.assertEqual(positions[:4], [200.0, 300.0, 400.0, 500.0])
+        self.assertEqual(
+            positions[:6],
+            [130.0, 160.0, 300.0, 440.0, 470.0, 500.0],
+        )
 
         opacities = [
             float(payload["filterSettings"]["opacity"])
@@ -673,11 +678,30 @@ class LayoutTests(unittest.TestCase):
             if request == "SetSourceFilterSettings"
             and payload.get("sourceName") == "[Webcam] Cadre"
         ]
-        self.assertGreaterEqual(len(opacities), 4)
+        self.assertGreaterEqual(len(opacities), 5)
         self.assertAlmostEqual(opacities[0], 0.5, places=6)
         self.assertAlmostEqual(opacities[1], 0.0, places=6)
         self.assertAlmostEqual(opacities[2], 0.5, places=6)
         self.assertAlmostEqual(opacities[3], 1.0, places=6)
+
+    def test_move_fade_opacity_curve_uses_fifteen_percent_edges(self):
+        curve = OBSLayoutManager._move_fade_opacity
+
+        self.assertAlmostEqual(curve("through", 0.0), 1.0, places=6)
+        self.assertAlmostEqual(curve("through", 0.075), 0.5, places=6)
+        self.assertAlmostEqual(curve("through", 0.15), 0.0, places=6)
+        self.assertAlmostEqual(curve("through", 0.50), 0.0, places=6)
+        self.assertAlmostEqual(curve("through", 0.85), 0.0, places=6)
+        self.assertAlmostEqual(curve("through", 0.925), 0.5, places=6)
+        self.assertAlmostEqual(curve("through", 1.0), 1.0, places=6)
+
+        self.assertAlmostEqual(curve("in", 0.85), 0.0, places=6)
+        self.assertAlmostEqual(curve("in", 0.925), 0.5, places=6)
+        self.assertAlmostEqual(curve("in", 1.0), 1.0, places=6)
+
+        self.assertAlmostEqual(curve("out", 0.075), 0.5, places=6)
+        self.assertAlmostEqual(curve("out", 0.15), 0.0, places=6)
+        self.assertAlmostEqual(curve("out", 1.0), 0.0, places=6)
     def test_move_transition_uses_one_global_timeline_for_all_sources(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
