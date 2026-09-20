@@ -1540,7 +1540,10 @@ class RoutingService:
                     result = self.dispatcher.layout_manager.undo_last()
                 elif command.action == "catalog.sync":
                     self.logger.info("catalog_sync_started")
-                    reader = OBSResourceCatalogReader(self.dispatcher.client)
+                    reader = OBSResourceCatalogReader(
+                        self.dispatcher.client,
+                        cooperative_yield=self._cooperative_obs_yield,
+                    )
                     result = reader.sync(
                         include_settings=bool(command.options.get("include_settings", False))
                     )
