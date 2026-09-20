@@ -1182,7 +1182,7 @@ class RoutingService:
             return
 
         try:
-            controller.apply_event(event)
+            applied_collection = controller.apply_event(event)
         except ActivationCollectionChanged as exc:
             self._record_activation_diagnostic(event.policy, "collection", str(exc))
             with self._lock:
@@ -1213,6 +1213,11 @@ class RoutingService:
             return
 
         if event.kind == "show":
+            if applied_collection:
+                setter = getattr(scheduler, "set_active_collection", None)
+                if callable(setter):
+                    with self._lock:
+                        setter(event.policy, str(applied_collection))
             self._record_activation_diagnostic(
                 event.policy,
                 "déclenché",
@@ -1725,6 +1730,7 @@ class RoutingService:
                             container_kind=str(
                                 getattr(state, "active_container_kind", "scene") or "scene"
                             ),
+                            collection=str(getattr(state, "active_collection", "") or ""),
                             reason="shutdown",
                         )
                         register(event)
