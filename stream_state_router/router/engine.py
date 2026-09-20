@@ -53,6 +53,10 @@ class StateRouterEngine:
         self._manual_override_until: float | None = None
 
     @property
+    def needs_context(self) -> bool:
+        return bool(self._rules.needs_context)
+
+    @property
     def current_state(self) -> StreamState | None:
         return self._current_state
 
@@ -164,11 +168,22 @@ class StateRouterEngine:
         self._reset_candidate()
         return self._commit(state, "manual_override", "manual", None, 0)
 
-    def clear_manual_override(self, app: ForegroundApp | None = None) -> StateChange | None:
+    def clear_manual_override(
+        self,
+        app: ForegroundApp | None = None,
+        *,
+        context: Mapping[str, Any] | None = None,
+        use_context_provider: bool = True,
+    ) -> StateChange | None:
         self._manual_override = None
         self._manual_override_until = None
         self._reset_candidate()
-        return self.observe(app, force=True)
+        return self.observe(
+            app,
+            force=True,
+            context=context,
+            use_context_provider=use_context_provider,
+        )
 
     def observe(
         self,
@@ -176,6 +191,8 @@ class StateRouterEngine:
         *,
         now: float | None = None,
         force: bool = False,
+        context: Mapping[str, Any] | None = None,
+        use_context_provider: bool = True,
     ) -> StateChange | None:
         timestamp = self._clock() if now is None else now
         if self._manual_override is not None:
@@ -185,13 +202,18 @@ class StateRouterEngine:
             self._manual_override_until = None
             force = True
 
-        context: Mapping[str, Any] = {}
-        if self._rules.needs_context and self._context_provider is not None:
+        frozen_context: Mapping[str, Any] = context or {}
+        if (
+            self._rules.needs_context
+            and context is None
+            and use_context_provider
+            and self._context_provider is not None
+        ):
             try:
-                context = self._context_provider() or {}
+                frozen_context = self._context_provider() or {}
             except Exception:
-                context = {}
-        resolution = self._rules.resolve(app, context)
+                frozen_context = {}
+        resolution = self._rules.resolve(app, frozen_context)
 
         if resolution.kind is ResolutionKind.IGNORE:
             self._reset_candidate()
