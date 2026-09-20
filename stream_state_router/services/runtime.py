@@ -24,6 +24,7 @@ from ..activation import (
     TriggerPolicyConfig,
     TriggerTargetIdentity,
 )
+from ..obs.catalog import OBSResourceCatalog, OBSResourceCatalogReader
 from ..obs.dispatcher import DispatchResult, OBSDispatcher
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
@@ -272,6 +273,7 @@ class RoutingService:
         self._shutdown_cleanup_active = False
         self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
         self._command_status: dict[str, dict[str, object]] = {}
+        self._obs_catalog: OBSResourceCatalog | None = None
         self._simulation_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="SSR-Activation-Sim",
@@ -732,6 +734,25 @@ class RoutingService:
         if profile_name:
             options["name"] = str(profile_name)
         return self.submit_obs_command(f"layout.{action}", options=options)
+
+    def request_catalog_sync(self, *, include_settings: bool = False) -> str:
+        """Queue one explicit read-only OBS catalogue refresh on the runtime worker."""
+        return self.submit_obs_command(
+            "catalog.sync",
+            options={"include_settings": bool(include_settings)},
+        )
+
+    def catalog_snapshot(self) -> dict[str, object]:
+        """Return the last catalogue snapshot without issuing OBS requests."""
+        with self._lock:
+            catalog = self._obs_catalog
+        return catalog.as_mapping() if catalog is not None else {}
+
+    def catalog_summary(self) -> dict[str, object]:
+        """Return a compact last-sync summary without issuing OBS requests."""
+        with self._lock:
+            catalog = self._obs_catalog
+        return catalog.summary() if catalog is not None else {}
 
     def explain_decision(
         self,
@@ -1511,6 +1532,24 @@ class RoutingService:
                     result = self.dispatcher.layout_manager.cancel_preview()
                 elif command.action == "layout.undo":
                     result = self.dispatcher.layout_manager.undo_last()
+                elif command.action == "catalog.sync":
+                    reader = OBSResourceCatalogReader(self.dispatcher.client)
+                    result = reader.sync(
+                        include_settings=bool(command.options.get("include_settings", False))
+                    )
+                    with self._lock:
+                        self._obs_catalog = result
+                    self.logger.info(
+                        "catalog_sync_complete: scenes=%s items=%s inputs=%s filters=%s "
+                        "transitions=%s requests=%s warnings=%s",
+                        len(result.scenes),
+                        len(result.scene_items),
+                        len(result.inputs),
+                        len(result.filters),
+                        len(result.transitions),
+                        result.requests_used,
+                        len(result.warnings),
+                    )
                 else:
                     raise ValueError(f"Commande OBS inconnue : {command.action}")
             warnings = tuple(getattr(result, "warnings", ()) or ()) if result is not None else ()
