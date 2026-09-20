@@ -58,6 +58,30 @@ class _ActivationCommand:
     options: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class OBSCommandResult:
+    request_id: str
+    action: str
+    success: bool
+    result: object | None = None
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _OBSCommand:
+    request_id: str
+    generation: int
+    action: str
+    options: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingDispatch:
+    deadline: float
+    generation: int
+    change: StateChange
+
+
 class RoutingService:
     """Background foreground observer + state router + OBS dispatcher."""
 
@@ -101,9 +125,11 @@ class RoutingService:
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._activation_eligibility_cache: dict[str, tuple[bool, str]] = {}
         self._activation_cleanup_cache: dict[str, int] = {}
-        self._activation_commands: queue.Queue[_ActivationCommand] = queue.Queue()
+        self._runtime_commands: queue.Queue[_ActivationCommand | _OBSCommand] = queue.Queue()
         self._command_generation = 0
         self._accept_activation_commands = False
+        self._accept_obs_commands = False
+        self._pending_dispatch: _PendingDispatch | None = None
         self._runtime_operational = False
         self._stopping = False
         self._shutdown_complete = threading.Event()
@@ -116,6 +142,9 @@ class RoutingService:
         self.on_change: Callable[[StateChange], None] | None = None
         self.on_dispatch: Callable[[DispatchResult], None] | None = None
         self.on_event: Callable[[RuntimeEvent], None] | None = None
+        layout_manager = getattr(self.dispatcher, "layout_manager", None)
+        if layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
+            layout_manager.set_cooperative_yield(self._cooperative_obs_yield)
 
     @property
     def paused(self) -> bool:
@@ -136,6 +165,7 @@ class RoutingService:
             self._stopping = False
             self._runtime_operational = True
             self._accept_activation_commands = True
+            self._accept_obs_commands = True
         self._thread = threading.Thread(target=self._run, name="SSR-Router", daemon=True)
         self._thread.start()
 
@@ -144,6 +174,7 @@ class RoutingService:
         if thread is None or not thread.is_alive():
             with self._lock:
                 self._accept_activation_commands = False
+                self._accept_obs_commands = False
                 self._runtime_operational = False
                 self._stopping = True
             return self._wait_for_dispatch_quiescence(timeout)
@@ -151,9 +182,11 @@ class RoutingService:
         with self._lock:
             if not self._stopping:
                 self._accept_activation_commands = False
+                self._accept_obs_commands = False
                 self._runtime_operational = False
                 self._stopping = True
                 self._dispatch_generation += 1
+                self._pending_dispatch = None
                 self._command_generation += 1
                 generation = self._command_generation
                 command = _ActivationCommand(
@@ -161,7 +194,7 @@ class RoutingService:
                     generation=generation,
                     action="shutdown",
                 )
-                self._activation_commands.put(command)
+                self._runtime_commands.put(command)
         self._wake.set()
 
         deadline = time.monotonic() + max(0.1, float(timeout))
@@ -318,7 +351,7 @@ class RoutingService:
                 raise RuntimeError("Runtime d'activation indisponible ou en arrêt")
             generation = self._command_generation
         request_id = uuid.uuid4().hex
-        self._activation_commands.put(
+        self._runtime_commands.put(
             _ActivationCommand(
                 request_id=request_id,
                 generation=generation,
@@ -331,6 +364,49 @@ class RoutingService:
         )
         self._wake.set()
         return request_id
+
+    def submit_obs_command(
+        self,
+        action: str,
+        *,
+        options: Mapping[str, object] | None = None,
+    ) -> str:
+        with self._lock:
+            thread = self._thread
+            if (
+                not self._accept_obs_commands
+                or self._stopping
+                or thread is None
+                or not thread.is_alive()
+            ):
+                raise RuntimeError("Runtime OBS indisponible ou en arrêt")
+            generation = self._command_generation
+        request_id = uuid.uuid4().hex
+        self._runtime_commands.put(
+            _OBSCommand(
+                request_id=request_id,
+                generation=generation,
+                action=str(action),
+                options=dict(options or {}),
+            )
+        )
+        self._wake.set()
+        return request_id
+
+    def request_force_reapply(self) -> str:
+        return self.submit_obs_command("reapply")
+
+    def request_profile(self, domain: str, profile_name: str) -> str:
+        return self.submit_obs_command(
+            "profile",
+            options={"domain": str(domain), "name": str(profile_name)},
+        )
+
+    def request_layout(self, action: str, profile_name: str = "") -> str:
+        options: dict[str, object] = {}
+        if profile_name:
+            options["name"] = str(profile_name)
+        return self.submit_obs_command(f"layout.{action}", options=options)
 
     def activation_diagnostics(
         self,
@@ -357,7 +433,7 @@ class RoutingService:
             while not self._stop.is_set():
                 started = time.monotonic()
                 try:
-                    if self._drain_activation_commands():
+                    if self._drain_runtime_commands():
                         break
                     self._probe_obs_if_due()
                     app = self.provider.get()
@@ -378,6 +454,7 @@ class RoutingService:
                             change = self.engine.observe(app)
                         if change:
                             self._apply_change(change)
+                    self._process_due_dispatch()
                     self._tick_activation(paused=paused)
                 except Exception as exc:
                     self.logger.exception("Routing loop error")
@@ -385,12 +462,17 @@ class RoutingService:
 
                 elapsed = time.monotonic() - started
                 wait_for = max(0.0, self.poll_seconds - elapsed)
+                with self._lock:
+                    pending = self._pending_dispatch
+                if pending is not None:
+                    wait_for = min(wait_for, max(0.0, pending.deadline - time.monotonic()))
                 self._wake.wait(wait_for)
                 self._wake.clear()
         finally:
             with self._lock:
                 self._runtime_operational = False
                 self._accept_activation_commands = False
+                self._accept_obs_commands = False
             self._shutdown_complete.set()
             self.logger.info("Routing service stopped")
 
@@ -630,32 +712,123 @@ class RoutingService:
         except Exception as exc:
             return False, f"évaluation impossible : {exc}"
 
-    def _drain_activation_commands(self) -> bool:
+    def _drain_runtime_commands(self, *, allow_obs: bool = True) -> bool:
+        deferred: list[_OBSCommand] = []
+        should_stop = False
         while True:
             try:
-                command = self._activation_commands.get_nowait()
+                command = self._runtime_commands.get_nowait()
             except queue.Empty:
-                return False
+                break
 
             with self._lock:
                 current_generation = self._command_generation
             if command.generation != current_generation:
-                self._emit_activation_result(
-                    command,
-                    success=False,
-                    error="Commande annulée par arrêt/reconfiguration du runtime",
-                )
+                if isinstance(command, _ActivationCommand):
+                    self._emit_activation_result(
+                        command,
+                        success=False,
+                        error="Commande annulée par arrêt/reconfiguration du runtime",
+                    )
+                else:
+                    self._emit_obs_result(
+                        command,
+                        success=False,
+                        error="Commande annulée par arrêt/reconfiguration du runtime",
+                    )
+                continue
+
+            if isinstance(command, _OBSCommand):
+                if not allow_obs:
+                    deferred.append(command)
+                    continue
+                self._execute_obs_command(command)
                 continue
 
             if command.action == "shutdown":
                 self._perform_activation_shutdown()
-                return True
-
+                should_stop = True
+                break
             if command.action == "simulate":
                 self._start_simulation(command)
                 continue
-
             self._execute_activation_command(command)
+
+        for command in deferred:
+            self._runtime_commands.put(command)
+        return should_stop
+
+    def _cooperative_obs_yield(self) -> None:
+        if self._thread is None or threading.current_thread() is not self._thread:
+            return
+        if self._drain_runtime_commands(allow_obs=False):
+            raise RuntimeError("Arrêt du runtime demandé pendant une opération OBS")
+        self._probe_obs_if_due()
+        self._tick_activation(paused=self.paused)
+        if self._stop.is_set():
+            raise RuntimeError("Runtime arrêté pendant une opération OBS")
+
+    def _execute_obs_command(self, command: _OBSCommand) -> None:
+        try:
+            with self._dispatch_lock:
+                if command.action == "reapply":
+                    with self._lock:
+                        state = self.engine.current_state
+                    if state is None:
+                        result = None
+                    else:
+                        result = self.dispatcher.dispatch_state(state, force=True)
+                        if self.on_dispatch:
+                            self.on_dispatch(result)
+                elif command.action == "profile":
+                    result = self.dispatcher.execute_profile(
+                        str(command.options.get("domain") or ""),
+                        str(command.options.get("name") or ""),
+                    )
+                elif command.action == "layout.apply":
+                    result = self.dispatcher.execute_layout_profile(
+                        str(command.options.get("name") or "")
+                    )
+                elif command.action == "layout.preview":
+                    result = self.dispatcher.execute_layout_profile(
+                        str(command.options.get("name") or ""),
+                        preview=True,
+                    )
+                elif command.action == "layout.cancel-preview":
+                    result = self.dispatcher.layout_manager.cancel_preview()
+                elif command.action == "layout.undo":
+                    result = self.dispatcher.layout_manager.undo_last()
+                else:
+                    raise ValueError(f"Commande OBS inconnue : {command.action}")
+            self._emit_obs_result(command, success=True, result=result)
+        except Exception as exc:
+            self.logger.error("OBS command failed [%s]: %s", command.action, exc)
+            self._emit_obs_result(command, success=False, error=str(exc))
+
+    def _emit_obs_result(
+        self,
+        command: _OBSCommand,
+        *,
+        success: bool,
+        result: object | None = None,
+        error: str = "",
+    ) -> None:
+        payload = OBSCommandResult(
+            request_id=command.request_id,
+            action=command.action,
+            success=bool(success),
+            result=result,
+            error=str(error),
+        )
+        self._emit(
+            RuntimeEvent(
+                "obs_command_result",
+                error or f"{command.action} terminé",
+                request_id=command.request_id,
+                payload=payload,
+                success=bool(success),
+            )
+        )
 
     def _execute_activation_command(self, command: _ActivationCommand) -> None:
         scheduler = self.activation_scheduler
@@ -891,6 +1064,11 @@ class RoutingService:
         with self._lock:
             self._dispatch_generation += 1
             generation = self._dispatch_generation
+            self._pending_dispatch = _PendingDispatch(
+                deadline=time.monotonic() + max(0, change.apply_delay_ms) / 1000.0,
+                generation=generation,
+                change=change,
+            )
         if change.apply_delay_ms > 0:
             self._emit(
                 RuntimeEvent(
@@ -898,15 +1076,15 @@ class RoutingService:
                     f"{change.rule_name}: application OBS dans {change.apply_delay_ms} ms",
                 )
             )
-            timer = threading.Timer(
-                change.apply_delay_ms / 1000.0,
-                self._dispatch_if_current,
-                args=(change, generation),
-            )
-            timer.daemon = True
-            timer.start()
-        else:
-            self._dispatch_if_current(change, generation)
+        self._wake.set()
+
+    def _process_due_dispatch(self) -> None:
+        with self._lock:
+            pending = self._pending_dispatch
+            if pending is None or pending.deadline > time.monotonic():
+                return
+            self._pending_dispatch = None
+        self._dispatch_if_current(pending.change, pending.generation)
 
     def _dispatch_if_current(self, change: StateChange, generation: int) -> None:
         with self._dispatch_lock:

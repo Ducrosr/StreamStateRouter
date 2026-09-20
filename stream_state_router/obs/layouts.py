@@ -281,9 +281,35 @@ class OBSLayoutManager:
     def __init__(self, client: OBSClientManager):
         self.client = client
         self._scene_item_cache: dict[tuple[str, str], int] = {}
+        self._cooperative_yield = None
         self._runtime_visibility_owners: set[tuple[str, str]] = set()
         self._undo_stack: list[LayoutSnapshot] = []
         self._preview_snapshot: LayoutSnapshot | None = None
+
+    def set_cooperative_yield(self, callback) -> None:
+        """Install a lightweight runtime checkpoint used during long transitions."""
+        self._cooperative_yield = callback
+
+    def _yield_runtime(self) -> None:
+        callback = self._cooperative_yield
+        if callback is not None:
+            callback()
+
+    def _cooperative_sleep(self, seconds: float) -> None:
+        remaining = max(0.0, float(seconds))
+        if remaining <= 0:
+            self._yield_runtime()
+            return
+        if self._cooperative_yield is None:
+            time.sleep(remaining)
+            return
+        deadline = time.monotonic() + remaining
+        while True:
+            self._yield_runtime()
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(0.02, left))
 
     def set_runtime_visibility_owners(
         self,
@@ -1371,7 +1397,7 @@ class OBSLayoutManager:
                 deadline = started + total_seconds * ((frame - 1) / (steps - 1))
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
-                    time.sleep(remaining)
+                    self._cooperative_sleep(remaining)
             t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
             for index, prepared in enumerate(prepared_items):
                 if move:
@@ -1425,7 +1451,7 @@ class OBSLayoutManager:
         callers. obs-websocket does not expose those calls, so SSR waits a very
         short interval between child updates and the final group transform.
         """
-        time.sleep(GROUP_RESIZE_SETTLE_SECONDS)
+        self._cooperative_sleep(GROUP_RESIZE_SETTLE_SECONDS)
 
     def _build_desired_elements(self, profile: Mapping[str, Any]) -> list[dict[str, Any]]:
         scene = str(profile.get("scene") or "").strip()
@@ -1782,7 +1808,7 @@ class OBSLayoutManager:
             }
             self._set_transform(container, source, update)
             if index != steps:
-                time.sleep(delay)
+                self._cooperative_sleep(delay)
 
     def _ensure_fade_filter(self, source: str, opacity: float) -> None:
         """Ensure the helper filter exists without recursively setting it.
