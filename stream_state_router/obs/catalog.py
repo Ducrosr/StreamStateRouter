@@ -175,7 +175,13 @@ class OBSResourceCatalogReader:
         scenes, current_program = self._scenes(state)
         scene_items = self._scene_items(scenes, state)
         inputs = self._inputs(state, include_settings=include_settings)
-        filters = self._filters(inputs, state, include_settings=include_settings)
+        filters = self._filters(
+            inputs,
+            scenes,
+            scene_items,
+            state,
+            include_settings=include_settings,
+        )
         transitions = self._transitions(state)
         canvas_width, canvas_height = self._video_settings(state)
 
@@ -388,19 +394,30 @@ class OBSResourceCatalogReader:
     def _filters(
         self,
         inputs: list[OBSInputRef],
+        scenes: list[OBSSceneRef],
+        scene_items: list[OBSSceneItemRef],
         state: _CatalogBuildState,
         *,
         include_settings: bool,
     ) -> list[OBSFilterRef]:
+        # OBS filters may be attached to input sources, scenes or groups. The
+        # Midgar collection notably keeps its layout MOVE filters on a scene,
+        # so limiting discovery to GetInputList would silently miss them.
+        source_names = {item.name for item in inputs}
+        source_names.update(scene.name for scene in scenes)
+        source_names.update(
+            item.source_name for item in scene_items if item.source_kind == "group"
+        )
+
         out: list[OBSFilterRef] = []
-        for input_ref in inputs:
+        for source_name in sorted(source_names, key=str.casefold):
             try:
                 response = self.client.send(
                     "GetSourceFilterList",
-                    {"sourceName": input_ref.name},
+                    {"sourceName": source_name},
                 )
             except Exception as exc:
-                state.warnings.append(f"Filtres de '{input_ref.name}' non lisibles : {exc}")
+                state.warnings.append(f"Filtres de '{source_name}' non lisibles : {exc}")
                 continue
             for raw in response.get("filters", []) or []:
                 if not isinstance(raw, Mapping):
@@ -416,18 +433,18 @@ class OBSResourceCatalogReader:
                     try:
                         details = self.client.send(
                             "GetSourceFilter",
-                            {"sourceName": input_ref.name, "filterName": name},
+                            {"sourceName": source_name, "filterName": name},
                         )
                         detailed_settings = details.get("filterSettings")
                         if isinstance(detailed_settings, Mapping):
                             settings = dict(detailed_settings)
                     except Exception as exc:
                         state.warnings.append(
-                            f"Settings filtre '{input_ref.name}/{name}' non lisibles : {exc}"
+                            f"Settings filtre '{source_name}/{name}' non lisibles : {exc}"
                         )
                 out.append(
                     OBSFilterRef(
-                        source_name=input_ref.name,
+                        source_name=source_name,
                         name=name,
                         kind=str(raw.get("filterKind") or ""),
                         enabled=self._optional_bool(raw, "filterEnabled"),
