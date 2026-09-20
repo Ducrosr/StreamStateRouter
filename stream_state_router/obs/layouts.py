@@ -1984,6 +1984,15 @@ class OBSLayoutManager:
             for source, (_start, end) in states.items():
                 self._set_source_opacity(source, end)
             return
+
+        # Emit the exact starting opacity before the first timed frame. The
+        # wall-clock timeline intentionally starts at the first interval (> 0),
+        # so without this write a fade-in after reposition would jump directly
+        # from 0 to 1/60 instead of having an explicit transparent boundary.
+        for source, (start, _end) in states.items():
+            self._yield_runtime()
+            self._set_source_opacity(source, start)
+
         for t in self._transition_progress(duration_ms, steps):
             for source, (start, end) in states.items():
                 self._yield_runtime()
@@ -2065,8 +2074,18 @@ class OBSLayoutManager:
                 if bool(target_enabled) == bool(current_enabled):
                     continue
                 if bool(target_enabled):
-                    self._set_source_opacity(prepared["source"], 0.0)
-                    self._set_enabled(prepared["container"], prepared["source"], True)
+                    try:
+                        self._set_source_opacity(prepared["source"], 0.0)
+                        self._set_enabled(prepared["container"], prepared["source"], True)
+                    except Exception as exc:
+                        # The opacity mutation may have reached OBS even when its
+                        # response was lost. Keep the pre-armed neutralization
+                        # obligation, skip this source's fade-in, and degrade to a
+                        # warning rather than aborting the whole layout transition.
+                        warnings.append(
+                            f"Fondu d'apparition incertain pour {prepared['source']}: {exc}"
+                        )
+                        fade_in.pop(prepared["source"], None)
                 else:
                     self._set_enabled(prepared["container"], prepared["source"], False)
 
