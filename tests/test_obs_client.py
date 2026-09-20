@@ -68,6 +68,20 @@ class OBSClientManagerTests(unittest.TestCase):
             self.assertEqual(response["obsVersion"], "32.2.2")
             self.assertEqual(_FakeReqClient.instances, 1)
 
+    def test_request_counter_counts_submitted_requests_without_reset_on_failure(self):
+        fake_obs = SimpleNamespace(ReqClient=_FakeReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True, reconnect_seconds=3.0))
+
+        with (
+            patch("stream_state_router.obs.client._obs", fake_obs),
+            patch("stream_state_router.obs.client._OBS_REQUEST_ERRORS", (_FakeRequestError,)),
+        ):
+            with self.assertRaises(OBSResourceNotFoundError):
+                manager.send("GetSceneItemTransform", {"sceneName": "Test", "sceneItemId": 7})
+            manager.send("GetVersion")
+
+        self.assertEqual(manager.request_count, 2)
+
     def test_generic_request_error_is_not_treated_as_confirmed_absence(self):
         fake_obs = SimpleNamespace(ReqClient=_GenericRequestFailReqClient)
         manager = OBSClientManager(OBSConnectionConfig(enabled=True, reconnect_seconds=3.0))
