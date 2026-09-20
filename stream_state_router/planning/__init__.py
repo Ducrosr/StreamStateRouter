@@ -21,4 +21,9 @@ __all__ = [
     "PlanDiagnostic",
     "PlannedOperation",
     "ResourceKey",
+    "ResourceValidation",
+    "validate_desired_state",
+    "validate_resource",
 ]
+
+from .validation import ResourceValidation, validate_desired_state, validate_resource
