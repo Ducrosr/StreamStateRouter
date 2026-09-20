@@ -310,6 +310,34 @@ class OBSLayoutManager:
         self._preview_snapshot: LayoutSnapshot | None = None
         self._snapshot_generation = 0
         self._last_discovery_warnings: list[str] = []
+        self._pending_fade_cleanup: set[str] = set()
+
+    def pending_fade_cleanup(self) -> tuple[str, ...]:
+        return tuple(sorted(self._pending_fade_cleanup, key=str.casefold))
+
+    def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
+        """Best-effort neutralization of helper fade filters left uncertain."""
+        warnings: list[str] = []
+        for source in tuple(self._pending_fade_cleanup):
+            try:
+                self._set_source_opacity(source, 1.0)
+            except Exception as exc:
+                warnings.append(f"{source}: neutralisation du fondu impossible ({exc})")
+                continue
+            self._pending_fade_cleanup.discard(source)
+        return tuple(warnings)
+
+    def _neutralize_fade_sources(self, sources: Iterable[str]) -> tuple[str, ...]:
+        warnings: list[str] = []
+        for source in {str(item) for item in sources if str(item)}:
+            try:
+                self._set_source_opacity(source, 1.0)
+            except Exception as exc:
+                self._pending_fade_cleanup.add(source)
+                warnings.append(f"{source}: opacité neutre non acquittée ({exc})")
+            else:
+                self._pending_fade_cleanup.discard(source)
+        return tuple(warnings)
 
     def set_cooperative_yield(self, callback) -> None:
         """Install a lightweight runtime checkpoint used during long transitions."""
@@ -1748,16 +1776,12 @@ class OBSLayoutManager:
         steps: int,
         warnings: list[str],
     ) -> None:
-        """Animate one layout on a single global timeline.
-
-        Older builds animated every source independently. A 2 s transition on
-        40 sources therefore blocked the UI for roughly 80 s. All transforms
-        and fades now advance together and sleep only once per frame.
-        """
+        """Animate one layout on a single global timeline with bounded fade cleanup."""
         move = mode in {"move", "move_fade"}
         fade = mode in {"fade", "move_fade"}
         fade_state: dict[int, tuple[float, float]] = {}
         fallback_visibility: set[int] = set()
+        touched_fades: set[str] = set()
 
         for index, prepared in enumerate(prepared_items):
             target_enabled = prepared["target_enabled"]
@@ -1774,17 +1798,17 @@ class OBSLayoutManager:
                 if bool(target_enabled):
                     self._set_enabled(container, source, True)
                 continue
-            if bool(target_enabled) == current_enabled:
-                continue
 
             if fade:
                 try:
                     if bool(target_enabled):
                         self._set_source_opacity(source, 0.0)
+                        touched_fades.add(source)
                         self._set_enabled(container, source, True)
                         fade_state[index] = (0.0, 1.0)
                     else:
                         self._ensure_fade_filter(source, 1.0)
+                        touched_fades.add(source)
                         fade_state[index] = (1.0, 0.0)
                 except Exception as exc:
                     warnings.append(f"Fondu indisponible pour {source}: {exc}")
@@ -1792,68 +1816,89 @@ class OBSLayoutManager:
                     if bool(target_enabled):
                         self._set_enabled(container, source, True)
             elif move and bool(target_enabled):
-                # Newly visible sources must be enabled before they can move.
                 self._set_enabled(container, source, True)
 
-        total_seconds = max(0.0, duration_ms / 1000.0)
-        started = time.monotonic()
-        for frame in range(1, steps + 1):
-            if frame > 1 and steps > 1:
-                deadline = started + total_seconds * ((frame - 1) / (steps - 1))
-                remaining = deadline - time.monotonic()
-                if remaining > 0:
-                    self._cooperative_sleep(remaining)
-            t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
+        try:
+            total_seconds = max(0.0, duration_ms / 1000.0)
+            started = time.monotonic()
+            for frame in range(1, steps + 1):
+                if frame > 1 and steps > 1:
+                    deadline = started + total_seconds * ((frame - 1) / (steps - 1))
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        self._cooperative_sleep(remaining)
+                t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
+                for index, prepared in enumerate(prepared_items):
+                    if move and prepared["transform_changed"]:
+                        target = prepared["target_transform"]
+                        current = prepared["current_transform"]
+                        if target:
+                            keys = [
+                                key
+                                for key in target
+                                if isinstance(target.get(key), (int, float))
+                            ]
+                            update = {
+                                key: _float(current.get(key), _float(target.get(key)))
+                                + (
+                                    _float(target.get(key))
+                                    - _float(current.get(key), _float(target.get(key)))
+                                )
+                                * t
+                                for key in keys
+                            }
+                            if update:
+                                self._set_transform(
+                                    prepared["container"],
+                                    prepared["source"],
+                                    update,
+                                )
+
+                    opacity = fade_state.get(index)
+                    if opacity is not None:
+                        start_opacity, end_opacity = opacity
+                        self._set_source_opacity(
+                            prepared["source"],
+                            start_opacity + (end_opacity - start_opacity) * t,
+                        )
+
             for index, prepared in enumerate(prepared_items):
-                if move and prepared["transform_changed"]:
-                    target = prepared["target_transform"]
-                    current = prepared["current_transform"]
-                    if target:
-                        keys = [key for key in target if isinstance(target.get(key), (int, float))]
-                        update = {
-                            key: _float(current.get(key), _float(target.get(key)))
-                            + (_float(target.get(key)) - _float(current.get(key), _float(target.get(key)))) * t
-                            for key in keys
-                        }
-                        if update:
-                            self._set_transform(prepared["container"], prepared["source"], update)
-
-                opacity = fade_state.get(index)
-                if opacity is not None:
-                    start, end = opacity
-                    self._set_source_opacity(
+                target_enabled = prepared["target_enabled"]
+                current_enabled = prepared["current_enabled"]
+                if (
+                    not move
+                    and prepared["target_transform"]
+                    and prepared["transform_changed"]
+                ):
+                    self._set_transform(
+                        prepared["container"],
                         prepared["source"],
-                        start + (end - start) * t,
+                        prepared["target_transform"],
                     )
+                if target_enabled is None:
+                    continue
+                if current_enabled is not None and bool(target_enabled) == current_enabled:
+                    continue
 
-        for index, prepared in enumerate(prepared_items):
-            target_enabled = prepared["target_enabled"]
-            current_enabled = prepared["current_enabled"]
-            if (
-                not move
-                and prepared["target_transform"]
-                and prepared["transform_changed"]
-            ):
-                # Fade-only transitions still apply changed geometry, but
-                # geometry is not itself animated.
-                self._set_transform(
-                    prepared["container"], prepared["source"], prepared["target_transform"]
-                )
-            if target_enabled is None:
-                continue
-            if current_enabled is not None and bool(target_enabled) == current_enabled:
-                continue
-
-            if index in fade_state:
-                if not bool(target_enabled):
-                    self._set_enabled(prepared["container"], prepared["source"], False)
-                    # Leave the helper filter neutral for the next transition.
-                    self._set_source_opacity(prepared["source"], 1.0)
-            elif index in fallback_visibility or move:
-                if not bool(target_enabled):
-                    self._set_enabled(prepared["container"], prepared["source"], False)
-                elif index in fallback_visibility:
-                    self._set_enabled(prepared["container"], prepared["source"], True)
+                if index in fade_state:
+                    if not bool(target_enabled):
+                        self._set_enabled(prepared["container"], prepared["source"], False)
+                        self._set_source_opacity(prepared["source"], 1.0)
+                elif index in fallback_visibility or move:
+                    if not bool(target_enabled):
+                        self._set_enabled(prepared["container"], prepared["source"], False)
+                    elif index in fallback_visibility:
+                        self._set_enabled(prepared["container"], prepared["source"], True)
+        except Exception as exc:
+            cleanup_warnings = self._neutralize_fade_sources(touched_fades)
+            warnings.extend(cleanup_warnings)
+            detail = ""
+            if cleanup_warnings:
+                detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
+            raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
+        else:
+            cleanup_warnings = self._neutralize_fade_sources(touched_fades)
+            warnings.extend(cleanup_warnings)
 
     def _wait_group_resize_settle(self) -> None:
         """Allow OBS to finish automatic group-bound recomputation.
