@@ -138,6 +138,27 @@ class DeclarativeIntentTests(unittest.TestCase):
 
         self.assertEqual(len(state.assignments), 1)
 
+    def test_reserved_specialized_owner_conflicts_with_action_profile(self):
+        key = PropertyKey.scene_item_visibility(
+            collection="",
+            container="Gameplay",
+            source="Chat",
+        )
+        action = OBSAction(
+            "scene_item_enabled",
+            {
+                "scene": "Gameplay",
+                "source": "Chat",
+                "enabled": True,
+            },
+        )
+
+        with self.assertRaises(DesiredOwnershipConflict):
+            desired_state_from_action_sets(
+                [("overlay:Base", (action,))],
+                reserved_owners={key: "layout:Gameplay"},
+            )
+
     def test_unknown_action_is_not_interpreted_as_macro(self):
         with self.assertRaises(UnsupportedIntentAction):
             desired_assignments_from_actions(
