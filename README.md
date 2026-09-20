@@ -334,6 +334,8 @@ POST /layout/apply
 POST /layout/preview
 POST /layout/cancel-preview
 POST /layout/undo
+POST /catalog/sync
+POST /catalog/snapshot
 ```
 
 Un plugin Stream Deck natif est fourni dans `streamdeck-plugin/` avec les actions :
@@ -344,6 +346,12 @@ Un plugin Stream Deck natif est fourni dans `streamdeck-plugin/` avec les action
 - appliquer ou prévisualiser un layout nommé ;
 - Undo layout ;
 - Annuler aperçu.
+
+Le catalogue est strictement diagnostique dans ce lot : `/catalog/sync`
+planifie une lecture OBS sérialisée avec le runtime, tandis que
+`/catalog/snapshot` renvoie le dernier snapshot déjà mémorisé sans nouvelle
+requête WebSocket. Le résultat détaillé n'est pas stocké dans l'historique des
+commandes ; celui-ci ne conserve qu'un résumé borné.
 
 Le plugin 2.0 utilise actuellement les paramètres API par défaut `127.0.0.1:8765` sans jeton. Si vous modifiez le port ou activez un jeton API, utilisez temporairement les commandes HTTP personnalisées ou conservez les valeurs par défaut jusqu'à l'ajout de paramètres globaux au plugin.
 
