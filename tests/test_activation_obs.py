@@ -321,7 +321,7 @@ class OBSActivationControllerTests(unittest.TestCase):
         replacement.retry_pending_hides(now=clock.value)
         self.assertEqual(replacement.pending_hides(), ())
 
-    def test_imported_cleanup_is_discarded_on_different_collection(self):
+    def test_imported_cleanup_is_preserved_but_not_replayed_in_different_collection(self):
         dispatcher = FakeDispatcher()
         old = {
             "policy": "egg",
@@ -329,16 +329,28 @@ class OBSActivationControllerTests(unittest.TestCase):
             "target": TriggerTargetConfig("[Module] EasterEgg", "A").to_mapping(),
             "created_at": 1.0,
             "attempts": 1,
-            "next_retry_at": 0.0,
+            "next_retry_at": 999999.0,
             "last_error": "timeout",
         }
         dispatcher.client.scene_collection = "Collection B"
         controller = OBSActivationController(dispatcher, {})
         controller.import_pending_hides([old])
+        dispatcher.layout_manager.enabled_calls.clear()
 
         controller.retry_pending_hides(now=10.0)
 
+        self.assertEqual(len(controller.pending_hides()), 1)
+        self.assertEqual(controller.pending_hides()[0].collection, "Collection A")
+        self.assertEqual(dispatcher.layout_manager.enabled_calls, [])
+
+        dispatcher.client.scene_collection = "Collection A"
+        controller.retry_pending_hides(now=10.1)
+
         self.assertEqual(controller.pending_hides(), ())
+        self.assertEqual(
+            dispatcher.layout_manager.enabled_calls[-1],
+            ("[Module] EasterEgg", "A", False, "scene"),
+        )
 
     def test_scene_collection_change_is_detected_after_probe_interval(self):
         dispatcher = FakeDispatcher()
@@ -403,6 +415,64 @@ class OBSActivationControllerTests(unittest.TestCase):
 
         self.assertEqual(controller.pending_hides("egg"), ())
         self.assertEqual(controller.policy_cleanup_status("egg"), (False, ""))
+
+    def test_hide_obligation_is_armed_before_visibility_io(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy()
+
+        class ObservingController(OBSActivationController):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.prearmed = False
+
+            def _mutate_visibility(self, target, enabled):
+                if not enabled:
+                    self.prearmed = bool(self.pending_hides())
+                    return "uncertain", "transport lost"
+                return super()._mutate_visibility(target, enabled)
+
+        controller = ObservingController(dispatcher, {"egg": policy})
+        controller.reconcile()
+
+        with self.assertRaises(ActivationVisibilityUncertain):
+            controller.apply_event(
+                ActivationEvent(
+                    "hide",
+                    "egg",
+                    10.0,
+                    source="A",
+                    container="[Module] EasterEgg",
+                )
+            )
+
+        self.assertTrue(controller.prearmed)
+        self.assertEqual(len(controller.pending_hides("egg")), 1)
+        self.assertEqual(controller.pending_hides("egg")[0].collection, "Collection A")
+
+    def test_uncertain_show_keeps_prearmed_compensating_hide_in_origin_collection(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy(exclusive=False)
+        controller = OBSActivationController(dispatcher, {"egg": policy})
+        controller.reconcile()
+        dispatcher.layout_manager.failures[
+            ("[Module] EasterEgg", "A", True, "scene")
+        ] = [OBSUnavailableError("response lost")]
+
+        with self.assertRaises(ActivationVisibilityUncertain):
+            controller.apply_event(
+                ActivationEvent(
+                    "show",
+                    "egg",
+                    10.0,
+                    source="A",
+                    container="[Module] EasterEgg",
+                )
+            )
+
+        pending = controller.pending_hides("egg")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].collection, "Collection A")
+        self.assertEqual(pending[0].target.source, "A")
 
     def test_hide_failure_stays_pending_and_retries_until_acknowledged(self):
         dispatcher = FakeDispatcher()
@@ -509,7 +579,7 @@ class OBSActivationControllerTests(unittest.TestCase):
             )
         )
 
-    def test_pending_hide_from_old_collection_is_not_replayed_in_new_collection(self):
+    def test_pending_hide_from_old_collection_is_suspended_until_original_collection_returns(self):
         dispatcher = FakeDispatcher()
         clock = FakeClock(40.0)
         controller = OBSActivationController(
@@ -540,8 +610,19 @@ class OBSActivationControllerTests(unittest.TestCase):
         clock.value = 40.2
         controller.retry_pending_hides(now=clock.value)
 
-        self.assertEqual(controller.pending_hides(), ())
+        self.assertEqual(len(controller.pending_hides()), 1)
+        self.assertEqual(controller.pending_hides()[0].collection, "Collection A")
         self.assertEqual(len(dispatcher.layout_manager.enabled_calls), calls_before)
+
+        dispatcher.client.scene_collection = "Collection A"
+        clock.value = 40.3
+        controller.retry_pending_hides(now=clock.value)
+
+        self.assertEqual(controller.pending_hides(), ())
+        self.assertEqual(
+            dispatcher.layout_manager.enabled_calls[-1],
+            ("[Module] EasterEgg", "A", False, "scene"),
+        )
 
     def test_legacy_source_only_event_is_rejected_when_ambiguous(self):
         dispatcher = FakeDispatcher()
