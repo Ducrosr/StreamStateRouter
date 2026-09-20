@@ -38,6 +38,7 @@ class FakeLayoutManager:
         self.enabled_calls = []
         self.reset_calls = 0
         self.catalog_by_scene = {}
+        self.topology_calls = []
         self.runtime_visibility_owners = set()
         self.failures = {}
 
@@ -49,6 +50,14 @@ class FakeLayoutManager:
 
     def discover_scene(self, scene, recursive=True):
         return self.catalog_by_scene.get(scene, {})
+
+    def scan_scene_topology(self, scene, recursive=True):
+        self.topology_calls.append((scene, bool(recursive)))
+        return tuple(
+            SimpleNamespace(source=element.source)
+            for elements in self.catalog_by_scene.get(scene, {}).values()
+            for element in elements
+        )
 
     def set_item_enabled(self, container, source, enabled, *, container_kind="scene"):
         self.enabled_calls.append((container, source, bool(enabled), container_kind))
@@ -113,6 +122,48 @@ class OBSActivationControllerTests(unittest.TestCase):
         self.assertTrue(controller.is_eligible("egg", policy))
         dispatcher.context["program_scene"] = "Pause"
         self.assertFalse(controller.is_eligible("egg", policy))
+
+    def test_multiple_policies_share_one_scene_topology_scan(self):
+        dispatcher = FakeDispatcher()
+        dispatcher.layout_manager.catalog_by_scene["In Game"] = {
+            "Egg A": [SimpleNamespace(source="[Module] EggA")],
+            "Egg B": [SimpleNamespace(source="[Module] EggB")],
+        }
+        first = self.policy(module_source="[Module] EggA")
+        second = self.policy(module_source="[Module] EggB")
+        clock = FakeClock(10.0)
+        controller = OBSActivationController(
+            dispatcher,
+            {"a": first, "b": second},
+            clock=clock,
+            eligibility_cache_seconds=0.5,
+        )
+
+        self.assertTrue(controller.is_eligible("a", first))
+        self.assertTrue(controller.is_eligible("b", second))
+        self.assertEqual(dispatcher.layout_manager.topology_calls, [("In Game", True)])
+
+    def test_scene_topology_cache_expires_and_observes_structure_change(self):
+        dispatcher = FakeDispatcher()
+        dispatcher.layout_manager.catalog_by_scene["In Game"] = {
+            "Egg": [SimpleNamespace(source="[Module] EasterEgg")]
+        }
+        policy = self.policy()
+        clock = FakeClock(1.0)
+        controller = OBSActivationController(
+            dispatcher,
+            {"egg": policy},
+            clock=clock,
+            eligibility_cache_seconds=0.5,
+        )
+
+        self.assertTrue(controller.is_eligible("egg", policy))
+        dispatcher.layout_manager.catalog_by_scene["In Game"] = {}
+        clock.value = 1.2
+        self.assertTrue(controller.is_eligible("egg", policy))
+        clock.value = 1.6
+        self.assertFalse(controller.is_eligible("egg", policy))
+        self.assertEqual(len(dispatcher.layout_manager.topology_calls), 2)
 
     def test_streaming_mode_uses_obs_context(self):
         dispatcher = FakeDispatcher()

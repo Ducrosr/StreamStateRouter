@@ -39,6 +39,7 @@ class FakeLayoutClient:
             "Unrelated": 3,
             "[Webcam:locked] Permanent": 4,
         }
+        self.enabled = {1: True, 2: True, 3: True, 4: True}
 
     def send(self, request, data=None):
         payload = dict(data or {})
@@ -63,7 +64,15 @@ class FakeLayoutClient:
             return {"sceneItemTransform": dict(self.transforms[int(payload["sceneItemId"])])}
         if request == "GetSceneItemId":
             return {"sceneItemId": self.items.get(payload["sourceName"], 0)}
-        if request in {"SetSceneItemTransform", "SetSceneItemEnabled"}:
+        if request == "GetSceneItemEnabled":
+            return {"sceneItemEnabled": self.enabled.get(int(payload["sceneItemId"]), True)}
+        if request == "SetSceneItemTransform":
+            item_id = int(payload["sceneItemId"])
+            if item_id in self.transforms:
+                self.transforms[item_id].update(dict(payload.get("sceneItemTransform") or {}))
+            return {}
+        if request == "SetSceneItemEnabled":
+            self.enabled[int(payload["sceneItemId"])] = bool(payload["sceneItemEnabled"])
             return {}
         raise AssertionError(f"Unexpected request: {request}")
 
@@ -73,6 +82,34 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(split_module_source("[Webcam] Cadre"), ("Webcam", "Cadre"))
         self.assertIsNone(split_module_source("Webcam Cadre"))
         self.assertIsNone(split_module_source("[Webcam]"))
+
+    def test_lightweight_topology_scan_does_not_read_transforms(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+
+        topology = manager.scan_scene_topology("Gameplay")
+
+        self.assertEqual(
+            {item.source for item in topology},
+            {"[Webcam] Cadre", "[Webcam] Avatar"},
+        )
+        self.assertFalse(any(request == "GetSceneItemTransform" for request, _ in client.calls))
+
+    def test_apply_matching_layout_performs_no_mutation_writes(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        client.calls.clear()
+
+        result = manager.apply_profile(profile, record_undo=False)
+
+        self.assertEqual(result.missing_sources, ())
+        writes = [
+            request
+            for request, _payload in client.calls
+            if request in {"SetSceneItemTransform", "SetSceneItemEnabled"}
+        ]
+        self.assertEqual(writes, [])
 
     def test_discovery_keeps_each_source_as_a_distinct_module(self):
         manager = OBSLayoutManager(FakeLayoutClient())
