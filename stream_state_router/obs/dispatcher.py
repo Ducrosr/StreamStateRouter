@@ -60,6 +60,7 @@ class OBSDispatcher:
         # the layout selected by the current routing state. Keep that manual
         # layout in place while routing continues to request the same baseline
         # LayoutProfile; a genuinely different routed layout releases the hold.
+        self._manual_layout_hold_active = False
         self._manual_layout_routing_baseline = ""
         self._context_cache: tuple[float, dict[str, Any]] | None = None
         self._cooperative_yield = None
@@ -95,6 +96,7 @@ class OBSDispatcher:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.clear()
+        self._manual_layout_hold_active = False
         self._manual_layout_routing_baseline = ""
         self._context_cache = None
 
@@ -102,6 +104,7 @@ class OBSDispatcher:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.clear()
+        self._manual_layout_hold_active = False
         self._manual_layout_routing_baseline = ""
         self._layout_manager.reset_cache()
         self._context_cache = None
@@ -118,13 +121,23 @@ class OBSDispatcher:
     def applied_profiles(self) -> dict[str, str]:
         return dict(self._applied_profiles)
 
-    def set_manual_layout_hold(self, routed_profile: str) -> None:
-        """Keep an explicit manual layout while routing still wants this profile."""
+    def set_manual_layout_hold(self, routed_profile: str = "") -> None:
+        """Keep an explicit layout until routing genuinely changes layout target.
+
+        routed_profile may be unknown during a runtime restart. In that case the
+        first subsequent routing decision adopts its LayoutProfile as the
+        baseline without overwriting the manual layout.
+        """
+        self._manual_layout_hold_active = True
         self._manual_layout_routing_baseline = str(routed_profile or "").strip()
 
+    def clear_manual_layout_hold(self) -> None:
+        self._manual_layout_hold_active = False
+        self._manual_layout_routing_baseline = ""
+
     def _layout_is_manually_held_for(self, state: StreamState) -> bool:
-        baseline = self._manual_layout_routing_baseline
-        return bool(baseline and state.profile_name("layout") == baseline)
+        del state
+        return self._manual_layout_hold_active
 
     def pending_domains(self, state: StreamState | None = None) -> tuple[str, ...]:
         wanted = state or self._desired_state
@@ -327,6 +340,18 @@ class OBSDispatcher:
     def dispatch_change(self, change: StateChange) -> DispatchResult:
         # change.previous is the router's previous *decision*, not necessarily
         # what OBS actually acknowledged. Always diff against applied state.
+        if self._manual_layout_hold_active:
+            desired_layout = change.current.profile_name("layout")
+            baseline = self._manual_layout_routing_baseline
+            if not baseline:
+                # The restart happened before any routed state was known. Adopt
+                # the first real routing target as the baseline, but keep the
+                # explicit manual layout currently visible in OBS.
+                self._manual_layout_routing_baseline = desired_layout
+            elif desired_layout != baseline:
+                # A genuine routing transition to another LayoutProfile releases
+                # the explicit manual divergence.
+                self.clear_manual_layout_hold()
         return self.dispatch_state(change.current)
 
     def dispatch_state(
@@ -339,17 +364,10 @@ class OBSDispatcher:
         del previous  # compatibility only: router history is not OBS applied state
         self._desired_state = state
         self._last_state = state
-        desired_layout = state.profile_name("layout")
         if force:
             # An explicit force-reapply means automatic routing deliberately
             # takes ownership back from any prior manual layout divergence.
-            self._manual_layout_routing_baseline = ""
-        elif (
-            self._manual_layout_routing_baseline
-            and desired_layout != self._manual_layout_routing_baseline
-        ):
-            # Routing now genuinely wants another layout: release the manual hold.
-            self._manual_layout_routing_baseline = ""
+            self.clear_manual_layout_hold()
         changed = [
             domain
             for domain in STATE_DOMAINS
@@ -500,10 +518,11 @@ class OBSDispatcher:
             if preview
             else self._layout_manager.apply_profile(profile)
         )
-        if not preview and baseline:
-            self._manual_layout_routing_baseline = (
-                "" if profile_name == baseline else baseline
-            )
+        if not preview:
+            if baseline and profile_name == baseline:
+                self.clear_manual_layout_hold()
+            else:
+                self.set_manual_layout_hold(baseline)
         return DispatchResult(
             result.elements_applied,
             result.elements_skipped,
