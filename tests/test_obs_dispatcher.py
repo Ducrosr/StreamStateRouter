@@ -173,6 +173,13 @@ class OBSDispatcherTests(unittest.TestCase):
         layout = next(row for row in plan["domains"] if row["domain"] == "layout")
         self.assertFalse(layout["needs_apply"])
         self.assertEqual(layout["status"], "held")
+        self.assertIn(
+            {
+                "provenance": "layout:A",
+                "reason": "LayoutProfile maintenu manuellement",
+            },
+            plan["declarative_blocks"],
+        )
 
     def test_manual_layout_hold_releases_when_routing_wants_another_layout(self):
         dispatcher = OBSDispatcher(FakeClient(), {})
