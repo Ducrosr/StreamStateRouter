@@ -471,6 +471,25 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(exported[0]["collection"], "Collection A")
         self.assertTrue(warnings)
 
+    def test_immediate_fade_cleanup_never_writes_in_foreign_collection(self):
+        client = FakeLayoutClient()
+        client.scene_collection = "Collection B"
+        manager = OBSLayoutManager(client)
+        client.calls.clear()
+
+        warnings = manager._neutralize_fade_sources(
+            ["[Webcam] Avatar"],
+            collection="Collection A",
+        )
+
+        self.assertTrue(warnings)
+        self.assertFalse(
+            any(request == "SetSourceFilterSettings" for request, _ in client.calls)
+        )
+        exported = manager.export_pending_fade_cleanup()
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["collection"], "Collection A")
+
     def test_fade_cleanup_export_import_preserves_collection_context(self):
         from stream_state_router.obs.client import OBSUnavailableError
 
