@@ -256,6 +256,55 @@ class DeclarativePlanningTests(unittest.TestCase):
             ("CaptureProfile Overwatch",),
         )
 
+    def test_invalid_boolean_target_is_blocked(self):
+        key = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="In Game",
+            source="Chat",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, "yes", provenance="test")]
+        )
+
+        plan = build_execution_plan(desired, ObservedState.empty())
+
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.operations, ())
+        self.assertEqual(plan.diagnostics[0].code, "invalid_desired_value")
+
+    def test_non_finite_volume_target_is_blocked(self):
+        key = PropertyKey.input_volume_db(
+            collection="Main",
+            input_name="Music",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, float("nan"), provenance="test")]
+        )
+
+        plan = build_execution_plan(desired, ObservedState.empty())
+
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.operations, ())
+        self.assertEqual(plan.diagnostics[0].code, "invalid_desired_value")
+
+    def test_incomplete_filter_key_is_blocked(self):
+        key = PropertyKey(
+            kind="filter_setting",
+            collection="Main",
+            source="Avatar",
+            filter_name="",
+            setting="strength",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, 1.0, provenance="test")]
+        )
+
+        plan = build_execution_plan(desired, ObservedState.empty())
+
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.operations, ())
+        self.assertEqual(plan.diagnostics[0].code, "invalid_property_key")
+
     def test_preflight_block_prevents_operation_even_with_known_diff(self):
         key = PropertyKey.scene_item_visibility(
             collection="Main",
