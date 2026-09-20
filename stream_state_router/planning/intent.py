@@ -10,6 +10,32 @@ class UnsupportedIntentAction(ValueError):
     pass
 
 
+class DesiredOwnershipConflict(ValueError):
+    def __init__(
+        self,
+        key: PropertyKey,
+        left_owner: str,
+        right_owner: str,
+    ):
+        super().__init__(
+            f"Managed property {key.kind} has multiple owners: "
+            f"{left_owner} vs {right_owner}"
+        )
+        self.key = key
+        self.left_owner = left_owner
+        self.right_owner = right_owner
+
+    def diagnostic_message(self) -> str:
+        return str(self)
+
+
+def _owner_from_provenance(provenance: str) -> str:
+    text = str(provenance or "").strip()
+    if not text:
+        return "unknown"
+    return text.split(":", 1)[0].strip() or "unknown"
+
+
 def desired_assignments_from_actions(
     actions: Iterable[OBSAction],
     *,
@@ -148,13 +174,38 @@ def desired_state_from_action_sets(
     collection: str = "",
     extra_assignments: Iterable[DesiredAssignment] = (),
 ) -> DesiredState:
-    assignments: list[DesiredAssignment] = list(extra_assignments)
-    for provenance, actions in action_sets:
-        assignments.extend(
-            desired_assignments_from_actions(
-                actions,
-                collection=collection,
-                provenance=provenance,
+    assignments: list[DesiredAssignment] = []
+    owners: dict[PropertyKey, str] = {}
+
+    def append_owned(
+        assignment: DesiredAssignment,
+        *,
+        owner: str,
+    ) -> None:
+        previous_owner = owners.get(assignment.key)
+        if previous_owner is not None and previous_owner != owner:
+            raise DesiredOwnershipConflict(
+                assignment.key,
+                previous_owner,
+                owner,
             )
+        owners[assignment.key] = owner
+        assignments.append(assignment)
+
+    for assignment in extra_assignments:
+        provenance = assignment.provenance[0] if assignment.provenance else ""
+        append_owned(
+            assignment,
+            owner=_owner_from_provenance(provenance),
         )
+
+    for provenance, actions in action_sets:
+        owner = _owner_from_provenance(provenance)
+        for assignment in desired_assignments_from_actions(
+            actions,
+            collection=collection,
+            provenance=provenance,
+        ):
+            append_owned(assignment, owner=owner)
+
     return DesiredState.build(assignments)
