@@ -365,6 +365,12 @@ class BlockingActivationController(FakeActivationController):
             self.hide_seen.set()
 
 
+class CollectionReportingController(FakeActivationController):
+    def apply_event(self, event):
+        super().apply_event(event)
+        return "Collection A"
+
+
 class ExplodingCleanupController(FakeActivationController):
     def pending_hides_for_current_collection(self):
         raise RuntimeError("cleanup exploded")
@@ -605,6 +611,31 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(controller.retry_calls, 1)
         self.assertEqual(controller.pending_hides(), ())
+
+    def test_successful_show_binds_scheduler_state_to_acknowledged_collection(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        scheduler = ActivationScheduler({"egg": activation_policy(cooldown=0.0)})
+        controller = CollectionReportingController()
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+
+        show = scheduler.trigger_now(
+            "egg",
+            target_source="Cloud",
+            eligible=True,
+            now=1.0,
+        )[0]
+        service._handle_activation_event(show, now=1.0)
+
+        self.assertEqual(scheduler.state("egg").active_collection, "Collection A")
+        hide = scheduler.stop("egg", now=2.0)[0]
+        self.assertEqual(hide.collection, "Collection A")
 
     def test_shutdown_prearms_visible_cleanup_before_scheduler_reset(self):
         app = ForegroundApp(1, 1, "terminal.exe")
