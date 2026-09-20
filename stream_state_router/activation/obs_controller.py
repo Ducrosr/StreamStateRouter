@@ -271,9 +271,9 @@ class OBSActivationController:
     def is_eligible(self, policy_name: str, policy: TriggerPolicyConfig) -> bool:
         return self.eligibility(policy_name, policy)[0]
 
-    def apply_event(self, event: ActivationEvent) -> None:
+    def apply_event(self, event: ActivationEvent) -> str:
         if event.kind not in {"show", "hide"}:
-            return
+            return ""
         policy = self._policy(event.policy)
         target = self._target_for_event(policy, event)
         if target is None:
@@ -283,20 +283,41 @@ class OBSActivationController:
             )
 
         if event.kind == "hide":
-            # A hide consumes scheduler-visible state. Arm its obligation before
-            # even probing OBS for the current Scene Collection. If that read
-            # fails, the last known origin (or <unknown>) still survives.
-            origin_collection = str(self._scene_collection or "").strip() or "<unknown>"
+            # A hide belongs to the Scene Collection in which the temporary
+            # visibility was created. Never reinterpret it against a collection
+            # merely because another hide in the same batch observed a switch.
+            origin_collection = (
+                str(event.collection or "").strip()
+                or str(self._scene_collection or "").strip()
+                or "<unknown>"
+            )
             self._ensure_pending_hide(event.policy, target, origin_collection)
-            collection = self._operation_collection()
-            if origin_collection != collection:
+            self._yield_runtime()
+            current = self._current_scene_collection()
+            if self._scene_collection != current:
+                self._adopt_collection(current)
+                self.invalidate_cache()
+
+            if origin_collection == "<unknown>":
                 self._ack_pending_hide(event.policy, target, origin_collection)
-                self._ensure_pending_hide(event.policy, target, collection)
+                origin_collection = current
+                self._ensure_pending_hide(event.policy, target, origin_collection)
+            elif current != origin_collection:
+                raise ActivationCollectionChanged(
+                    "Masquage suspendu : Scene Collection d'origine "
+                    f"{origin_collection} != collection active {current}"
+                )
+
             status, error = self._mutate_visibility(target, False)
             if status in {"applied", "missing"}:
-                self._ack_pending_hide(event.policy, target, collection)
-                return
-            self._record_pending_hide_failure(event.policy, target, collection, error)
+                self._ack_pending_hide(event.policy, target, origin_collection)
+                return origin_collection
+            self._record_pending_hide_failure(
+                event.policy,
+                target,
+                origin_collection,
+                error,
+            )
             raise ActivationVisibilityUncertain(
                 f"Masquage non acquitté pour {target.container}/{target.source}: {error}"
             )
@@ -357,7 +378,7 @@ class OBSActivationController:
         status, error = self._mutate_visibility(target, True)
         if status == "applied":
             self._ack_pending_hide(event.policy, target, collection)
-            return
+            return collection
         if status == "missing":
             self._ack_pending_hide(event.policy, target, collection)
             raise ActivationTargetMissing(
@@ -565,7 +586,11 @@ class OBSActivationController:
         # A normally-visible activation already has its originating collection
         # from apply_event(show). If that context is unexpectedly unavailable,
         # preserve a non-replayable obligation rather than guessing a collection.
-        collection = str(self._scene_collection or "").strip() or "<unknown>"
+        collection = (
+            str(event.collection or "").strip()
+            or str(self._scene_collection or "").strip()
+            or "<unknown>"
+        )
         self._ensure_pending_hide(event.policy, target, collection)
 
     def _ensure_pending_hide(
