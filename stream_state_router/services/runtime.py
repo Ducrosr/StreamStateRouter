@@ -540,6 +540,48 @@ class RoutingService:
             options["name"] = str(profile_name)
         return self.submit_obs_command(f"layout.{action}", options=options)
 
+    def explain_decision(
+        self,
+        app: ForegroundApp | None = None,
+    ) -> dict[str, object]:
+        """Explain routing and the resulting OBS plan without performing OBS I/O."""
+        with self._lock:
+            target_app = self._last_app if app is None else app
+            paused = self._paused
+        if hasattr(self.dispatcher, "cached_obs_context"):
+            context = self.dispatcher.cached_obs_context()
+        else:
+            context = {}
+        routing = self.engine.explain(target_app, context=context)
+        kind = str(routing.get("kind") or "")
+        effective_raw = routing.get("effective_state")
+        if kind == "ignore":
+            obs_plan: dict[str, object] = {
+                "state": effective_raw,
+                "context": dict(context),
+                "domains": [],
+                "reason": "IGNORE conserve l'état logique courant ; aucune nouvelle mutation OBS n'est demandée.",
+            }
+        elif isinstance(effective_raw, Mapping):
+            state = StreamState.from_mapping(effective_raw)
+            if hasattr(self.dispatcher, "plan_state"):
+                obs_plan = self.dispatcher.plan_state(state, context=context)
+            else:
+                obs_plan = {"state": state.as_variables(), "context": dict(context), "domains": []}
+        else:
+            obs_plan = {"state": None, "context": dict(context), "domains": []}
+        return {
+            "config_revision": self.config_revision,
+            "paused": paused,
+            "foreground": {
+                "exe": target_app.exe_name if target_app else "",
+                "path": target_app.process_path if target_app else "",
+                "title": target_app.window_title if target_app else "",
+            },
+            "routing": routing,
+            "obs_plan": obs_plan,
+        }
+
     def routing_status(self) -> dict[str, object]:
         """Return the latest routing diagnostic snapshot without OBS I/O."""
         with self._lock:
