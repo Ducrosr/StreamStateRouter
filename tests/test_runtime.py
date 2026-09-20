@@ -40,6 +40,16 @@ class FakeDispatcher:
         return DispatchResult(0, 0, ("game",))
 
 
+class CommandDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.profile_threads = []
+
+    def execute_profile(self, domain, profile_name):
+        self.profile_threads.append((domain, profile_name, threading.current_thread().name))
+        return DispatchResult(1, 0, (domain,))
+
+
 class BlockingDispatcher(FakeDispatcher):
     def __init__(self):
         super().__init__()
@@ -183,6 +193,31 @@ class ResultCollector:
             return self._results[request_id]
 
 
+class OBSResultCollector:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._results = {}
+        self._events = {}
+
+    def callback(self, event):
+        if event.kind != "obs_command_result" or event.payload is None:
+            return
+        with self._lock:
+            self._results[event.request_id] = event.payload
+            waiter = self._events.setdefault(event.request_id, threading.Event())
+            waiter.set()
+
+    def wait(self, request_id, timeout=2.0):
+        with self._lock:
+            if request_id in self._results:
+                return self._results[request_id]
+            waiter = self._events.setdefault(request_id, threading.Event())
+        if not waiter.wait(timeout):
+            raise AssertionError(f"OBS command result timeout: {request_id}")
+        with self._lock:
+            return self._results[request_id]
+
+
 def activation_policy(*, enabled=True, cooldown=20.0):
     return TriggerPolicyConfig(
         module_source="[Module] EasterEgg",
@@ -204,6 +239,49 @@ def activation_policy(*, enabled=True, cooldown=20.0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_live_obs_profile_command_runs_on_runtime_worker(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_profile("game", "Vanilla")
+            result = collector.wait(request_id)
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(
+                dispatcher.profile_threads,
+                [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_delayed_dispatch_uses_runtime_deadline_not_timer_thread(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", state, exe="game.exe", apply_delay_ms=60)]),
+            debounce_ms=0,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(engine, dispatcher, poll_ms=10, provider=FakeProvider(app))
+        seen = threading.Event()
+        service.on_dispatch = lambda _result: seen.set()
+        service.start()
+        try:
+            self.assertFalse(seen.wait(0.02))
+            self.assertTrue(seen.wait(1.0))
+            self.assertEqual(len(dispatcher.changes), 1)
+        finally:
+            self.assertTrue(service.stop())
+
     def test_service_routes_foreground_in_background(self):
         app = ForegroundApp(1, 1, "game.exe")
         state = StreamState(game="Game")
