@@ -342,6 +342,10 @@ class OBSActivationControllerTests(unittest.TestCase):
         self.assertEqual(len(controller.pending_hides()), 1)
         self.assertEqual(controller.pending_hides()[0].collection, "Collection A")
         self.assertEqual(dispatcher.layout_manager.enabled_calls, [])
+        self.assertNotIn(
+            ("[Module] EasterEgg", "A"),
+            dispatcher.layout_manager.runtime_visibility_owners,
+        )
 
         dispatcher.client.scene_collection = "Collection A"
         controller.retry_pending_hides(now=10.1)
@@ -415,6 +419,60 @@ class OBSActivationControllerTests(unittest.TestCase):
 
         self.assertEqual(controller.pending_hides("egg"), ())
         self.assertEqual(controller.policy_cleanup_status("egg"), (False, ""))
+
+    def test_hide_obligation_survives_collection_probe_transport_failure(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy()
+        controller = OBSActivationController(dispatcher, {"egg": policy})
+        controller._scene_collection = "Collection A"
+
+        original_send = dispatcher.client.send
+
+        def fail_collection_probe(request, data=None):
+            if request == "GetSceneCollectionList":
+                raise OBSUnavailableError("offline")
+            return original_send(request, data)
+
+        dispatcher.client.send = fail_collection_probe
+
+        with self.assertRaises(OBSUnavailableError):
+            controller.apply_event(
+                ActivationEvent(
+                    "hide",
+                    "egg",
+                    10.0,
+                    source="A",
+                    container="[Module] EasterEgg",
+                )
+            )
+
+        pending = controller.pending_hides("egg")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].collection, "Collection A")
+        self.assertEqual(pending[0].target.source, "A")
+
+    def test_shutdown_registration_without_known_collection_performs_no_network_io(self):
+        dispatcher = FakeDispatcher()
+        policy = self.policy()
+        controller = OBSActivationController(dispatcher, {"egg": policy})
+
+        def forbidden_send(request, data=None):
+            raise AssertionError(f"unexpected OBS I/O: {request}")
+
+        dispatcher.client.send = forbidden_send
+        controller.register_hide_obligation(
+            ActivationEvent(
+                "hide",
+                "egg",
+                10.0,
+                source="A",
+                container="[Module] EasterEgg",
+            )
+        )
+
+        pending = controller.pending_hides("egg")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].collection, "<unknown>")
 
     def test_hide_obligation_is_armed_before_visibility_io(self):
         dispatcher = FakeDispatcher()
