@@ -1752,7 +1752,10 @@ class OBSLayoutManager:
             transition = dict(transition_override)
         mode = str(transition.get("mode") or "instant").casefold()
         duration_ms = max(0, _int(transition.get("duration_ms"), 0))
-        steps = max(1, min(60, _int(transition.get("steps"), 8)))
+        steps = self._effective_transition_steps(
+            duration_ms,
+            _int(transition.get("steps"), 8),
+        )
 
         applied = 0
         skipped = 0
@@ -1915,6 +1918,163 @@ class OBSLayoutManager:
             self._undo_stack = self._undo_stack[-20:]
         return result
 
+    @staticmethod
+    def _effective_transition_steps(duration_ms: int, configured_steps: int) -> int:
+        """Return a smooth but bounded number of animation frames.
+
+        Historical profiles store 8 steps, which is only about 8 FPS for a
+        one-second transition and is visibly jerky. Treat the stored value as
+        a minimum quality hint and target about 30 FPS, capped at 60 frames.
+        """
+        configured = max(1, min(60, int(configured_steps or 1)))
+        if duration_ms <= 0:
+            return configured
+        cadence = int(math.ceil((float(duration_ms) / 1000.0) * 30.0)) + 1
+        return max(configured, min(60, cadence))
+
+    def _animate_opacity_batch(
+        self,
+        states: Mapping[str, tuple[float, float]],
+        *,
+        duration_ms: int,
+        steps: int,
+    ) -> None:
+        if not states:
+            return
+        if duration_ms <= 0 or steps <= 1:
+            for source, (_start, end) in states.items():
+                self._set_source_opacity(source, end)
+            return
+        total_seconds = max(0.0, duration_ms / 1000.0)
+        started = time.monotonic()
+        for frame in range(steps):
+            if frame > 0:
+                deadline = started + total_seconds * (frame / (steps - 1))
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    self._cooperative_sleep(remaining)
+            t = frame / (steps - 1)
+            for source, (start, end) in states.items():
+                self._yield_runtime()
+                self._set_source_opacity(source, start + (end - start) * t)
+
+    def _animate_fade_reposition(
+        self,
+        prepared_items: list[dict[str, Any]],
+        *,
+        duration_ms: int,
+        steps: int,
+        warnings: list[str],
+    ) -> None:
+        """Fade visible layout-owned items out, reposition, then fade them in.
+
+        duration_ms is the duration of each fade phase. Geometry mutations are
+        applied only while affected visible items are fully transparent.
+        """
+        fade_collection = self._fade_collection_context(probe=True)
+        fade_out: dict[str, tuple[float, float]] = {}
+        fade_in: dict[str, tuple[float, float]] = {}
+        touched: set[str] = set()
+        fallback: list[dict[str, Any]] = []
+
+        for prepared in prepared_items:
+            self._yield_runtime()
+            source = prepared["source"]
+            target_enabled = prepared["target_enabled"]
+            current_enabled = prepared["current_enabled"]
+
+            # Runtime-owned visibility must not be driven through a temporary
+            # opacity transition by the layout engine.
+            if target_enabled is None:
+                fallback.append(prepared)
+                continue
+            if current_enabled is None:
+                warnings.append(
+                    f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
+                )
+                fallback.append(prepared)
+                continue
+
+            current_visible = bool(current_enabled)
+            target_visible = bool(target_enabled)
+            needs_geometry = bool(
+                prepared["transform_changed"] and prepared["target_transform"]
+            )
+            needs_visibility = bool(prepared["visibility_changed"])
+            if not needs_geometry and not needs_visibility:
+                continue
+
+            if current_visible:
+                touched.add(source)
+                self._ensure_pending_fade(source, fade_collection)
+                self._ensure_fade_filter(source, 1.0)
+                fade_out[source] = (1.0, 0.0)
+            if target_visible:
+                touched.add(source)
+                self._ensure_pending_fade(source, fade_collection)
+                fade_in[source] = (0.0, 1.0)
+
+        try:
+            self._animate_opacity_batch(
+                fade_out, duration_ms=duration_ms, steps=steps
+            )
+
+            for prepared in prepared_items:
+                self._yield_runtime()
+                target = prepared["target_transform"]
+                if prepared["transform_changed"] and target:
+                    self._set_transform(
+                        prepared["container"], prepared["source"], target
+                    )
+
+                target_enabled = prepared["target_enabled"]
+                current_enabled = prepared["current_enabled"]
+                if target_enabled is None or current_enabled is None:
+                    continue
+                if bool(target_enabled) == bool(current_enabled):
+                    continue
+                if bool(target_enabled):
+                    self._set_source_opacity(prepared["source"], 0.0)
+                    self._set_enabled(prepared["container"], prepared["source"], True)
+                else:
+                    self._set_enabled(prepared["container"], prepared["source"], False)
+
+            self._animate_opacity_batch(
+                fade_in, duration_ms=duration_ms, steps=steps
+            )
+
+            for prepared in fallback:
+                target = prepared["target_transform"]
+                if prepared["transform_changed"] and target:
+                    self._set_transform(
+                        prepared["container"], prepared["source"], target
+                    )
+                target_enabled = prepared["target_enabled"]
+                current_enabled = prepared["current_enabled"]
+                if (
+                    target_enabled is not None
+                    and current_enabled is not None
+                    and bool(target_enabled) != bool(current_enabled)
+                ):
+                    self._set_enabled(
+                        prepared["container"],
+                        prepared["source"],
+                        bool(target_enabled),
+                    )
+        except Exception as exc:
+            cleanup_warnings = self._neutralize_fade_sources(
+                touched, collection=fade_collection
+            )
+            warnings.extend(cleanup_warnings)
+            detail = ""
+            if cleanup_warnings:
+                detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
+            raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
+        else:
+            warnings.extend(
+                self._neutralize_fade_sources(touched, collection=fade_collection)
+            )
+
     def _animate_layout_transition(
         self,
         prepared_items: list[dict[str, Any]],
@@ -1925,8 +2085,17 @@ class OBSLayoutManager:
         warnings: list[str],
     ) -> None:
         """Animate one layout on a single global timeline with bounded fade cleanup."""
+        if mode == "fade":
+            self._animate_fade_reposition(
+                prepared_items,
+                duration_ms=duration_ms,
+                steps=steps,
+                warnings=warnings,
+            )
+            return
+
         move = mode in {"move", "move_fade"}
-        fade = mode in {"fade", "move_fade"}
+        fade = mode == "move_fade"
         # Bind all temporary fade obligations in this transition to the Scene
         # Collection observed immediately before any fade mutation.
         fade_collection = self._fade_collection_context(probe=True) if fade else ""
