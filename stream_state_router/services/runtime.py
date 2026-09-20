@@ -386,10 +386,14 @@ class RoutingService:
                 "Routing service did not stop within %.1f s; refusing replacement runtime",
                 timeout,
             )
+            # The worker being alive is already sufficient to reject a replacement.
+            # Probe the dispatch lock only for an accurate diagnostic instead of
+            # reporting it active unconditionally.
+            quiescent = self._wait_for_dispatch_quiescence(0.0)
             pending = self.pending_cleanup_snapshot()
             return self._build_shutdown_result(
                 worker_stopped=False,
-                dispatch_quiescent=False,
+                dispatch_quiescent=quiescent,
                 pending_cleanup=pending,
                 started_at=started_at,
             )
