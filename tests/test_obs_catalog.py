@@ -117,6 +117,18 @@ class FakeClient:
                         }
                     ]
                 }
+            if data["sourceName"] == "In Game":
+                return {
+                    "filters": [
+                        {
+                            "filterName": "Dofus - WebCam - MOVE",
+                            "filterKind": "move_source_filter",
+                            "filterEnabled": False,
+                            "filterIndex": 0,
+                            "filterSettings": {"duration": 450},
+                        }
+                    ]
+                }
             return {"filters": []}
         if request == "GetSourceFilter":
             return {"filterSettings": {"strength": 1.0}}
@@ -153,8 +165,13 @@ class OBSResourceCatalogTests(unittest.TestCase):
         self.assertFalse(any(item.source_name == "Backup" for item in catalog.scene_items))
         avatar = next(item for item in catalog.inputs if item.name == "Avatar Dynamic")
         self.assertEqual(avatar.settings, {"file": "avatar.png"})
-        self.assertEqual(catalog.filters[0].name, "Avatar FX")
-        self.assertEqual(catalog.filters[0].settings, {"strength": 1.0})
+        avatar_filter = next(item for item in catalog.filters if item.name == "Avatar FX")
+        self.assertEqual(avatar_filter.settings, {"strength": 1.0})
+        move_filter = next(
+            item for item in catalog.filters if item.name == "Dofus - WebCam - MOVE"
+        )
+        self.assertEqual(move_filter.source_name, "In Game")
+        self.assertEqual(move_filter.settings, {"duration": 450})
         self.assertEqual(catalog.transitions[0].name, "Transition Mako")
         self.assertGreater(catalog.requests_used, 0)
         self.assertFalse(
