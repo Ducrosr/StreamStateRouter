@@ -418,6 +418,45 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(manager.retry_pending_fade_cleanup(), ())
         self.assertEqual(manager.pending_fade_cleanup(), ())
 
+    def test_fade_cleanup_is_prearmed_before_first_opacity_io(self):
+        from stream_state_router.obs.client import OBSUnavailableError
+
+        class FirstFadeWriteUncertainClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.calls.append((request, dict(data or {})))
+                    raise OBSUnavailableError("response lost")
+                return super().send(request, data)
+
+        client = FirstFadeWriteUncertainClient()
+        client.scene_collection = "Collection A"
+        manager = OBSLayoutManager(client)
+        warnings = []
+        prepared = [{
+            "target_enabled": True,
+            "current_enabled": False,
+            "visibility_changed": True,
+            "source": "[Webcam] Avatar",
+            "container": "Gameplay",
+            "transform_changed": False,
+            "target_transform": {},
+            "current_transform": {},
+        }]
+
+        manager._animate_layout_transition(
+            prepared,
+            mode="fade",
+            duration_ms=1,
+            steps=1,
+            warnings=warnings,
+        )
+
+        exported = manager.export_pending_fade_cleanup()
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["source"], "[Webcam] Avatar")
+        self.assertEqual(exported[0]["collection"], "Collection A")
+        self.assertTrue(warnings)
+
     def test_fade_cleanup_export_import_preserves_collection_context(self):
         from stream_state_router.obs.client import OBSUnavailableError
 
