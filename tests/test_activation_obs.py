@@ -216,6 +216,57 @@ class OBSActivationControllerTests(unittest.TestCase):
             dispatcher.layout_manager.enabled_calls,
         )
 
+    def test_pending_cleanup_can_be_transferred_even_if_policy_was_removed(self):
+        dispatcher = FakeDispatcher()
+        clock = FakeClock(10.0)
+        controller = OBSActivationController(
+            dispatcher,
+            {"egg": self.policy()},
+            clock=clock,
+            retry_base_seconds=0.1,
+        )
+        controller.reconcile()
+        dispatcher.layout_manager.failures[
+            ("[Module] EasterEgg", "A", False, "scene")
+        ] = [OBSUnavailableError("timeout")]
+        with self.assertRaises(ActivationVisibilityUncertain):
+            controller.apply_event(
+                ActivationEvent("hide", "egg", 10.0, source="A", container="[Module] EasterEgg")
+            )
+        snapshot = controller.export_pending_hides()
+
+        replacement = OBSActivationController(dispatcher, {}, clock=clock, retry_base_seconds=0.1)
+        imported = replacement.import_pending_hides(snapshot)
+
+        self.assertEqual(imported, 1)
+        self.assertEqual(len(replacement.pending_hides()), 1)
+        self.assertIn(
+            ("[Module] EasterEgg", "A"),
+            dispatcher.layout_manager.runtime_visibility_owners,
+        )
+        clock.value = 10.2
+        replacement.retry_pending_hides(now=clock.value)
+        self.assertEqual(replacement.pending_hides(), ())
+
+    def test_imported_cleanup_is_discarded_on_different_collection(self):
+        dispatcher = FakeDispatcher()
+        old = {
+            "policy": "egg",
+            "collection": "Collection A",
+            "target": TriggerTargetConfig("[Module] EasterEgg", "A").to_mapping(),
+            "created_at": 1.0,
+            "attempts": 1,
+            "next_retry_at": 0.0,
+            "last_error": "timeout",
+        }
+        dispatcher.client.scene_collection = "Collection B"
+        controller = OBSActivationController(dispatcher, {})
+        controller.import_pending_hides([old])
+
+        controller.retry_pending_hides(now=10.0)
+
+        self.assertEqual(controller.pending_hides(), ())
+
     def test_scene_collection_change_is_detected_after_probe_interval(self):
         dispatcher = FakeDispatcher()
         clock = FakeClock(1.0)

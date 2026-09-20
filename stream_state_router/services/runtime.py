@@ -82,6 +82,21 @@ class _PendingDispatch:
     change: StateChange
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeShutdownResult:
+    worker_stopped: bool
+    dispatch_quiescent: bool
+    cleanup_complete: bool
+    pending_cleanup: tuple[dict[str, object], ...] = ()
+
+    @property
+    def success(self) -> bool:
+        return self.worker_stopped and self.dispatch_quiescent
+
+    def __bool__(self) -> bool:
+        return self.success
+
+
 class RoutingService:
     """Background foreground observer + state router + OBS dispatcher."""
 
@@ -98,6 +113,7 @@ class RoutingService:
         activation_policies: Mapping[str, TriggerPolicyConfig] | None = None,
         activation_scheduler: ActivationScheduler | None = None,
         activation_controller: OBSActivationController | None = None,
+        pending_activation_cleanup=(),
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
@@ -111,8 +127,10 @@ class RoutingService:
         self.activation_controller = activation_controller
         if self.activation_scheduler is None and policies:
             self.activation_scheduler = ActivationScheduler(policies)
-        if self.activation_controller is None and policies:
+        if self.activation_controller is None and (policies or pending_activation_cleanup):
             self.activation_controller = OBSActivationController(dispatcher, policies)
+        if self.activation_controller is not None and pending_activation_cleanup:
+            self.activation_controller.import_pending_hides(pending_activation_cleanup)
 
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -136,6 +154,7 @@ class RoutingService:
         self._runtime_operational = False
         self._stopping = False
         self._shutdown_complete = threading.Event()
+        self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
         self._simulation_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="SSR-Activation-Sim",
@@ -172,7 +191,17 @@ class RoutingService:
         self._thread = threading.Thread(target=self._run, name="SSR-Router", daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> bool:
+    @property
+    def shutdown_result(self) -> RuntimeShutdownResult:
+        return self._shutdown_result
+
+    def pending_cleanup_snapshot(self) -> tuple[dict[str, object], ...]:
+        controller = self.activation_controller
+        if controller is None:
+            return ()
+        return controller.export_pending_hides()
+
+    def stop(self, timeout: float = 5.0) -> RuntimeShutdownResult:
         thread = self._thread
         if thread is None or not thread.is_alive():
             with self._lock:
@@ -180,7 +209,15 @@ class RoutingService:
                 self._accept_obs_commands = False
                 self._runtime_operational = False
                 self._stopping = True
-            return self._wait_for_dispatch_quiescence(timeout)
+            quiescent = self._wait_for_dispatch_quiescence(timeout)
+            pending = self.pending_cleanup_snapshot()
+            self._shutdown_result = RuntimeShutdownResult(
+                True,
+                quiescent,
+                not pending,
+                pending,
+            )
+            return self._shutdown_result
 
         with self._lock:
             if not self._stopping:
@@ -202,21 +239,36 @@ class RoutingService:
 
         deadline = time.monotonic() + max(0.1, float(timeout))
         thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        if thread.is_alive():
+        worker_stopped = not thread.is_alive()
+        if not worker_stopped:
             self.logger.error(
                 "Routing service did not stop within %.1f s; refusing replacement runtime",
                 timeout,
             )
-            return False
+            pending = self.pending_cleanup_snapshot()
+            self._shutdown_result = RuntimeShutdownResult(
+                False,
+                False,
+                not pending,
+                pending,
+            )
+            return self._shutdown_result
 
         remaining = max(0.0, deadline - time.monotonic())
-        if not self._wait_for_dispatch_quiescence(remaining):
+        quiescent = self._wait_for_dispatch_quiescence(remaining)
+        if not quiescent:
             self.logger.error(
                 "An OBS dispatch from the previous runtime is still active; "
                 "refusing replacement runtime"
             )
-            return False
-        return True
+        pending = self.pending_cleanup_snapshot()
+        self._shutdown_result = RuntimeShutdownResult(
+            True,
+            quiescent,
+            not pending,
+            pending,
+        )
+        return self._shutdown_result
 
     def pause(self, paused: bool = True) -> None:
         with self._lock:
@@ -1073,10 +1125,18 @@ class RoutingService:
             if controller.pending_hides():
                 time.sleep(0.05)
         if controller is not None and controller.pending_hides():
+            pending_count = len(controller.pending_hides())
             self._record_activation_diagnostic(
                 "*",
                 "warning",
-                f"arrêt avec {len(controller.pending_hides())} masquage(s) non acquitté(s)",
+                f"arrêt avec {pending_count} masquage(s) non acquitté(s)",
+            )
+            self._emit(
+                RuntimeEvent(
+                    "activation_cleanup_persisted",
+                    f"{pending_count} masquage(s) devront être repris par le prochain runtime",
+                    success=False,
+                )
             )
         try:
             self._simulation_executor.shutdown(wait=False, cancel_futures=True)

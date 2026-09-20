@@ -737,6 +737,33 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(scheduler.state("egg").phase, ActivationPhase.IDLE)
         self.assertIsNone(scheduler.state("egg").cooldown_until)
 
+    def test_shutdown_result_preserves_unacknowledged_cleanup(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        controller = FakeActivationController()
+        controller.export_pending_hides = lambda: (
+            {
+                "policy": "egg",
+                "collection": "Collection A",
+                "target": {"container": "Egg", "source": "Cloud"},
+            },
+        )
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+
+        result = service.stop()
+
+        self.assertTrue(result)
+        self.assertFalse(result.cleanup_complete)
+        self.assertEqual(len(result.pending_cleanup), 1)
+
     def test_stop_waits_for_inflight_old_obs_dispatch(self):
         app = ForegroundApp(1, 1, "game.exe")
         state = StreamState(game="Game")

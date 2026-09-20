@@ -78,13 +78,24 @@ class RuntimeBridge(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, config: dict, *, logger, start_minimized: bool = False):
+    def __init__(
+        self,
+        config: dict,
+        *,
+        logger,
+        start_minimized: bool = False,
+        runtime_marker=None,
+    ):
         super().__init__()
         self.setWindowTitle("Stream State Router 2.0.13")
         self.resize(1180, 760)
         self.config = copy.deepcopy(config)
         self.logger = logger
         self.start_minimized = start_minimized
+        self._runtime_marker = runtime_marker
+        self._pending_cleanup_transfer = tuple(
+            getattr(runtime_marker, "previous_pending_cleanup", ()) or ()
+        )
         self._service: RoutingService | None = None
         self._dispatcher: OBSDispatcher | None = None
         self._client: OBSClientManager | None = None
@@ -668,7 +679,9 @@ class MainWindow(QMainWindow):
             poll_ms=poll_ms,
             logger=self.logger,
             activation_policies=build_activation_policies(self.config),
+            pending_activation_cleanup=self._pending_cleanup_transfer,
         )
+        self._pending_cleanup_transfer = ()
         self._service.on_foreground = self.bridge.foreground.emit
         self._service.on_change = self.bridge.state_change.emit
         self._service.on_dispatch = self.bridge.dispatch.emit
@@ -678,17 +691,25 @@ class MainWindow(QMainWindow):
 
     def _restart_runtime(self) -> bool:
         previous = self._service
-        if previous is not None and not previous.stop():
-            self._log(
-                "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
-            )
-            QMessageBox.critical(
-                self,
-                "Runtime",
-                "Le runtime précédent n'a pas terminé son nettoyage. "
-                "Le nouveau runtime n'a pas été démarré.",
-            )
-            return False
+        if previous is not None:
+            result = previous.stop()
+            if not result:
+                self._log(
+                    "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
+                )
+                QMessageBox.critical(
+                    self,
+                    "Runtime",
+                    "Le runtime précédent n'a pas pu être arrêté proprement. "
+                    "Le nouveau runtime n'a pas été démarré.",
+                )
+                return False
+            self._pending_cleanup_transfer = result.pending_cleanup
+            if not result.cleanup_complete:
+                self._log(
+                    f"Transfert de {len(result.pending_cleanup)} obligation(s) de nettoyage OBS "
+                    "au nouveau runtime."
+                )
         self._start_runtime()
         return True
 
@@ -2086,6 +2107,23 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _stop_runtime_for_exit(self):
+        if self._service is None:
+            return None
+        result = self._service.stop()
+        marker = self._runtime_marker
+        if marker is not None:
+            marker.finish(
+                clean_shutdown=bool(result),
+                cleanup_complete=bool(result.cleanup_complete),
+                pending_cleanup=result.pending_cleanup,
+            )
+        if not result.cleanup_complete:
+            self._log(
+                f"Arrêt avec {len(result.pending_cleanup)} obligation(s) de nettoyage OBS conservée(s)."
+            )
+        return result
+
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._quitting and self.close_to_tray.isChecked() and self.tray.isVisible():
             event.ignore()
@@ -2099,8 +2137,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
-        if self._service:
-            self._service.stop()
+        self._stop_runtime_for_exit()
         event.accept()
         QApplication.instance().quit()
 
@@ -2108,7 +2145,6 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
-        if self._service:
-            self._service.stop()
+        self._stop_runtime_for_exit()
         self.tray.hide()
         QApplication.instance().quit()
