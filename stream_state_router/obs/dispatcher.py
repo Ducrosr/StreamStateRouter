@@ -44,7 +44,6 @@ class OBSDispatcher:
         }
         self._layout_manager = OBSLayoutManager(client)
         self._last_state: StreamState | None = None
-        self._scene_item_cache: dict[tuple[str, str], int] = {}
         self._context_cache: tuple[float, dict[str, Any]] | None = None
 
     @property
@@ -57,7 +56,6 @@ class OBSDispatcher:
     ) -> None:
         self._profiles = {domain: dict(values) for domain, values in profiles.items()}
         self._last_state = None
-        self._scene_item_cache.clear()
         self._layout_manager.reset_cache()
         self._context_cache = None
 
@@ -69,7 +67,6 @@ class OBSDispatcher:
 
     def reset(self) -> None:
         self._last_state = None
-        self._scene_item_cache.clear()
         self._layout_manager.reset_cache()
         self._context_cache = None
 
@@ -321,9 +318,9 @@ class OBSDispatcher:
         raise ValueError(f"Type d'action OBS inconnu : {action.type}")
 
     def _scene_item_id(self, scene: str, source: str) -> int:
-        key = (scene, source)
-        if key in self._scene_item_cache:
-            return self._scene_item_cache[key]
+        # sceneItemId is ephemeral OBS state. Resolve the logical
+        # (scene, source) identity for every visibility operation so an ID
+        # reused after an OBS scene edit can never target another item.
         response = self.client.send(
             "GetSceneItemId",
             {"sceneName": scene, "sourceName": source},
@@ -331,7 +328,6 @@ class OBSDispatcher:
         item_id = int(response.get("sceneItemId") or 0)
         if not item_id:
             raise RuntimeError(f"Source '{source}' introuvable dans la scène '{scene}'")
-        self._scene_item_cache[key] = item_id
         return item_id
 
     @staticmethod

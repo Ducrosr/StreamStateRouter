@@ -10,11 +10,14 @@ from stream_state_router.router.models import StreamState
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self.scene_item_ids = [42]
 
     def send(self, request, data=None):
         self.calls.append((request, data))
         if request == "GetSceneItemId":
-            return {"sceneItemId": 42}
+            if len(self.scene_item_ids) > 1:
+                return {"sceneItemId": self.scene_item_ids.pop(0)}
+            return {"sceneItemId": self.scene_item_ids[0]}
         return {}
 
 
@@ -40,14 +43,19 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertEqual(second.executed, 0)
         self.assertEqual(len(client.calls), 3)  # scene change + lookup + scene item enabled
 
-    def test_scene_item_id_is_cached(self):
+    def test_scene_item_id_is_resolved_fresh_for_each_visibility_action(self):
         client = FakeClient()
+        client.scene_item_ids = [42, 99]
         dispatcher = OBSDispatcher(client, {})
         action = OBSAction("scene_item_enabled", {"scene": "A", "source": "B", "enabled": True})
+
         dispatcher.execute_action(action)
         dispatcher.execute_action(action)
+
         lookups = [call for call in client.calls if call[0] == "GetSceneItemId"]
-        self.assertEqual(len(lookups), 1)
+        writes = [call for call in client.calls if call[0] == "SetSceneItemEnabled"]
+        self.assertEqual(len(lookups), 2)
+        self.assertEqual([call[1]["sceneItemId"] for call in writes], [42, 99])
 
     def test_supported_action_shapes(self):
         client = FakeClient()
