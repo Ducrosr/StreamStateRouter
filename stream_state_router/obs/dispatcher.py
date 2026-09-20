@@ -56,6 +56,11 @@ class OBSDispatcher:
         self._last_state: StreamState | None = None
         self._desired_state: StreamState | None = None
         self._applied_profiles: dict[str, str] = {}
+        # An explicit layout.apply may intentionally diverge OBS geometry from
+        # the layout selected by the current routing state. Keep that manual
+        # layout in place while routing continues to request the same baseline
+        # LayoutProfile; a genuinely different routed layout releases the hold.
+        self._manual_layout_routing_baseline = ""
         self._context_cache: tuple[float, dict[str, Any]] | None = None
         self._cooperative_yield = None
 
@@ -90,12 +95,14 @@ class OBSDispatcher:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.clear()
+        self._manual_layout_routing_baseline = ""
         self._context_cache = None
 
     def reset(self) -> None:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.clear()
+        self._manual_layout_routing_baseline = ""
         self._layout_manager.reset_cache()
         self._context_cache = None
 
@@ -111,6 +118,14 @@ class OBSDispatcher:
     def applied_profiles(self) -> dict[str, str]:
         return dict(self._applied_profiles)
 
+    def set_manual_layout_hold(self, routed_profile: str) -> None:
+        """Keep an explicit manual layout while routing still wants this profile."""
+        self._manual_layout_routing_baseline = str(routed_profile or "").strip()
+
+    def _layout_is_manually_held_for(self, state: StreamState) -> bool:
+        baseline = self._manual_layout_routing_baseline
+        return bool(baseline and state.profile_name("layout") == baseline)
+
     def pending_domains(self, state: StreamState | None = None) -> tuple[str, ...]:
         wanted = state or self._desired_state
         if wanted is None:
@@ -118,7 +133,8 @@ class OBSDispatcher:
         return tuple(
             domain
             for domain in STATE_DOMAINS
-            if self._applied_profiles.get(domain) != wanted.profile_name(domain)
+            if not (domain == "layout" and self._layout_is_manually_held_for(wanted))
+            and self._applied_profiles.get(domain) != wanted.profile_name(domain)
         )
 
     def obs_context(self) -> dict[str, Any]:
@@ -242,12 +258,14 @@ class OBSDispatcher:
         for domain in STATE_DOMAINS:
             desired = state.profile_name(domain)
             applied = self._applied_profiles.get(domain, "")
+            held = domain == "layout" and self._layout_is_manually_held_for(state)
+            needs_apply = not held and applied != desired
             row: dict[str, object] = {
                 "domain": domain,
                 "desired_profile": desired,
                 "applied_profile": applied,
-                "needs_apply": applied != desired,
-                "status": "noop" if applied == desired else "planned",
+                "needs_apply": needs_apply,
+                "status": "held" if held else ("noop" if applied == desired else "planned"),
                 "operations": [],
             }
             if domain == "layout":
@@ -321,10 +339,22 @@ class OBSDispatcher:
         del previous  # compatibility only: router history is not OBS applied state
         self._desired_state = state
         self._last_state = state
+        desired_layout = state.profile_name("layout")
+        if force:
+            # An explicit force-reapply means automatic routing deliberately
+            # takes ownership back from any prior manual layout divergence.
+            self._manual_layout_routing_baseline = ""
+        elif (
+            self._manual_layout_routing_baseline
+            and desired_layout != self._manual_layout_routing_baseline
+        ):
+            # Routing now genuinely wants another layout: release the manual hold.
+            self._manual_layout_routing_baseline = ""
         changed = [
             domain
             for domain in STATE_DOMAINS
-            if force or self._applied_profiles.get(domain) != state.profile_name(domain)
+            if not (domain == "layout" and self._layout_is_manually_held_for(state))
+            and (force or self._applied_profiles.get(domain) != state.profile_name(domain))
         ]
 
         executed = 0
@@ -459,11 +489,21 @@ class OBSDispatcher:
         profile = resolve_layout_profile(profile_name, self._layout_profiles)
         if isinstance(profile.get("conditions"), Mapping) and not self.conditions_match(profile["conditions"]):
             return DispatchResult(0, 1, ("layout",))
+        baseline = ""
+        if not preview:
+            if self._desired_state is not None:
+                baseline = self._desired_state.profile_name("layout")
+            elif self._applied_profiles.get("layout"):
+                baseline = self._applied_profiles["layout"]
         result = (
             self._layout_manager.preview_profile(profile)
             if preview
             else self._layout_manager.apply_profile(profile)
         )
+        if not preview and baseline:
+            self._manual_layout_routing_baseline = (
+                "" if profile_name == baseline else baseline
+            )
         return DispatchResult(
             result.elements_applied,
             result.elements_skipped,
