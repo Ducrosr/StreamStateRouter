@@ -1687,6 +1687,15 @@ class RoutingService:
             self._finalize_shutdown_signal()
 
     def _finalize_shutdown_signal(self) -> None:
+        self._worker_phase = "client_close"
+        client = getattr(self.dispatcher, "client", None)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                self.logger.warning("OBS client close failed during shutdown: %s", exc)
+
         with self._lock:
             self._shutdown_phase = "simulation_shutdown"
         try:
