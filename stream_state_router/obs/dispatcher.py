@@ -310,6 +310,13 @@ class OBSDispatcher:
             }
 
             if domain == "layout":
+                if held:
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": "LayoutProfile maintenu manuellement",
+                        }
+                    )
                 if desired not in self._layout_profiles:
                     row.update(status="missing", message="LayoutProfile introuvable")
                     domains.append(row)
