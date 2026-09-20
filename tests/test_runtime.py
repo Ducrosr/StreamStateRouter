@@ -786,6 +786,50 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_active_layout_apply_profile_exposes_inflight_manual_target(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CooperativeLayoutDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        try:
+            service.request_layout("apply", "Test B")
+            self.assertTrue(dispatcher.layout_entered.wait(1.0))
+            self.assertEqual(service.active_layout_apply_profile, "Test B")
+
+            shutdown = service.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertEqual(service.active_layout_apply_profile, "")
+        finally:
+            service.stop()
+
+    def test_startup_layout_profile_is_queued_before_first_foreground_cycle(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+            startup_layout_profile="Test B",
+        )
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while not dispatcher.layout_threads and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(
+                dispatcher.layout_threads,
+                [("Test B", False, "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
     def test_completed_layout_apply_stops_before_replacement_runtime_starts(self):
         app = ForegroundApp(1, 1, "terminal.exe")
         engine_a = StateRouterEngine(RuleSet([]), debounce_ms=0)
