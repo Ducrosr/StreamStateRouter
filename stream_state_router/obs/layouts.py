@@ -1601,6 +1601,7 @@ class OBSLayoutManager:
 
         missing: list[str] = []
         warnings: list[str] = []
+        mutated_any = False
 
         def prepare_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
             nonlocal skipped
@@ -1641,7 +1642,7 @@ class OBSLayoutManager:
             }
 
         def apply_item_immediate(item: Mapping[str, Any]) -> None:
-            nonlocal applied
+            nonlocal applied, mutated_any
             prepared = prepare_item(item)
             if prepared is None:
                 return
@@ -1652,8 +1653,10 @@ class OBSLayoutManager:
             # A zero-duration fade is just an immediate visibility change.
             if target_transform and prepared["transform_changed"]:
                 self._set_transform(container, source, target_transform)
+                mutated_any = True
             if prepared["visibility_changed"]:
                 self._set_enabled(container, source, bool(target_enabled))
+                mutated_any = True
             applied += 1
 
         animated = mode in {"move", "fade", "move_fade"} and duration_ms > 0
@@ -1663,15 +1666,21 @@ class OBSLayoutManager:
                 prepared = prepare_item(item)
                 if prepared is not None:
                     prepared_items.append(prepared)
-            if prepared_items:
+            actionable = [
+                prepared
+                for prepared in prepared_items
+                if prepared["transform_changed"] or prepared["visibility_changed"]
+            ]
+            if actionable:
+                mutated_any = True
                 self._animate_layout_transition(
-                    prepared_items,
+                    actionable,
                     mode=mode,
                     duration_ms=duration_ms,
                     steps=steps,
                     warnings=warnings,
                 )
-                applied += len(prepared_items)
+            applied += len(prepared_items)
         else:
             for item in regular_items:
                 apply_item_immediate(item)
@@ -1685,25 +1694,9 @@ class OBSLayoutManager:
         # Groups need a final correction after descendants have settled. This is
         # intentionally outside the animation timeline: the transition itself is
         # global and lasts duration_ms once, not duration_ms once per source.
-        changed_any = any(
-            bool(item.get("transform_changed")) or bool(item.get("visibility_changed"))
-            for item in prepared_items
-        ) if animated else any(
-            False for _item in ()
-        )
-        if not animated:
-            # Immediate items are prepared lazily; inspect current state once for
-            # groups before deciding whether the stabilization pass is needed.
-            changed_any = False
-            for item in desired:
-                prepared = prepare_item(item)
-                if prepared is not None and (
-                    prepared["transform_changed"] or prepared["visibility_changed"]
-                ):
-                    changed_any = True
-                    break
-
-        if group_items and changed_any:
+        # Keep the fact that a mutation happened *before* the writes; re-reading
+        # after convergence would incorrectly suppress group stabilization.
+        if group_items and mutated_any:
             self._wait_group_resize_settle()
             for item in sorted(
                 group_items, key=lambda value: len(value.get("path") or ()), reverse=True
@@ -1836,9 +1829,13 @@ class OBSLayoutManager:
         for index, prepared in enumerate(prepared_items):
             target_enabled = prepared["target_enabled"]
             current_enabled = prepared["current_enabled"]
-            if not move and prepared["target_transform"]:
-                # Fade-only transitions still apply geometry, but geometry is
-                # not itself animated.
+            if (
+                not move
+                and prepared["target_transform"]
+                and prepared["transform_changed"]
+            ):
+                # Fade-only transitions still apply changed geometry, but
+                # geometry is not itself animated.
                 self._set_transform(
                     prepared["container"], prepared["source"], prepared["target_transform"]
                 )
