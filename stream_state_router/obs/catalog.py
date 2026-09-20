@@ -71,12 +71,16 @@ class OBSInputRef:
     uuid: str = ""
     settings: Mapping[str, object] | None = None
 
-    def as_mapping(self) -> dict[str, object]:
+    def as_mapping(self, *, include_settings: bool = True) -> dict[str, object]:
         return {
             "name": self.name,
             "kind": self.kind,
             "uuid": self.uuid,
-            "settings": dict(self.settings) if self.settings is not None else None,
+            "settings": (
+                dict(self.settings)
+                if include_settings and self.settings is not None
+                else None
+            ),
         }
 
 
@@ -93,14 +97,18 @@ class OBSFilterRef:
     def identity(self) -> tuple[str, str]:
         return (self.source_name, self.name)
 
-    def as_mapping(self) -> dict[str, object]:
+    def as_mapping(self, *, include_settings: bool = True) -> dict[str, object]:
         return {
             "source_name": self.source_name,
             "name": self.name,
             "kind": self.kind,
             "enabled": self.enabled,
             "index": self.index,
-            "settings": dict(self.settings) if self.settings is not None else None,
+            "settings": (
+                dict(self.settings)
+                if include_settings and self.settings is not None
+                else None
+            ),
         }
 
 
@@ -127,15 +135,21 @@ class OBSResourceCatalog:
     warnings: tuple[str, ...] = ()
     requests_used: int = 0
 
-    def as_mapping(self) -> dict[str, object]:
+    def as_mapping(self, *, include_settings: bool = True) -> dict[str, object]:
         return {
             "scene_collection": self.scene_collection,
             "current_program_scene": self.current_program_scene,
             "canvas": {"width": self.canvas_width, "height": self.canvas_height},
             "scenes": [item.as_mapping() for item in self.scenes],
             "scene_items": [item.as_mapping() for item in self.scene_items],
-            "inputs": [item.as_mapping() for item in self.inputs],
-            "filters": [item.as_mapping() for item in self.filters],
+            "inputs": [
+                item.as_mapping(include_settings=include_settings)
+                for item in self.inputs
+            ],
+            "filters": [
+                item.as_mapping(include_settings=include_settings)
+                for item in self.filters
+            ],
             "transitions": [item.as_mapping() for item in self.transitions],
             "warnings": list(self.warnings),
             "requests_used": self.requests_used,
