@@ -75,6 +75,17 @@ class CatalogElement:
     flags: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True, slots=True)
+class SceneTopologyItem:
+    scene: str
+    container: str
+    path: tuple[str, ...]
+    container_kind: str
+    source: str
+    source_type: str
+    flags: frozenset[str] = frozenset()
+
+
 @dataclass(slots=True)
 class LayoutSnapshot:
     profile: dict[str, Any]
@@ -510,6 +521,127 @@ class OBSLayoutManager:
             except Exception:
                 current = ""
         return names, current
+
+    def scan_scene_topology(
+        self,
+        scene: str,
+        *,
+        recursive: bool = True,
+    ) -> tuple[SceneTopologyItem, ...]:
+        """Read scene/group membership without fetching any item transforms.
+
+        This is intentionally lightweight and is used for runtime eligibility
+        checks. Scene-item IDs are not retained after the scan.
+        """
+        scene = str(scene or "").strip()
+        if not scene:
+            return ()
+        self._last_discovery_warnings = []
+        out: list[SceneTopologyItem] = []
+        self._scan_topology_container(
+            root_scene=scene,
+            container=scene,
+            path=(scene,),
+            out=out,
+            recursive=recursive,
+            depth=0,
+            prefetched=None,
+            container_kind="scene",
+        )
+        return tuple(out)
+
+    def _scan_topology_container(
+        self,
+        *,
+        root_scene: str,
+        container: str,
+        path: tuple[str, ...],
+        out: list[SceneTopologyItem],
+        recursive: bool,
+        depth: int,
+        prefetched: list[Mapping[str, Any]] | None,
+        container_kind: str,
+    ) -> None:
+        if depth > 8:
+            return
+        if prefetched is None:
+            response = self.client.send("GetSceneItemList", {"sceneName": container})
+            items = response.get("sceneItems", []) or []
+        else:
+            items = prefetched
+
+        for raw in items:
+            if not isinstance(raw, Mapping):
+                continue
+            source = str(raw.get("sourceName") or "").strip()
+            if not source:
+                continue
+            is_group = bool(raw.get("isGroup", False))
+            source_type = str(raw.get("sourceType") or "")
+            input_kind = str(raw.get("inputKind") or "")
+            is_scene = (
+                not is_group
+                and (source_type == "OBS_SOURCE_TYPE_SCENE" or input_kind == "scene")
+            )
+            source_kind = "group" if is_group else ("scene" if is_scene else "input")
+            parsed = parse_module_source(source)
+            hard_locked = parsed is not None and "locked" in parsed.flags
+            if parsed is not None and not hard_locked:
+                out.append(
+                    SceneTopologyItem(
+                        scene=root_scene,
+                        container=container,
+                        path=path,
+                        container_kind=container_kind,
+                        source=source,
+                        source_type=source_kind,
+                        flags=parsed.flags,
+                    )
+                )
+            if hard_locked or not recursive:
+                continue
+            if is_group:
+                try:
+                    group = self.client.send(
+                        "GetGroupSceneItemList",
+                        {"sceneName": source},
+                    )
+                    children = [
+                        item
+                        for item in group.get("sceneItems", []) or []
+                        if isinstance(item, Mapping)
+                    ]
+                    self._scan_topology_container(
+                        root_scene=root_scene,
+                        container=source,
+                        path=(*path, source),
+                        out=out,
+                        recursive=True,
+                        depth=depth + 1,
+                        prefetched=children,
+                        container_kind="group",
+                    )
+                except Exception as exc:
+                    self._last_discovery_warnings.append(
+                        f"Groupe '{source}' non lisible depuis '{container}' : {exc}"
+                    )
+                continue
+            if is_scene:
+                try:
+                    self._scan_topology_container(
+                        root_scene=root_scene,
+                        container=source,
+                        path=(*path, source),
+                        out=out,
+                        recursive=True,
+                        depth=depth + 1,
+                        prefetched=None,
+                        container_kind="scene",
+                    )
+                except Exception as exc:
+                    self._last_discovery_warnings.append(
+                        f"Scène imbriquée '{source}' non lisible depuis '{container}' : {exc}"
+                    )
 
     def discover_scene(self, scene: str, *, recursive: bool = True) -> dict[str, list[CatalogElement]]:
         scene = str(scene or "").strip()
@@ -1386,6 +1518,21 @@ class OBSLayoutManager:
             self._undo_stack.pop()
         return result
 
+    def _transform_needs_update(
+        self,
+        current: Mapping[str, Any],
+        target: Mapping[str, Any],
+    ) -> bool:
+        for key, value in target.items():
+            if str(key).startswith("__ssr_"):
+                continue
+            if isinstance(value, (int, float)):
+                if abs(_float(current.get(key)) - _float(value)) > self._diff_tolerance(str(key)):
+                    return True
+            elif current.get(key) != value:
+                return True
+        return False
+
     def apply_profile(
         self,
         profile: Mapping[str, Any],
@@ -1471,14 +1618,26 @@ class OBSLayoutManager:
             target_transform = self._resolve_runtime_transform(
                 item["transform"], current["transform"]
             )
+            target_enabled = item["enabled"]
+            current_enabled = current.get("enabled")
             return {
                 "item": item,
                 "container": container,
                 "source": source,
                 "current_transform": current["transform"],
                 "target_transform": target_transform,
-                "current_enabled": current.get("enabled"),
-                "target_enabled": item["enabled"],
+                "transform_changed": self._transform_needs_update(
+                    current["transform"], target_transform
+                ),
+                "current_enabled": current_enabled,
+                "target_enabled": target_enabled,
+                "visibility_changed": (
+                    target_enabled is not None
+                    and (
+                        current_enabled is None
+                        or bool(target_enabled) != bool(current_enabled)
+                    )
+                ),
             }
 
         def apply_item_immediate(item: Mapping[str, Any]) -> None:
@@ -1491,9 +1650,9 @@ class OBSLayoutManager:
             target_transform = prepared["target_transform"]
             target_enabled = prepared["target_enabled"]
             # A zero-duration fade is just an immediate visibility change.
-            if target_transform:
+            if target_transform and prepared["transform_changed"]:
                 self._set_transform(container, source, target_transform)
-            if target_enabled is not None:
+            if prepared["visibility_changed"]:
                 self._set_enabled(container, source, bool(target_enabled))
             applied += 1
 
@@ -1526,7 +1685,25 @@ class OBSLayoutManager:
         # Groups need a final correction after descendants have settled. This is
         # intentionally outside the animation timeline: the transition itself is
         # global and lasts duration_ms once, not duration_ms once per source.
-        if group_items:
+        changed_any = any(
+            bool(item.get("transform_changed")) or bool(item.get("visibility_changed"))
+            for item in prepared_items
+        ) if animated else any(
+            False for _item in ()
+        )
+        if not animated:
+            # Immediate items are prepared lazily; inspect current state once for
+            # groups before deciding whether the stabilization pass is needed.
+            changed_any = False
+            for item in desired:
+                prepared = prepare_item(item)
+                if prepared is not None and (
+                    prepared["transform_changed"] or prepared["visibility_changed"]
+                ):
+                    changed_any = True
+                    break
+
+        if group_items and changed_any:
             self._wait_group_resize_settle()
             for item in sorted(
                 group_items, key=lambda value: len(value.get("path") or ()), reverse=True
@@ -1540,7 +1717,9 @@ class OBSLayoutManager:
                 target_transform = self._resolve_runtime_transform(
                     item["transform"], current["transform"]
                 )
-                if target_transform:
+                if target_transform and self._transform_needs_update(
+                    current["transform"], target_transform
+                ):
                     self._set_transform(container, source, target_transform)
 
             # One more render frame prevents the group's automatic resize pass
@@ -1592,7 +1771,7 @@ class OBSLayoutManager:
             current_enabled = prepared["current_enabled"]
             source = prepared["source"]
             container = prepared["container"]
-            if target_enabled is None:
+            if target_enabled is None or not prepared["visibility_changed"]:
                 continue
             if current_enabled is None:
                 warnings.append(
@@ -1633,7 +1812,7 @@ class OBSLayoutManager:
                     self._cooperative_sleep(remaining)
             t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
             for index, prepared in enumerate(prepared_items):
-                if move:
+                if move and prepared["transform_changed"]:
                     target = prepared["target_transform"]
                     current = prepared["current_transform"]
                     if target:
