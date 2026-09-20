@@ -174,14 +174,13 @@ def values_equal(left: object, right: object) -> bool:
 
 def _canonical_value(value: object) -> object:
     if isinstance(value, Mapping):
+        items = [
+            (str(key), _canonical_value(item))
+            for key, item in value.items()
+        ]
         return (
             "mapping",
-            tuple(
-                sorted(
-                    (str(key), _canonical_value(item))
-                    for key, item in value.items()
-                )
-            ),
+            tuple(sorted(items, key=lambda pair: (pair[0], repr(pair[1])))),
         )
     if isinstance(value, (list, tuple)):
         return ("sequence", tuple(_canonical_value(item) for item in value))
