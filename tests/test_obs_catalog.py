@@ -197,6 +197,26 @@ class OBSResourceCatalogTests(unittest.TestCase):
         self.assertNotIn("GetInputSettings", requests)
         self.assertNotIn("GetSourceFilter", requests)
 
+    def test_catalog_mapping_can_redact_sensitive_settings(self):
+        client = FakeClient()
+        catalog = OBSResourceCatalogReader(client).sync(include_settings=True)
+
+        full = catalog.as_mapping(include_settings=True)
+        redacted = catalog.as_mapping(include_settings=False)
+
+        full_avatar = next(item for item in full["inputs"] if item["name"] == "Avatar Dynamic")
+        safe_avatar = next(
+            item for item in redacted["inputs"] if item["name"] == "Avatar Dynamic"
+        )
+        self.assertEqual(full_avatar["settings"], {"file": "avatar.png"})
+        self.assertIsNone(safe_avatar["settings"])
+        full_filter = next(item for item in full["filters"] if item["name"] == "Avatar FX")
+        safe_filter = next(
+            item for item in redacted["filters"] if item["name"] == "Avatar FX"
+        )
+        self.assertEqual(full_filter["settings"], {"strength": 1.0})
+        self.assertIsNone(safe_filter["settings"])
+
     def test_group_children_are_cached_when_group_is_reused(self):
         client = FakeClient()
         original_send = client.send
