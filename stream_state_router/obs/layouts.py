@@ -1924,8 +1924,8 @@ class OBSLayoutManager:
 
         Historical profiles store 8 steps, which is visibly jerky. Treat the
         stored value as a minimum quality hint and target the OBS render-friendly
-        cadence of about 60 FPS. The UI caps duration at 3 seconds, so 181
-        timeline points bounds the amount of WebSocket work.
+        cadence of about 60 FPS. The 361-point hard cap bounds WebSocket work
+        even for unusually long hand-edited transition durations.
         """
         configured = max(1, min(60, int(configured_steps or 1)))
         if duration_ms <= 0:
