@@ -2101,6 +2101,30 @@ class OBSLayoutManager:
                 self._neutralize_fade_sources(touched, collection=fade_collection)
             )
 
+    @staticmethod
+    def _move_fade_opacity(mode: str, progress: float) -> float:
+        """Opacity curve for the compact central move-fade window."""
+        t = max(0.0, min(1.0, float(progress)))
+        if mode == "through":
+            if t <= 0.25 or t >= 0.75:
+                return 1.0
+            if t <= 0.5:
+                return 1.0 - ((t - 0.25) / 0.25)
+            return (t - 0.5) / 0.25
+        if mode == "in":
+            if t <= 0.5:
+                return 0.0
+            if t >= 0.75:
+                return 1.0
+            return (t - 0.5) / 0.25
+        if mode == "out":
+            if t <= 0.25:
+                return 1.0
+            if t >= 0.5:
+                return 0.0
+            return 1.0 - ((t - 0.25) / 0.25)
+        return 1.0
+
     def _animate_move_fade(
         self,
         prepared_items: list[dict[str, Any]],
@@ -2111,10 +2135,11 @@ class OBSLayoutManager:
     ) -> None:
         """Move continuously while fading according to visibility ownership.
 
-        For items visible before and after the layout change, duration_ms is
-        one half of the opacity cycle: 100% -> 0% -> 100%. The geometry moves
-        continuously over both halves. Opacity is updated at about 30 Hz while
-        geometry keeps the ~60 Hz wall-clock timeline.
+        duration_ms is the total move duration. For items visible before and
+        after the layout change, opacity stays at 100% for the first quarter,
+        fades to 0% at mid-move, returns to 100% by the third quarter, then
+        remains fully visible. Opacity is updated at about 30 Hz while geometry
+        keeps the ~60 Hz wall-clock timeline.
         """
         fade_collection = self._fade_collection_context(probe=True)
         touched_fades: set[str] = set()
@@ -2175,7 +2200,7 @@ class OBSLayoutManager:
             else:
                 fade_modes[index] = "out"
 
-        total_duration_ms = max(1, duration_ms * 2)
+        total_duration_ms = max(1, duration_ms)
         move_steps = self._effective_transition_steps(total_duration_ms, steps)
         # Opacity is intentionally half the geometry cadence. A source-level
         # filter write is an additional synchronous WebSocket round trip and
@@ -2186,8 +2211,7 @@ class OBSLayoutManager:
         )
         opacity_interval = 1.0 / max(1, opacity_points - 1)
         next_opacity_progress = opacity_interval
-        previous_t = 0.0
-        midpoint_emitted: set[int] = set()
+        last_opacity: dict[int, float] = {}
 
         try:
             for t in self._transition_progress(total_duration_ms, move_steps):
@@ -2219,24 +2243,16 @@ class OBSLayoutManager:
                         )
 
                 opacity_due = t + 1e-9 >= next_opacity_progress or t >= 1.0
-                crossed_midpoint = previous_t < 0.5 <= t
-                if opacity_due or crossed_midpoint:
+                if opacity_due or abs(t - 0.5) <= 1e-9:
                     for index, mode in fade_modes.items():
-                        source = prepared_items[index]["source"]
-                        if mode == "through":
-                            if crossed_midpoint and index not in midpoint_emitted:
-                                opacity = 0.0
-                                midpoint_emitted.add(index)
-                            else:
-                                opacity = abs(2.0 * t - 1.0)
-                        elif mode == "in":
-                            opacity = t
-                        else:
-                            opacity = 1.0 - t
-                        self._set_source_opacity(source, opacity)
+                        opacity = self._move_fade_opacity(mode, t)
+                        previous = last_opacity.get(index)
+                        if previous is None or abs(previous - opacity) > 1e-6:
+                            source = prepared_items[index]["source"]
+                            self._set_source_opacity(source, opacity)
+                            last_opacity[index] = opacity
                     while next_opacity_progress <= t + 1e-9:
                         next_opacity_progress += opacity_interval
-                previous_t = t
 
             # Force exact final transforms even if stale-frame dropping skipped
             # the nominal final geometry update.
