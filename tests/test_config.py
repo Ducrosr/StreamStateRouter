@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import copy
 
 from stream_state_router.services.config import (
     build_activation_policies,
     build_ruleset,
+    export_config,
     load_config,
     migrate_config,
+    save_config,
     validate_config,
     config_revision,
     release_runtime_visibility_ownership,
@@ -136,6 +139,33 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(modules["[Global] Date"]["display_name"], "Date")
         self.assertEqual(len(modules["[Global] Date"]["elements"]), 1)
 
+
+    def test_shareable_export_redacts_secrets_and_is_valid(self):
+        data = self.sample()
+        data["obs"]["password"] = "obs-secret"
+        data["api"]["token"] = "api-secret"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(exported["obs"]["password"], "")
+        self.assertEqual(exported["api"]["token"], "")
+        self.assertEqual(validate_config(exported), [])
+
+    def test_backup_names_do_not_collide_and_retention_is_bounded(self):
+        data = self.sample()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "config.json"
+            backup_dir = root / "backups"
+            with patch("stream_state_router.services.config.backups_dir", return_value=backup_dir):
+                save_config(data, target, backup_limit=2)
+                for value in (51, 52, 53):
+                    data["router"]["poll_ms"] = value
+                    save_config(data, target, backup_limit=2)
+                backups = list(backup_dir.glob("config-*.json"))
+        self.assertLessEqual(len(backups), 2)
+        self.assertEqual(len({item.name for item in backups}), len(backups))
 
     def test_config_revision_is_stable_and_changes_with_content(self):
         data = self.sample()

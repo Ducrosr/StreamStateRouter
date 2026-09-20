@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -306,31 +307,114 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     return data
 
 
-def save_config(data: Mapping[str, Any], path: str | Path | None = None) -> Path:
+def _validated_payload(data: Mapping[str, Any]) -> dict[str, Any]:
     payload = migrate_config(data)
     errors = validate_config(payload)
     if errors:
         raise ConfigError("Configuration invalide :\n- " + "\n- ".join(errors))
+    try:
+        json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Configuration non sérialisable strictement : {exc}") from exc
+    return payload
+
+
+def _atomic_write_json(target: Path, payload: Mapping[str, Any]) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
+        temp.replace(target)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _prune_backups(*, keep: int = 20) -> None:
+    directory = backups_dir()
+    if not directory.exists():
+        return
+    files = sorted(
+        directory.glob("config-*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in files[max(1, int(keep)) :]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def save_config(
+    data: Mapping[str, Any],
+    path: str | Path | None = None,
+    *,
+    backup_limit: int = 20,
+) -> Path:
+    payload = _validated_payload(data)
     target = Path(path) if path else config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        shutil.copy2(target, backups_dir() / f"config-{stamp}.json")
-    temp = target.with_suffix(".tmp")
-    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(target)
+        directory = backups_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup = directory / f"config-{stamp}-{uuid.uuid4().hex[:8]}.json"
+        shutil.copy2(target, backup)
+        _prune_backups(keep=backup_limit)
+    _atomic_write_json(target, payload)
     return target
 
 
-def export_config(data: Mapping[str, Any], destination: str | Path) -> Path:
-    payload = migrate_config(data)
+def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(payload)
+    obs = result.get("obs")
+    if isinstance(obs, dict):
+        obs["password"] = ""
+    api = result.get("api")
+    if isinstance(api, dict):
+        api["token"] = ""
+    return result
+
+
+def export_config(
+    data: Mapping[str, Any],
+    destination: str | Path,
+    *,
+    include_secrets: bool = True,
+) -> Path:
+    payload = _validated_payload(data)
+    if not include_secrets:
+        payload = _redact_secrets(payload)
     target = Path(destination)
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(target, payload)
     return target
 
 
 def import_config(source: str | Path) -> dict[str, Any]:
     return load_config(Path(source))
+
+
+def latest_valid_backup() -> tuple[dict[str, Any], Path] | None:
+    directory = backups_dir()
+    if not directory.exists():
+        return None
+    candidates = sorted(
+        directory.glob("config-*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        try:
+            return load_config(candidate), candidate
+        except ConfigError:
+            continue
+    return None
 
 
 def push_layout_history(data: dict[str, Any], name: str, profile: Mapping[str, Any], *, limit: int = 10) -> None:

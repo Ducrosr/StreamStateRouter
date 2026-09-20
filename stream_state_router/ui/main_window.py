@@ -50,6 +50,7 @@ from ..services.config import (
     build_ruleset,
     export_config,
     import_config,
+    latest_valid_backup,
     save_config,
     validate_config,
     push_layout_history,
@@ -558,6 +559,7 @@ class MainWindow(QMainWindow):
             ("Enregistrer et appliquer", self.save_and_apply),
             ("Exporter la configuration…", self._export_config),
             ("Importer une configuration…", self._import_config),
+            ("Restaurer la dernière sauvegarde valide…", self._restore_config_backup),
             ("Quitter", self._quit_app),
         ]:
             action = QAction(text, self)
@@ -2133,11 +2135,31 @@ class MainWindow(QMainWindow):
 
     def _export_config(self) -> None:
         self._collect_settings()
-        path, _ = QFileDialog.getSaveFileName(self, "Exporter la configuration", "stream-state-router-config.json", "JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exporter la configuration",
+            "stream-state-router-config.json",
+            "JSON (*.json)",
+        )
         if not path:
             return
+        include_secrets = QMessageBox.question(
+            self,
+            "Secrets de l'export",
+            "Inclure le mot de passe OBS et le jeton API dans cet export ?\n\n"
+            "Choisissez Non pour un fichier partageable.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) == QMessageBox.Yes
         try:
-            export_config(self.config, path)
+            export_config(self.config, path, include_secrets=include_secrets)
+            QMessageBox.information(
+                self,
+                "Export",
+                "Configuration exportée avec secrets."
+                if include_secrets
+                else "Configuration partageable exportée sans mot de passe OBS ni jeton API.",
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Export", str(exc))
 
@@ -2159,6 +2181,28 @@ class MainWindow(QMainWindow):
         self.config = copy.deepcopy(incoming)
         self._load_config_into_ui()
         self._mark_dirty()
+
+    def _restore_config_backup(self) -> None:
+        try:
+            found = latest_valid_backup()
+        except Exception as exc:
+            QMessageBox.critical(self, "Sauvegarde", str(exc))
+            return
+        if found is None:
+            QMessageBox.information(self, "Sauvegarde", "Aucune sauvegarde valide n'a été trouvée.")
+            return
+        incoming, path = found
+        if QMessageBox.question(
+            self,
+            "Restaurer une sauvegarde",
+            f"Charger « {path.name} » comme brouillon ?\n\n"
+            "La configuration active ne changera qu'après « Enregistrer et appliquer ».",
+        ) != QMessageBox.Yes:
+            return
+        self.config = copy.deepcopy(incoming)
+        self._load_config_into_ui()
+        self._mark_dirty()
+        self._log(f"Sauvegarde valide chargée en brouillon : {path}")
 
     def _refresh_config_revision_status(self, *, draft_dirty: bool = False) -> None:
         saved = self._saved_revision or "—"
