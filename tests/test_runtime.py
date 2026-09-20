@@ -453,6 +453,8 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(status["success"])
             self.assertEqual(status["blocked_domains"], ["game"])
             self.assertEqual(status["pending_domains"], ["game"])
+            self.assertEqual(status["domain_details"][0]["domain"], "game")
+            self.assertEqual(status["domain_details"][0]["message"], "test")
             self.assertTrue(snapshots)
             serialized = repr(status).casefold()
             self.assertNotIn("password", serialized)

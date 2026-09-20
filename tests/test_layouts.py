@@ -391,6 +391,33 @@ class LayoutTests(unittest.TestCase):
 
         self.assertEqual(client.settings_attempts, 2)
 
+    def test_pending_fade_cleanup_is_retained_until_neutralization_succeeds(self):
+        from stream_state_router.obs.client import OBSUnavailableError
+
+        class FadeCleanupClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.fail_cleanup = True
+
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.calls.append((request, dict(data or {})))
+                    if self.fail_cleanup:
+                        raise OBSUnavailableError("offline")
+                    return {}
+                return super().send(request, data)
+
+        client = FadeCleanupClient()
+        manager = OBSLayoutManager(client)
+
+        warnings = manager._neutralize_fade_sources(["[Webcam] Avatar"])
+        self.assertTrue(warnings)
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
+        client.fail_cleanup = False
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+
     def test_move_transition_uses_one_global_timeline_for_all_sources(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
