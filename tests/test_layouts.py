@@ -83,6 +83,20 @@ class LayoutTests(unittest.TestCase):
         self.assertIsNone(split_module_source("Webcam Cadre"))
         self.assertIsNone(split_module_source("[Webcam]"))
 
+    def test_topology_scan_honors_cooperative_shutdown_before_obs_io(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+
+        def stop_now():
+            raise RuntimeError("shutdown requested")
+
+        manager.set_cooperative_yield(stop_now)
+
+        with self.assertRaisesRegex(RuntimeError, "shutdown requested"):
+            manager.scan_scene_topology("Gameplay")
+
+        self.assertEqual(client.calls, [])
+
     def test_lightweight_topology_scan_does_not_read_transforms(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
