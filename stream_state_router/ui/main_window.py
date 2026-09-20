@@ -426,7 +426,7 @@ class MainWindow(QMainWindow):
         self.layout_transition.currentIndexChanged.connect(self._layout_option_changed)
         options.addWidget(self.layout_transition)
         self.layout_transition_ms = QSpinBox()
-        self.layout_transition_ms.setRange(0, 3000)
+        self.layout_transition_ms.setRange(0, 10000)
         self.layout_transition_ms.setSuffix(" ms")
         self.layout_transition_ms.valueChanged.connect(self._layout_option_changed)
         options.addWidget(self.layout_transition_ms)
