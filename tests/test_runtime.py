@@ -121,6 +121,36 @@ class BlockingLayoutDispatcher(CommandDispatcher):
         return super().execute_layout_profile(profile_name, preview=preview)
 
 
+class CooperativeLayoutManager:
+    def __init__(self):
+        self._yield = None
+
+    def set_cooperative_yield(self, callback):
+        self._yield = callback
+
+    def checkpoint(self):
+        if self._yield is not None:
+            self._yield()
+
+
+class CooperativeLayoutDispatcher(CommandDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.layout_manager = CooperativeLayoutManager()
+        self.layout_entered = threading.Event()
+        self.in_layout = False
+
+    def execute_layout_profile(self, profile_name, preview=False):
+        self.in_layout = True
+        self.layout_entered.set()
+        try:
+            while True:
+                self.layout_manager.checkpoint()
+                time.sleep(0.01)
+        finally:
+            self.in_layout = False
+
+
 class BlockingDispatcher(FakeDispatcher):
     def __init__(self):
         super().__init__()
@@ -236,6 +266,22 @@ class ActiveShutdownScheduler(FakeActivationScheduler):
                 reason="reset",
             )
         ]
+
+
+class ReentrancyDetectingController(FakeActivationController):
+    def __init__(self, dispatcher):
+        super().__init__()
+        self.dispatcher = dispatcher
+        self.reconcile_during_layout = False
+        self.apply_during_layout = False
+
+    def reconcile(self):
+        self.reconcile_during_layout = self.reconcile_during_layout or self.dispatcher.in_layout
+        return super().reconcile()
+
+    def apply_event(self, event):
+        self.apply_during_layout = self.apply_during_layout or self.dispatcher.in_layout
+        return super().apply_event(event)
 
 
 class CleanupBlockingController(FakeActivationController):
@@ -445,6 +491,41 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(command_result.success, command_result.error)
         finally:
             dispatcher.release_layout.set()
+            service.stop()
+
+    def test_cooperative_layout_shutdown_unwinds_before_activation_cleanup(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CooperativeLayoutDispatcher()
+        scheduler = ActiveShutdownScheduler()
+        controller = ReentrancyDetectingController(dispatcher)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_layout("apply", "Test A")
+            self.assertTrue(dispatcher.layout_entered.wait(1.0))
+
+            shutdown = service.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertFalse(service._thread.is_alive())
+
+            command_result = collector.wait(request_id)
+            self.assertFalse(command_result.success)
+            self.assertIn("Arrêt du runtime demandé", command_result.error)
+            self.assertFalse(controller.reconcile_during_layout)
+            self.assertFalse(controller.apply_during_layout)
+            self.assertEqual(len(controller.events), 1)
+            self.assertEqual(controller.events[0].kind, "hide")
+        finally:
             service.stop()
 
     def test_shutdown_hides_scheduler_owned_visible_activation(self):
