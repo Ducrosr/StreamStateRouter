@@ -4,6 +4,7 @@ from .models import (
     DesiredStateConflict,
     ObservedProperty,
     ObservedState,
+    ObservedStateConflict,
     ResourceKey,
 )
 from .planner import DeclarativePlanner, ExecutionPlan, PlanDiagnostic, PlannedOperation
@@ -16,6 +17,7 @@ __all__ = [
     "ExecutionPlan",
     "ObservedProperty",
     "ObservedState",
+    "ObservedStateConflict",
     "PlanDiagnostic",
     "PlannedOperation",
     "ResourceKey",
