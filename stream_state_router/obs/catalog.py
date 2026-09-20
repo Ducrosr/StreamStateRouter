@@ -38,9 +38,14 @@ class OBSSceneItemRef:
     locked: bool | None = None
 
     @property
-    def identity(self) -> tuple[str, str, str, int]:
-        """Durable-ish occurrence identity without persisting ephemeral item ids."""
-        return (self.root_scene, self.container, self.source_name, self.occurrence)
+    def identity(self) -> tuple[str, str, int]:
+        """Physical item identity without persisting ephemeral scene-item ids.
+
+        root_scene/path are navigation context only. A group or nested scene may
+        be referenced from several parents while its internal item remains the
+        same OBS occurrence.
+        """
+        return (self.container, self.source_name, self.occurrence)
 
     def as_mapping(self) -> dict[str, object]:
         return {
