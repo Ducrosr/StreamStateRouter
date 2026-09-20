@@ -1049,6 +1049,8 @@ class RoutingService:
         config = getattr(client, "config", None)
         if client is None or config is None or not bool(getattr(config, "enabled", False)):
             self._last_obs_connected = None
+            with self._lock:
+                self._obs_catalog = None
             return
 
         now = time.monotonic()
@@ -1061,6 +1063,8 @@ class RoutingService:
             manager = getattr(self.dispatcher, "layout_manager", None)
             if self._last_obs_connected is not True:
                 self.logger.info("OBS connection established: %s", message)
+                with self._lock:
+                    self._obs_catalog = None
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
                 if manager is not None and hasattr(manager, "invalidate_session"):
@@ -1089,6 +1093,8 @@ class RoutingService:
 
         if self._last_obs_connected is not False:
             self.logger.warning("OBS connection unavailable: %s", message)
+            with self._lock:
+                self._obs_catalog = None
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
 
@@ -1533,6 +1539,7 @@ class RoutingService:
                 elif command.action == "layout.undo":
                     result = self.dispatcher.layout_manager.undo_last()
                 elif command.action == "catalog.sync":
+                    self.logger.info("catalog_sync_started")
                     reader = OBSResourceCatalogReader(self.dispatcher.client)
                     result = reader.sync(
                         include_settings=bool(command.options.get("include_settings", False))
@@ -1552,6 +1559,9 @@ class RoutingService:
                     )
                 else:
                     raise ValueError(f"Commande OBS inconnue : {command.action}")
+            if command.action == "catalog.sync":
+                self._emit_obs_result(command, success=True, result=result)
+                return
             warnings = tuple(getattr(result, "warnings", ()) or ()) if result is not None else ()
             missing = tuple(getattr(result, "missing_sources", ()) or ()) if result is not None else ()
             incomplete = bool(warnings or missing)
