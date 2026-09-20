@@ -227,6 +227,38 @@ class OBSResourceCatalogTests(unittest.TestCase):
         ]
         self.assertEqual(len(grouped), 2)
         self.assertEqual({item.root_scene for item in grouped}, {"In Game", "Nested"})
+        self.assertEqual(grouped[0].identity, grouped[1].identity)
+
+    def test_sync_yields_before_each_obs_request(self):
+        client = FakeClient()
+        checkpoints = []
+
+        def checkpoint():
+            checkpoints.append(client.request_count)
+
+        OBSResourceCatalogReader(
+            client,
+            cooperative_yield=checkpoint,
+        ).sync()
+
+        self.assertEqual(len(checkpoints), client.request_count)
+
+    def test_sync_can_be_cancelled_before_next_obs_request(self):
+        client = FakeClient()
+        checkpoints = []
+
+        def checkpoint():
+            checkpoints.append(client.request_count)
+            if len(checkpoints) == 3:
+                raise RuntimeError("shutdown requested")
+
+        with self.assertRaisesRegex(RuntimeError, "shutdown requested"):
+            OBSResourceCatalogReader(
+                client,
+                cooperative_yield=checkpoint,
+            ).sync()
+
+        self.assertEqual(client.request_count, 2)
 
 
 if __name__ == "__main__":
