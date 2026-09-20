@@ -8,9 +8,15 @@ class OBSReadClient(Protocol):
     """Minimal read-only contract used by the OBS catalogue."""
 
     @property
-    def request_count(self) -> int: ...
+    def request_count(self) -> int:
+        ...
 
-    def send(self, request: str, data: dict[str, Any] | None = None) -> dict[str, Any]: ...
+    def send(
+        self,
+        request: str,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        ...
 
 
 @dataclass(frozen=True, slots=True)
