@@ -60,6 +60,7 @@ class RuntimeCatalogTests(unittest.TestCase):
         self.assertEqual(status["status"], "completed")
         self.assertEqual(status["result"]["scene_collection"], "Midgar")
         self.assertEqual(status["result"]["scene_count"], 0)
+        self.assertTrue(status["result"]["complete"])
         self.assertNotIn("scenes", status["result"])
 
     def test_catalog_warnings_do_not_turn_read_only_sync_into_write_failure(self):
@@ -85,6 +86,7 @@ class RuntimeCatalogTests(unittest.TestCase):
         self.assertIsNotNone(status)
         self.assertEqual(status["status"], "completed")
         self.assertTrue(status["result"]["warnings"])
+        self.assertFalse(status["result"]["complete"])
         self.assertFalse(
             any(
                 request.startswith(("Set", "Create", "Remove"))
