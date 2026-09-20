@@ -57,10 +57,21 @@ class OBSDispatcher:
         self._desired_state: StreamState | None = None
         self._applied_profiles: dict[str, str] = {}
         self._context_cache: tuple[float, dict[str, Any]] | None = None
+        self._cooperative_yield = None
 
     @property
     def layout_manager(self) -> OBSLayoutManager:
         return self._layout_manager
+
+    def set_cooperative_yield(self, callback) -> None:
+        """Install the runtime shutdown checkpoint for long OBS batches."""
+        self._cooperative_yield = callback
+        self._layout_manager.set_cooperative_yield(callback)
+
+    def _yield_runtime(self) -> None:
+        callback = self._cooperative_yield
+        if callback is not None:
+            callback()
 
     def configure_profiles(
         self,
@@ -127,16 +138,19 @@ class OBSDispatcher:
                 "program_scene": "",
             }
         context: dict[str, Any] = {"obs_enabled": True}
+        self._yield_runtime()
         try:
             stream = self.client.send("GetStreamStatus")
             context["streaming"] = bool(stream.get("outputActive", False))
         except Exception:
             context["streaming"] = None
+        self._yield_runtime()
         try:
             record = self.client.send("GetRecordStatus")
             context["recording"] = bool(record.get("outputActive", False))
         except Exception:
             context["recording"] = None
+        self._yield_runtime()
         try:
             scene = self.client.send("GetCurrentProgramScene")
             context["program_scene"] = str(scene.get("currentProgramSceneName") or "")
@@ -330,6 +344,7 @@ class OBSDispatcher:
             )
 
         for domain in changed:
+            self._yield_runtime()
             profile_name = state.profile_name(domain)
             if domain == "layout":
                 if profile_name not in self._layout_profiles:
@@ -391,6 +406,7 @@ class OBSDispatcher:
             domain_skipped = 0
             failed = ""
             for action in profile.actions:
+                self._yield_runtime()
                 if not action.enabled:
                     skipped += 1
                     domain_skipped += 1
@@ -428,6 +444,7 @@ class OBSDispatcher:
         executed = 0
         skipped = 0
         for action in profile.actions:
+            self._yield_runtime()
             if not action.enabled:
                 skipped += 1
                 continue
@@ -436,6 +453,7 @@ class OBSDispatcher:
         return DispatchResult(executed, skipped, (domain,))
 
     def execute_layout_profile(self, profile_name: str, *, preview: bool = False) -> DispatchResult:
+        self._yield_runtime()
         if profile_name not in self._layout_profiles:
             raise ValueError(f"Layout introuvable : {profile_name}")
         profile = resolve_layout_profile(profile_name, self._layout_profiles)
@@ -483,6 +501,7 @@ class OBSDispatcher:
         )
 
     def execute_action(self, action: OBSAction) -> None:
+        self._yield_runtime()
         kind = action.type.strip().casefold()
         p = dict(action.params)
         if kind == "set_program_scene":
