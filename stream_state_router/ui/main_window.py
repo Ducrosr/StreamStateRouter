@@ -676,6 +676,7 @@ class MainWindow(QMainWindow):
         *,
         bootstrap_foreground: ForegroundApp | None = None,
         startup_layout_profile: str = "",
+        startup_layout_routing_baseline: str = "",
     ) -> None:
         rules, poll_ms, debounce_ms, fallback_ms = build_ruleset(self.config)
         self._client = OBSClientManager(build_obs_config(self.config))
@@ -684,6 +685,8 @@ class MainWindow(QMainWindow):
             build_profiles(self.config),
             build_layout_profiles(self.config),
         )
+        if startup_layout_routing_baseline:
+            self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
         engine = StateRouterEngine(
             rules,
             debounce_ms=debounce_ms,
@@ -729,6 +732,11 @@ class MainWindow(QMainWindow):
             resume_layout_profile = (
                 previous.active_layout_apply_profile if previous is not None else ""
             )
+            resume_layout_routing_baseline = ""
+            if resume_layout_profile and previous is not None:
+                previous_state = previous.engine.current_state
+                if previous_state is not None:
+                    resume_layout_routing_baseline = previous_state.profile_name("layout")
             bootstrap_foreground = (
                 None
                 if resume_layout_profile
@@ -759,6 +767,7 @@ class MainWindow(QMainWindow):
             self._start_runtime(
                 bootstrap_foreground=bootstrap_foreground,
                 startup_layout_profile=resume_layout_profile,
+                startup_layout_routing_baseline=resume_layout_routing_baseline,
             )
             succeeded = True
             return True
