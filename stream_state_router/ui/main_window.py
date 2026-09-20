@@ -1947,6 +1947,7 @@ class MainWindow(QMainWindow):
             activation_candidates=candidates,
             activation_status_provider=self._activation_status,
             activation_command=self._activation_command,
+            visibility_release_command=self._release_runtime_visibility_ownership,
             activation_result_signal=self.bridge.activation_result,
         )
         if dlg.exec() == QDialog.Accepted:
