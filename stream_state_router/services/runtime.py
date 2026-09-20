@@ -94,6 +94,7 @@ class RoutingService:
         provider=None,
         logger: logging.Logger | None = None,
         obs_probe_seconds: float = 2.0,
+        state_reconcile_seconds: float = 0.5,
         activation_policies: Mapping[str, TriggerPolicyConfig] | None = None,
         activation_scheduler: ActivationScheduler | None = None,
         activation_controller: OBSActivationController | None = None,
@@ -104,6 +105,7 @@ class RoutingService:
         self.provider = provider or WindowsForegroundProvider()
         self.logger = logger or logging.getLogger("stream_state_router")
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
+        self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
         policies = dict(activation_policies or {})
         self.activation_scheduler = activation_scheduler
         self.activation_controller = activation_controller
@@ -122,6 +124,7 @@ class RoutingService:
         self._dispatch_generation = 0
         self._last_obs_probe = 0.0
         self._last_obs_connected: bool | None = None
+        self._last_state_reconcile = 0.0
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._activation_eligibility_cache: dict[str, tuple[bool, str]] = {}
         self._activation_cleanup_cache: dict[str, int] = {}
@@ -455,6 +458,7 @@ class RoutingService:
                         if change:
                             self._apply_change(change)
                     self._process_due_dispatch()
+                    self._reconcile_desired_state_if_due()
                     self._tick_activation(paused=paused)
                 except Exception as exc:
                     self.logger.exception("Routing loop error")
@@ -492,6 +496,9 @@ class RoutingService:
         if ok:
             if self._last_obs_connected is not True:
                 self.logger.info("OBS connection established: %s", message)
+                if hasattr(self.dispatcher, "invalidate_applied_state"):
+                    self.dispatcher.invalidate_applied_state()
+                self._last_state_reconcile = 0.0
                 self._reconcile_activation("connexion OBS")
                 self._emit(RuntimeEvent("obs_connected", message))
             self._last_obs_connected = True
@@ -501,6 +508,31 @@ class RoutingService:
             self.logger.warning("OBS connection unavailable: %s", message)
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
+
+    def _reconcile_desired_state_if_due(self) -> None:
+        if self._last_obs_connected is False:
+            return
+        now = time.monotonic()
+        if self._last_state_reconcile and now - self._last_state_reconcile < self.state_reconcile_seconds:
+            return
+        with self._lock:
+            if self._stopping or self._pending_dispatch is not None:
+                return
+            state = self.engine.current_state
+        if state is None or not hasattr(self.dispatcher, "pending_domains"):
+            return
+        pending = self.dispatcher.pending_domains(state)
+        if not pending:
+            return
+        self._last_state_reconcile = now
+        try:
+            result = self.dispatcher.dispatch_state(state)
+        except Exception as exc:
+            self.logger.error("OBS reconciliation failed: %s", exc)
+            self._emit(RuntimeEvent("obs_error", str(exc)))
+            return
+        if self.on_dispatch:
+            self.on_dispatch(result)
 
     def _reconcile_activation(self, reason: str) -> bool:
         scheduler = self.activation_scheduler

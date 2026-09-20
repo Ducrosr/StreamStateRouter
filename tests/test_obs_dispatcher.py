@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from stream_state_router.obs.dispatcher import OBSDispatcher, profile_map_from_raw
+from stream_state_router.router.engine import StateChange
 from stream_state_router.obs.models import OBSAction
 from stream_state_router.router.models import StreamState
 
@@ -11,6 +12,7 @@ class FakeClient:
     def __init__(self):
         self.calls = []
         self.scene_item_ids = [42]
+        self.streaming = False
 
     def send(self, request, data=None):
         self.calls.append((request, data))
@@ -18,6 +20,12 @@ class FakeClient:
             if len(self.scene_item_ids) > 1:
                 return {"sceneItemId": self.scene_item_ids.pop(0)}
             return {"sceneItemId": self.scene_item_ids[0]}
+        if request == "GetStreamStatus":
+            return {"outputActive": self.streaming}
+        if request == "GetRecordStatus":
+            return {"outputActive": False}
+        if request == "GetCurrentProgramScene":
+            return {"currentProgramSceneName": "OW"}
         return {}
 
 
@@ -56,6 +64,63 @@ class OBSDispatcherTests(unittest.TestCase):
         writes = [call for call in client.calls if call[0] == "SetSceneItemEnabled"]
         self.assertEqual(len(lookups), 2)
         self.assertEqual([call[1]["sceneItemId"] for call in writes], [42, 99])
+
+    def test_dispatch_change_uses_applied_state_not_router_previous_state(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "A": {"actions": [{"type": "set_program_scene", "params": {"scene": "A"}}]},
+                    "B": {"actions": [{"type": "set_program_scene", "params": {"scene": "B"}}]},
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        state_a = StreamState(overlay_profile="A")
+        state_b = StreamState(overlay_profile="B")
+
+        dispatcher.dispatch_state(state_a)
+        client.calls.clear()
+        change = StateChange(
+            previous=state_b,
+            current=state_b,
+            reason="delayed replacement",
+            rule_name="B",
+            app=None,
+        )
+        result = dispatcher.dispatch_change(change)
+
+        self.assertIn("overlay", result.changed_domains)
+        self.assertTrue(
+            any(request == "SetCurrentProgramScene" and payload["sceneName"] == "B" for request, payload in client.calls)
+        )
+        self.assertEqual(dispatcher.applied_profiles().get("overlay"), "B")
+
+    def test_blocked_domain_stays_pending_and_retries_when_condition_changes(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Live": {
+                        "conditions": {"streaming": True},
+                        "actions": [{"type": "set_program_scene", "params": {"scene": "Live"}}],
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        state = StreamState(game="Live")
+
+        first = dispatcher.dispatch_state(state)
+        self.assertIn("game", dispatcher.pending_domains(state))
+        self.assertTrue(any(s.status == "blocked" for s in first.domain_statuses))
+
+        client.streaming = True
+        dispatcher._context_cache = None
+        second = dispatcher.dispatch_state(state)
+
+        self.assertNotIn("game", dispatcher.pending_domains(state))
+        self.assertTrue(any(s.status == "applied" for s in second.domain_statuses))
 
     def test_supported_action_shapes(self):
         client = FakeClient()

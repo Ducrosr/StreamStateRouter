@@ -17,11 +17,21 @@ STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
 
 
 @dataclass(frozen=True, slots=True)
+class DomainDispatchStatus:
+    domain: str
+    desired_profile: str
+    applied_profile: str
+    status: str
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class DispatchResult:
     executed: int
     skipped: int
     changed_domains: tuple[str, ...]
     warnings: tuple[str, ...] = ()
+    domain_statuses: tuple[DomainDispatchStatus, ...] = ()
 
 
 class OBSDispatcher:
@@ -44,6 +54,8 @@ class OBSDispatcher:
         }
         self._layout_manager = OBSLayoutManager(client)
         self._last_state: StreamState | None = None
+        self._desired_state: StreamState | None = None
+        self._applied_profiles: dict[str, str] = {}
         self._context_cache: tuple[float, dict[str, Any]] | None = None
 
     @property
@@ -56,6 +68,8 @@ class OBSDispatcher:
     ) -> None:
         self._profiles = {domain: dict(values) for domain, values in profiles.items()}
         self._last_state = None
+        self._desired_state = None
+        self._applied_profiles.clear()
         self._layout_manager.reset_cache()
         self._context_cache = None
 
@@ -63,12 +77,38 @@ class OBSDispatcher:
         self._layout_profiles = {str(name): dict(value) for name, value in profiles.items()}
         self._layout_manager.reset_cache()
         self._last_state = None
+        self._desired_state = None
+        self._applied_profiles.clear()
         self._context_cache = None
 
     def reset(self) -> None:
         self._last_state = None
+        self._desired_state = None
+        self._applied_profiles.clear()
         self._layout_manager.reset_cache()
         self._context_cache = None
+
+    def invalidate_applied_state(self) -> None:
+        """Forget OBS-side convergence knowledge after reconnect/session changes."""
+        self._applied_profiles.clear()
+        self._context_cache = None
+
+    @property
+    def desired_state(self) -> StreamState | None:
+        return self._desired_state
+
+    def applied_profiles(self) -> dict[str, str]:
+        return dict(self._applied_profiles)
+
+    def pending_domains(self, state: StreamState | None = None) -> tuple[str, ...]:
+        wanted = state or self._desired_state
+        if wanted is None:
+            return ()
+        return tuple(
+            domain
+            for domain in STATE_DOMAINS
+            if self._applied_profiles.get(domain) != wanted.profile_name(domain)
+        )
 
     def obs_context(self) -> dict[str, Any]:
         """Return a small current OBS context for conditional rules/profiles.
@@ -125,7 +165,9 @@ class OBSDispatcher:
         return True
 
     def dispatch_change(self, change: StateChange) -> DispatchResult:
-        return self.dispatch_state(change.current, previous=change.previous)
+        # change.previous is the router's previous *decision*, not necessarily
+        # what OBS actually acknowledged. Always diff against applied state.
+        return self.dispatch_state(change.current)
 
     def dispatch_state(
         self,
@@ -134,35 +176,71 @@ class OBSDispatcher:
         previous: StreamState | None = None,
         force: bool = False,
     ) -> DispatchResult:
-        baseline = self._last_state if previous is None else previous
-        changed = []
-        for domain in STATE_DOMAINS:
-            if force or baseline is None or state.profile_name(domain) != baseline.profile_name(domain):
-                changed.append(domain)
+        del previous  # compatibility only: router history is not OBS applied state
+        self._desired_state = state
+        self._last_state = state
+        changed = [
+            domain
+            for domain in STATE_DOMAINS
+            if force or self._applied_profiles.get(domain) != state.profile_name(domain)
+        ]
 
         executed = 0
         skipped = 0
         warnings: list[str] = []
+        statuses: list[DomainDispatchStatus] = []
+
+        def status(domain: str, desired: str, value: str, message: str = "") -> None:
+            statuses.append(
+                DomainDispatchStatus(
+                    domain=domain,
+                    desired_profile=desired,
+                    applied_profile=self._applied_profiles.get(domain, ""),
+                    status=value,
+                    message=message,
+                )
+            )
+
         for domain in changed:
             profile_name = state.profile_name(domain)
             if domain == "layout":
                 if profile_name not in self._layout_profiles:
                     skipped += 1
+                    status(domain, profile_name, "missing", "LayoutProfile introuvable")
                     continue
                 try:
                     layout = resolve_layout_profile(profile_name, self._layout_profiles)
                 except Exception as exc:
                     skipped += 1
                     warnings.append(str(exc))
+                    status(domain, profile_name, "failed", str(exc))
                     continue
                 conditions = layout.get("conditions")
                 if isinstance(conditions, Mapping) and not self.conditions_match(conditions):
                     skipped += 1
+                    status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
                     continue
-                result = self._layout_manager.apply_profile(layout)
+                try:
+                    result = self._layout_manager.apply_profile(layout)
+                except Exception as exc:
+                    skipped += 1
+                    warnings.append(str(exc))
+                    status(domain, profile_name, "failed", str(exc))
+                    continue
                 executed += result.elements_applied
                 skipped += result.elements_skipped
                 warnings.extend(result.warnings)
+                if result.missing_sources or result.warnings:
+                    message = "; ".join(
+                        [
+                            *(f"source manquante: {name}" for name in result.missing_sources),
+                            *result.warnings,
+                        ]
+                    )
+                    status(domain, profile_name, "partial", message)
+                    continue
+                self._applied_profiles[domain] = profile_name
+                status(domain, profile_name, "applied")
                 continue
 
             try:
@@ -170,22 +248,46 @@ class OBSDispatcher:
             except Exception as exc:
                 skipped += 1
                 warnings.append(str(exc))
+                status(domain, profile_name, "failed", str(exc))
                 continue
             if profile is None:
                 skipped += 1
+                status(domain, profile_name, "missing", "Profil OBS introuvable")
                 continue
             if not self.conditions_match(profile.conditions):
                 skipped += len(profile.actions) or 1
+                status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
                 continue
+
+            domain_executed = 0
+            domain_skipped = 0
+            failed = ""
             for action in profile.actions:
                 if not action.enabled:
                     skipped += 1
+                    domain_skipped += 1
                     continue
-                self.execute_action(action)
+                try:
+                    self.execute_action(action)
+                except Exception as exc:
+                    failed = str(exc)
+                    warnings.append(f"{domain}/{profile_name}: {exc}")
+                    break
                 executed += 1
+                domain_executed += 1
+            if failed:
+                status(domain, profile_name, "failed", failed)
+                continue
+            self._applied_profiles[domain] = profile_name
+            status(domain, profile_name, "applied")
 
-        self._last_state = state
-        return DispatchResult(executed, skipped, tuple(changed), tuple(warnings))
+        return DispatchResult(
+            executed,
+            skipped,
+            tuple(changed),
+            tuple(warnings),
+            tuple(statuses),
+        )
 
     def execute_profile(self, domain: str, profile_name: str) -> DispatchResult:
         if domain not in ACTION_PROFILE_DOMAINS:
