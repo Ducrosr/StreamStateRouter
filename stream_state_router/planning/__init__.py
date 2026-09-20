@@ -8,6 +8,7 @@ from .models import (
     ResourceKey,
 )
 from .planner import DeclarativePlanner, ExecutionPlan, PlanDiagnostic, PlannedOperation
+from .validation import ResourceValidation, validate_desired_state, validate_resource
 
 __all__ = [
     "DeclarativePlanner",
@@ -25,5 +26,3 @@ __all__ = [
     "validate_desired_state",
     "validate_resource",
 ]
-
-from .validation import ResourceValidation, validate_desired_state, validate_resource
