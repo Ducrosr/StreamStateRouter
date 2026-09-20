@@ -233,6 +233,24 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
             any(request == "GetSourceFilter" for request, _data in client.requests)
         )
 
+    def test_container_delegation_does_not_block_external_occurrence(self):
+        scope = ControlScope(
+            excluded_containers=frozenset({"External Component"})
+        )
+        internal = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="External Component",
+            source="Internal Item",
+        )
+        external = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="In Game",
+            source="External Component",
+        )
+
+        self.assertTrue(scope.block_reason(internal))
+        self.assertEqual(scope.block_reason(external), "")
+
     def test_generic_control_scope_blocks_delegated_container(self):
         key = PropertyKey.scene_item_visibility(
             collection="Main",
