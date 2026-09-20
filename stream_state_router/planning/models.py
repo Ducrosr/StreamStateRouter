@@ -3,7 +3,29 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import math
 from typing import Any, Iterable, Mapping
+
+
+def _canonical_signature_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return {"$invalid_float": str(value)}
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_signature_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_signature_value(item) for item in value]
+    return {
+        "$unsupported_type": (
+            f"{type(value).__module__}.{type(value).__qualname__}"
+        )
+    }
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -257,7 +279,7 @@ class DesiredState:
         payload = [
             {
                 "property": item.key.as_mapping(),
-                "value": item.value,
+                "value": _canonical_signature_value(item.value),
             }
             for item in self.assignments
         ]
