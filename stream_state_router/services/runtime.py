@@ -192,6 +192,7 @@ class RoutingService:
         pending_cleanup=(),
         config_revision: str = "",
         bootstrap_foreground: ForegroundApp | None = None,
+        startup_layout_profile: str = "",
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
@@ -265,6 +266,8 @@ class RoutingService:
         self._shutdown_complete = threading.Event()
         self._shutdown_phase = "idle"
         self._active_operation = ""
+        self._active_obs_command: _OBSCommand | None = None
+        self._startup_layout_profile = str(startup_layout_profile or "").strip()
         self._worker_phase = "idle"
         self._shutdown_cleanup_active = False
         self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
@@ -302,6 +305,14 @@ class RoutingService:
         with self._lock:
             return self._last_meaningful_app
 
+    @property
+    def active_layout_apply_profile(self) -> str:
+        with self._lock:
+            command = self._active_obs_command
+            if command is None or command.action != "layout.apply":
+                return ""
+            return str(command.options.get("name") or "").strip()
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -311,11 +322,28 @@ class RoutingService:
             self._stopping = False
             self._shutdown_phase = "running"
             self._active_operation = ""
+            self._active_obs_command = None
             self._worker_phase = "starting"
             self._shutdown_cleanup_active = False
             self._runtime_operational = True
             self._accept_activation_commands = True
             self._accept_obs_commands = True
+            if self._startup_layout_profile:
+                request_id = f"startup-layout-{uuid.uuid4().hex}"
+                self._set_command_status(
+                    request_id,
+                    action="layout.apply",
+                    status="accepted",
+                )
+                self._runtime_commands.put(
+                    _OBSCommand(
+                        request_id=request_id,
+                        generation=self._command_generation,
+                        action="layout.apply",
+                        options={"name": self._startup_layout_profile},
+                    )
+                )
+                self._startup_layout_profile = ""
         self._thread = threading.Thread(target=self._run, name="SSR-Router", daemon=True)
         self._thread.start()
 
@@ -1439,6 +1467,7 @@ class RoutingService:
     def _execute_obs_command(self, command: _OBSCommand) -> None:
         with self._lock:
             self._active_operation = command.action
+            self._active_obs_command = command
         try:
             with self._dispatch_lock:
                 if command.action == "reapply":
@@ -1509,6 +1538,8 @@ class RoutingService:
             self._emit_obs_result(command, success=False, error=str(exc))
         finally:
             with self._lock:
+                if self._active_obs_command is command:
+                    self._active_obs_command = None
                 if self._active_operation == command.action:
                     self._active_operation = ""
 
