@@ -360,11 +360,34 @@ def pop_layout_history(data: dict[str, Any], name: str) -> dict[str, Any] | None
 
 
 def _valid_number(value: Any, *, positive: bool = False) -> bool:
+    if isinstance(value, bool):
+        return False
     try:
         parsed = float(value)
     except (TypeError, ValueError, OverflowError):
         return False
+    if not math.isfinite(parsed):
+        return False
     return parsed > 0 if positive else True
+
+
+def _valid_int(
+    value: Any,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if minimum is not None and parsed < minimum:
+        return False
+    if maximum is not None and parsed > maximum:
+        return False
+    return True
 
 
 def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
@@ -377,6 +400,11 @@ def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
     unknown = set(raw) - allowed
     if unknown:
         errors.append(f"{prefix} contient des conditions inconnues : {', '.join(sorted(unknown))}")
+    for key in ("streaming", "recording", "obs_enabled"):
+        if key in raw and not isinstance(raw.get(key), bool):
+            errors.append(f"{prefix}.{key} doit être booléen")
+    if "program_scene" in raw and not isinstance(raw.get("program_scene"), str):
+        errors.append(f"{prefix}.program_scene doit être une chaîne")
 
 
 def _check_inheritance_cycles(mapping: Mapping[str, Any], prefix: str, errors: list[str]) -> None:
@@ -414,11 +442,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         router = {}
     else:
         for key in ("poll_ms", "debounce_ms", "fallback_debounce_ms"):
-            try:
-                value = int(router.get(key, 0))
-                if value < 0:
-                    raise ValueError
-            except (TypeError, ValueError):
+            if not _valid_int(router.get(key, 0), minimum=0):
                 errors.append(f"router.{key} doit être un entier >= 0")
 
     fallback = router.get("fallback_state") if isinstance(router, Mapping) else None
@@ -447,13 +471,16 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             errors.append(f"{prefix}.behavior doit être match ou ignore")
         if not any(str(raw.get(key) or "").strip() for key in ("exe", "path", "title_regex")):
             errors.append(f"{prefix} doit définir exe, path ou title_regex")
+        title_regex = str(raw.get("title_regex") or "").strip()
+        if title_regex:
+            try:
+                re.compile(title_regex)
+            except re.error as exc:
+                errors.append(f"{prefix}.title_regex est invalide : {exc}")
         if behavior == "match" and not isinstance(raw.get("state"), Mapping):
             errors.append(f"{prefix}.state est requis pour une règle match")
-        try:
-            if int(raw.get("apply_delay_ms", 0)) < 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            errors.append(f"{prefix}.apply_delay_ms doit être >= 0")
+        if not _valid_int(raw.get("apply_delay_ms", 0), minimum=0):
+            errors.append(f"{prefix}.apply_delay_ms doit être un entier >= 0")
         _validate_conditions(raw.get("conditions", {}), f"{prefix}.conditions", errors)
 
     obs = data.get("obs")
@@ -463,12 +490,12 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         host = str(obs.get("host") or "127.0.0.1").strip().casefold()
         if host not in {"127.0.0.1", "localhost", "::1"}:
             errors.append("obs.host doit rester local (127.0.0.1, localhost ou ::1)")
-        try:
-            port = int(obs.get("port", 4455))
-            if not 1 <= port <= 65535:
-                raise ValueError
-        except (TypeError, ValueError):
+        if not _valid_int(obs.get("port", 4455), minimum=1, maximum=65535):
             errors.append("obs.port doit être compris entre 1 et 65535")
+        if not _valid_number(obs.get("timeout_seconds", 2.0), positive=True):
+            errors.append("obs.timeout_seconds doit être un nombre fini > 0")
+        if not _valid_number(obs.get("reconnect_seconds", 3.0)) or float(obs.get("reconnect_seconds", 3.0)) < 0:
+            errors.append("obs.reconnect_seconds doit être un nombre fini >= 0")
 
     api = data.get("api", {})
     if not isinstance(api, Mapping):
@@ -476,11 +503,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
     else:
         if str(api.get("host") or "127.0.0.1").strip() not in {"127.0.0.1", "localhost", "::1"}:
             errors.append("api.host doit rester local")
-        try:
-            port = int(api.get("port", 8765))
-            if not 1 <= port <= 65535:
-                raise ValueError
-        except (TypeError, ValueError):
+        if not _valid_int(api.get("port", 8765), minimum=1, maximum=65535):
             errors.append("api.port doit être compris entre 1 et 65535")
 
     activation_policies = data.get("activation_policies", {})
@@ -617,6 +640,45 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     errors.append(f"profiles.{domain}.{name}.actions[{action_index}].type est requis")
                 elif action_type not in SUPPORTED_ACTION_TYPES:
                     errors.append(f"profiles.{domain}.{name}.actions[{action_index}].type inconnu : {action_type}")
+                    continue
+                aprefix = f"profiles.{domain}.{name}.actions[{action_index}]"
+                params = action.get("params", {})
+                if not isinstance(params, Mapping):
+                    errors.append(f"{aprefix}.params doit être un objet")
+                    continue
+                if "enabled" in action and not isinstance(action.get("enabled"), bool):
+                    errors.append(f"{aprefix}.enabled doit être booléen")
+
+                def required_text(key: str) -> None:
+                    if not str(params.get(key) or "").strip():
+                        errors.append(f"{aprefix}.params.{key} est requis")
+
+                if action_type == "set_program_scene":
+                    required_text("scene")
+                elif action_type == "scene_item_enabled":
+                    required_text("scene")
+                    required_text("source")
+                    if "enabled" in params and not isinstance(params.get("enabled"), bool):
+                        errors.append(f"{aprefix}.params.enabled doit être booléen")
+                elif action_type == "source_filter_enabled":
+                    required_text("source")
+                    required_text("filter")
+                    if "enabled" in params and not isinstance(params.get("enabled"), bool):
+                        errors.append(f"{aprefix}.params.enabled doit être booléen")
+                elif action_type == "input_mute":
+                    required_text("input")
+                    if "muted" in params and not isinstance(params.get("muted"), bool):
+                        errors.append(f"{aprefix}.params.muted doit être booléen")
+                elif action_type == "input_volume_db":
+                    required_text("input")
+                    if not _valid_number(params.get("volume_db", 0.0)):
+                        errors.append(f"{aprefix}.params.volume_db doit être un nombre fini")
+                elif action_type == "set_input_settings":
+                    required_text("input")
+                    if not isinstance(params.get("settings"), Mapping):
+                        errors.append(f"{aprefix}.params.settings doit être un objet")
+                    if "overlay" in params and not isinstance(params.get("overlay"), bool):
+                        errors.append(f"{aprefix}.params.overlay doit être booléen")
 
     layout_profiles = data.get("layout_profiles")
     if not isinstance(layout_profiles, Mapping):
@@ -638,6 +700,10 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             mode = str(transition.get("mode") or "instant")
             if mode not in LAYOUT_TRANSITIONS:
                 errors.append(f"{prefix}.transition.mode inconnu : {mode}")
+            if not _valid_int(transition.get("duration_ms", 0), minimum=0):
+                errors.append(f"{prefix}.transition.duration_ms doit être un entier >= 0")
+            if not _valid_int(transition.get("steps", 8), minimum=1, maximum=60):
+                errors.append(f"{prefix}.transition.steps doit être compris entre 1 et 60")
         modules = profile.get("modules", {})
         if not isinstance(modules, Mapping):
             errors.append(f"{prefix}.modules doit être un objet")
@@ -672,8 +738,20 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     continue
                 if not str(element.get("source") or "").strip():
                     errors.append(f"{eprefix}.source est requis")
-                if not isinstance(element.get("transform"), Mapping):
+                transform = element.get("transform")
+                if not isinstance(transform, Mapping):
                     errors.append(f"{eprefix}.transform doit être un objet")
+                    continue
+                for key in (
+                    "positionX", "positionY", "scaleX", "scaleY", "rotation",
+                    "boundsWidth", "boundsHeight", "width", "height",
+                    "sourceWidth", "sourceHeight",
+                ):
+                    if key in transform and not _valid_number(transform.get(key)):
+                        errors.append(f"{eprefix}.transform.{key} doit être un nombre fini")
+                for key in ("included", "enabled", "follow_position", "follow_size", "follow_visibility", "locked"):
+                    if key in element and not isinstance(element.get(key), bool):
+                        errors.append(f"{eprefix}.{key} doit être booléen")
 
     profile_keys = {
         "game": "Game",

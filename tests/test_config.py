@@ -314,6 +314,61 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(validate_config(data), [])
 
 
+    def test_non_finite_layout_numbers_are_rejected(self):
+        for key, value in (("x", float("nan")), ("width", float("inf"))):
+            data = self.sample()
+            data["layout_profiles"]["Vanilla"] = {
+                "scene": "Gameplay",
+                "modules": {
+                    "Webcam": {
+                        "base_bounds": {"x": 0, "y": 0, "width": 100, "height": 100},
+                        "geometry": {"x": 0, "y": 0, "width": 100, "height": 100},
+                        "elements": [],
+                    }
+                },
+            }
+            data["layout_profiles"]["Vanilla"]["modules"]["Webcam"]["geometry"][key] = value
+            errors = validate_config(data)
+            self.assertTrue(any(f".geometry.{key}" in error for error in errors), errors)
+
+    def test_invalid_rule_regex_is_rejected(self):
+        data = self.sample()
+        data["rules"][1]["title_regex"] = "([unterminated"
+        errors = validate_config(data)
+        self.assertTrue(any("title_regex est invalide" in error for error in errors), errors)
+
+    def test_action_parameters_are_validated(self):
+        data = self.sample()
+        data["profiles"]["game"]["Game"]["actions"] = [
+            {"type": "scene_item_enabled", "params": {"scene": "", "source": "X", "enabled": "yes"}},
+            {"type": "input_volume_db", "params": {"input": "Music", "volume_db": float("nan")}},
+        ]
+        errors = validate_config(data)
+        self.assertTrue(any(".params.scene est requis" in error for error in errors), errors)
+        self.assertTrue(any(".params.enabled doit être booléen" in error for error in errors), errors)
+        self.assertTrue(any(".params.volume_db doit être un nombre fini" in error for error in errors), errors)
+
+    def test_non_finite_obs_and_transition_values_are_rejected(self):
+        data = self.sample()
+        data["obs"]["timeout_seconds"] = float("inf")
+        data["obs"]["reconnect_seconds"] = float("nan")
+        data["layout_profiles"]["Vanilla"]["transition"] = {
+            "mode": "move",
+            "duration_ms": float("inf"),
+            "steps": 0,
+        }
+        errors = validate_config(data)
+        self.assertTrue(any("obs.timeout_seconds" in error for error in errors), errors)
+        self.assertTrue(any("obs.reconnect_seconds" in error for error in errors), errors)
+        self.assertTrue(any("transition.duration_ms" in error for error in errors), errors)
+        self.assertTrue(any("transition.steps" in error for error in errors), errors)
+
+    def test_condition_types_are_rejected_when_not_boolean(self):
+        data = self.sample()
+        data["profiles"]["game"]["Game"]["conditions"] = {"streaming": "true"}
+        errors = validate_config(data)
+        self.assertTrue(any(".conditions.streaming doit être booléen" in error for error in errors), errors)
+
 
 if __name__ == "__main__":
     unittest.main()
