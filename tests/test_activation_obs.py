@@ -432,7 +432,6 @@ class OBSActivationControllerTests(unittest.TestCase):
                 return super()._mutate_visibility(target, enabled)
 
         controller = ObservingController(dispatcher, {"egg": policy})
-        controller.reconcile()
 
         with self.assertRaises(ActivationVisibilityUncertain):
             controller.apply_event(
