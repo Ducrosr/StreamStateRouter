@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import unittest
@@ -208,6 +209,7 @@ class FakeActivationController:
         self.reconcile_calls = 0
         self.changed = False
         self.events = []
+        self.registered_events = []
         self.thread_names = []
 
     def reconcile(self):
@@ -219,6 +221,12 @@ class FakeActivationController:
 
     def pending_hides(self, _policy_name=None):
         return ()
+
+    def pending_hides_for_current_collection(self):
+        return ()
+
+    def register_hide_obligation(self, event):
+        self.registered_events.append(event)
 
     def policy_cleanup_status(self, _policy_name):
         return False, ""
@@ -313,6 +321,112 @@ class BlockingActivationController(FakeActivationController):
             self.hide_seen.set()
 
 
+class CleanupRetryController(FakeActivationController):
+    def __init__(self):
+        super().__init__()
+        self.pending = [SimpleNamespace(policy="legacy")]
+        self.retry_calls = 0
+
+    def pending_hides(self, _policy_name=None):
+        return tuple(self.pending)
+
+    def pending_hides_for_current_collection(self):
+        return tuple(self.pending)
+
+    def retry_pending_hides(self, *, now=None):
+        self.retry_calls += 1
+        self.pending.clear()
+        return ("cleanup ack",)
+
+
+class PrearmShutdownScheduler(FakeActivationScheduler):
+    def __init__(self):
+        super().__init__()
+        self.reset_happened = False
+
+    def states(self):
+        return {
+            "egg": SimpleNamespace(
+                phase=SimpleNamespace(value="visible"),
+                active_source="Cloud",
+                active_container="[Module] EasterEgg",
+                active_container_kind="scene",
+            )
+        }
+
+    def reset_all(self):
+        self.reset_all_calls += 1
+        self.reset_happened = True
+        return [
+            ActivationEvent(
+                "hide",
+                "egg",
+                time.monotonic(),
+                source="Cloud",
+                container="[Module] EasterEgg",
+                container_kind="scene",
+                reason="reset",
+            )
+        ]
+
+
+class PrearmShutdownController(FakeActivationController):
+    def __init__(self, scheduler):
+        super().__init__()
+        self.scheduler = scheduler
+        self.registered_before_reset = False
+
+    def register_hide_obligation(self, event):
+        self.registered_before_reset = not self.scheduler.reset_happened
+        super().register_hide_obligation(event)
+
+
+class CleanupLayoutManager:
+    def __init__(self):
+        self._yield = None
+        self.imported = []
+        self.exported = []
+
+    def set_cooperative_yield(self, callback):
+        self._yield = callback
+
+    def import_pending_fade_cleanup(self, items):
+        self.imported.extend(dict(item) for item in items)
+        self.exported.extend(dict(item) for item in items)
+        return len(self.imported)
+
+    def export_pending_fade_cleanup(self):
+        return tuple(dict(item) for item in self.exported)
+
+
+class CleanupDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.layout_manager = CleanupLayoutManager()
+
+
+class OneShotBlockingQueue:
+    def __init__(self):
+        self.inner = queue.Queue()
+        self.put_entered = threading.Event()
+        self.release_first_put = threading.Event()
+        self._blocked = False
+
+    def put(self, item):
+        if not self._blocked:
+            self._blocked = True
+            self.put_entered.set()
+            if not self.release_first_put.wait(2.0):
+                raise RuntimeError("queue put barrier timed out")
+        self.inner.put(item)
+
+    def get_nowait(self):
+        return self.inner.get_nowait()
+
+    def qsize(self):
+        return self.inner.qsize()
+
+
 class ResultCollector:
     def __init__(self):
         self._lock = threading.Lock()
@@ -385,6 +499,148 @@ def activation_policy(*, enabled=True, cooldown=20.0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_cleanup_retries_without_activation_scheduler(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        controller = CleanupRetryController()
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            provider=FakeProvider(app),
+            activation_scheduler=None,
+            activation_controller=controller,
+        )
+
+        service._tick_activation(paused=False)
+
+        self.assertEqual(controller.retry_calls, 1)
+        self.assertEqual(controller.pending_hides(), ())
+
+    def test_shutdown_prearms_visible_cleanup_before_scheduler_reset(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        scheduler = PrearmShutdownScheduler()
+        controller = PrearmShutdownController(scheduler)
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service.start()
+        try:
+            result = service.stop(timeout=1.0)
+            self.assertTrue(result, result.diagnostic_summary())
+            self.assertTrue(controller.registered_before_reset)
+            self.assertEqual(len(controller.registered_events), 1)
+            self.assertEqual(controller.registered_events[0].source, "Cloud")
+            self.assertEqual(len(controller.events), 1)
+            self.assertEqual(controller.events[0].kind, "hide")
+        finally:
+            service.stop()
+
+    def test_runtime_imports_and_exports_contextual_fade_cleanup(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CleanupDispatcher()
+        fade = {
+            "kind": "layout_fade",
+            "source": "[Webcam] Avatar",
+            "collection": "Collection A",
+            "created_at": 1.0,
+            "attempts": 2,
+            "last_error": "offline",
+        }
+
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            pending_cleanup=(fade,),
+        )
+
+        self.assertEqual(dispatcher.layout_manager.imported, [fade])
+        self.assertEqual(service.pending_cleanup_snapshot(), (fade,))
+
+    def test_shutdown_snapshot_combines_activation_and_fade_obligations(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CleanupDispatcher()
+        controller = FakeActivationController()
+        activation = {
+            "kind": "activation_hide",
+            "policy": "egg",
+            "collection": "Collection A",
+            "target": {"container": "Egg", "source": "Cloud"},
+        }
+        fade = {
+            "kind": "layout_fade",
+            "source": "[Webcam] Avatar",
+            "collection": "Collection A",
+        }
+        controller.export_pending_hides = lambda: (activation,)
+        dispatcher.layout_manager.exported = [fade]
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_controller=controller,
+        )
+
+        snapshot = service.pending_cleanup_snapshot()
+
+        self.assertEqual(snapshot, (activation, fade))
+
+    def test_command_admission_is_atomic_with_shutdown_boundary(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        service = RoutingService(
+            engine,
+            CommandDispatcher(),
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        blocker = OneShotBlockingQueue()
+        service._runtime_commands = blocker
+        request_done = threading.Event()
+        stop_done = threading.Event()
+        stop_result = {}
+
+        def submit():
+            try:
+                service.request_layout("apply", "Test A")
+            finally:
+                request_done.set()
+
+        def stop():
+            stop_result["value"] = service.stop(timeout=1.5)
+            stop_done.set()
+
+        submitter = threading.Thread(target=submit)
+        stopper = threading.Thread(target=stop)
+        try:
+            submitter.start()
+            self.assertTrue(blocker.put_entered.wait(1.0))
+            stopper.start()
+            time.sleep(0.05)
+
+            # submit_obs_command still owns _lock while its accepted command is
+            # inserted, so stop() cannot close admission in the middle.
+            self.assertFalse(service._stopping)
+            self.assertFalse(stop_done.is_set())
+
+            blocker.release_first_put.set()
+            self.assertTrue(request_done.wait(1.0))
+            submitter.join(1.0)
+            stopper.join(2.0)
+            self.assertFalse(stopper.is_alive())
+            self.assertTrue(stop_result["value"], stop_result["value"].diagnostic_summary())
+        finally:
+            blocker.release_first_put.set()
+            service.stop()
+
     def test_live_obs_profile_command_runs_on_runtime_worker(self):
         app = ForegroundApp(1, 1, "terminal.exe")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
