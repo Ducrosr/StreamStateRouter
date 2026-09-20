@@ -141,10 +141,22 @@ class RuntimeShutdownResult:
         return self.success
 
     def diagnostic_summary(self) -> str:
+        activation_pending = sum(
+            1
+            for item in self.pending_cleanup
+            if str(item.get("kind") or "activation_hide").casefold() != "layout_fade"
+        )
+        fade_pending = sum(
+            1
+            for item in self.pending_cleanup
+            if str(item.get("kind") or "").casefold() == "layout_fade"
+        )
         return (
             f"routing_thread={'stopped' if self.worker_stopped else 'alive'}; "
             f"obs_dispatch={'quiescent' if self.dispatch_quiescent else 'active'}; "
-            f"activation_cleanup={'complete' if self.cleanup_complete else f'pending({len(self.pending_cleanup)})'}; "
+            f"cleanup={'complete' if self.cleanup_complete else f'pending({len(self.pending_cleanup)})'}; "
+            f"activation_pending={activation_pending}; "
+            f"fade_pending={fade_pending}; "
             f"pending_commands={self.pending_commands}; "
             f"phase={self.shutdown_phase or 'unknown'}; "
             f"active_operation={self.active_operation or 'none'}; "
@@ -169,6 +181,7 @@ class RoutingService:
         activation_scheduler: ActivationScheduler | None = None,
         activation_controller: OBSActivationController | None = None,
         pending_activation_cleanup=(),
+        pending_cleanup=(),
         config_revision: str = "",
     ) -> None:
         self.engine = engine
@@ -180,14 +193,36 @@ class RoutingService:
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
         self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
         policies = dict(activation_policies or {})
+        transferred_cleanup = tuple(pending_activation_cleanup or ()) + tuple(pending_cleanup or ())
+        activation_cleanup: list[Mapping[str, object]] = []
+        fade_cleanup: list[Mapping[str, object]] = []
+        for item in transferred_cleanup:
+            if not isinstance(item, Mapping):
+                continue
+            kind = str(item.get("kind") or "activation_hide").strip().casefold()
+            if kind == "layout_fade":
+                fade_cleanup.append(item)
+            else:
+                # Backward compatibility: pre-v2 cleanup markers did not carry
+                # a kind and always represented activation hides.
+                activation_cleanup.append(item)
+
         self.activation_scheduler = activation_scheduler
         self.activation_controller = activation_controller
         if self.activation_scheduler is None and policies:
             self.activation_scheduler = ActivationScheduler(policies)
-        if self.activation_controller is None and (policies or pending_activation_cleanup):
+        if self.activation_controller is None and (policies or activation_cleanup):
             self.activation_controller = OBSActivationController(dispatcher, policies)
-        if self.activation_controller is not None and pending_activation_cleanup:
-            self.activation_controller.import_pending_hides(pending_activation_cleanup)
+        if self.activation_controller is not None and activation_cleanup:
+            self.activation_controller.import_pending_hides(activation_cleanup)
+
+        layout_manager = getattr(self.dispatcher, "layout_manager", None)
+        if (
+            layout_manager is not None
+            and fade_cleanup
+            and hasattr(layout_manager, "import_pending_fade_cleanup")
+        ):
+            layout_manager.import_pending_fade_cleanup(fade_cleanup)
 
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -226,7 +261,6 @@ class RoutingService:
         self.on_change: Callable[[StateChange], None] | None = None
         self.on_dispatch: Callable[[DispatchResult], None] | None = None
         self.on_event: Callable[[RuntimeEvent], None] | None = None
-        layout_manager = getattr(self.dispatcher, "layout_manager", None)
         if layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
             layout_manager.set_cooperative_yield(self._cooperative_obs_yield)
 
@@ -260,13 +294,19 @@ class RoutingService:
         return self._shutdown_result
 
     def pending_cleanup_snapshot(self) -> tuple[dict[str, object], ...]:
+        items: list[dict[str, object]] = []
         controller = self.activation_controller
-        if controller is None:
-            return ()
-        exporter = getattr(controller, "export_pending_hides", None)
-        if not callable(exporter):
-            return ()
-        return tuple(exporter())
+        if controller is not None:
+            exporter = getattr(controller, "export_pending_hides", None)
+            if callable(exporter):
+                items.extend(dict(item) for item in exporter())
+
+        layout_manager = getattr(self.dispatcher, "layout_manager", None)
+        if layout_manager is not None:
+            exporter = getattr(layout_manager, "export_pending_fade_cleanup", None)
+            if callable(exporter):
+                items.extend(dict(item) for item in exporter())
+        return tuple(items)
 
     def _build_shutdown_result(
         self,
@@ -489,6 +529,7 @@ class RoutingService:
         target_source: str | None = None,
         options: Mapping[str, object] | None = None,
     ) -> str:
+        request_id = uuid.uuid4().hex
         with self._lock:
             thread = self._thread
             if (
@@ -499,19 +540,20 @@ class RoutingService:
             ):
                 raise RuntimeError("Runtime d'activation indisponible ou en arrêt")
             generation = self._command_generation
-        request_id = uuid.uuid4().hex
-        self._set_command_status(request_id, action=str(action), status="accepted")
-        self._runtime_commands.put(
-            _ActivationCommand(
-                request_id=request_id,
-                generation=generation,
-                action=str(action),
-                policy=str(policy_name),
-                target_identity=target_identity,
-                target_source=target_source,
-                options=dict(options or {}),
+            # Admission and queue insertion are one atomic lifecycle decision:
+            # stop() cannot close admission/increment generation between them.
+            self._set_command_status(request_id, action=str(action), status="accepted")
+            self._runtime_commands.put(
+                _ActivationCommand(
+                    request_id=request_id,
+                    generation=generation,
+                    action=str(action),
+                    policy=str(policy_name),
+                    target_identity=target_identity,
+                    target_source=target_source,
+                    options=dict(options or {}),
+                )
             )
-        )
         self._wake.set()
         return request_id
 
@@ -521,6 +563,7 @@ class RoutingService:
         *,
         options: Mapping[str, object] | None = None,
     ) -> str:
+        request_id = uuid.uuid4().hex
         with self._lock:
             thread = self._thread
             if (
@@ -531,16 +574,15 @@ class RoutingService:
             ):
                 raise RuntimeError("Runtime OBS indisponible ou en arrêt")
             generation = self._command_generation
-        request_id = uuid.uuid4().hex
-        self._set_command_status(request_id, action=str(action), status="accepted")
-        self._runtime_commands.put(
-            _OBSCommand(
-                request_id=request_id,
-                generation=generation,
-                action=str(action),
-                options=dict(options or {}),
+            self._set_command_status(request_id, action=str(action), status="accepted")
+            self._runtime_commands.put(
+                _OBSCommand(
+                    request_id=request_id,
+                    generation=generation,
+                    action=str(action),
+                    options=dict(options or {}),
+                )
             )
-        )
         self._wake.set()
         return request_id
 
@@ -933,14 +975,17 @@ class RoutingService:
     def _reconcile_activation(self, reason: str) -> bool:
         scheduler = self.activation_scheduler
         controller = self.activation_controller
-        if scheduler is None or controller is None:
+        if controller is None:
             return True
-        with self._lock:
-            scheduler.reset_all()
-            self._activation_eligibility_cache.clear()
-            self._activation_cleanup_cache.clear()
+        if scheduler is not None:
+            with self._lock:
+                scheduler.reset_all()
+                self._activation_eligibility_cache.clear()
+                self._activation_cleanup_cache.clear()
         try:
             warnings = controller.reconcile()
+            for message in controller.retry_pending_hides(now=time.monotonic()):
+                self._record_activation_diagnostic("*", "nettoyage", message)
         except Exception as exc:
             self.logger.warning("Activation reconciliation failed (%s): %s", reason, exc)
             self._record_activation_diagnostic(
@@ -959,6 +1004,7 @@ class RoutingService:
         for item in pending:
             cleanup_counts[item.policy] = cleanup_counts.get(item.policy, 0) + 1
         with self._lock:
+            self._activation_cleanup_cache.clear()
             self._activation_cleanup_cache.update(cleanup_counts)
         if warnings or pending:
             message = (
@@ -977,16 +1023,23 @@ class RoutingService:
     def _tick_activation(self, *, paused: bool) -> None:
         scheduler = self.activation_scheduler
         controller = self.activation_controller
-        if scheduler is None or controller is None:
+        if controller is None:
             return
 
-        if controller.scene_collection_changed():
+        collection_changed = controller.scene_collection_changed()
+        if collection_changed and scheduler is not None:
             self._reconcile_activation("changement de Scene Collection")
             return
 
+        # Imported/leftover obligations are recovery work in their own right.
+        # They must continue to progress even when the current configuration no
+        # longer contains an activation scheduler/policy.
         now = time.monotonic()
         for message in controller.retry_pending_hides(now=now):
             self._record_activation_diagnostic("*", "nettoyage", message)
+
+        if scheduler is None:
+            return
 
         def eligibility(name: str, policy: TriggerPolicyConfig) -> bool:
             result = self._effective_activation_eligibility(name, policy)
@@ -1515,15 +1568,52 @@ class RoutingService:
         scheduler = self.activation_scheduler
         controller = self.activation_controller
 
-        # Full activation reconciliation is deliberately reserved for
-        # OBS connect/reconnect. It hides every configured target and therefore
-        # performs O(targets) synchronous OBS mutations. During an orderly stop
-        # the scheduler already knows which targets are actually visible, while
-        # uncertain visibility is tracked in controller.pending_hides().
-        with self._lock:
-            self._shutdown_phase = "activation_reset"
+        # Full activation reconciliation is deliberately reserved for OBS
+        # connect/reconnect. During orderly stop, capture scheduler-owned visible
+        # state as cleanup obligations before reset_all() destroys that transient
+        # state, then issue only the corresponding hides.
         hide_events: list[ActivationEvent] = []
         if scheduler is not None:
+            with self._lock:
+                self._shutdown_phase = "activation_snapshot"
+            states = getattr(scheduler, "states", None)
+            register = getattr(controller, "register_hide_obligation", None)
+            if callable(states) and callable(register):
+                try:
+                    now = time.monotonic()
+                    for policy_name, state in states().items():
+                        phase = str(getattr(getattr(state, "phase", None), "value", ""))
+                        source = str(getattr(state, "active_source", "") or "")
+                        if phase != "visible" or not source:
+                            continue
+                        event = ActivationEvent(
+                            "hide",
+                            str(policy_name),
+                            now,
+                            source=source,
+                            container=str(getattr(state, "active_container", "") or ""),
+                            container_kind=str(
+                                getattr(state, "active_container_kind", "scene") or "scene"
+                            ),
+                            reason="shutdown",
+                        )
+                        register(event)
+                except Exception as exc:
+                    # Do not invent a context if OBS cannot establish one. The
+                    # scheduler event is still retained locally below and its
+                    # normal apply path will either acknowledge or record it.
+                    self.logger.warning(
+                        "Activation cleanup pre-arm failed during shutdown: %s",
+                        exc,
+                    )
+                    self._record_activation_diagnostic(
+                        "*",
+                        "warning",
+                        f"pré-enregistrement cleanup impossible : {exc}",
+                    )
+
+            with self._lock:
+                self._shutdown_phase = "activation_reset"
             try:
                 hide_events = [
                     event
@@ -1551,8 +1641,6 @@ class RoutingService:
                 try:
                     controller.apply_event(event)
                 except Exception as exc:
-                    # OBSActivationController records uncertain hide results in
-                    # pending_hides, which are transferred to the next runtime.
                     self.logger.warning("Activation hide during shutdown failed: %s", exc)
                     self._record_activation_diagnostic(
                         getattr(event, "policy", "*"),
@@ -1562,17 +1650,24 @@ class RoutingService:
 
         with self._lock:
             self._shutdown_phase = "activation_pending_cleanup"
+        current_pending = getattr(controller, "pending_hides_for_current_collection", None)
+        pending_for_retry = (
+            current_pending
+            if callable(current_pending)
+            else (lambda: controller.pending_hides() if controller is not None else ())
+        )
         deadline = time.monotonic() + 1.5
         while (
             controller is not None
-            and controller.pending_hides()
+            and pending_for_retry()
             and time.monotonic() < deadline
         ):
             now = time.monotonic()
             for message in controller.retry_pending_hides(now=now):
                 self._record_activation_diagnostic("*", "nettoyage", message)
-            if controller.pending_hides():
+            if pending_for_retry():
                 time.sleep(0.05)
+
         if controller is not None and controller.pending_hides():
             pending_count = len(controller.pending_hides())
             self._record_activation_diagnostic(
