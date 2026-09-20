@@ -726,6 +726,22 @@ class MainWindow(QMainWindow):
         if event.kind == "activation_command_result" and event.payload is not None:
             self.bridge.activation_result.emit(event.payload)
             return
+        if event.kind == "obs_command_result" and event.payload is not None:
+            payload = event.payload
+            action = str(getattr(payload, "action", "") or "")
+            if bool(getattr(payload, "success", False)):
+                if action == "layout.preview":
+                    self._preview_active = True
+                elif action in {"layout.cancel-preview", "layout.apply"}:
+                    self._preview_active = False
+                self.statusBar().showMessage(f"OBS : {action} terminé", 5000)
+            else:
+                self.statusBar().showMessage(
+                    f"OBS : {action} échoué — {getattr(payload, 'error', '')}",
+                    8000,
+                )
+            self._update_obs_status()
+            return
         if event.kind in {"obs_connected", "obs_disconnected"}:
             self._update_obs_status()
         elif event.kind == "obs_error":
@@ -779,15 +795,9 @@ class MainWindow(QMainWindow):
         if not self._service:
             return
         try:
-            result = self._service.force_reapply()
-            if result is None:
-                QMessageBox.information(self, "OBS", "Aucun état courant à réappliquer.")
-            else:
-                QMessageBox.information(
-                    self,
-                    "OBS",
-                    f"{result.executed} action(s) réappliquée(s).",
-                )
+            request_id = self._service.request_force_reapply()
+            self._log(f"Réapplication OBS mise en file ({request_id[:8]}).")
+            self.statusBar().showMessage("Réapplication OBS en cours…", 3000)
         except Exception as exc:
             QMessageBox.critical(self, "OBS", str(exc))
 
@@ -1759,22 +1769,15 @@ class MainWindow(QMainWindow):
 
     def _apply_layout_profile(self) -> None:
         current = self._current_layout_profile()
-        if not current:
+        if not current or self._service is None:
             return
         self._collect_settings()
         try:
-            manager = self._layout_manager_for_tools()
-            resolved = resolve_layout_profile(current[0], self._layout_profiles())
-            result = manager.apply_profile(resolved)
+            request_id = self._service.request_layout("apply", current[0])
+            self._log(f"Application layout {current[0]} mise en file ({request_id[:8]}).")
+            self.statusBar().showMessage(f"Application du layout {current[0]}…", 3000)
         except Exception as exc:
             QMessageBox.critical(self, "Appliquer le layout", str(exc))
-            return
-        details = f"{result.elements_applied} élément(s) appliqué(s), {result.elements_skipped} ignoré(s)."
-        if result.missing_sources:
-            details += "\n\nSources introuvables :\n- " + "\n- ".join(result.missing_sources)
-        if result.warnings:
-            details += "\n\nAvertissements :\n- " + "\n- ".join(result.warnings)
-        QMessageBox.information(self, "Layout appliqué", details)
 
     def _layout_manager_for_tools(self) -> OBSLayoutManager:
         self._collect_settings()
@@ -1789,33 +1792,29 @@ class MainWindow(QMainWindow):
 
     def _preview_layout_profile(self) -> None:
         current = self._current_layout_profile()
-        if not current:
+        if not current or self._service is None:
             return
         try:
-            manager = self._layout_manager_for_tools()
-            resolved = resolve_layout_profile(current[0], self._layout_profiles())
-            result = manager.preview_profile(resolved)
-            self._preview_active = True
-            self._log(f"Aperçu layout {current[0]} : {result.elements_applied} élément(s).")
+            request_id = self._service.request_layout("preview", current[0])
+            self._log(f"Aperçu layout {current[0]} mis en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Aperçu layout", str(exc))
 
     def _cancel_layout_preview(self) -> None:
+        if self._service is None:
+            return
         try:
-            manager = self._layout_manager_for_tools()
-            result = manager.cancel_preview()
-            self._preview_active = False
-            self._log(f"Aperçu annulé : {result.elements_applied} élément(s) restauré(s).")
+            request_id = self._service.request_layout("cancel-preview")
+            self._log(f"Annulation aperçu mise en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Aperçu layout", str(exc))
 
     def _undo_layout_obs(self) -> None:
+        if self._service is None:
+            return
         try:
-            manager = self._layout_manager_for_tools()
-            result = manager.undo_last()
-            self._log(f"Undo OBS : {result.elements_applied} élément(s) restauré(s).")
-            if result.warnings:
-                QMessageBox.information(self, "Undo OBS", "\n".join(result.warnings))
+            request_id = self._service.request_layout("undo")
+            self._log(f"Undo OBS mis en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Undo OBS", str(exc))
 
@@ -1972,8 +1971,8 @@ class MainWindow(QMainWindow):
             self._service.clear_manual_override()
             return {"paused": False}
         if action == "reapply":
-            result = self._service.force_reapply()
-            return {"executed": result.executed if result else 0}
+            request_id = self._service.request_force_reapply()
+            return {"request_id": request_id, "status": "accepted"}
         if action == "override":
             state = StreamState.from_mapping(payload.get("state") if isinstance(payload.get("state"), dict) else {})
             duration = float(payload.get("duration_seconds", 0) or 0)
@@ -1983,20 +1982,20 @@ class MainWindow(QMainWindow):
             name = str(payload.get("name") or "").strip()
             if not name:
                 raise ValueError("name requis")
-            result = self._dispatcher.execute_layout_profile(name)
-            return {"executed": result.executed}
+            request_id = self._service.request_layout("apply", name)
+            return {"request_id": request_id, "status": "accepted"}
         if action == "layout.preview":
             name = str(payload.get("name") or "").strip()
             if not name:
                 raise ValueError("name requis")
-            result = self._dispatcher.execute_layout_profile(name, preview=True)
-            return {"executed": result.executed}
+            request_id = self._service.request_layout("preview", name)
+            return {"request_id": request_id, "status": "accepted"}
         if action == "layout.cancel-preview":
-            result = self._dispatcher.layout_manager.cancel_preview()
-            return {"executed": result.elements_applied}
+            request_id = self._service.request_layout("cancel-preview")
+            return {"request_id": request_id, "status": "accepted"}
         if action == "layout.undo":
-            result = self._dispatcher.layout_manager.undo_last()
-            return {"executed": result.elements_applied}
+            request_id = self._service.request_layout("undo")
+            return {"request_id": request_id, "status": "accepted"}
         raise ValueError(f"Action inconnue : {action}")
 
     def _edit_layout_in_obs(self) -> None:
@@ -2004,16 +2003,16 @@ class MainWindow(QMainWindow):
         if not current:
             return
         try:
-            manager = self._layout_manager_for_tools()
-            resolved = resolve_layout_profile(current[0], self._layout_profiles())
-            result = manager.apply_profile(resolved)
+            if self._service is None:
+                raise RuntimeError("Runtime non disponible")
+            request_id = self._service.request_layout("apply", current[0])
             self._log(
-                f"Mode édition OBS — layout {current[0]} appliqué ({result.elements_applied} élément(s)). "
-                "Ajustez dans OBS puis utilisez Capturer depuis OBS."
+                f"Mode édition OBS — application de {current[0]} mise en file "
+                f"({request_id[:8]}). Ajustez dans OBS après confirmation runtime puis capturez."
             )
             self.statusBar().showMessage(
-                "Mode édition : ajustez le layout dans OBS puis cliquez Capturer depuis OBS",
-                8000,
+                "Mode édition : application OBS en cours…",
+                5000,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Mode édition OBS", str(exc))
