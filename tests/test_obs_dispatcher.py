@@ -141,6 +141,74 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertNotIn("game", dispatcher.pending_domains(state))
         self.assertTrue(any(s.status == "applied" for s in second.domain_statuses))
 
+    def test_manual_layout_hold_survives_session_invalidation(self):
+        client = FakeClient()
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            {
+                "A": {"scene": "OW", "modules": {}},
+                "B": {"scene": "OW", "modules": {}},
+            },
+        )
+        state_a = StreamState(layout_profile="A")
+        state_b = StreamState(layout_profile="B")
+
+        dispatcher.set_manual_layout_hold("A")
+        dispatcher.invalidate_applied_state()
+
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+        self.assertIn("layout", dispatcher.pending_domains(state_b))
+
+        plan = dispatcher.plan_state(
+            state_a,
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "OW",
+            },
+        )
+        layout = next(row for row in plan["domains"] if row["domain"] == "layout")
+        self.assertFalse(layout["needs_apply"])
+        self.assertEqual(layout["status"], "held")
+
+    def test_manual_layout_hold_releases_when_routing_wants_another_layout(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+        state_a = StreamState(layout_profile="A")
+        state_b = StreamState(layout_profile="B")
+
+        dispatcher.set_manual_layout_hold("A")
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+
+        # A genuinely different routed layout releases the manual divergence.
+        dispatcher.dispatch_state(state_b)
+
+        self.assertIn("layout", dispatcher.pending_domains(state_a))
+
+    def test_explicit_layout_apply_records_current_routing_baseline(self):
+        dispatcher = OBSDispatcher(
+            FakeClient(),
+            {},
+            {
+                "A": {"scene": "OW", "modules": {}},
+                "B": {"scene": "OW", "modules": {}},
+            },
+        )
+        state_a = StreamState(layout_profile="A")
+        dispatcher._desired_state = state_a
+        dispatcher._layout_manager.apply_profile = lambda _profile: SimpleNamespace(
+            elements_applied=1,
+            elements_skipped=0,
+            warnings=(),
+            missing_sources=(),
+        )
+
+        dispatcher.execute_layout_profile("B")
+        dispatcher.invalidate_applied_state()
+
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+
     def test_read_only_plan_reuses_inheritance_and_performs_no_obs_calls(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
