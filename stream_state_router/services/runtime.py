@@ -1000,20 +1000,37 @@ class RoutingService:
             self.logger.warning("Activation reconcile: %s", warning)
             self._record_activation_diagnostic("*", "warning", warning)
         pending = controller.pending_hides()
+        current_pending_provider = getattr(
+            controller,
+            "pending_hides_for_current_collection",
+            None,
+        )
+        active_pending = (
+            tuple(current_pending_provider())
+            if callable(current_pending_provider)
+            else tuple(pending)
+        )
         cleanup_counts: dict[str, int] = {}
-        for item in pending:
+        for item in active_pending:
             cleanup_counts[item.policy] = cleanup_counts.get(item.policy, 0) + 1
         with self._lock:
             self._activation_cleanup_cache.clear()
             self._activation_cleanup_cache.update(cleanup_counts)
-        if warnings or pending:
+        if warnings or active_pending:
             message = (
                 f"Nettoyage activation incomplet — {reason} "
-                f"({len(pending)} masquage(s) en attente)"
+                f"({len(active_pending)} masquage(s) actif(s) en attente)"
             )
             self._record_activation_diagnostic("*", "nettoyage", message)
             self._emit(RuntimeEvent("activation_cleanup_pending", message, success=False))
             return False
+        suspended = max(0, len(pending) - len(active_pending))
+        if suspended:
+            self._record_activation_diagnostic(
+                "*",
+                "nettoyage",
+                f"{suspended} obligation(s) contextualisée(s) suspendue(s) dans une autre Scene Collection",
+            )
 
         message = f"Déclenchements réinitialisés — {reason}"
         self._record_activation_diagnostic("*", "fail-safe", message)
