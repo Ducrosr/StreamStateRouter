@@ -1,4 +1,29 @@
-# Stream State Router 2.0.13
+# Stream State Router 2.0.14
+
+## 2.0.14 — feuille de route d'architecture Astra
+
+Cette version applique la feuille de route d'audit dans l'ordre recommandé, sans remplacer l'architecture existante :
+
+- résolution fraîche des `sceneItemId` pour les actions OBS classiques ;
+- récupération bornée des filtres de fondu et nettoyage différé des opacités temporaires ;
+- validation homogène des nombres finis, regex, conditions et paramètres d'actions ;
+- signatures Win32 `ctypes` explicites ;
+- chaîne de build/release versionnée depuis une source unique avec smoke test du binaire ;
+- mutations OBS live sérialisées par le runtime ;
+- séparation entre état désiré et état effectivement acquitté par OBS ;
+- obligations de nettoyage conservées après erreur, reconnexion ou arrêt ;
+- preview/undo protégés par le contexte OBS et récupérables ;
+- identité exacte des cibles d'activation et propriété explicite de visibilité runtime ;
+- capture de LayoutProfiles remplacée de manière complète et validée ;
+- comparaison/validation des layouts alignées sur le plan réellement appliqué ;
+- distinction entre brouillon, configuration enregistrée et configuration appliquée ;
+- API et Stream Deck avec acquittement explicite des commandes ;
+- sauvegardes atomiques et bornées ;
+- diagnostic transversal des décisions et applications incomplètes ;
+- scans OBS allégés et suppression des écritures no-op mesurables ;
+- explication de routage en lecture seule, construite avec les mêmes résolveurs que l'exécution réelle.
+
+OBS reste l'éditeur visuel ; SSR conserve son rôle d'orchestrateur, de mémoire et de restaurateur d'état.
 
 ## Correctif 2.0.13 — activations OBS sérialisées et acquittées
 

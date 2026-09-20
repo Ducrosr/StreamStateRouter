@@ -1,5 +1,26 @@
 # Historique
 
+## 2.0.14 — feuille de route d'architecture Astra
+
+- **A2 — IDs OBS frais** : les actions classiques de visibilité résolvent désormais le `sceneItemId` à chaque mutation au lieu de conserver un cache durable susceptible de cibler un autre item après une modification structurelle d'OBS.
+- **A6 — Fondu borné** : la récupération du filtre de fondu n'est plus récursive ; seules les absences confirmées déclenchent une création/réactivation, avec une unique relance et un nettoyage compensatoire suivi dans le runtime.
+- **A7 — Validation homogène** : rejet des `NaN`/`Infinity`, regex invalides, types de conditions incohérents, paramètres d'actions incomplets et transitions invalides.
+- **A8 — Win32** : signatures ABI `ctypes` explicites pour user32/kernel32 et le mutex d'instance unique.
+- **A16 — Build/release** : version Python unique, noms d'artefacts cohérents, contrôle des codes de sortie, smoke test de l'EXE, vérification tag/version, dépendances Stream Deck directes verrouillées et provenance de build enregistrée.
+- **A3 — Orchestration OBS** : les mutations live provenant du runtime, de l'UI et de l'API passent par une orchestration sérialisée, avec résultats structurés.
+- **A1 — État désiré/acquitté** : le runtime distingue l'état demandé de l'état effectivement appliqué par OBS, y compris le scénario A → B différé → C.
+- **A4 — Obligations de nettoyage** : les nettoyages temporaires restent explicitement suivis et retentables après erreur, reconnexion et arrêt.
+- **A5 — Preview/Undo** : les contextes de restauration sont invalidés quand le contexte OBS change et les restaurations partielles sont signalées au lieu d'être considérées réussies.
+- **A9 — Identité d'activation** : cibles identifiées exactement par conteneur/type/source, propriété de visibilité explicite et compatibilité legacy uniquement lorsqu'elle reste non ambiguë.
+- **A10 — Capture** : une recapture remplace complètement l'état prévu du profil et valide l'héritage/les modules supprimés plutôt que de conserver des fragments obsolètes.
+- **A11 — Diagnostics Layout** : compare/validate réutilisent le même plan logique que l'application réelle, notamment pour héritage, exclusions et visibilité runtime-owned.
+- **A13 — Révisions de configuration** : distinction entre brouillon, version enregistrée et version réellement appliquée au runtime.
+- **A14 — API / Stream Deck** : acquittement explicite des commandes et paramètres de connexion configurables.
+- **A15 — Sauvegardes/export** : sauvegardes atomiques, rotation bornée et export partageable plus sûr.
+- **A17 — Observabilité** : diagnostics corrélés par décision, domaines demandés/appliqués/échoués, détails d'erreur et compteurs de requêtes OBS ; état UI/API « application incomplète ».
+- **A12 — Performance** : scans topologiques légers mutualisés et écritures de layout inutiles supprimées tout en conservant la stabilisation des groupes.
+- **A18 — Explication de décision** : explication de routage en lecture seule pour MATCH/IGNORE/fallback, debounce, héritage, conditions et opérations prévues, sans mutation OBS.
+
 ## 2.0.13 — sérialisation et acquittement des activations temporaires OBS
 
 - Les commandes d'activation Qt sont désormais asynchrones et consommées par le worker `SSR-Router`.

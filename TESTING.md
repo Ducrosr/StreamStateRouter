@@ -1,4 +1,37 @@
-# Plan de validation — Stream State Router 2.0.13
+# Plan de validation — Stream State Router 2.0.14
+
+## 0. Acceptation de la feuille de route Astra
+
+### Phase A — correctifs localisés
+
+- [ ] Modifier structurellement une scène OBS puis exécuter deux actions classiques sur la même source : la résolution doit suivre le nouvel ID et jamais l'ancien item réutilisé.
+- [ ] Faire échouer durablement le filtre de fondu : aucune récursion ni rafale infinie ; le nettoyage reste visible/rejouable.
+- [ ] Charger des valeurs `NaN`/`Infinity`, une regex invalide ou des paramètres d'action mal typés : la configuration doit être refusée avant application.
+- [ ] Vérifier le provider Win32 et l'instance unique sur Windows x64.
+- [ ] Injecter un échec de test/build : aucun artefact release ultérieur ne doit être publié.
+
+### Phase B — orchestration et récupération
+
+- [ ] Reproduire A appliqué → B demandé avec délai → C demandé avant B : C doit être calculé depuis le dernier état réellement acquitté, pas depuis B.
+- [ ] Envoyer simultanément des mutations depuis routage, UI et API : l'ordre doit rester déterministe et observable.
+- [ ] Couper OBS pendant un nettoyage temporaire puis reconnecter : l'obligation doit être conservée et retentée.
+- [ ] Créer un preview, changer de Scene Collection puis annuler : le snapshot ancien ne doit jamais être appliqué à la nouvelle collection.
+- [ ] Provoquer une restauration partielle : l'UI/API doivent signaler l'incomplétude et permettre un nouveau test.
+
+### Phase C — configuration et ergonomie
+
+- [ ] Deux cibles de même nom dans des conteneurs différents doivent être distinguées par leur identité exacte.
+- [ ] Recapturer un LayoutProfile après suppression d'un module : l'ancien module ne doit pas survivre dans le profil capturé.
+- [ ] Vérifier qu'un profil hérité compare/valide exactement ce que l'application utiliserait réellement.
+- [ ] Modifier une configuration sans l'appliquer : l'UI doit distinguer brouillon, enregistré et runtime appliqué.
+- [ ] Depuis API et Stream Deck, une commande doit retourner/acquitter son résultat plutôt qu'être supposée réussie.
+- [ ] Interrompre une écriture de configuration/sauvegarde : aucun fichier final partiellement écrit ne doit remplacer la dernière copie valide.
+
+### Phase D — mesure et extensions
+
+- [ ] Provoquer une source manquante : le diagnostic doit identifier décision, domaine et cible incomplets sans exposer de secret.
+- [ ] Mesurer les requêtes OBS sur une grande scène avant/après les scans partagés ; aucune optimisation ne doit réintroduire des IDs persistants.
+- [ ] Utiliser « Expliquer cette décision » sur MATCH, IGNORE et fallback : l'explication doit correspondre au moteur et ne provoquer aucune mutation OBS.
 
 ## 1. Validation automatisée prioritaire
 
