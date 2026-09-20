@@ -2044,11 +2044,6 @@ class OBSLayoutManager:
             )
 
             for prepared in fallback:
-                target = prepared["target_transform"]
-                if prepared["transform_changed"] and target:
-                    self._set_transform(
-                        prepared["container"], prepared["source"], target
-                    )
                 target_enabled = prepared["target_enabled"]
                 current_enabled = prepared["current_enabled"]
                 if (
