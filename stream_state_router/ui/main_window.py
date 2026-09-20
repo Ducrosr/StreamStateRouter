@@ -2215,6 +2215,8 @@ class MainWindow(QMainWindow):
                 include_settings=bool(payload.get("include_settings", False))
             )
             return {"request_id": request_id, "status": "accepted"}
+        if action == "catalog.snapshot":
+            return {"catalog": self._service.catalog_snapshot()}
         if action == "override":
             state = StreamState.from_mapping(payload.get("state") if isinstance(payload.get("state"), dict) else {})
             duration = float(payload.get("duration_seconds", 0) or 0)
