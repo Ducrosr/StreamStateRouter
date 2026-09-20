@@ -918,7 +918,7 @@ class RoutingService:
                 except _RuntimeShutdownRequested:
                     if self._stopping:
                         self._worker_phase = "shutdown_cleanup"
-                        self._perform_activation_shutdown()
+                        self._perform_orderly_shutdown()
                         break
                     raise
                 except Exception as exc:
@@ -1323,7 +1323,7 @@ class RoutingService:
                     deferred.append(command)
                     should_stop = True
                     break
-                self._perform_activation_shutdown()
+                self._perform_orderly_shutdown()
                 should_stop = True
                 break
             if command.action == "simulate":
@@ -1664,6 +1664,35 @@ class RoutingService:
             )
         )
 
+    def _perform_orderly_shutdown(self) -> None:
+        """Run cleanup once and always finish the worker shutdown protocol."""
+        self._shutdown_cleanup_active = True
+        try:
+            self._perform_activation_shutdown()
+        except Exception as exc:
+            # Cleanup failure must preserve the fail-closed lifecycle: do not
+            # resurrect normal work and do not lose an already-consumed shutdown.
+            self.logger.exception("Runtime cleanup failed during shutdown")
+            self._record_activation_diagnostic(
+                "*",
+                "warning",
+                f"nettoyage runtime interrompu : {exc}",
+            )
+        finally:
+            self._finalize_shutdown_signal()
+
+    def _finalize_shutdown_signal(self) -> None:
+        with self._lock:
+            self._shutdown_phase = "simulation_shutdown"
+        try:
+            self._simulation_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        self._stop.set()
+        with self._lock:
+            self._shutdown_phase = "stop_signalled"
+        self._shutdown_cleanup_active = False
+
     def _perform_activation_shutdown(self) -> None:
         self._record_activation_diagnostic("*", "arrêt", "nettoyage runtime en cours")
         scheduler = self.activation_scheduler
@@ -1783,16 +1812,6 @@ class RoutingService:
                     success=False,
                 )
             )
-        with self._lock:
-            self._shutdown_phase = "simulation_shutdown"
-        try:
-            self._simulation_executor.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
-        self._stop.set()
-        with self._lock:
-            self._shutdown_phase = "stop_signalled"
-
     def _apply_change(self, change: StateChange) -> None:
         self.logger.info(
             "State decision [%s] -> %s (OBS delay %d ms)",
