@@ -56,6 +56,7 @@ class OBSClientManager:
         self._lock = threading.RLock()
         self._last_failure = 0.0
         self._connected = False
+        self._request_count = 0
         self.last_error = ""
 
     @property
@@ -65,6 +66,12 @@ class OBSClientManager:
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def request_count(self) -> int:
+        """Monotonic count of OBS requests actually submitted on this manager."""
+        with self._lock:
+            return int(self._request_count)
 
     def configure(self, config: OBSConnectionConfig) -> None:
         with self._lock:
@@ -89,6 +96,7 @@ class OBSClientManager:
             raise OBSUnavailableError("L'intégration OBS est désactivée")
         with self._lock:
             client = self._ensure_client()
+            self._request_count += 1
             try:
                 if data is None:
                     response = client.send(request, raw=True)
