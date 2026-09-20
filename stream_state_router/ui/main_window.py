@@ -671,7 +671,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Configuration enregistrée et appliquée", 4000)
         self._log("Configuration enregistrée et appliquée.")
 
-    def _start_runtime(self, *, bootstrap_foreground: ForegroundApp | None = None) -> None:
+    def _start_runtime(
+        self,
+        *,
+        bootstrap_foreground: ForegroundApp | None = None,
+        startup_layout_profile: str = "",
+    ) -> None:
         rules, poll_ms, debounce_ms, fallback_ms = build_ruleset(self.config)
         self._client = OBSClientManager(build_obs_config(self.config))
         self._dispatcher = OBSDispatcher(
@@ -694,6 +699,7 @@ class MainWindow(QMainWindow):
             pending_cleanup=self._pending_cleanup_transfer,
             config_revision=config_revision(self.config),
             bootstrap_foreground=bootstrap_foreground,
+            startup_layout_profile=startup_layout_profile,
         )
         self._pending_cleanup_transfer = ()
         self._service.on_foreground = self.bridge.foreground.emit
@@ -720,8 +726,13 @@ class MainWindow(QMainWindow):
         succeeded = False
         try:
             previous = self._service
+            resume_layout_profile = (
+                previous.active_layout_apply_profile if previous is not None else ""
+            )
             bootstrap_foreground = (
-                previous.last_meaningful_app if previous is not None else None
+                None
+                if resume_layout_profile
+                else (previous.last_meaningful_app if previous is not None else None)
             )
             if previous is not None:
                 result = previous.stop()
@@ -745,7 +756,10 @@ class MainWindow(QMainWindow):
                         f"Transfert de {len(result.pending_cleanup)} obligation(s) de nettoyage OBS "
                         "au nouveau runtime."
                     )
-            self._start_runtime(bootstrap_foreground=bootstrap_foreground)
+            self._start_runtime(
+                bootstrap_foreground=bootstrap_foreground,
+                startup_layout_profile=resume_layout_profile,
+            )
             succeeded = True
             return True
         finally:
