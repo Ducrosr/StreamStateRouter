@@ -2103,26 +2103,24 @@ class OBSLayoutManager:
 
     @staticmethod
     def _move_fade_opacity(mode: str, progress: float) -> float:
-        """Opacity curve for the compact central move-fade window."""
+        """Opacity curve for a fast 15% edge fade around an invisible move."""
         t = max(0.0, min(1.0, float(progress)))
+        edge = 0.15
+        reveal = 1.0 - edge
         if mode == "through":
-            if t <= 0.25 or t >= 0.75:
-                return 1.0
-            if t <= 0.5:
-                return 1.0 - ((t - 0.25) / 0.25)
-            return (t - 0.5) / 0.25
+            if t <= edge:
+                return 1.0 - (t / edge)
+            if t < reveal:
+                return 0.0
+            return (t - reveal) / edge
         if mode == "in":
-            if t <= 0.5:
+            if t < reveal:
                 return 0.0
-            if t >= 0.75:
-                return 1.0
-            return (t - 0.5) / 0.25
+            return (t - reveal) / edge
         if mode == "out":
-            if t <= 0.25:
-                return 1.0
-            if t >= 0.5:
-                return 0.0
-            return 1.0 - ((t - 0.25) / 0.25)
+            if t <= edge:
+                return 1.0 - (t / edge)
+            return 0.0
         return 1.0
 
     def _animate_move_fade(
@@ -2136,10 +2134,9 @@ class OBSLayoutManager:
         """Move continuously while fading according to visibility ownership.
 
         duration_ms is the total move duration. For items visible before and
-        after the layout change, opacity stays at 100% for the first quarter,
-        fades to 0% at mid-move, returns to 100% by the third quarter, then
-        remains fully visible. Opacity is updated at about 30 Hz while geometry
-        keeps the ~60 Hz wall-clock timeline.
+        after the layout change, opacity fades 100% -> 0% during the first 15%,
+        stays fully transparent through the middle 70%, then fades 0% -> 100%
+        during the final 15%. Geometry keeps moving continuously at ~60 Hz.
         """
         fade_collection = self._fade_collection_context(probe=True)
         touched_fades: set[str] = set()
@@ -2202,13 +2199,11 @@ class OBSLayoutManager:
 
         total_duration_ms = max(1, duration_ms)
         move_steps = self._effective_transition_steps(total_duration_ms, steps)
-        # Opacity is intentionally half the geometry cadence. A source-level
-        # filter write is an additional synchronous WebSocket round trip and
-        # sending it at 60 Hz noticeably harms transform smoothness.
-        opacity_points = max(
-            2,
-            min(181, int(math.ceil(total_duration_ms / 1000.0 * 30.0)) + 1),
-        )
+        # The fade only changes during the first/last 15%. Using the same ~60 Hz
+        # cadence as geometry gives a smooth short fade without doubling traffic
+        # during the transparent middle section because unchanged opacity is not
+        # re-sent.
+        opacity_points = self._effective_transition_steps(total_duration_ms, steps)
         opacity_interval = 1.0 / max(1, opacity_points - 1)
         next_opacity_progress = opacity_interval
         last_opacity: dict[int, float] = {}
