@@ -157,6 +157,7 @@ class RoutingService:
         self._stopping = False
         self._shutdown_complete = threading.Event()
         self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
+        self._command_status: dict[str, dict[str, object]] = {}
         self._simulation_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="SSR-Activation-Sim",
@@ -409,6 +410,7 @@ class RoutingService:
                 raise RuntimeError("Runtime d'activation indisponible ou en arrêt")
             generation = self._command_generation
         request_id = uuid.uuid4().hex
+        self._set_command_status(request_id, action=str(action), status="accepted")
         self._runtime_commands.put(
             _ActivationCommand(
                 request_id=request_id,
@@ -440,6 +442,7 @@ class RoutingService:
                 raise RuntimeError("Runtime OBS indisponible ou en arrêt")
             generation = self._command_generation
         request_id = uuid.uuid4().hex
+        self._set_command_status(request_id, action=str(action), status="accepted")
         self._runtime_commands.put(
             _OBSCommand(
                 request_id=request_id,
@@ -450,6 +453,37 @@ class RoutingService:
         )
         self._wake.set()
         return request_id
+
+    def _set_command_status(
+        self,
+        request_id: str,
+        *,
+        action: str,
+        status: str,
+        error: str = "",
+        result: object | None = None,
+    ) -> None:
+        row = {
+            "request_id": str(request_id),
+            "action": str(action),
+            "status": str(status),
+            "error": str(error),
+            "updated_at": time.time(),
+        }
+        if result is not None:
+            if hasattr(result, "__dict__"):
+                row["result"] = dict(result.__dict__)
+            else:
+                row["result"] = str(result)
+        with self._lock:
+            self._command_status[str(request_id)] = row
+            while len(self._command_status) > 200:
+                self._command_status.pop(next(iter(self._command_status)))
+
+    def command_status(self, request_id: str) -> dict[str, object] | None:
+        with self._lock:
+            row = self._command_status.get(str(request_id))
+            return dict(row) if row is not None else None
 
     def request_force_reapply(self) -> str:
         return self.submit_obs_command("reapply")
@@ -900,6 +934,13 @@ class RoutingService:
         result: object | None = None,
         error: str = "",
     ) -> None:
+        self._set_command_status(
+            command.request_id,
+            action=command.action,
+            status="completed" if success else "failed",
+            error=error,
+            result=result,
+        )
         payload = OBSCommandResult(
             request_id=command.request_id,
             action=command.action,
@@ -1094,6 +1135,13 @@ class RoutingService:
         result: object | None = None,
         error: str = "",
     ) -> None:
+        self._set_command_status(
+            command.request_id,
+            action=command.action,
+            status="completed" if success else "failed",
+            error=error,
+            result=result,
+        )
         payload = ActivationCommandResult(
             request_id=command.request_id,
             action=command.action,

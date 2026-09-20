@@ -2011,7 +2011,12 @@ class MainWindow(QMainWindow):
             port=int(raw.get("port", 8765)),
             token=str(raw.get("token") or ""),
         )
-        self._api = LocalControlAPI(cfg, status=self._api_status, action=self._api_action)
+        self._api = LocalControlAPI(
+            cfg,
+            status=self._api_status,
+            action=self._api_action,
+            request_status=self._api_request_status,
+        )
         try:
             self._api.start()
             if cfg.enabled:
@@ -2039,6 +2044,11 @@ class MainWindow(QMainWindow):
                 "applied": self._applied_revision,
             },
         }
+
+    def _api_request_status(self, request_id: str) -> dict | None:
+        if self._service is None:
+            return None
+        return self._service.command_status(request_id)
 
     def _api_action(self, action: str, payload: dict) -> dict:
         if self._service is None or self._dispatcher is None:
