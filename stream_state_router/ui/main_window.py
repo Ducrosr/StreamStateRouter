@@ -671,7 +671,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Configuration enregistrée et appliquée", 4000)
         self._log("Configuration enregistrée et appliquée.")
 
-    def _start_runtime(self) -> None:
+    def _start_runtime(self, *, bootstrap_foreground: ForegroundApp | None = None) -> None:
         rules, poll_ms, debounce_ms, fallback_ms = build_ruleset(self.config)
         self._client = OBSClientManager(build_obs_config(self.config))
         self._dispatcher = OBSDispatcher(
@@ -693,6 +693,7 @@ class MainWindow(QMainWindow):
             activation_policies=build_activation_policies(self.config),
             pending_cleanup=self._pending_cleanup_transfer,
             config_revision=config_revision(self.config),
+            bootstrap_foreground=bootstrap_foreground,
         )
         self._pending_cleanup_transfer = ()
         self._service.on_foreground = self.bridge.foreground.emit
@@ -719,6 +720,9 @@ class MainWindow(QMainWindow):
         succeeded = False
         try:
             previous = self._service
+            bootstrap_foreground = (
+                previous.last_meaningful_app if previous is not None else None
+            )
             if previous is not None:
                 result = previous.stop()
                 diagnostic = result.diagnostic_summary()
@@ -741,7 +745,7 @@ class MainWindow(QMainWindow):
                         f"Transfert de {len(result.pending_cleanup)} obligation(s) de nettoyage OBS "
                         "au nouveau runtime."
                     )
-            self._start_runtime()
+            self._start_runtime(bootstrap_foreground=bootstrap_foreground)
             succeeded = True
             return True
         finally:
