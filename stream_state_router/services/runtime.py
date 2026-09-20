@@ -791,13 +791,32 @@ class RoutingService:
 
         ok, message = client.probe()
         if ok:
+            manager = getattr(self.dispatcher, "layout_manager", None)
             if self._last_obs_connected is not True:
                 self.logger.info("OBS connection established: %s", message)
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
+                if manager is not None and hasattr(manager, "invalidate_session"):
+                    manager.invalidate_session()
                 self._last_state_reconcile = 0.0
                 self._reconcile_activation("connexion OBS")
                 self._emit(RuntimeEvent("obs_connected", message))
+            if manager is not None and hasattr(manager, "retry_pending_fade_cleanup"):
+                cleanup_warnings = manager.retry_pending_fade_cleanup()
+                if cleanup_warnings:
+                    detail = "; ".join(cleanup_warnings)
+                    self.logger.warning("Layout fade cleanup pending: %s", detail)
+                    self._emit(
+                        RuntimeEvent(
+                            "layout_cleanup_pending",
+                            detail,
+                            success=False,
+                        )
+                    )
+                elif hasattr(manager, "pending_fade_cleanup") and not manager.pending_fade_cleanup():
+                    # No event on the common clean path; this branch simply
+                    # confirms that an earlier obligation has been discharged.
+                    pass
             self._last_obs_connected = True
             return
 
