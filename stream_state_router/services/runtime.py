@@ -469,9 +469,19 @@ class RoutingService:
         return change
 
     def clear_manual_override(self) -> StateChange | None:
+        context = None
+        if bool(getattr(self.engine, "needs_context", False)):
+            try:
+                context = self.dispatcher.obs_context()
+            except Exception:
+                context = {}
         with self._lock:
             app = self._last_app
-            change = self.engine.clear_manual_override(app)
+            change = self.engine.clear_manual_override(
+                app,
+                context=context,
+                use_context_provider=False,
+            )
         if change:
             self._apply_change(change)
         return change
@@ -897,9 +907,20 @@ class RoutingService:
                         if self.on_foreground:
                             self.on_foreground(app)
                     if not paused:
+                        routing_context = None
+                        if bool(getattr(self.engine, "needs_context", False)):
+                            self._worker_phase = "routing_context"
+                            try:
+                                routing_context = self.dispatcher.obs_context()
+                            except Exception:
+                                routing_context = {}
                         self._worker_phase = "observe"
                         with self._lock:
-                            change = self.engine.observe(app)
+                            change = self.engine.observe(
+                                app,
+                                context=routing_context,
+                                use_context_provider=False,
+                            )
                         if change:
                             self._apply_change(change)
                     self._worker_phase = "due_dispatch"
