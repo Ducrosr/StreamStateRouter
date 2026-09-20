@@ -53,6 +53,7 @@ from ..services.config import (
     validate_config,
     push_layout_history,
     pop_layout_history,
+    release_runtime_visibility_ownership,
 )
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
@@ -1680,6 +1681,25 @@ class MainWindow(QMainWindow):
                 add_candidate(raw)
 
         return candidates
+
+    def _release_runtime_visibility_ownership(self, container: str, source: str) -> int:
+        configured = build_activation_policies(self.config)
+        identity = TriggerTargetIdentity(container, source)
+        for policy_name, policy in configured.items():
+            if any(target.identity.container == identity.container and target.identity.source == identity.source for target in policy.targets):
+                raise RuntimeError(
+                    f"Cette source appartient encore à la politique d'activation {policy_name}. "
+                    "Retirez-la d'abord de la politique puis enregistrez."
+                )
+        changed = release_runtime_visibility_ownership(
+            self.config,
+            container=container,
+            source=source,
+        )
+        if changed:
+            self._mark_dirty()
+            self._refresh_layout_profile_view()
+        return changed
 
     def _activation_status(self, policy_name: str) -> dict:
         if self._service is None:

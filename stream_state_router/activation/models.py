@@ -135,7 +135,8 @@ class ActivationRuntimeState:
     active_source: str = ""
     active_container: str = ""
     active_container_kind: str = "scene"
-    last_source: str = ""
+    last_source: str = ""  # compatibility/display only
+    last_identity: TriggerTargetIdentity | None = None
     last_trigger_at: float | None = None
 
 
@@ -161,6 +162,7 @@ class RollTestResult:
     chance: float
     triggered: bool
     source: str = ""
+    target_identity: TriggerTargetIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,6 +11,7 @@ from stream_state_router.services.config import (
     load_config,
     migrate_config,
     validate_config,
+    release_runtime_visibility_ownership,
 )
 
 
@@ -293,6 +294,48 @@ class ConfigTests(unittest.TestCase):
         errors = validate_config(data)
 
         self.assertTrue(any("ancêtre/descendant" in error for error in errors))
+
+    def test_cross_policy_activation_target_ownership_is_rejected(self):
+        data = self.sample()
+        target = {"container": "Egg", "container_kind": "scene", "source": "Cloud"}
+        data["activation_policies"] = {
+            "One": {"type": "random", "targets": [dict(target)]},
+            "Two": {"type": "random", "targets": [dict(target)]},
+        }
+        errors = validate_config(data)
+        self.assertTrue(any("partage la cible" in error for error in errors), errors)
+
+    def test_runtime_visibility_marker_can_be_explicitly_released(self):
+        data = self.sample()
+        data["layout_profiles"]["Vanilla"] = {
+            "scene": "Gameplay",
+            "modules": {
+                "Egg": {
+                    "base_bounds": {"x": 0, "y": 0, "width": 100, "height": 100},
+                    "geometry": {"x": 0, "y": 0, "width": 100, "height": 100},
+                    "elements": [{
+                        "container": "Egg",
+                        "source": "Cloud",
+                        "transform": {},
+                        "visibility_owner": "runtime",
+                        "follow_visibility": False,
+                    }],
+                }
+            },
+            "support_items": [{
+                "container": "Egg",
+                "source": "Cloud",
+                "transform": {},
+                "visibility_owner": "runtime",
+            }],
+        }
+
+        changed = release_runtime_visibility_ownership(data, container="Egg", source="Cloud")
+
+        self.assertEqual(changed, 2)
+        element = data["layout_profiles"]["Vanilla"]["modules"]["Egg"]["elements"][0]
+        self.assertEqual(element["visibility_owner"], "")
+        self.assertTrue(element["follow_visibility"])
 
     def test_single_legacy_deep_target_remains_valid(self):
         data = self.sample()

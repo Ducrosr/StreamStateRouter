@@ -610,6 +610,32 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     "sont en conflit ancêtre/descendant"
                 )
 
+    activation_owners: dict[tuple[str, str, str], str] = {}
+    if isinstance(activation_policies, Mapping):
+        for policy_name, policy in activation_policies.items():
+            if not isinstance(policy, Mapping):
+                continue
+            targets = policy.get("targets", [])
+            if not isinstance(targets, list):
+                continue
+            for target_index, target in enumerate(targets):
+                if not isinstance(target, Mapping):
+                    continue
+                container = str(target.get("container") or "").strip()
+                source = str(target.get("source") or "").strip()
+                kind = str(target.get("container_kind") or "scene").strip() or "scene"
+                if not container or not source:
+                    continue
+                identity = (container, kind, source)
+                previous = activation_owners.get(identity)
+                if previous is not None and previous != str(policy_name):
+                    errors.append(
+                        f"activation_policies.{policy_name}.targets[{target_index}] partage la cible "
+                        f"{kind}:{container}/{source} avec activation_policies.{previous}"
+                    )
+                else:
+                    activation_owners[identity] = str(policy_name)
+
     profiles = data.get("profiles")
     if not isinstance(profiles, Mapping):
         errors.append("profiles doit être un objet")
@@ -784,6 +810,71 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         check_state_refs(raw.get("state"), f"rules[{index}].state")
 
     return errors
+
+
+def release_runtime_visibility_ownership(
+    data: dict[str, Any],
+    *,
+    container: str,
+    source: str,
+) -> int:
+    """Explicitly return one orphaned visibility marker to LayoutProfile ownership."""
+    wanted = (str(container).strip(), str(source).strip())
+    if not all(wanted):
+        return 0
+    changed = 0
+
+    def release_profile(profile: Any) -> None:
+        nonlocal changed
+        if not isinstance(profile, Mapping):
+            return
+        modules = profile.get("modules")
+        if isinstance(modules, Mapping):
+            for module in modules.values():
+                if not isinstance(module, Mapping):
+                    continue
+                elements = module.get("elements")
+                if not isinstance(elements, list):
+                    continue
+                for element in elements:
+                    if not isinstance(element, dict):
+                        continue
+                    identity = (
+                        str(element.get("container") or "").strip(),
+                        str(element.get("source") or "").strip(),
+                    )
+                    if identity != wanted:
+                        continue
+                    if str(element.get("visibility_owner") or "").casefold() == "runtime":
+                        element["visibility_owner"] = ""
+                        element["follow_visibility"] = True
+                        changed += 1
+        support = profile.get("support_items")
+        if isinstance(support, list):
+            for item in support:
+                if not isinstance(item, dict):
+                    continue
+                identity = (
+                    str(item.get("container") or "").strip(),
+                    str(item.get("source") or "").strip(),
+                )
+                if identity == wanted and str(item.get("visibility_owner") or "").casefold() == "runtime":
+                    item["visibility_owner"] = ""
+                    changed += 1
+
+    layouts = data.get("layout_profiles")
+    if isinstance(layouts, Mapping):
+        for profile in layouts.values():
+            release_profile(profile)
+    history = data.get("layout_history")
+    if isinstance(history, Mapping):
+        for entries in history.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if isinstance(entry, Mapping):
+                    release_profile(entry.get("profile"))
+    return changed
 
 
 def build_activation_policies(data: Mapping[str, Any]) -> dict[str, TriggerPolicyConfig]:
