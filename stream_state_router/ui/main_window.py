@@ -112,6 +112,7 @@ class MainWindow(QMainWindow):
         self._known_catalog_sources: set[str] = set()
         self._preview_active = False
         self._routing_incomplete = False
+        self._runtime_restart_in_progress = False
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -706,31 +707,47 @@ class MainWindow(QMainWindow):
         self._refresh_config_revision_status()
 
     def _restart_runtime(self) -> bool:
-        previous = self._service
-        if previous is not None:
-            result = previous.stop()
-            diagnostic = result.diagnostic_summary()
-            self._log(f"runtime_stop: {diagnostic}")
-            if not result:
-                self._log(
-                    "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
-                )
-                QMessageBox.critical(
-                    self,
-                    "Runtime",
-                    "Le runtime précédent n'a pas pu être arrêté proprement. "
-                    "Le nouveau runtime n'a pas été démarré.\n\n"
-                    f"Diagnostic : {diagnostic}",
-                )
-                return False
-            self._pending_cleanup_transfer = result.pending_cleanup
-            if not result.cleanup_complete:
-                self._log(
-                    f"Transfert de {len(result.pending_cleanup)} obligation(s) de nettoyage OBS "
-                    "au nouveau runtime."
-                )
-        self._start_runtime()
-        return True
+        if self._runtime_restart_in_progress:
+            self._log("Redémarrage runtime déjà en cours : demande ignorée.")
+            return False
+
+        self._runtime_restart_in_progress = True
+        timer = getattr(self, "_module_scan_timer", None)
+        timer_was_active = bool(timer is not None and timer.isActive())
+        if timer_was_active:
+            timer.stop()
+        succeeded = False
+        try:
+            previous = self._service
+            if previous is not None:
+                result = previous.stop()
+                diagnostic = result.diagnostic_summary()
+                self._log(f"runtime_stop: {diagnostic}")
+                if not result:
+                    self._log(
+                        "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
+                    )
+                    QMessageBox.critical(
+                        self,
+                        "Runtime",
+                        "Le runtime précédent n'a pas pu être arrêté proprement. "
+                        "Le nouveau runtime n'a pas été démarré.\n\n"
+                        f"Diagnostic : {diagnostic}",
+                    )
+                    return False
+                self._pending_cleanup_transfer = result.pending_cleanup
+                if not result.cleanup_complete:
+                    self._log(
+                        f"Transfert de {len(result.pending_cleanup)} obligation(s) de nettoyage OBS "
+                        "au nouveau runtime."
+                    )
+            self._start_runtime()
+            succeeded = True
+            return True
+        finally:
+            self._runtime_restart_in_progress = False
+            if not succeeded and timer_was_active:
+                self._configure_module_scan_timer()
 
     def _on_foreground(self, app: ForegroundApp | None) -> None:
         if app is None:
