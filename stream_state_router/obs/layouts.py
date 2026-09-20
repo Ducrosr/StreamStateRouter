@@ -72,6 +72,10 @@ class LayoutSnapshot:
     profile: dict[str, Any]
     label: str = ""
     created_at: float = field(default_factory=time.time)
+    collection: str = ""
+    generation: int = 0
+    complete: bool = True
+    warnings: tuple[str, ...] = ()
 
 
 def parse_module_source(source_name: str) -> ModuleSourceName | None:
@@ -285,6 +289,7 @@ class OBSLayoutManager:
         self._runtime_visibility_owners: set[tuple[str, str]] = set()
         self._undo_stack: list[LayoutSnapshot] = []
         self._preview_snapshot: LayoutSnapshot | None = None
+        self._snapshot_generation = 0
 
     def set_cooperative_yield(self, callback) -> None:
         """Install a lightweight runtime checkpoint used during long transitions."""
@@ -310,6 +315,82 @@ class OBSLayoutManager:
             if left <= 0:
                 break
             time.sleep(min(0.02, left))
+
+    def invalidate_session(self) -> None:
+        """Invalidate transient restore points after an OBS reconnect/session reset."""
+        self._snapshot_generation += 1
+        self.reset_cache()
+
+    def _scene_collection_name(self) -> str:
+        response = self.client.send("GetSceneCollectionList")
+        return str(response.get("currentSceneCollectionName") or "").strip()
+
+    def _snapshot_target_count(self, profile: Mapping[str, Any]) -> int:
+        return len(self._build_desired_elements(profile)) + len(self._build_support_desired(profile))
+
+    @staticmethod
+    def _captured_snapshot_count(profile: Mapping[str, Any]) -> int:
+        count = 0
+        modules = profile.get("modules")
+        if isinstance(modules, Mapping):
+            for module in modules.values():
+                if not isinstance(module, Mapping):
+                    continue
+                elements = module.get("elements")
+                if isinstance(elements, list):
+                    count += sum(1 for item in elements if isinstance(item, Mapping))
+        support = profile.get("support_items")
+        if isinstance(support, list):
+            count += sum(1 for item in support if isinstance(item, Mapping))
+        return count
+
+    def _capture_snapshot(self, profile: Mapping[str, Any], label: str) -> LayoutSnapshot:
+        collection = ""
+        warnings: list[str] = []
+        try:
+            collection = self._scene_collection_name()
+        except Exception as exc:
+            warnings.append(f"Scene Collection non lisible : {exc}")
+        expected = self._snapshot_target_count(profile)
+        captured = self.snapshot_profile(profile)
+        actual = self._captured_snapshot_count(captured)
+        complete = bool(collection) and actual >= expected
+        if actual < expected:
+            warnings.append(f"Snapshot incomplet : {actual}/{expected} élément(s) capturé(s)")
+        return LayoutSnapshot(
+            captured,
+            label,
+            collection=collection,
+            generation=self._snapshot_generation,
+            complete=complete,
+            warnings=tuple(warnings),
+        )
+
+    def _snapshot_context_error(self, snapshot: LayoutSnapshot) -> str:
+        if snapshot.generation != self._snapshot_generation:
+            return "Snapshot issu d'une session OBS précédente ; restauration refusée."
+        try:
+            current = self._scene_collection_name()
+        except Exception as exc:
+            return f"Scene Collection non lisible ; restauration refusée : {exc}"
+        if snapshot.collection and current != snapshot.collection:
+            return (
+                f"Snapshot lié à la Scene Collection '{snapshot.collection}', "
+                f"collection active '{current}' ; restauration refusée."
+            )
+        if not snapshot.complete:
+            return "Snapshot incomplet ; restauration sûre impossible."
+        return ""
+
+    def _restore_snapshot(self, snapshot: LayoutSnapshot) -> LayoutApplyResult:
+        context_error = self._snapshot_context_error(snapshot)
+        if context_error:
+            return LayoutApplyResult(warnings=(context_error, *snapshot.warnings))
+        return self.apply_profile(
+            snapshot.profile,
+            record_undo=False,
+            transition_override={"mode": "instant", "duration_ms": 0},
+        )
 
     def set_runtime_visibility_owners(
         self,
@@ -1033,23 +1114,36 @@ class OBSLayoutManager:
 
     def preview_profile(self, profile: Mapping[str, Any]) -> LayoutApplyResult:
         if self._preview_snapshot is not None:
-            self.cancel_preview()
-        snapshot = LayoutSnapshot(self.snapshot_profile(profile), "preview")
-        self._preview_snapshot = snapshot
-        return self.apply_profile(profile, record_undo=False)
+            cancelled = self.cancel_preview()
+            if cancelled.warnings or cancelled.missing_sources:
+                return cancelled
+        snapshot = self._capture_snapshot(profile, "preview")
+        if not snapshot.complete:
+            return LayoutApplyResult(warnings=(
+                "Aperçu refusé : impossible de garantir une restauration complète.",
+                *snapshot.warnings,
+            ))
+        result = self.apply_profile(profile, record_undo=False)
+        if result.elements_applied or not result.warnings:
+            self._preview_snapshot = snapshot
+        return result
 
     def cancel_preview(self) -> LayoutApplyResult:
         if self._preview_snapshot is None:
             return LayoutApplyResult()
         snapshot = self._preview_snapshot
-        self._preview_snapshot = None
-        return self.apply_profile(snapshot.profile, record_undo=False, transition_override={"mode": "instant", "duration_ms": 0})
+        result = self._restore_snapshot(snapshot)
+        if not result.warnings and not result.missing_sources:
+            self._preview_snapshot = None
+        return result
 
     def commit_preview(self) -> None:
         if self._preview_snapshot is not None:
-            self._undo_stack.append(self._preview_snapshot)
+            snapshot = self._preview_snapshot
+            if not self._snapshot_context_error(snapshot):
+                self._undo_stack.append(snapshot)
+                self._undo_stack = self._undo_stack[-20:]
             self._preview_snapshot = None
-            self._undo_stack = self._undo_stack[-20:]
 
     def snapshot_profile(self, profile: Mapping[str, Any]) -> dict[str, Any]:
         # Scene-item ids are only valid for the current OBS scene graph.
@@ -1166,8 +1260,11 @@ class OBSLayoutManager:
     def undo_last(self) -> LayoutApplyResult:
         if not self._undo_stack:
             return LayoutApplyResult(warnings=("Aucun état précédent à restaurer.",))
-        snapshot = self._undo_stack.pop()
-        return self.apply_profile(snapshot.profile, record_undo=False, transition_override={"mode": "instant", "duration_ms": 0})
+        snapshot = self._undo_stack[-1]
+        result = self._restore_snapshot(snapshot)
+        if not result.warnings and not result.missing_sources:
+            self._undo_stack.pop()
+        return result
 
     def apply_profile(
         self,
@@ -1185,12 +1282,14 @@ class OBSLayoutManager:
         # an old numeric id for another source. Resolve every apply from a clean
         # cache by (container, source name).
         self.reset_cache()
+        undo_snapshot: LayoutSnapshot | None = None
         if record_undo:
             try:
-                self._undo_stack.append(LayoutSnapshot(self.snapshot_profile(profile), "apply"))
-                self._undo_stack = self._undo_stack[-20:]
+                candidate = self._capture_snapshot(profile, "apply")
+                if candidate.complete:
+                    undo_snapshot = candidate
             except Exception:
-                pass
+                undo_snapshot = None
 
         desired = self._build_desired_elements(profile)
         desired.extend(self._build_support_desired(profile))
@@ -1342,7 +1441,11 @@ class OBSLayoutManager:
                 if target_transform:
                     self._set_transform(container, source, target_transform)
 
-        return LayoutApplyResult(applied, skipped, tuple(sorted(set(missing))), tuple(warnings))
+        result = LayoutApplyResult(applied, skipped, tuple(sorted(set(missing))), tuple(warnings))
+        if undo_snapshot is not None and applied > 0:
+            self._undo_stack.append(undo_snapshot)
+            self._undo_stack = self._undo_stack[-20:]
+        return result
 
     def _animate_layout_transition(
         self,

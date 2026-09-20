@@ -43,6 +43,8 @@ class FakeLayoutClient:
     def send(self, request, data=None):
         payload = dict(data or {})
         self.calls.append((request, payload))
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": getattr(self, "scene_collection", "Collection A")}
         if request == "GetSceneList":
             return {
                 "currentProgramSceneName": "Gameplay",
@@ -411,6 +413,58 @@ class LayoutTests(unittest.TestCase):
             if request == "SetSceneItemEnabled"
         ]
         self.assertNotIn(2, visibility_ids)
+
+    def test_undo_snapshot_is_consumed_only_after_successful_restore(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] += 10.0
+        manager.apply_profile(profile)
+        self.assertEqual(len(manager._undo_stack), 1)
+
+        original_apply = manager.apply_profile
+        def fail_restore(*args, **kwargs):
+            from stream_state_router.obs.layouts import LayoutApplyResult
+            return LayoutApplyResult(warnings=("temporary failure",))
+        manager.apply_profile = fail_restore
+        failed = manager.undo_last()
+        self.assertTrue(failed.warnings)
+        self.assertEqual(len(manager._undo_stack), 1)
+
+        manager.apply_profile = original_apply
+        restored = manager.undo_last()
+        self.assertFalse(restored.warnings)
+        self.assertEqual(len(manager._undo_stack), 0)
+
+    def test_undo_refuses_snapshot_from_another_scene_collection(self):
+        client = FakeLayoutClient()
+        client.scene_collection = "Collection A"
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] += 10.0
+        manager.apply_profile(profile)
+        self.assertEqual(len(manager._undo_stack), 1)
+        client.scene_collection = "Collection B"
+        client.calls.clear()
+
+        result = manager.undo_last()
+
+        self.assertTrue(any("Scene Collection" in warning for warning in result.warnings))
+        self.assertEqual(len(manager._undo_stack), 1)
+        self.assertFalse(any(request.startswith("SetSceneItem") for request, _ in client.calls))
+
+    def test_reconnect_session_invalidates_existing_snapshot(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] += 10.0
+        manager.apply_profile(profile)
+        manager.invalidate_session()
+
+        result = manager.undo_last()
+
+        self.assertTrue(any("session OBS précédente" in warning for warning in result.warnings))
+        self.assertEqual(len(manager._undo_stack), 1)
 
     def test_preview_and_undo_preserve_runtime_owned_visibility(self):
         client = FakeLayoutClient()
