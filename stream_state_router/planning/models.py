@@ -9,6 +9,10 @@ class DesiredStateConflict(ValueError):
     pass
 
 
+class ObservedStateConflict(ValueError):
+    pass
+
+
 @dataclass(frozen=True, order=True, slots=True)
 class ResourceKey:
     """Stable property identity used for conflict detection and planning."""
@@ -182,7 +186,19 @@ class ObservedState:
     def build(cls, properties: Iterable[ObservedProperty]) -> "ObservedState":
         values: dict[ResourceKey, ObservedProperty] = {}
         for item in properties:
-            values[item.key] = item
+            current = values.get(item.key)
+            if current is None:
+                values[item.key] = item
+                continue
+            if current.known and item.known:
+                if not values_equal(current.value, item.value):
+                    raise ObservedStateConflict(
+                        f"Observations contradictoires pour {item.key.label()} : "
+                        f"{current.value!r} != {item.value!r}"
+                    )
+                continue
+            if item.known:
+                values[item.key] = item
         return cls(tuple(values[key] for key in sorted(values)))
 
     @classmethod
