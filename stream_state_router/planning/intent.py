@@ -173,9 +173,13 @@ def desired_state_from_action_sets(
     *,
     collection: str = "",
     extra_assignments: Iterable[DesiredAssignment] = (),
+    reserved_owners: Mapping[PropertyKey, str] | None = None,
 ) -> DesiredState:
     assignments: list[DesiredAssignment] = []
-    owners: dict[PropertyKey, str] = {}
+    owners: dict[PropertyKey, str] = {
+        key: str(owner)
+        for key, owner in (reserved_owners or {}).items()
+    }
 
     def append_owned(
         assignment: DesiredAssignment,
