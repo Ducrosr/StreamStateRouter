@@ -365,6 +365,11 @@ class BlockingActivationController(FakeActivationController):
             self.hide_seen.set()
 
 
+class ExplodingCleanupController(FakeActivationController):
+    def pending_hides_for_current_collection(self):
+        raise RuntimeError("cleanup exploded")
+
+
 class CleanupRetryController(FakeActivationController):
     def __init__(self):
         super().__init__()
@@ -543,6 +548,47 @@ def activation_policy(*, enabled=True, cooldown=20.0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_cooperative_checkpoint_does_not_start_probe_or_activation_tick(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeHeartbeatDispatcher()
+        scheduler = FakeActivationScheduler()
+        controller = FakeActivationController()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service._thread = threading.current_thread()
+
+        service._cooperative_obs_yield()
+
+        self.assertEqual(dispatcher.client.probes, 0)
+        self.assertEqual(scheduler.tick_calls, 0)
+        self.assertEqual(controller.reconcile_calls, 0)
+
+    def test_cleanup_exception_cannot_lose_consumed_shutdown(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        controller = ExplodingCleanupController()
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_controller=controller,
+        )
+        service.start()
+        try:
+            result = service.stop(timeout=1.0)
+            self.assertTrue(result, result.diagnostic_summary())
+            self.assertFalse(service._thread.is_alive())
+            self.assertTrue(service._stop.is_set())
+        finally:
+            service.stop()
+
     def test_cleanup_retries_without_activation_scheduler(self):
         app = ForegroundApp(1, 1, "terminal.exe")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
