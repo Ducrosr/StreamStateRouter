@@ -111,6 +111,7 @@ class MainWindow(QMainWindow):
         self._api: LocalControlAPI | None = None
         self._known_catalog_sources: set[str] = set()
         self._preview_active = False
+        self._routing_incomplete = False
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -775,7 +776,23 @@ class MainWindow(QMainWindow):
                 )
             self._update_obs_status()
             return
+        if event.kind == "routing_result" and isinstance(event.payload, dict):
+            self._routing_incomplete = not bool(event.payload.get("success", False))
+            if self._routing_incomplete:
+                failed = list(event.payload.get("failed_domains") or [])
+                blocked = list(event.payload.get("blocked_domains") or [])
+                pending = list(event.payload.get("pending_domains") or [])
+                details = failed or blocked or pending
+                suffix = f" — {', '.join(str(item) for item in details)}" if details else ""
+                self.statusBar().showMessage(
+                    f"OBS connecté mais application incomplète{suffix}",
+                    8000,
+                )
+            self._update_obs_status()
+            return
         if event.kind in {"obs_connected", "obs_disconnected"}:
+            if event.kind == "obs_disconnected":
+                self._routing_incomplete = False
             self._update_obs_status()
         elif event.kind == "obs_error":
             self.obs_status.setText("OBS : erreur")
@@ -788,6 +805,8 @@ class MainWindow(QMainWindow):
             return
         if not self._client.config.enabled:
             text, style = "OBS : désactivé", "Muted"
+        elif self._client.connected and self._routing_incomplete:
+            text, style = "OBS : connecté · application incomplète", "Warn"
         elif self._client.connected:
             text, style = "OBS : connecté", "Good"
         elif self._client.last_error:
@@ -2045,6 +2064,7 @@ class MainWindow(QMainWindow):
                 "saved": self._saved_revision,
                 "applied": self._applied_revision,
             },
+            "routing": service.routing_status() if service else {},
         }
 
     def _api_request_status(self, request_id: str) -> dict | None:
