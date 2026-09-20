@@ -115,9 +115,11 @@ class OBSActivationController:
             for policy in self._policies.values()
             for target in policy.targets
         }
+        collection = str(self._scene_collection or "").strip()
         owners.update(
             (pending.target.container, pending.target.source)
             for pending in self._pending_hides.values()
+            if not collection or pending.collection == collection
         )
         self.layout_manager.set_runtime_visibility_owners(owners)
 
@@ -540,9 +542,11 @@ class OBSActivationController:
                 f"Source d'activation introuvable ou ambiguë pour {event.policy}: "
                 f"{event.container}/{event.source}"
             )
-        collection = str(self._scene_collection or "").strip()
-        if not collection:
-            collection = self._operation_collection()
+        # Never perform network I/O while snapshotting shutdown state.
+        # A normally-visible activation already has its originating collection
+        # from apply_event(show). If that context is unexpectedly unavailable,
+        # preserve a non-replayable obligation rather than guessing a collection.
+        collection = str(self._scene_collection or "").strip() or "<unknown>"
         self._ensure_pending_hide(event.policy, target, collection)
 
     def _ensure_pending_hide(
