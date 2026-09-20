@@ -455,6 +455,117 @@ class OBSDispatcherTests(unittest.TestCase):
                 },
             )
 
+    def test_layout_visibility_ownership_conflicts_with_action_profile(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Chat",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        layout = {
+            "scene": "In Game",
+            "modules": {
+                "Chat": {
+                    "managed": True,
+                    "locked": False,
+                    "elements": [
+                        {
+                            "source": "Chat",
+                            "container": "In Game",
+                            "included": True,
+                            "locked": False,
+                            "follow_visibility": True,
+                            "visibility_owner": "",
+                        }
+                    ],
+                }
+            },
+        }
+        dispatcher = OBSDispatcher(client, profiles, {"Layout": layout})
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="B", layout_profile="Layout"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
+        self.assertIn("layout:Layout", plan["declarative_error"]["message"])
+        self.assertIn("overlay:B", plan["declarative_error"]["message"])
+
+    def test_runtime_owned_layout_visibility_is_not_reserved(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Alert",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        layout = {
+            "scene": "In Game",
+            "modules": {
+                "Alert": {
+                    "managed": True,
+                    "locked": False,
+                    "elements": [
+                        {
+                            "source": "Alert",
+                            "container": "In Game",
+                            "included": True,
+                            "locked": False,
+                            "follow_visibility": False,
+                            "visibility_owner": "runtime",
+                        }
+                    ],
+                }
+            },
+        }
+        dispatcher = OBSDispatcher(client, profiles, {"Layout": layout})
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="B", layout_profile="Layout"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertNotIn("declarative_error", plan)
+
     def test_read_only_plan_reports_blocked_conditions_without_mutation(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
