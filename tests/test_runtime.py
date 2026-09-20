@@ -223,6 +223,21 @@ class SlowReconcileController(FakeActivationController):
         return ()
 
 
+class ActiveShutdownScheduler(FakeActivationScheduler):
+    def reset_all(self):
+        self.reset_all_calls += 1
+        return [
+            ActivationEvent(
+                "hide",
+                "egg",
+                time.monotonic(),
+                source="Cloud",
+                container="[Module] EasterEgg",
+                reason="reset",
+            )
+        ]
+
+
 class CleanupBlockingController(FakeActivationController):
     def __init__(self):
         super().__init__()
@@ -430,6 +445,31 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(command_result.success, command_result.error)
         finally:
             dispatcher.release_layout.set()
+            service.stop()
+
+    def test_shutdown_hides_scheduler_owned_visible_activation(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        scheduler = ActiveShutdownScheduler()
+        controller = FakeActivationController()
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service.start()
+        try:
+            shutdown = service.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertEqual(scheduler.reset_all_calls, 1)
+            self.assertEqual(len(controller.events), 1)
+            self.assertEqual(controller.events[0].kind, "hide")
+            self.assertEqual(controller.events[0].source, "Cloud")
+            self.assertEqual(controller.reconcile_calls, 0)
+        finally:
             service.stop()
 
     def test_shutdown_does_not_run_full_activation_reconcile(self):
