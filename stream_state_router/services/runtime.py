@@ -68,6 +68,42 @@ class OBSCommandResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutingDecisionStatus:
+    decision_id: str
+    origin: str
+    generation: int
+    config_revision: str
+    rule_name: str
+    requested_domains: tuple[str, ...]
+    applied_domains: tuple[str, ...]
+    blocked_domains: tuple[str, ...]
+    failed_domains: tuple[str, ...]
+    pending_domains: tuple[str, ...]
+    duration_ms: float
+    obs_requests: int
+    success: bool
+    message: str = ""
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "decision_id": self.decision_id,
+            "origin": self.origin,
+            "generation": self.generation,
+            "config_revision": self.config_revision,
+            "rule_name": self.rule_name,
+            "requested_domains": list(self.requested_domains),
+            "applied_domains": list(self.applied_domains),
+            "blocked_domains": list(self.blocked_domains),
+            "failed_domains": list(self.failed_domains),
+            "pending_domains": list(self.pending_domains),
+            "duration_ms": round(float(self.duration_ms), 3),
+            "obs_requests": int(self.obs_requests),
+            "success": bool(self.success),
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class _OBSCommand:
     request_id: str
     generation: int
@@ -80,6 +116,8 @@ class _PendingDispatch:
     deadline: float
     generation: int
     change: StateChange
+    decision_id: str
+    origin: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +184,8 @@ class RoutingService:
         self._last_obs_connected: bool | None = None
         self._last_state_reconcile = 0.0
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
+        self._routing_diagnostics: deque[RoutingDecisionStatus] = deque(maxlen=100)
+        self._last_routing_status: RoutingDecisionStatus | None = None
         self._activation_eligibility_cache: dict[str, tuple[bool, str]] = {}
         self._activation_cleanup_cache: dict[str, int] = {}
         self._runtime_commands: queue.Queue[_ActivationCommand | _OBSCommand] = queue.Queue()
@@ -500,6 +540,120 @@ class RoutingService:
             options["name"] = str(profile_name)
         return self.submit_obs_command(f"layout.{action}", options=options)
 
+    def routing_status(self) -> dict[str, object]:
+        """Return the latest routing diagnostic snapshot without OBS I/O."""
+        with self._lock:
+            status = self._last_routing_status
+        return status.as_mapping() if status is not None else {}
+
+    def routing_diagnostics(self, *, limit: int = 20) -> list[dict[str, object]]:
+        """Return recent routing outcomes; snapshots contain no configuration secrets."""
+        with self._lock:
+            rows = list(self._routing_diagnostics)[-max(1, int(limit)) :]
+        return [row.as_mapping() for row in rows]
+
+    def _obs_request_count(self) -> int:
+        client = getattr(self.dispatcher, "client", None)
+        value = getattr(client, "request_count", 0) if client is not None else 0
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _publish_routing_result(
+        self,
+        *,
+        decision_id: str,
+        origin: str,
+        generation: int,
+        rule_name: str,
+        state: StreamState,
+        result: DispatchResult | None,
+        started_at: float,
+        obs_requests_before: int,
+        error: str = "",
+    ) -> RoutingDecisionStatus:
+        statuses = tuple(getattr(result, "domain_statuses", ()) or ()) if result is not None else ()
+        requested = tuple(getattr(result, "changed_domains", ()) or ()) if result is not None else ()
+        if not requested and hasattr(self.dispatcher, "pending_domains"):
+            try:
+                requested = tuple(self.dispatcher.pending_domains(state))
+            except Exception:
+                requested = ()
+
+        applied = tuple(
+            str(getattr(item, "domain", ""))
+            for item in statuses
+            if str(getattr(item, "status", "")) == "applied"
+        )
+        blocked = tuple(
+            str(getattr(item, "domain", ""))
+            for item in statuses
+            if str(getattr(item, "status", "")) == "blocked"
+        )
+        failed = tuple(
+            str(getattr(item, "domain", ""))
+            for item in statuses
+            if str(getattr(item, "status", "")) in {"failed", "missing", "partial"}
+        )
+        pending: tuple[str, ...] = ()
+        if hasattr(self.dispatcher, "pending_domains"):
+            try:
+                pending = tuple(self.dispatcher.pending_domains(state))
+            except Exception:
+                pending = ()
+
+        if result is not None and not statuses and not error:
+            # Compatibility for lightweight dispatchers used by integrations/tests.
+            applied = tuple(requested)
+
+        if error and not failed:
+            failed = tuple(requested or pending)
+        success = not error and not blocked and not failed and not pending
+        if success:
+            message = "Application OBS complète"
+        else:
+            parts = []
+            if blocked:
+                parts.append("bloqué=" + ",".join(blocked))
+            if failed:
+                parts.append("échec=" + ",".join(failed))
+            if pending:
+                parts.append("en attente=" + ",".join(pending))
+            if error:
+                parts.append(error)
+            message = "Application OBS incomplète" + (": " + " · ".join(parts) if parts else "")
+
+        status = RoutingDecisionStatus(
+            decision_id=str(decision_id),
+            origin=str(origin),
+            generation=int(generation),
+            config_revision=self.config_revision,
+            rule_name=str(rule_name),
+            requested_domains=tuple(dict.fromkeys(requested)),
+            applied_domains=tuple(dict.fromkeys(applied)),
+            blocked_domains=tuple(dict.fromkeys(blocked)),
+            failed_domains=tuple(dict.fromkeys(failed)),
+            pending_domains=tuple(dict.fromkeys(pending)),
+            duration_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+            obs_requests=max(0, self._obs_request_count() - obs_requests_before),
+            success=success,
+            message=message,
+        )
+        with self._lock:
+            self._last_routing_status = status
+            self._routing_diagnostics.append(status)
+        self._emit(
+            RuntimeEvent(
+                "routing_result",
+                status.message,
+                request_id=status.decision_id,
+                payload=status.as_mapping(),
+                success=status.success,
+            )
+        )
+        return status
+
     def activation_diagnostics(
         self,
         policy_name: str | None = None,
@@ -608,20 +762,46 @@ class RoutingService:
             if self._stopping or self._pending_dispatch is not None:
                 return
             state = self.engine.current_state
+            generation = self._dispatch_generation
+            rule_name = self.engine.current_rule
         if state is None or not hasattr(self.dispatcher, "pending_domains"):
             return
         pending = self.dispatcher.pending_domains(state)
         if not pending:
             return
         self._last_state_reconcile = now
+        decision_id = f"reconcile-{uuid.uuid4().hex}"
+        started_at = time.monotonic()
+        obs_before = self._obs_request_count()
         try:
             result = self.dispatcher.dispatch_state(state)
         except Exception as exc:
             self.logger.error("OBS reconciliation failed: %s", exc)
-            self._emit(RuntimeEvent("obs_error", str(exc)))
+            self._publish_routing_result(
+                decision_id=decision_id,
+                origin="reconcile",
+                generation=generation,
+                rule_name=rule_name,
+                state=state,
+                result=None,
+                started_at=started_at,
+                obs_requests_before=obs_before,
+                error=str(exc),
+            )
+            self._emit(RuntimeEvent("obs_error", str(exc), request_id=decision_id))
             return
         if self.on_dispatch:
             self.on_dispatch(result)
+        self._publish_routing_result(
+            decision_id=decision_id,
+            origin="reconcile",
+            generation=generation,
+            rule_name=rule_name,
+            state=state,
+            result=result,
+            started_at=started_at,
+            obs_requests_before=obs_before,
+        )
 
     def _reconcile_activation(self, reason: str) -> bool:
         scheduler = self.activation_scheduler
@@ -895,12 +1075,26 @@ class RoutingService:
                 if command.action == "reapply":
                     with self._lock:
                         state = self.engine.current_state
+                        rule_name = self.engine.current_rule
+                        generation = self._dispatch_generation
                     if state is None:
                         result = None
                     else:
+                        started_at = time.monotonic()
+                        obs_before = self._obs_request_count()
                         result = self.dispatcher.dispatch_state(state, force=True)
                         if self.on_dispatch:
                             self.on_dispatch(result)
+                        self._publish_routing_result(
+                            decision_id=command.request_id,
+                            origin="command:reapply",
+                            generation=generation,
+                            rule_name=rule_name,
+                            state=state,
+                            result=result,
+                            started_at=started_at,
+                            obs_requests_before=obs_before,
+                        )
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
@@ -1204,19 +1398,79 @@ class RoutingService:
         )
         if self.on_change:
             self.on_change(change)
+        superseded: _PendingDispatch | None = None
         with self._lock:
+            superseded = self._pending_dispatch
             self._dispatch_generation += 1
             generation = self._dispatch_generation
+            decision_id = uuid.uuid4().hex
+            origin = str(change.reason or "router")
             self._pending_dispatch = _PendingDispatch(
                 deadline=time.monotonic() + max(0, change.apply_delay_ms) / 1000.0,
                 generation=generation,
                 change=change,
+                decision_id=decision_id,
+                origin=origin,
             )
+
+        if superseded is not None:
+            pending_domains = ()
+            if hasattr(self.dispatcher, "pending_domains"):
+                try:
+                    pending_domains = tuple(self.dispatcher.pending_domains(superseded.change.current))
+                except Exception:
+                    pending_domains = ()
+            status = RoutingDecisionStatus(
+                decision_id=superseded.decision_id,
+                origin=superseded.origin,
+                generation=superseded.generation,
+                config_revision=self.config_revision,
+                rule_name=superseded.change.rule_name,
+                requested_domains=pending_domains,
+                applied_domains=(),
+                blocked_domains=(),
+                failed_domains=(),
+                pending_domains=pending_domains,
+                duration_ms=0.0,
+                obs_requests=0,
+                success=False,
+                message="Décision OBS remplacée avant application",
+            )
+            with self._lock:
+                self._last_routing_status = status
+                self._routing_diagnostics.append(status)
+            self._emit(
+                RuntimeEvent(
+                    "routing_result",
+                    status.message,
+                    request_id=status.decision_id,
+                    payload=status.as_mapping(),
+                    success=False,
+                )
+            )
+
+        self._emit(
+            RuntimeEvent(
+                "routing_decision",
+                f"{change.rule_name}: décision OBS génération {generation}",
+                request_id=decision_id,
+                payload={
+                    "decision_id": decision_id,
+                    "origin": origin,
+                    "generation": generation,
+                    "config_revision": self.config_revision,
+                    "rule_name": change.rule_name,
+                    "state": change.current.as_variables(),
+                    "apply_delay_ms": change.apply_delay_ms,
+                },
+            )
+        )
         if change.apply_delay_ms > 0:
             self._emit(
                 RuntimeEvent(
                     "pending",
                     f"{change.rule_name}: application OBS dans {change.apply_delay_ms} ms",
+                    request_id=decision_id,
                 )
             )
         self._wake.set()
@@ -1227,19 +1481,22 @@ class RoutingService:
             if pending is None or pending.deadline > time.monotonic():
                 return
             self._pending_dispatch = None
-        self._dispatch_if_current(pending.change, pending.generation)
+        self._dispatch_if_current(pending)
 
-    def _dispatch_if_current(self, change: StateChange, generation: int) -> None:
+    def _dispatch_if_current(self, pending: _PendingDispatch) -> None:
+        change = pending.change
         with self._dispatch_lock:
             if self._stop.is_set():
                 return
             with self._lock:
                 if self._stopping:
                     return
-                if generation != self._dispatch_generation:
+                if pending.generation != self._dispatch_generation:
                     return
                 if self.engine.current_state != change.current:
                     return
+            started_at = time.monotonic()
+            obs_before = self._obs_request_count()
             try:
                 result = self.dispatcher.dispatch_change(change)
                 if self.on_dispatch:
@@ -1252,9 +1509,30 @@ class RoutingService:
                     )
                 for warning in result.warnings:
                     self.logger.warning("OBS: %s", warning)
+                self._publish_routing_result(
+                    decision_id=pending.decision_id,
+                    origin=pending.origin,
+                    generation=pending.generation,
+                    rule_name=change.rule_name,
+                    state=change.current,
+                    result=result,
+                    started_at=started_at,
+                    obs_requests_before=obs_before,
+                )
             except Exception as exc:
                 self.logger.error("OBS dispatch failed: %s", exc)
-                self._emit(RuntimeEvent("obs_error", str(exc)))
+                self._publish_routing_result(
+                    decision_id=pending.decision_id,
+                    origin=pending.origin,
+                    generation=pending.generation,
+                    rule_name=change.rule_name,
+                    state=change.current,
+                    result=None,
+                    started_at=started_at,
+                    obs_requests_before=obs_before,
+                    error=str(exc),
+                )
+                self._emit(RuntimeEvent("obs_error", str(exc), request_id=pending.decision_id))
 
     def _wait_for_dispatch_quiescence(self, timeout: float) -> bool:
         acquired = self._dispatch_lock.acquire(timeout=max(0.0, float(timeout)))
