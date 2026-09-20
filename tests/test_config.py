@@ -31,6 +31,7 @@ class ConfigTests(unittest.TestCase):
                 "fallback_state": {"Game": "Vanilla", "LayoutProfile": "Vanilla"},
             },
             "obs": {"enabled": False, "host": "127.0.0.1", "port": 4455},
+            "api": {"enabled": True, "host": "127.0.0.1", "port": 8765, "token": ""},
             "rules": [
                 {"name": "Launcher", "behavior": "ignore", "exe": "launcher.exe"},
                 {
