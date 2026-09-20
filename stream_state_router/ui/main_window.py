@@ -690,7 +690,7 @@ class MainWindow(QMainWindow):
             poll_ms=poll_ms,
             logger=self.logger,
             activation_policies=build_activation_policies(self.config),
-            pending_activation_cleanup=self._pending_cleanup_transfer,
+            pending_cleanup=self._pending_cleanup_transfer,
             config_revision=config_revision(self.config),
         )
         self._pending_cleanup_transfer = ()
