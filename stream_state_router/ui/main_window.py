@@ -214,6 +214,9 @@ class MainWindow(QMainWindow):
         self.rule_label.setObjectName("Muted")
         state_lay.addLayout(state_form)
         state_lay.addWidget(self.rule_label)
+        explain_button = QPushButton("Expliquer cette décision")
+        explain_button.clicked.connect(self._explain_current_decision)
+        state_lay.addWidget(explain_button, 0, Qt.AlignLeft)
         root.addWidget(state_card)
 
         override_card, override_lay = self._card("Override manuel")
@@ -817,6 +820,64 @@ class MainWindow(QMainWindow):
         self.obs_status.setObjectName(style)
         self.obs_status.style().unpolish(self.obs_status)
         self.obs_status.style().polish(self.obs_status)
+
+    def _explain_current_decision(self) -> None:
+        service = self._service
+        if service is None:
+            QMessageBox.information(self, "Explication", "Runtime non disponible.")
+            return
+        try:
+            explanation = service.explain_decision()
+        except Exception as exc:
+            QMessageBox.critical(self, "Explication", str(exc))
+            return
+
+        routing = explanation.get("routing", {}) if isinstance(explanation, dict) else {}
+        plan = explanation.get("obs_plan", {}) if isinstance(explanation, dict) else {}
+        foreground = explanation.get("foreground", {}) if isinstance(explanation, dict) else {}
+        lines = [
+            f"Application : {foreground.get('exe') or '—'}",
+            f"Décision : {routing.get('kind') or '—'} · {routing.get('rule_name') or '—'}",
+            f"Debounce : {routing.get('debounce_ms', 0)} ms · délai OBS : {routing.get('apply_delay_ms', 0)} ms",
+        ]
+        if explanation.get("paused"):
+            lines.append("Runtime : routage suspendu")
+        lines.append("")
+        lines.append("Règles évaluées :")
+        checks = routing.get("checks") if isinstance(routing, dict) else None
+        if isinstance(checks, list) and checks:
+            for check in checks:
+                if not isinstance(check, dict):
+                    continue
+                marker = "✓" if check.get("matched") else "·"
+                lines.append(
+                    f"{marker} {check.get('name', '')} — {check.get('reason', '')}"
+                )
+        else:
+            lines.append("— aucune règle évaluée —")
+
+        lines.append("")
+        lines.append("Plan OBS :")
+        domains = plan.get("domains") if isinstance(plan, dict) else None
+        if isinstance(domains, list) and domains:
+            for domain in domains:
+                if not isinstance(domain, dict):
+                    continue
+                lines.append(
+                    f"• {domain.get('domain', '')}: {domain.get('status', '')} "
+                    f"({domain.get('applied_profile') or '—'} → {domain.get('desired_profile') or '—'})"
+                )
+                for operation in domain.get("operations", []) or []:
+                    if not isinstance(operation, dict):
+                        continue
+                    target = str(operation.get("target") or operation.get("scene") or "")
+                    lines.append(
+                        f"    {operation.get('type', '')}" + (f" → {target}" if target else "")
+                    )
+        else:
+            lines.append(str(plan.get("reason") or "Aucune mutation OBS prévue."))
+
+        QMessageBox.information(self, "Expliquer cette décision", "\n".join(lines))
 
     def _apply_override(self) -> None:
         if not self._service:
@@ -2075,6 +2136,8 @@ class MainWindow(QMainWindow):
     def _api_action(self, action: str, payload: dict) -> dict:
         if self._service is None or self._dispatcher is None:
             raise RuntimeError("Runtime non disponible")
+        if action == "explain":
+            return {"explanation": self._service.explain_decision()}
         if action == "pause":
             self._service.pause(bool(payload.get("paused", True)))
             return {"paused": self._service.paused}
