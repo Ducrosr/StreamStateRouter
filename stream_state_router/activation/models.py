@@ -135,6 +135,7 @@ class ActivationRuntimeState:
     active_source: str = ""
     active_container: str = ""
     active_container_kind: str = "scene"
+    active_collection: str = ""
     last_source: str = ""  # compatibility/display only
     last_identity: TriggerTargetIdentity | None = None
     last_trigger_at: float | None = None
@@ -148,6 +149,7 @@ class ActivationEvent:
     source: str = ""
     container: str = ""
     container_kind: str = "scene"
+    collection: str = ""
     roll: float | None = None
     chance: float | None = None
     duration_seconds: float | None = None
