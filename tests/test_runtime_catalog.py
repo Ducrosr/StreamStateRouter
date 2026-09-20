@@ -58,6 +58,39 @@ class RuntimeCatalogTests(unittest.TestCase):
         status = service.command_status("catalog-test")
         self.assertIsNotNone(status)
         self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["result"]["scene_collection"], "Midgar")
+        self.assertEqual(status["result"]["scene_count"], 0)
+        self.assertNotIn("scenes", status["result"])
+
+    def test_catalog_warnings_do_not_turn_read_only_sync_into_write_failure(self):
+        class PartialClient(FakeCatalogClient):
+            def send(self, request, data=None):
+                if request == "GetSceneCollectionList":
+                    self.calls.append((request, data))
+                    raise RuntimeError("collection unavailable")
+                return super().send(request, data)
+
+        client = PartialClient()
+        service = RoutingService(SimpleNamespace(), SimpleNamespace(client=client))
+        command = _OBSCommand(
+            request_id="catalog-partial",
+            generation=0,
+            action="catalog.sync",
+            options={},
+        )
+
+        service._execute_obs_command(command)
+
+        status = service.command_status("catalog-partial")
+        self.assertIsNotNone(status)
+        self.assertEqual(status["status"], "completed")
+        self.assertTrue(status["result"]["warnings"])
+        self.assertFalse(
+            any(
+                request.startswith(("Set", "Create", "Remove"))
+                for request, _data in client.calls
+            )
+        )
 
 
 if __name__ == "__main__":
