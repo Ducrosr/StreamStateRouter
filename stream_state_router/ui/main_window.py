@@ -685,7 +685,7 @@ class MainWindow(QMainWindow):
             build_profiles(self.config),
             build_layout_profiles(self.config),
         )
-        if startup_layout_routing_baseline:
+        if startup_layout_profile:
             self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
         engine = StateRouterEngine(
             rules,
