@@ -547,6 +547,66 @@ class LayoutTests(unittest.TestCase):
             "Collection B",
         )
 
+    def test_transition_steps_raise_historical_eight_steps_to_smooth_cadence(self):
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 8), 31)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(2000, 8), 60)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(3000, 8), 60)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 45), 45)
+
+    def test_fade_repositions_visible_item_only_while_fully_transparent(self):
+        class FadeClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.filters = set()
+
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSourceFilterList":
+                    self.calls.append((request, payload))
+                    source = str(payload.get("sourceName") or "")
+                    filters = []
+                    if source in self.filters:
+                        filters.append({"filterName": "[SSR] Layout Fade"})
+                    return {"filters": filters}
+                if request == "CreateSourceFilter":
+                    self.calls.append((request, payload))
+                    self.filters.add(str(payload.get("sourceName") or ""))
+                    return {}
+                if request in {"SetSourceFilterEnabled", "SetSourceFilterSettings"}:
+                    self.calls.append((request, payload))
+                    return {}
+                return super().send(request, data)
+
+        client = FadeClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["transition"] = {"mode": "fade", "duration_ms": 1000, "steps": 8}
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+        client.calls.clear()
+
+        with patch("stream_state_router.obs.layouts.time.sleep"):
+            result = manager.apply_profile(profile, record_undo=False)
+
+        self.assertEqual(result.missing_sources, ())
+        transform_index = next(
+            index
+            for index, (request, payload) in enumerate(client.calls)
+            if request == "SetSceneItemTransform" and int(payload["sceneItemId"]) == 1
+        )
+        opacity_writes = [
+            (index, float(payload["filterSettings"]["opacity"]))
+            for index, (request, payload) in enumerate(client.calls)
+            if request == "SetSourceFilterSettings"
+            and payload.get("sourceName") == "[Webcam] Cadre"
+        ]
+        self.assertTrue(opacity_writes)
+        before = [value for index, value in opacity_writes if index < transform_index]
+        after = [value for index, value in opacity_writes if index > transform_index]
+        self.assertTrue(before)
+        self.assertTrue(after)
+        self.assertAlmostEqual(before[-1], 0.0, places=6)
+        self.assertAlmostEqual(after[0], 0.0, places=6)
+        self.assertAlmostEqual(after[-1], 1.0, places=6)
     def test_move_transition_uses_one_global_timeline_for_all_sources(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
@@ -560,13 +620,13 @@ class LayoutTests(unittest.TestCase):
             result = manager.apply_profile(profile, record_undo=False)
 
         self.assertEqual(result.elements_applied, 2)
-        # Eight animation frames share one clock. The old implementation slept
-        # seven times per source (14 sleeps for two items, ~4 s instead of 2 s).
-        self.assertEqual(sleep_mock.call_count, 7)
+        # A two-second transition targets ~30 FPS and is capped at 60 frames.
+        # All sources still share the same global timeline.
+        self.assertEqual(sleep_mock.call_count, 59)
         transform_calls = [
             payload for request, payload in client.calls if request == "SetSceneItemTransform"
         ]
-        self.assertEqual(len(transform_calls), 16)
+        self.assertEqual(len(transform_calls), 120)
 
     def test_excluded_module_element_is_left_untouched(self):
         client = FakeLayoutClient()
