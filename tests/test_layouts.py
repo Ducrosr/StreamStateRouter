@@ -622,6 +622,61 @@ class LayoutTests(unittest.TestCase):
         self.assertAlmostEqual(before[-1], 0.0, places=6)
         self.assertAlmostEqual(after[0], 0.0, places=6)
         self.assertAlmostEqual(after[-1], 1.0, places=6)
+    def test_move_fade_moves_continuously_through_zero_opacity_midpoint(self):
+        class MoveFadeClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.filters = set()
+
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSourceFilterList":
+                    self.calls.append((request, payload))
+                    source = str(payload.get("sourceName") or "")
+                    filters = []
+                    if source in self.filters:
+                        filters.append({"filterName": "[SSR] Layout Fade"})
+                    return {"filters": filters}
+                if request == "CreateSourceFilter":
+                    self.calls.append((request, payload))
+                    self.filters.add(str(payload.get("sourceName") or ""))
+                    return {}
+                if request in {"SetSourceFilterEnabled", "SetSourceFilterSettings"}:
+                    self.calls.append((request, payload))
+                    return {}
+                return super().send(request, data)
+
+        client = MoveFadeClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["transition"] = {"mode": "move_fade", "duration_ms": 1000, "steps": 8}
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+        client.calls.clear()
+
+        with patch.object(
+            manager, "_transition_progress", return_value=iter((0.25, 0.5, 0.75, 1.0))
+        ):
+            result = manager.apply_profile(profile, record_undo=False)
+
+        self.assertEqual(result.missing_sources, ())
+        positions = [
+            float(payload["sceneItemTransform"]["positionX"])
+            for request, payload in client.calls
+            if request == "SetSceneItemTransform" and int(payload["sceneItemId"]) == 1
+        ]
+        self.assertEqual(positions[:4], [200.0, 300.0, 400.0, 500.0])
+
+        opacities = [
+            float(payload["filterSettings"]["opacity"])
+            for request, payload in client.calls
+            if request == "SetSourceFilterSettings"
+            and payload.get("sourceName") == "[Webcam] Cadre"
+        ]
+        self.assertGreaterEqual(len(opacities), 4)
+        self.assertAlmostEqual(opacities[0], 0.5, places=6)
+        self.assertAlmostEqual(opacities[1], 0.0, places=6)
+        self.assertAlmostEqual(opacities[2], 0.5, places=6)
+        self.assertAlmostEqual(opacities[3], 1.0, places=6)
     def test_move_transition_uses_one_global_timeline_for_all_sources(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
