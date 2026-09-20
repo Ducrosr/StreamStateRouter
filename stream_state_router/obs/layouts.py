@@ -2101,6 +2101,187 @@ class OBSLayoutManager:
                 self._neutralize_fade_sources(touched, collection=fade_collection)
             )
 
+    def _animate_move_fade(
+        self,
+        prepared_items: list[dict[str, Any]],
+        *,
+        duration_ms: int,
+        steps: int,
+        warnings: list[str],
+    ) -> None:
+        """Move continuously while fading according to visibility ownership.
+
+        For items visible before and after the layout change, duration_ms is
+        one half of the opacity cycle: 100% -> 0% -> 100%. The geometry moves
+        continuously over both halves. Opacity is updated at about 30 Hz while
+        geometry keeps the ~60 Hz wall-clock timeline.
+        """
+        fade_collection = self._fade_collection_context(probe=True)
+        touched_fades: set[str] = set()
+        fade_modes: dict[int, str] = {}
+        fallback_visibility: set[int] = set()
+
+        for index, prepared in enumerate(prepared_items):
+            self._yield_runtime()
+            source = prepared["source"]
+            target_enabled = prepared["target_enabled"]
+            current_enabled = prepared["current_enabled"]
+
+            # Layout geometry may still move when visibility belongs to another
+            # subsystem, but this transition must not take temporary ownership
+            # of that source opacity.
+            if target_enabled is None:
+                continue
+            if current_enabled is None:
+                warnings.append(
+                    f"Visibilité actuelle inconnue pour {source}; fondu ignoré."
+                )
+                fallback_visibility.add(index)
+                if bool(target_enabled):
+                    self._set_enabled(
+                        prepared["container"], prepared["source"], True
+                    )
+                continue
+
+            current_visible = bool(current_enabled)
+            target_visible = bool(target_enabled)
+            if not current_visible and not target_visible:
+                continue
+
+            touched_fades.add(source)
+            self._ensure_pending_fade(source, fade_collection)
+            try:
+                if current_visible:
+                    self._ensure_fade_filter(source, 1.0)
+                else:
+                    self._set_source_opacity(source, 0.0)
+                    self._set_enabled(
+                        prepared["container"], prepared["source"], True
+                    )
+            except Exception as exc:
+                warnings.append(f"Fondu indisponible pour {source}: {exc}")
+                fallback_visibility.add(index)
+                touched_fades.discard(source)
+                if target_visible:
+                    self._set_enabled(
+                        prepared["container"], prepared["source"], True
+                    )
+                continue
+
+            if current_visible and target_visible:
+                fade_modes[index] = "through"
+            elif target_visible:
+                fade_modes[index] = "in"
+            else:
+                fade_modes[index] = "out"
+
+        total_duration_ms = max(1, duration_ms * 2)
+        move_steps = self._effective_transition_steps(total_duration_ms, steps)
+        # Opacity is intentionally half the geometry cadence. A source-level
+        # filter write is an additional synchronous WebSocket round trip and
+        # sending it at 60 Hz noticeably harms transform smoothness.
+        opacity_points = max(2, min(91, int(math.ceil(total_duration_ms / 1000.0 * 30.0)) + 1))
+        opacity_interval = 1.0 / max(1, opacity_points - 1)
+        next_opacity_progress = opacity_interval
+        previous_t = 0.0
+        midpoint_emitted: set[int] = set()
+
+        try:
+            for t in self._transition_progress(total_duration_ms, move_steps):
+                for prepared in prepared_items:
+                    self._yield_runtime()
+                    if not prepared["transform_changed"]:
+                        continue
+                    target = prepared["target_transform"]
+                    current = prepared["current_transform"]
+                    if not target:
+                        continue
+                    keys = [
+                        key
+                        for key in target
+                        if isinstance(target.get(key), (int, float))
+                    ]
+                    update = {
+                        key: _float(current.get(key), _float(target.get(key)))
+                        + (
+                            _float(target.get(key))
+                            - _float(current.get(key), _float(target.get(key)))
+                        )
+                        * t
+                        for key in keys
+                    }
+                    if update:
+                        self._set_transform(
+                            prepared["container"], prepared["source"], update
+                        )
+
+                opacity_due = t + 1e-9 >= next_opacity_progress or t >= 1.0
+                crossed_midpoint = previous_t < 0.5 <= t
+                if opacity_due or crossed_midpoint:
+                    for index, mode in fade_modes.items():
+                        source = prepared_items[index]["source"]
+                        if mode == "through":
+                            if crossed_midpoint and index not in midpoint_emitted:
+                                opacity = 0.0
+                                midpoint_emitted.add(index)
+                            else:
+                                opacity = abs(2.0 * t - 1.0)
+                        elif mode == "in":
+                            opacity = t
+                        else:
+                            opacity = 1.0 - t
+                        self._set_source_opacity(source, opacity)
+                    while next_opacity_progress <= t + 1e-9:
+                        next_opacity_progress += opacity_interval
+                previous_t = t
+
+            # Force exact final transforms even if stale-frame dropping skipped
+            # the nominal final geometry update.
+            for prepared in prepared_items:
+                target = prepared["target_transform"]
+                if prepared["transform_changed"] and target:
+                    self._set_transform(
+                        prepared["container"], prepared["source"], target
+                    )
+
+            for index, prepared in enumerate(prepared_items):
+                target_enabled = prepared["target_enabled"]
+                current_enabled = prepared["current_enabled"]
+                if target_enabled is None or current_enabled is None:
+                    continue
+                if index in fade_modes:
+                    if bool(target_enabled):
+                        self._set_source_opacity(prepared["source"], 1.0)
+                    else:
+                        self._set_enabled(
+                            prepared["container"], prepared["source"], False
+                        )
+                        self._set_source_opacity(prepared["source"], 1.0)
+                elif index in fallback_visibility:
+                    if not bool(target_enabled):
+                        self._set_enabled(
+                            prepared["container"], prepared["source"], False
+                        )
+                    elif bool(target_enabled) != bool(current_enabled):
+                        self._set_enabled(
+                            prepared["container"], prepared["source"], True
+                        )
+        except Exception as exc:
+            cleanup_warnings = self._neutralize_fade_sources(
+                touched_fades, collection=fade_collection
+            )
+            warnings.extend(cleanup_warnings)
+            detail = ""
+            if cleanup_warnings:
+                detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
+            raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
+        else:
+            warnings.extend(
+                self._neutralize_fade_sources(
+                    touched_fades, collection=fade_collection
+                )
+            )
+
     def _animate_layout_transition(
         self,
         prepared_items: list[dict[str, Any]],
@@ -2119,9 +2300,17 @@ class OBSLayoutManager:
                 warnings=warnings,
             )
             return
+        if mode == "move_fade":
+            self._animate_move_fade(
+                prepared_items,
+                duration_ms=duration_ms,
+                steps=steps,
+                warnings=warnings,
+            )
+            return
 
-        move = mode in {"move", "move_fade"}
-        fade = mode == "move_fade"
+        move = mode == "move"
+        fade = False
         # Bind all temporary fade obligations in this transition to the Scene
         # Collection observed immediately before any fade mutation.
         fade_collection = self._fade_collection_context(probe=True) if fade else ""
