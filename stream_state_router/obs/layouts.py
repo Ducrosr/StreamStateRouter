@@ -397,7 +397,14 @@ class OBSLayoutManager:
             self._pending_fade_cleanup.pop(key, None)
         return tuple(warnings)
 
-    def _fade_collection_context(self) -> str:
+    def _fade_collection_context(self, *, probe: bool = False) -> str:
+        if probe:
+            try:
+                current = self._scene_collection_name()
+                if current:
+                    return current
+            except Exception:
+                pass
         collection = str(self._last_scene_collection or "").strip()
         if collection:
             return collection
@@ -420,9 +427,14 @@ class OBSLayoutManager:
             self._pending_fade_cleanup[key] = pending
         return pending
 
-    def _neutralize_fade_sources(self, sources: Iterable[str]) -> tuple[str, ...]:
+    def _neutralize_fade_sources(
+        self,
+        sources: Iterable[str],
+        *,
+        collection: str | None = None,
+    ) -> tuple[str, ...]:
         warnings: list[str] = []
-        collection = self._fade_collection_context()
+        collection = str(collection or self._fade_collection_context()).strip()
         for source in {str(item) for item in sources if str(item)}:
             pending = self._ensure_pending_fade(source, collection)
             try:
@@ -1878,6 +1890,9 @@ class OBSLayoutManager:
         """Animate one layout on a single global timeline with bounded fade cleanup."""
         move = mode in {"move", "move_fade"}
         fade = mode in {"fade", "move_fade"}
+        # Bind all temporary fade obligations in this transition to the Scene
+        # Collection observed immediately before any fade mutation.
+        fade_collection = self._fade_collection_context(probe=True) if fade else ""
         fade_state: dict[int, tuple[float, float]] = {}
         fallback_visibility: set[int] = set()
         touched_fades: set[str] = set()
@@ -1989,14 +2004,14 @@ class OBSLayoutManager:
                     elif index in fallback_visibility:
                         self._set_enabled(prepared["container"], prepared["source"], True)
         except Exception as exc:
-            cleanup_warnings = self._neutralize_fade_sources(touched_fades)
+            cleanup_warnings = self._neutralize_fade_sources(touched_fades, collection=fade_collection)
             warnings.extend(cleanup_warnings)
             detail = ""
             if cleanup_warnings:
                 detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
             raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
         else:
-            cleanup_warnings = self._neutralize_fade_sources(touched_fades)
+            cleanup_warnings = self._neutralize_fade_sources(touched_fades, collection=fade_collection)
             warnings.extend(cleanup_warnings)
 
     def _wait_group_resize_settle(self) -> None:
