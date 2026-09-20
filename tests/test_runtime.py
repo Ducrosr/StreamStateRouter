@@ -13,7 +13,7 @@ from stream_state_router.activation import (
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
-from stream_state_router.obs.dispatcher import DispatchResult
+from stream_state_router.obs.dispatcher import DispatchResult, DomainDispatchStatus
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, RuleSet
@@ -38,6 +38,41 @@ class FakeDispatcher:
 
     def dispatch_state(self, state, force=False):
         return DispatchResult(0, 0, ("game",))
+
+
+class DiagnosticDispatcher(FakeDispatcher):
+    def __init__(self, *, incomplete: bool = False):
+        super().__init__()
+        self.client = SimpleNamespace(request_count=0)
+        self.incomplete = incomplete
+        self._pending = ("game",)
+
+    def pending_domains(self, _state=None):
+        return self._pending
+
+    def dispatch_change(self, change):
+        self.changes.append(change)
+        self.client.request_count += 3
+        if self.incomplete:
+            return DispatchResult(
+                0,
+                1,
+                ("game",),
+                ("blocked for test",),
+                (DomainDispatchStatus("game", change.current.game, "", "blocked", "test"),),
+            )
+        self._pending = ()
+        return DispatchResult(
+            1,
+            0,
+            ("game",),
+            (),
+            (DomainDispatchStatus("game", change.current.game, change.current.game, "applied"),),
+        )
+
+    def dispatch_state(self, state, force=False):
+        change = SimpleNamespace(current=state)
+        return self.dispatch_change(change)
 
 
 class CommandDispatcher(FakeDispatcher):
@@ -302,6 +337,72 @@ class RuntimeTests(unittest.TestCase):
             service.start()
             self.assertTrue(seen.wait(1.0))
             self.assertEqual(dispatcher.changes[0].current.game, "Game")
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_routing_diagnostic_keeps_decision_id_through_result(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", state, exe="game.exe")]),
+            debounce_ms=0,
+        )
+        dispatcher = DiagnosticDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(app),
+            config_revision="rev-safe",
+        )
+        events = []
+        completed = threading.Event()
+
+        def on_event(event):
+            events.append(event)
+            if event.kind == "routing_result":
+                completed.set()
+
+        service.on_event = on_event
+        service.start()
+        try:
+            self.assertTrue(completed.wait(1.0))
+            decision = next(event for event in events if event.kind == "routing_decision")
+            result = next(event for event in events if event.kind == "routing_result")
+            self.assertEqual(decision.request_id, result.request_id)
+            self.assertTrue(result.success)
+            self.assertEqual(result.payload["config_revision"], "rev-safe")
+            self.assertEqual(result.payload["requested_domains"], ["game"])
+            self.assertEqual(result.payload["applied_domains"], ["game"])
+            self.assertEqual(result.payload["obs_requests"], 3)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_routing_diagnostic_classifies_blocked_domain_as_incomplete(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", state, exe="game.exe")]),
+            debounce_ms=0,
+        )
+        dispatcher = DiagnosticDispatcher(incomplete=True)
+        service = RoutingService(engine, dispatcher, poll_ms=10, provider=FakeProvider(app))
+        completed = threading.Event()
+        service.on_event = lambda event: completed.set() if event.kind == "routing_result" else None
+        service.start()
+        try:
+            self.assertTrue(completed.wait(1.0))
+            status = service.routing_status()
+            before = dispatcher.client.request_count
+            snapshots = service.routing_diagnostics(limit=5)
+            self.assertEqual(dispatcher.client.request_count, before)
+            self.assertFalse(status["success"])
+            self.assertEqual(status["blocked_domains"], ["game"])
+            self.assertEqual(status["pending_domains"], ["game"])
+            self.assertTrue(snapshots)
+            serialized = repr(status).casefold()
+            self.assertNotIn("password", serialized)
+            self.assertNotIn("token", serialized)
         finally:
             self.assertTrue(service.stop())
 
