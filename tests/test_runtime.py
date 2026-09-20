@@ -1052,6 +1052,71 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_restart_bootstrap_reuses_last_meaningful_foreground_when_ssr_is_active(self):
+        app = ForegroundApp(1, 1, "game.exe", window_title="Gameplay")
+        wanted = StreamState(game="Game")
+
+        provider_a = FakeProvider(app)
+        engine_a = StateRouterEngine(
+            RuleSet([AppRule("Game", wanted, exe="game.exe")]),
+            debounce_ms=0,
+        )
+        service_a = RoutingService(
+            engine_a,
+            FakeDispatcher(),
+            poll_ms=20,
+            provider=provider_a,
+        )
+        service_a.start()
+        service_b = None
+        try:
+            deadline = time.monotonic() + 1.0
+            while service_a.last_meaningful_app != app and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(service_a.last_meaningful_app, app)
+
+            # SSR becomes foreground: WindowsForegroundProvider intentionally
+            # reports None for our own process, but the last external app must
+            # remain available for a safe runtime handoff.
+            provider_a.app = None
+            service_a._wake.set()
+            deadline = time.monotonic() + 1.0
+            while service_a.last_app is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertIsNone(service_a.last_app)
+            self.assertEqual(service_a.last_meaningful_app, app)
+
+            shutdown = service_a.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertFalse(service_a._thread.is_alive())
+
+            dispatcher_b = FakeDispatcher()
+            engine_b = StateRouterEngine(
+                RuleSet([AppRule("Game", wanted, exe="game.exe")]),
+                debounce_ms=500,
+            )
+            service_b = RoutingService(
+                engine_b,
+                dispatcher_b,
+                poll_ms=20,
+                provider=FakeProvider(None),
+                bootstrap_foreground=service_a.last_meaningful_app,
+            )
+            routed = threading.Event()
+            service_b.on_change = lambda _change: routed.set()
+            service_b.start()
+
+            # Bootstrap is forced: it must not wait for the normal debounce even
+            # though SSR remains the foreground application.
+            self.assertTrue(routed.wait(1.0))
+            self.assertEqual(engine_b.current_state, wanted)
+            self.assertEqual(len(dispatcher_b.changes), 1)
+            self.assertEqual(dispatcher_b.changes[0].current, wanted)
+        finally:
+            service_a.stop()
+            if service_b is not None:
+                self.assertTrue(service_b.stop())
+
     def test_explain_decision_is_read_only_and_matches_router_resolution(self):
         app = ForegroundApp(1, 1, "game.exe", window_title="Gameplay")
         wanted = StreamState(game="Game")
