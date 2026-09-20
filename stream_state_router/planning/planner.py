@@ -110,6 +110,79 @@ def _operation_for(assignment: DesiredAssignment) -> str | None:
     return _OPERATION_TYPES.get(assignment.key.kind)
 
 
+def _assignment_validation_error(
+    assignment: DesiredAssignment,
+) -> tuple[str, str] | None:
+    key = assignment.key
+    value = assignment.value
+
+    if key.kind == "program_scene":
+        if not isinstance(value, str) or not value.strip():
+            return "invalid_desired_value", "Program scene must be a non-empty string"
+        return None
+
+    if key.kind == "scene_item_visibility":
+        if not key.container or not key.source:
+            return (
+                "invalid_property_key",
+                "Scene-item visibility requires container and source",
+            )
+        if not isinstance(value, bool):
+            return "invalid_desired_value", "Scene-item visibility must be boolean"
+        return None
+
+    if key.kind == "input_mute":
+        if not key.source:
+            return "invalid_property_key", "Input mute requires an input name"
+        if not isinstance(value, bool):
+            return "invalid_desired_value", "Input mute must be boolean"
+        return None
+
+    if key.kind == "input_volume_db":
+        if not key.source:
+            return "invalid_property_key", "Input volume requires an input name"
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            return "invalid_desired_value", "Input volume dB must be a finite number"
+        return None
+
+    if key.kind == "input_setting":
+        if not key.source or not key.setting:
+            return (
+                "invalid_property_key",
+                "Input setting requires input name and setting key",
+            )
+        return None
+
+    if key.kind == "filter_enabled":
+        if not key.source or not key.filter_name:
+            return (
+                "invalid_property_key",
+                "Filter enable state requires source and filter name",
+            )
+        if not isinstance(value, bool):
+            return "invalid_desired_value", "Filter enable state must be boolean"
+        return None
+
+    if key.kind == "filter_setting":
+        if not key.source or not key.filter_name or not key.setting:
+            return (
+                "invalid_property_key",
+                "Filter setting requires source, filter name and setting key",
+            )
+        return None
+
+    if key.kind == "layout_profile":
+        if not isinstance(value, str) or not value.strip():
+            return "invalid_desired_value", "Layout profile must be a non-empty string"
+        return None
+
+    return None
+
+
 def _values_equal(left: Any, right: Any) -> bool:
     if (
         isinstance(left, (int, float))
@@ -150,6 +223,24 @@ def build_execution_plan(
         key = assignment.key
         current = observed.get(key)
         operation_type = _operation_for(assignment)
+
+        validation_error = _assignment_validation_error(assignment)
+        if validation_error is not None:
+            code, message = validation_error
+            diff.append(
+                DiffEntry(
+                    key=key,
+                    status="blocked",
+                    observed_known=current.known,
+                    observed=current.value,
+                    desired=assignment.value,
+                    provenance=assignment.provenance,
+                )
+            )
+            diagnostics.append(
+                PlanDiagnostic("error", code, message, key)
+            )
+            continue
 
         blocked = preflight.get(key)
         if blocked is not None:
