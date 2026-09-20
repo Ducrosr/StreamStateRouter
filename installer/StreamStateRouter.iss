@@ -1,5 +1,7 @@
 #define MyAppName "Stream State Router"
-#define MyAppVersion "2.0.13"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0"
+#endif
 #define MyAppPublisher "Ducrosr"
 #define MyAppExeName "StreamStateRouter.exe"
 
@@ -17,7 +19,7 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\release
-OutputBaseFilename=Stream-State-Router-v2.0.13-setup
+OutputBaseFilename=Stream-State-Router-v{#MyAppVersion}-setup
 PrivilegesRequired=lowest
 
 [Files]

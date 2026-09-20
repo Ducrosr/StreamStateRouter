@@ -10,13 +10,13 @@
     "pack": "streamdeck pack com.remyducros.streamstaterouter.sdPlugin --no-update-check --force"
   },
   "dependencies": {
-    "@elgato/streamdeck": "^2.0.0"
+    "@elgato/streamdeck": "2.0.0"
   },
   "devDependencies": {
-    "@elgato/cli": "^1.7.1",
-    "@tsconfig/node20": "^20.1.2",
-    "@types/node": "^20.19.0",
-    "rolldown": "^1.0.0-rc.6",
-    "typescript": "^5.2.2"
+    "@elgato/cli": "1.7.1",
+    "@tsconfig/node20": "20.1.2",
+    "@types/node": "20.19.0",
+    "rolldown": "1.0.0-rc.6",
+    "typescript": "5.2.2"
   }
 }
