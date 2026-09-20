@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 from typing import Any, Mapping
 
@@ -110,6 +111,14 @@ def _operation_for(assignment: DesiredAssignment) -> str | None:
     return _OPERATION_TYPES.get(assignment.key.kind)
 
 
+def _is_json_compatible(value: Any) -> bool:
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return True
+
+
 def _assignment_validation_error(
     assignment: DesiredAssignment,
 ) -> tuple[str, str] | None:
@@ -155,6 +164,11 @@ def _assignment_validation_error(
                 "invalid_property_key",
                 "Input setting requires input name and setting key",
             )
+        if not _is_json_compatible(value):
+            return (
+                "invalid_desired_value",
+                "Input setting value must be JSON-compatible",
+            )
         return None
 
     if key.kind == "filter_enabled":
@@ -172,6 +186,11 @@ def _assignment_validation_error(
             return (
                 "invalid_property_key",
                 "Filter setting requires source, filter name and setting key",
+            )
+        if not _is_json_compatible(value):
+            return (
+                "invalid_desired_value",
+                "Filter setting value must be JSON-compatible",
             )
         return None
 
