@@ -97,7 +97,7 @@ class OBSActivationController:
         self._collection_probe_seconds = max(0.1, float(collection_probe_seconds))
         self._retry_base_seconds = max(0.05, float(retry_base_seconds))
         self._retry_max_seconds = max(self._retry_base_seconds, float(retry_max_seconds))
-        self._module_presence_cache: dict[tuple[str, str], tuple[float, bool, str]] = {}
+        self._scene_topology_cache: dict[str, tuple[float, frozenset[str], str]] = {}
         self._last_collection_probe = 0.0
         self._scene_collection: str | None = None
         self._pending_hides: dict[tuple[str, str, str, str, str], PendingHide] = {}
@@ -157,7 +157,7 @@ class OBSActivationController:
     def invalidate_cache(self) -> None:
         # Activation visibility uses pair-local fresh ids. Do not flush the
         # LayoutProfile transform cache globally from this subsystem.
-        self._module_presence_cache.clear()
+        self._scene_topology_cache.clear()
 
     def pending_hides(self, policy_name: str | None = None) -> tuple[PendingHide, ...]:
         values = tuple(self._pending_hides.values())
@@ -215,24 +215,33 @@ class OBSActivationController:
         if not module_source:
             return False, "module OBS non défini"
 
-        key = (scene, module_source)
         now = self._clock()
-        cached = self._module_presence_cache.get(key)
+        cached = self._scene_topology_cache.get(scene)
         if cached is not None and now - cached[0] < self._eligibility_cache_seconds:
-            return cached[1], cached[2]
+            sources = cached[1]
+            scan_error = cached[2]
+        else:
+            try:
+                if hasattr(self.layout_manager, "scan_scene_topology"):
+                    topology = self.layout_manager.scan_scene_topology(scene, recursive=True)
+                    sources = frozenset(str(item.source) for item in topology)
+                else:  # compatibility for lightweight integrations/fakes
+                    catalog = self.layout_manager.discover_scene(scene, recursive=True)
+                    sources = frozenset(
+                        str(element.source)
+                        for elements in catalog.values()
+                        for element in elements
+                    )
+                scan_error = ""
+            except Exception as exc:
+                sources = frozenset()
+                scan_error = str(exc)
+            self._scene_topology_cache[scene] = (now, sources, scan_error)
 
-        try:
-            catalog = self.layout_manager.discover_scene(scene, recursive=True)
-            present = any(
-                element.source == module_source
-                for elements in catalog.values()
-                for element in elements
-            )
-            reason = f"module présent dans {scene}" if present else f"module absent de {scene}"
-        except Exception as exc:
-            present = False
-            reason = f"scan OBS impossible : {exc}"
-        self._module_presence_cache[key] = (now, present, reason)
+        if scan_error:
+            return False, f"scan OBS impossible : {scan_error}"
+        present = module_source in sources
+        reason = f"module présent dans {scene}" if present else f"module absent de {scene}"
         return present, reason
 
     def is_eligible(self, policy_name: str, policy: TriggerPolicyConfig) -> bool:
