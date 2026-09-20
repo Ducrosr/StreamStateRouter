@@ -143,6 +143,28 @@ class OBSActivationControllerTests(unittest.TestCase):
         self.assertTrue(controller.is_eligible("b", second))
         self.assertEqual(dispatcher.layout_manager.topology_calls, [("In Game", True)])
 
+    def test_ten_policies_in_one_scene_still_use_one_topology_scan(self):
+        dispatcher = FakeDispatcher()
+        policies = {}
+        dispatcher.layout_manager.catalog_by_scene["In Game"] = {}
+        for index in range(10):
+            source = f"[Module] Egg{index}"
+            dispatcher.layout_manager.catalog_by_scene["In Game"][source] = [
+                SimpleNamespace(source=source)
+            ]
+            policies[f"egg-{index}"] = self.policy(module_source=source)
+        controller = OBSActivationController(
+            dispatcher,
+            policies,
+            clock=FakeClock(5.0),
+            eligibility_cache_seconds=0.5,
+        )
+
+        for name, policy in policies.items():
+            self.assertTrue(controller.is_eligible(name, policy))
+
+        self.assertEqual(dispatcher.layout_manager.topology_calls, [("In Game", True)])
+
     def test_scene_topology_cache_expires_and_observes_structure_change(self):
         dispatcher = FakeDispatcher()
         dispatcher.layout_manager.catalog_by_scene["In Game"] = {

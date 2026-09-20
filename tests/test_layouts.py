@@ -111,6 +111,59 @@ class LayoutTests(unittest.TestCase):
         ]
         self.assertEqual(writes, [])
 
+    def test_noop_apply_scales_to_hundred_elements_without_writes(self):
+        class LargeClient(FakeLayoutClient):
+            def __init__(self, count):
+                super().__init__()
+                self.items = {f"[Test] Item {index:03d}": index + 1 for index in range(count)}
+                self.transforms = {
+                    index + 1: {
+                        "positionX": float(index * 10),
+                        "positionY": float(index * 5),
+                        "width": 100.0,
+                        "height": 50.0,
+                        "scaleX": 1.0,
+                        "scaleY": 1.0,
+                        "alignment": 5,
+                        "rotation": 0.0,
+                        "boundsType": "OBS_BOUNDS_NONE",
+                    }
+                    for index in range(count)
+                }
+                self.enabled = {index + 1: True for index in range(count)}
+
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSceneItemList":
+                    self.calls.append((request, payload))
+                    return {
+                        "sceneItems": [
+                            {
+                                "sourceName": source,
+                                "sceneItemId": item_id,
+                                "sceneItemEnabled": True,
+                            }
+                            for source, item_id in self.items.items()
+                        ]
+                    }
+                return super().send(request, data)
+
+        for count in (10, 100):
+            with self.subTest(count=count):
+                client = LargeClient(count)
+                manager = OBSLayoutManager(client)
+                profile = manager.capture_profile("Gameplay")
+                client.calls.clear()
+
+                manager.apply_profile(profile, record_undo=False)
+
+                writes = [
+                    request
+                    for request, _payload in client.calls
+                    if request in {"SetSceneItemTransform", "SetSceneItemEnabled"}
+                ]
+                self.assertEqual(writes, [])
+
     def test_discovery_keeps_each_source_as_a_distinct_module(self):
         manager = OBSLayoutManager(FakeLayoutClient())
         modules = manager.discover_scene("Gameplay")
