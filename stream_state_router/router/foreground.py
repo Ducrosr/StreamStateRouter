@@ -10,6 +10,31 @@ from .models import ForegroundApp
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
+def _configure_user32(user32) -> None:
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+
+
+def _configure_kernel32(kernel32) -> None:
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+
 class WindowsForegroundProvider:
     """Read the real foreground HWND/PID/executable using Win32 only."""
 
@@ -18,6 +43,8 @@ class WindowsForegroundProvider:
             raise RuntimeError("WindowsForegroundProvider is only available on Windows")
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _configure_user32(self._user32)
+        _configure_kernel32(self._kernel32)
 
     def get(self) -> ForegroundApp | None:
         hwnd = int(self._user32.GetForegroundWindow() or 0)
