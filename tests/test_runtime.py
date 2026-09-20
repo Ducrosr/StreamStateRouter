@@ -192,6 +192,23 @@ class CooperativeBackgroundDispatcher(FakeDispatcher):
             self.reconcile_exited.set()
 
 
+class NonCooperativeBackgroundDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.reconcile_entered = threading.Event()
+        self.release_reconcile = threading.Event()
+
+    def pending_domains(self, _state=None):
+        return ("game",)
+
+    def dispatch_state(self, state, force=False):
+        del state, force
+        self.reconcile_entered.set()
+        if not self.release_reconcile.wait(2.0):
+            raise RuntimeError("background reconcile barrier timed out")
+        return DispatchResult(0, 0, ("game",))
+
+
 class FakeOBSHeartbeatClient:
     def __init__(self):
         self.config = SimpleNamespace(enabled=True)
@@ -763,6 +780,32 @@ class RuntimeTests(unittest.TestCase):
             self.assertLess(elapsed, 0.5)
         finally:
             service.stop()
+
+    def test_stop_timeout_reports_real_dispatch_quiescence(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        dispatcher = NonCooperativeBackgroundDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        try:
+            self.assertTrue(dispatcher.reconcile_entered.wait(1.0))
+
+            first = service.stop(timeout=0.05)
+
+            self.assertFalse(first)
+            self.assertFalse(first.worker_stopped)
+            self.assertTrue(first.dispatch_quiescent)
+            self.assertIn("obs_dispatch=quiescent", first.diagnostic_summary())
+        finally:
+            dispatcher.release_reconcile.set()
+            self.assertTrue(service.stop(timeout=1.0))
 
     def test_stop_waits_for_inflight_layout_command_then_stops_cleanly(self):
         app = ForegroundApp(1, 1, "terminal.exe")
