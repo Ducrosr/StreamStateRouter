@@ -191,6 +191,7 @@ class RoutingService:
         pending_activation_cleanup=(),
         pending_cleanup=(),
         config_revision: str = "",
+        bootstrap_foreground: ForegroundApp | None = None,
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
@@ -239,6 +240,12 @@ class RoutingService:
         self._dispatch_lock = threading.RLock()
         self._paused = False
         self._last_app: ForegroundApp | None = None
+        # Keep the last real external foreground independently from transient
+        # None values produced while SSR itself owns the foreground window.
+        # A replacement runtime may use it exactly once to reconverge after a
+        # cooperative restart interrupted a long OBS transition.
+        self._last_meaningful_app: ForegroundApp | None = bootstrap_foreground
+        self._bootstrap_foreground: ForegroundApp | None = bootstrap_foreground
         self._dispatch_generation = 0
         self._last_obs_probe = 0.0
         self._last_obs_connected: bool | None = None
@@ -289,6 +296,11 @@ class RoutingService:
     def last_app(self) -> ForegroundApp | None:
         with self._lock:
             return self._last_app
+
+    @property
+    def last_meaningful_app(self) -> ForegroundApp | None:
+        with self._lock:
+            return self._last_meaningful_app
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -897,7 +909,17 @@ class RoutingService:
                     with self._lock:
                         changed_app = app != self._last_app
                         self._last_app = app
+                        if app is not None:
+                            self._last_meaningful_app = app
+                            self._bootstrap_foreground = None
+                        bootstrap_app = self._bootstrap_foreground
+                        bootstrap_routing = app is None and bootstrap_app is not None
+                        if bootstrap_routing:
+                            # Consume the handoff once. A real foreground observed
+                            # later always wins normally.
+                            self._bootstrap_foreground = None
                         paused = self._paused
+                    routing_app = bootstrap_app if bootstrap_routing else app
                     if changed_app:
                         self.logger.info(
                             "Foreground -> %s | %s",
@@ -906,6 +928,12 @@ class RoutingService:
                         )
                         if self.on_foreground:
                             self.on_foreground(app)
+                    if bootstrap_routing:
+                        self.logger.info(
+                            "Routing bootstrap -> %s | %s",
+                            routing_app.exe_name if routing_app else "<none>",
+                            routing_app.window_title if routing_app else "",
+                        )
                     if not paused:
                         routing_context = None
                         if bool(getattr(self.engine, "needs_context", False)):
@@ -917,7 +945,8 @@ class RoutingService:
                         self._worker_phase = "observe"
                         with self._lock:
                             change = self.engine.observe(
-                                app,
+                                routing_app,
+                                force=bootstrap_routing,
                                 context=routing_context,
                                 use_context_provider=False,
                             )
