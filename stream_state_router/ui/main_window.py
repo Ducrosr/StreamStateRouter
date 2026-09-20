@@ -709,6 +709,8 @@ class MainWindow(QMainWindow):
         previous = self._service
         if previous is not None:
             result = previous.stop()
+            diagnostic = result.diagnostic_summary()
+            self._log(f"runtime_stop: {diagnostic}")
             if not result:
                 self._log(
                     "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
@@ -717,7 +719,8 @@ class MainWindow(QMainWindow):
                     self,
                     "Runtime",
                     "Le runtime précédent n'a pas pu être arrêté proprement. "
-                    "Le nouveau runtime n'a pas été démarré.",
+                    "Le nouveau runtime n'a pas été démarré.\n\n"
+                    f"Diagnostic : {diagnostic}",
                 )
                 return False
             self._pending_cleanup_transfer = result.pending_cleanup
