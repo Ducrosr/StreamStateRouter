@@ -742,11 +742,19 @@ class RoutingService:
             options={"include_settings": bool(include_settings)},
         )
 
-    def catalog_snapshot(self) -> dict[str, object]:
-        """Return the last catalogue snapshot without issuing OBS requests."""
+    def catalog_snapshot(self, *, include_settings: bool = False) -> dict[str, object]:
+        """Return the last catalogue snapshot without issuing OBS requests.
+
+        Detailed source/filter settings are redacted by default because they may
+        contain local paths, tokens or other sensitive configuration values.
+        """
         with self._lock:
             catalog = self._obs_catalog
-        return catalog.as_mapping() if catalog is not None else {}
+        return (
+            catalog.as_mapping(include_settings=include_settings)
+            if catalog is not None
+            else {}
+        )
 
     def catalog_summary(self) -> dict[str, object]:
         """Return a compact last-sync summary without issuing OBS requests."""
