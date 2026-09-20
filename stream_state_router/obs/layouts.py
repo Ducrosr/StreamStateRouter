@@ -703,6 +703,7 @@ class OBSLayoutManager:
     ) -> None:
         if depth > 8:
             return
+        self._yield_runtime()
         if prefetched is None:
             response = self.client.send("GetSceneItemList", {"sceneName": container})
             items = response.get("sceneItems", []) or []
@@ -710,6 +711,7 @@ class OBSLayoutManager:
             items = prefetched
 
         for raw in items:
+            self._yield_runtime()
             if not isinstance(raw, Mapping):
                 continue
             source = str(raw.get("sourceName") or "").strip()
@@ -839,6 +841,7 @@ class OBSLayoutManager:
     ) -> None:
         if depth > 8:
             return
+        self._yield_runtime()
         if prefetched is None:
             response = self.client.send("GetSceneItemList", {"sceneName": container})
             items = response.get("sceneItems", []) or []
@@ -846,6 +849,7 @@ class OBSLayoutManager:
             items = prefetched
 
         for raw in items:
+            self._yield_runtime()
             if not isinstance(raw, Mapping):
                 continue
             source = str(raw.get("sourceName") or "")
@@ -1533,6 +1537,7 @@ class OBSLayoutManager:
         scene = str(profile.get("scene") or "")
         by_module: dict[str, list[CatalogElement]] = {}
         for item in desired:
+            self._yield_runtime()
             try:
                 current = self._get_current_item(item["container"], item["source"])
             except Exception:
@@ -1744,6 +1749,7 @@ class OBSLayoutManager:
 
         def prepare_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
             nonlocal skipped
+            self._yield_runtime()
             if item.get("skip"):
                 skipped += 1
                 return None
@@ -1898,6 +1904,7 @@ class OBSLayoutManager:
         touched_fades: set[str] = set()
 
         for index, prepared in enumerate(prepared_items):
+            self._yield_runtime()
             target_enabled = prepared["target_enabled"]
             current_enabled = prepared["current_enabled"]
             source = prepared["source"]
@@ -1946,6 +1953,7 @@ class OBSLayoutManager:
                         self._cooperative_sleep(remaining)
                 t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
                 for index, prepared in enumerate(prepared_items):
+                    self._yield_runtime()
                     if move and prepared["transform_changed"]:
                         target = prepared["target_transform"]
                         current = prepared["current_transform"]
@@ -2296,6 +2304,7 @@ class OBSLayoutManager:
         self._scene_item_cache.pop((container, source), None)
 
     def _get_current_item(self, container: str, source: str) -> dict[str, Any]:
+        self._yield_runtime()
         # Scene-item ids are not a durable identifier for a LayoutProfile. OBS can
         # rebuild/renumber items after structural scene edits (for example when a
         # source is removed). A cached id that was valid during discovery must
@@ -2309,6 +2318,7 @@ class OBSLayoutManager:
                 "GetSceneItemTransform", {"sceneName": container, "sceneItemId": item_id}
             )
         except Exception:
+            self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             item_id = self._scene_item_id(container, source)
             transform_response = self.client.send(
@@ -2316,6 +2326,7 @@ class OBSLayoutManager:
             )
         enabled = None
         enabled_error = ""
+        self._yield_runtime()
         try:
             enabled_response = self.client.send(
                 "GetSceneItemEnabled", {"sceneName": container, "sceneItemId": item_id}
@@ -2334,6 +2345,7 @@ class OBSLayoutManager:
         }
 
     def _set_transform(self, container: str, source: str, transform: Mapping[str, Any]) -> None:
+        self._yield_runtime()
         if not transform:
             return
         item_id = self._scene_item_id(container, source)
@@ -2345,11 +2357,13 @@ class OBSLayoutManager:
         try:
             self.client.send("SetSceneItemTransform", payload)
         except Exception:
+            self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             payload["sceneItemId"] = self._scene_item_id(container, source)
             self.client.send("SetSceneItemTransform", payload)
 
     def _set_enabled(self, container: str, source: str, enabled: bool) -> None:
+        self._yield_runtime()
         item_id = self._scene_item_id(container, source)
         payload = {
             "sceneName": container,
@@ -2359,6 +2373,7 @@ class OBSLayoutManager:
         try:
             self.client.send("SetSceneItemEnabled", payload)
         except Exception:
+            self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             payload["sceneItemId"] = self._scene_item_id(container, source)
             self.client.send("SetSceneItemEnabled", payload)
@@ -2444,9 +2459,10 @@ class OBSLayoutManager:
             value = start + (end - start) * (index / steps)
             self._set_source_opacity(source, value)
             if index != steps:
-                time.sleep(delay)
+                self._cooperative_sleep(delay)
 
     def _fresh_scene_item_id(self, container: str, source: str) -> int:
+        self._yield_runtime()
         self._invalidate_scene_item_id(container, source)
         response = self.client.send(
             "GetSceneItemId",
@@ -2462,6 +2478,7 @@ class OBSLayoutManager:
         return item_id
 
     def _scene_item_id(self, container: str, source: str) -> int:
+        self._yield_runtime()
         key = (container, source)
         cached = self._scene_item_cache.get(key)
         if cached:
