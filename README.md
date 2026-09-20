@@ -1,5 +1,41 @@
 # Stream State Router 2.0.14
 
+## Branche d'architecture — fondations déclaratives
+
+Le chantier déclaratif est développé séparément de la correction lifecycle. Son principe est :
+**décrire l'état final souhaité, calculer un diff, puis laisser SSR générer le plan
+d'exécution** au lieu de demander à l'utilisateur d'écrire des macros impératives.
+
+Le premier lot reste volontairement sans nouvel exécuteur :
+
+- un catalogue OBS **en lecture seule** découvre explicitement scènes, groupes,
+  occurrences de Scene Items, inputs, filtres, transitions et canvas ;
+- la synchronisation du catalogue est déclenchée à la demande et n'est jamais
+  exécutée à chaque tick de routage ;
+- les réglages détaillés des inputs/filtres sont optionnels afin d'éviter les
+  lectures réseau inutiles ;
+- `DesiredState` ne contient que les propriétés que SSR a choisi de gérer ;
+- `ObservedState` distingue une valeur connue d'une valeur inconnue ;
+- le planner pur produit un `ExecutionPlan` déterministe, avec provenance et
+  diagnostics, sans I/O et sans écriture OBS ;
+- un état déjà convergé produit zéro opération ;
+- les LayoutProfiles existants restent un moteur spécialisé : le planner les
+  référence, il ne réimplémente pas leur géométrie ni leurs transitions.
+
+Le catalogue synchronisé est un cache de session, pas une copie de la Scene
+Collection dans la configuration. Il est invalidé après perte/recréation de la
+session OBS. La future cible dynamique multi-client reste un point d'extension
+générique ; aucune logique Dofus n'est introduite dans ce socle.
+
+Pour diagnostic local, `POST /catalog/sync` met en file une synchronisation
+read-only sur le worker SSR. `POST /catalog/snapshot` renvoie uniquement le
+dernier snapshot déjà mémorisé et ne contacte pas OBS. `/status` n'expose qu'un
+résumé compact du catalogue.
+
+**Ce lot n'exécute aucun `ExecutionPlan`.** Avatar/Mood, capture dynamique,
+audio Windows, recettes d'effets et migration d'Advanced Scene Switcher restent
+volontairement hors périmètre jusqu'à audit de ces fondations.
+
 ## 2.0.14 — feuille de route d'architecture Astra
 
 Cette version applique la feuille de route d'audit dans l'ordre recommandé, sans remplacer l'architecture existante :
