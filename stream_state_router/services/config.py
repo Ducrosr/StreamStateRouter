@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import shutil
@@ -425,6 +426,18 @@ def _check_inheritance_cycles(mapping: Mapping[str, Any], prefix: str, errors: l
 
     for name in mapping:
         visit(str(name), ())
+
+
+def config_revision(data: Mapping[str, Any]) -> str:
+    """Stable short revision for draft/saved/applied UI state."""
+    payload = json.dumps(
+        dict(data),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:12]
 
 
 def validate_config(data: Mapping[str, Any]) -> list[str]:

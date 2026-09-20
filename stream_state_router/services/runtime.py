@@ -114,9 +114,11 @@ class RoutingService:
         activation_scheduler: ActivationScheduler | None = None,
         activation_controller: OBSActivationController | None = None,
         pending_activation_cleanup=(),
+        config_revision: str = "",
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
+        self.config_revision = str(config_revision or "")
         self.poll_seconds = max(0.02, poll_ms / 1000.0)
         self.provider = provider or WindowsForegroundProvider()
         self.logger = logger or logging.getLogger("stream_state_router")
@@ -332,6 +334,7 @@ class RoutingService:
             "eligibility_reason": eligibility_reason,
             "operational": operational,
             "cleanup_pending": cleanup_pending,
+            "config_revision": self.config_revision,
             "next_roll_seconds": (
                 max(0.0, state.next_roll_at - now) if state.next_roll_at is not None else None
             ),

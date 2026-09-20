@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+import copy
 
 from stream_state_router.services.config import (
     build_activation_policies,
@@ -11,6 +12,7 @@ from stream_state_router.services.config import (
     load_config,
     migrate_config,
     validate_config,
+    config_revision,
     release_runtime_visibility_ownership,
 )
 
@@ -134,6 +136,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(modules["[Global] Date"]["display_name"], "Date")
         self.assertEqual(len(modules["[Global] Date"]["elements"]), 1)
 
+
+    def test_config_revision_is_stable_and_changes_with_content(self):
+        data = self.sample()
+        first = config_revision(data)
+        second = config_revision(copy.deepcopy(data))
+        changed = copy.deepcopy(data)
+        changed["router"]["poll_ms"] += 1
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, config_revision(changed))
+        self.assertEqual(len(first), 12)
 
     def test_schema_v4_adds_activation_policies(self):
         data = self.sample()

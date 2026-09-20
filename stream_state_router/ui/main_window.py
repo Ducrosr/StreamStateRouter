@@ -43,6 +43,7 @@ from ..router.engine import StateChange, StateRouterEngine
 from ..router.models import ForegroundApp, StreamState
 from ..services.config import (
     build_activation_policies,
+    config_revision,
     build_obs_config,
     build_profiles,
     build_layout_profiles,
@@ -91,6 +92,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Stream State Router 2.0.13")
         self.resize(1180, 760)
         self.config = copy.deepcopy(config)
+        self._saved_revision = config_revision(self.config)
+        self._applied_revision = ""
         self.logger = logger
         self.start_minimized = start_minimized
         self._runtime_marker = runtime_marker
@@ -642,6 +645,7 @@ class MainWindow(QMainWindow):
             return
         try:
             save_config(self.config)
+            self._saved_revision = config_revision(self.config)
             set_startup_enabled(self.start_with_windows.isChecked())
         except Exception as exc:
             QMessageBox.critical(self, "Enregistrement", str(exc))
@@ -656,7 +660,7 @@ class MainWindow(QMainWindow):
         self._restart_api()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
-        self.unsaved.setText("")
+        self._refresh_config_revision_status()
         self.statusBar().showMessage("Configuration enregistrée et appliquée", 4000)
         self._log("Configuration enregistrée et appliquée.")
 
@@ -681,6 +685,7 @@ class MainWindow(QMainWindow):
             logger=self.logger,
             activation_policies=build_activation_policies(self.config),
             pending_activation_cleanup=self._pending_cleanup_transfer,
+            config_revision=config_revision(self.config),
         )
         self._pending_cleanup_transfer = ()
         self._service.on_foreground = self.bridge.foreground.emit
@@ -688,7 +693,11 @@ class MainWindow(QMainWindow):
         self._service.on_dispatch = self.bridge.dispatch.emit
         self._service.on_event = self.bridge.runtime_event.emit
         self._service.start()
+        self._applied_revision = self._service.config_revision
+        self._layout_sync_manager = None
+        self._obs_module_catalog = {}
         self._update_obs_status()
+        self._refresh_config_revision_status()
 
     def _restart_runtime(self) -> bool:
         previous = self._service
@@ -1853,8 +1862,8 @@ class MainWindow(QMainWindow):
             raise RuntimeError("Activez le pilotage OBS avant d'utiliser cet outil.")
         if self._dispatcher is not None:
             return self._dispatcher.layout_manager
-        if self._layout_sync_manager is not None:
-            return self._layout_sync_manager
+        # Tools must never silently use a manager kept from an older runtime.
+        self._layout_sync_manager = None
         return OBSLayoutManager(OBSClientManager(cfg))
 
     def _preview_layout_profile(self) -> None:
@@ -2025,6 +2034,10 @@ class MainWindow(QMainWindow):
             "rule": service.engine.current_rule if service else "",
             "state": state.as_variables() if state else {},
             "obs_connected": bool(self._client.connected) if self._client else False,
+            "config_revision": {
+                "saved": self._saved_revision,
+                "applied": self._applied_revision,
+            },
         }
 
     def _api_action(self, action: str, payload: dict) -> dict:
@@ -2137,8 +2150,22 @@ class MainWindow(QMainWindow):
         self._load_config_into_ui()
         self._mark_dirty()
 
+    def _refresh_config_revision_status(self, *, draft_dirty: bool = False) -> None:
+        saved = self._saved_revision or "—"
+        applied = self._applied_revision or "—"
+        if draft_dirty:
+            self.unsaved.setText(
+                f"Brouillon modifié · enregistré {saved} · appliqué {applied}"
+            )
+        elif saved != applied:
+            self.unsaved.setText(
+                f"Enregistré {saved} · runtime encore sur {applied}"
+            )
+        else:
+            self.unsaved.setText(f"Enregistré / appliqué {applied}")
+
     def _mark_dirty(self, *_args) -> None:
-        self.unsaved.setText("Modifications non enregistrées")
+        self._refresh_config_revision_status(draft_dirty=True)
 
     def _log(self, message: str) -> None:
         self.log_view.appendPlainText(message)
