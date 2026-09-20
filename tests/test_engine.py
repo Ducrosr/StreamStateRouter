@@ -71,6 +71,35 @@ class StateRouterEngineTests(unittest.TestCase):
         self.assertIsNone(engine.observe(None))
         self.assertEqual(engine.current_state, self.dofus)
 
+    def test_frozen_routing_context_bypasses_context_provider(self):
+        target = StreamState("Live")
+        rules = RuleSet(
+            [
+                AppRule(
+                    "Live",
+                    target,
+                    exe="game.exe",
+                    conditions={"streaming": True},
+                )
+            ],
+            fallback=self.vanilla,
+        )
+        calls = []
+
+        def provider():
+            calls.append(True)
+            raise AssertionError("context provider must not run")
+
+        engine = StateRouterEngine(rules, debounce_ms=0, context_provider=provider)
+        change = engine.observe(
+            self.app("game.exe"),
+            context={"streaming": True},
+            use_context_provider=False,
+        )
+
+        self.assertEqual(change.current, target)
+        self.assertEqual(calls, [])
+
     def test_manual_override_blocks_foreground_changes_until_cleared(self):
         engine = StateRouterEngine(self.rules, debounce_ms=0)
         custom = StreamState("Manual", "Manual", "Manual", "Manual")
