@@ -1568,46 +1568,72 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            push_layout_history(self.config, name, old_profile)
-            captured = self._layout_sync_manager.capture_profile(
+            capture = self._layout_sync_manager.capture_profile_result(
                 scene,
                 selected_sources=selected,
                 extends=str(old_profile.get("extends") or ""),
-                transition=old_profile.get("transition") if isinstance(old_profile.get("transition"), dict) else None,
+                transition=(
+                    old_profile.get("transition")
+                    if isinstance(old_profile.get("transition"), dict)
+                    else None
+                ),
             )
-            captured["coordinate_mode"] = str(old_profile.get("coordinate_mode") or "normalized")
-            captured["conditions"] = copy.deepcopy(old_profile.get("conditions") or {})
-            parent_name = str(captured.get("extends") or "")
+            raw_captured = capture.profile
+            if capture.captured_modules <= 0:
+                QMessageBox.warning(
+                    self,
+                    "Capturer le layout",
+                    "Aucune source correspondant à « [Type de module] Nom du module » "
+                    "n'a été trouvée parmi la sélection.",
+                )
+                return
+            if not capture.complete:
+                QMessageBox.warning(
+                    self,
+                    "Capture OBS incomplète",
+                    "Le profil existant n'a pas été remplacé. Certains sous-arbres OBS "
+                    "n'ont pas pu être lus :\n\n- " + "\n- ".join(capture.warnings[:20]),
+                )
+                return
+
+            candidate = copy.deepcopy(raw_captured)
+            candidate["coordinate_mode"] = str(old_profile.get("coordinate_mode") or "normalized")
+            candidate["conditions"] = copy.deepcopy(old_profile.get("conditions") or {})
+            parent_name = str(candidate.get("extends") or "")
             if parent_name and parent_name in self._layout_profiles():
                 parent = resolve_layout_profile(parent_name, self._layout_profiles())
-                captured = compact_layout_overrides(captured, parent)
+                candidate = compact_layout_overrides(candidate, parent)
+
+            candidate_profiles = copy.deepcopy(self._layout_profiles())
+            candidate_profiles[name] = candidate
+            resolved = resolve_layout_profile(name, candidate_profiles)
+            issues = self._layout_sync_manager.validate_profile(resolved)
+            errors = [issue for issue in issues if issue.level == "error"]
+            if errors:
+                QMessageBox.warning(
+                    self,
+                    "Capture OBS refusée",
+                    "Le profil existant n'a pas été remplacé :\n\n"
+                    + "\n".join(f"• {issue.message}" for issue in errors[:20]),
+                )
+                return
         except Exception as exc:
             QMessageBox.critical(self, "Capturer le layout", str(exc))
             return
-        if not captured.get("modules"):
-            QMessageBox.warning(
-                self,
-                "Capturer le layout",
-                "Aucune source correspondant à « [Type de module] Nom du module » n'a été trouvée parmi la sélection.",
-            )
-            return
-        self._layout_profiles()[name] = captured
+
+        push_layout_history(self.config, name, old_profile)
+        self._layout_profiles()[name] = candidate
         self._mark_dirty()
         self._refresh_layout_profile_view()
         self._refresh_override_boxes()
         self.statusBar().showMessage(f"Layout « {name} » capturé depuis OBS", 4000)
-        try:
-            resolved = resolve_layout_profile(name, self._layout_profiles())
-            issues = self._layout_sync_manager.validate_profile(resolved)
-        except Exception:
-            issues = []
-        errors = [issue for issue in issues if issue.level == "error"]
-        if errors:
-            QMessageBox.warning(
+        warnings = [issue for issue in issues if issue.level != "error"]
+        if warnings:
+            QMessageBox.information(
                 self,
-                "Layout capturé avec avertissements",
-                "Le layout a été enregistré, mais certains éléments devront être vérifiés :\n\n"
-                + "\n".join(f"• {issue.message}" for issue in errors[:20]),
+                "Layout capturé",
+                "Capture valide avec informations :\n\n"
+                + "\n".join(f"• {issue.message}" for issue in warnings[:20]),
             )
 
     def _selected_layout_module_name(self) -> str | None:

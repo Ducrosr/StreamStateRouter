@@ -45,6 +45,14 @@ class LayoutDiffItem:
 
 
 @dataclass(frozen=True, slots=True)
+class LayoutCaptureResult:
+    profile: dict[str, Any]
+    complete: bool
+    warnings: tuple[str, ...] = ()
+    captured_modules: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class LayoutValidationIssue:
     level: str
     message: str
@@ -290,6 +298,7 @@ class OBSLayoutManager:
         self._undo_stack: list[LayoutSnapshot] = []
         self._preview_snapshot: LayoutSnapshot | None = None
         self._snapshot_generation = 0
+        self._last_discovery_warnings: list[str] = []
 
     def set_cooperative_yield(self, callback) -> None:
         """Install a lightweight runtime checkpoint used during long transitions."""
@@ -506,6 +515,7 @@ class OBSLayoutManager:
         scene = str(scene or "").strip()
         if not scene:
             return {}
+        self._last_discovery_warnings = []
         # Scene-item ids are ephemeral. A structural edit in OBS can invalidate
         # or even reuse ids without producing an error for the old id. Discovery
         # must therefore always rebuild the cache from the current scene graph.
@@ -630,8 +640,10 @@ class OBSLayoutManager:
                         prefetched=children,
                         container_kind="group",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._last_discovery_warnings.append(
+                        f"Groupe '{source}' non lisible depuis '{container}' : {exc}"
+                    )
                 continue
 
             if is_scene:
@@ -646,8 +658,33 @@ class OBSLayoutManager:
                         prefetched=None,
                         container_kind="scene",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._last_discovery_warnings.append(
+                        f"Scène imbriquée '{source}' non lisible depuis '{container}' : {exc}"
+                    )
+
+    def capture_profile_result(
+        self,
+        scene: str,
+        *,
+        selected_sources: Iterable[str] | None = None,
+        extends: str = "",
+        transition: Mapping[str, Any] | None = None,
+    ) -> LayoutCaptureResult:
+        profile = self.capture_profile(
+            scene,
+            selected_sources=selected_sources,
+            extends=extends,
+            transition=transition,
+        )
+        modules = profile.get("modules") if isinstance(profile.get("modules"), Mapping) else {}
+        warnings = tuple(self._last_discovery_warnings)
+        return LayoutCaptureResult(
+            profile=profile,
+            complete=not warnings,
+            warnings=warnings,
+            captured_modules=len(modules),
+        )
 
     def capture_profile(
         self,
@@ -798,7 +835,10 @@ class OBSLayoutManager:
                 return
             try:
                 response = self.client.send("GetGroupSceneItemList", {"sceneName": group})
-            except Exception:
+            except Exception as exc:
+                self._last_discovery_warnings.append(
+                    f"Groupe de support '{group}' non lisible : {exc}"
+                )
                 return
             for raw in response.get("sceneItems", []) or []:
                 if not isinstance(raw, Mapping):
@@ -862,7 +902,10 @@ class OBSLayoutManager:
             visited_scenes.add(scene_name)
             try:
                 response = self.client.send("GetSceneItemList", {"sceneName": scene_name})
-            except Exception:
+            except Exception as exc:
+                self._last_discovery_warnings.append(
+                    f"Scène de support '{scene_name}' non lisible : {exc}"
+                )
                 return
             for raw in response.get("sceneItems", []) or []:
                 if not isinstance(raw, Mapping):

@@ -82,6 +82,34 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(modules["[Webcam] Avatar"][0].element, "Avatar")
 
 
+    def test_capture_result_reports_partial_nested_read(self):
+        class PartialClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSceneItemList" and payload.get("sceneName") == "[Webcam] Cadre":
+                    raise RuntimeError("nested read failed")
+                return super().send(request, data)
+
+        client = PartialClient()
+        manager = OBSLayoutManager(client)
+
+        result = manager.capture_profile_result("Gameplay")
+
+        self.assertFalse(result.complete)
+        self.assertTrue(result.warnings)
+        self.assertGreater(result.captured_modules, 0)
+
+    def test_compacted_child_may_have_no_module_overrides(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        parent = manager.capture_profile("Gameplay")
+        child = manager.capture_profile("Gameplay", extends="Base")
+
+        compact = compact_layout_overrides(child, parent)
+
+        self.assertEqual(compact.get("modules"), {})
+        self.assertEqual(compact.get("extends"), "Base")
+
     def test_locked_convention_is_excluded_from_discovery_and_recapture(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
