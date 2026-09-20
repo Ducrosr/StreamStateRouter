@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from stream_state_router.obs.dispatcher import OBSDispatcher, profile_map_from_raw
 from stream_state_router.router.engine import StateChange
@@ -30,6 +31,24 @@ class FakeClient:
 
 
 class OBSDispatcherTests(unittest.TestCase):
+    def test_obs_context_checks_shutdown_between_requests(self):
+        client = FakeClient()
+        client.config = SimpleNamespace(enabled=True)
+        dispatcher = OBSDispatcher(client, {})
+        checkpoints = []
+
+        def checkpoint():
+            checkpoints.append(len(client.calls))
+            if len(checkpoints) == 2:
+                raise RuntimeError("shutdown requested")
+
+        dispatcher.set_cooperative_yield(checkpoint)
+
+        with self.assertRaisesRegex(RuntimeError, "shutdown requested"):
+            dispatcher.obs_context()
+
+        self.assertEqual([request for request, _ in client.calls], ["GetStreamStatus"])
+
     def test_only_changed_profile_domains_are_dispatched(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
