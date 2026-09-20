@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 import shutil
 import uuid
 from datetime import datetime
