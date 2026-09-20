@@ -16,7 +16,7 @@ from stream_state_router.activation import (
 from stream_state_router.obs.dispatcher import DispatchResult, DomainDispatchStatus
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
-from stream_state_router.router.rules import AppRule, RuleSet
+from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
 from stream_state_router.services.runtime import RoutingService
 
 
@@ -73,6 +73,22 @@ class DiagnosticDispatcher(FakeDispatcher):
     def dispatch_state(self, state, force=False):
         change = SimpleNamespace(current=state)
         return self.dispatch_change(change)
+
+
+    def cached_obs_context(self):
+        return {
+            "obs_enabled": True,
+            "streaming": False,
+            "recording": False,
+            "program_scene": "Gameplay",
+        }
+
+    def plan_state(self, state, *, context=None):
+        return {
+            "state": state.as_variables(),
+            "context": dict(context or {}),
+            "domains": [{"domain": "game", "status": "planned"}],
+        }
 
 
 class CommandDispatcher(FakeDispatcher):
@@ -339,6 +355,44 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(dispatcher.changes[0].current.game, "Game")
         finally:
             self.assertTrue(service.stop())
+
+    def test_explain_decision_is_read_only_and_matches_router_resolution(self):
+        app = ForegroundApp(1, 1, "game.exe", window_title="Gameplay")
+        wanted = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", wanted, exe="game.exe")]),
+            debounce_ms=0,
+        )
+        dispatcher = DiagnosticDispatcher()
+        service = RoutingService(engine, dispatcher, provider=FakeProvider(app))
+        service._last_app = app
+        before = dispatcher.client.request_count
+
+        explanation = service.explain_decision()
+
+        self.assertEqual(dispatcher.client.request_count, before)
+        self.assertEqual(explanation["routing"]["kind"], "match")
+        self.assertEqual(explanation["routing"]["rule_name"], "Game")
+        self.assertEqual(explanation["routing"]["effective_state"]["Game"], "Game")
+        self.assertEqual(explanation["obs_plan"]["domains"][0]["status"], "planned")
+
+    def test_explain_ignore_preserves_current_state_without_obs_plan(self):
+        app = ForegroundApp(1, 1, "launcher.exe")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Launcher", priority=100, exe="launcher.exe", behavior=ResolutionKind.IGNORE)]),
+            debounce_ms=0,
+        )
+        dispatcher = DiagnosticDispatcher()
+        service = RoutingService(engine, dispatcher, provider=FakeProvider(app))
+        service._last_app = app
+        before = dispatcher.client.request_count
+
+        explanation = service.explain_decision()
+
+        self.assertEqual(dispatcher.client.request_count, before)
+        self.assertEqual(explanation["routing"]["kind"], "ignore")
+        self.assertEqual(explanation["obs_plan"]["domains"], [])
+        self.assertIn("IGNORE", explanation["obs_plan"]["reason"])
 
     def test_routing_diagnostic_keeps_decision_id_through_result(self):
         app = ForegroundApp(1, 1, "game.exe")

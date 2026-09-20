@@ -122,6 +122,70 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertNotIn("game", dispatcher.pending_domains(state))
         self.assertTrue(any(s.status == "applied" for s in second.domain_statuses))
 
+    def test_read_only_plan_reuses_inheritance_and_performs_no_obs_calls(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Base": {
+                        "actions": [
+                            {"type": "input_mute", "params": {"input": "Mic", "muted": False}}
+                        ]
+                    },
+                    "Child": {
+                        "extends": "Base",
+                        "conditions": {"streaming": True},
+                        "actions": [
+                            {"type": "set_program_scene", "params": {"scene": "Gameplay"}}
+                        ],
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        before = len(client.calls)
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Child"),
+            context={
+                "obs_enabled": True,
+                "streaming": True,
+                "recording": False,
+                "program_scene": "Gameplay",
+            },
+        )
+
+        self.assertEqual(len(client.calls), before)
+        game = next(row for row in plan["domains"] if row["domain"] == "game")
+        self.assertEqual(game["status"], "planned")
+        self.assertEqual(
+            [item["type"] for item in game["operations"]],
+            ["input_mute", "set_program_scene"],
+        )
+
+    def test_read_only_plan_reports_blocked_conditions_without_mutation(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Live": {
+                        "conditions": {"streaming": True},
+                        "actions": [{"type": "set_program_scene", "params": {"scene": "Live"}}],
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Live"),
+            context={"obs_enabled": True, "streaming": False, "recording": False, "program_scene": "Idle"},
+        )
+
+        self.assertEqual(client.calls, [])
+        game = next(row for row in plan["domains"] if row["domain"] == "game")
+        self.assertEqual(game["status"], "blocked")
+
     def test_supported_action_shapes(self):
         client = FakeClient()
         dispatcher = OBSDispatcher(client, {})
