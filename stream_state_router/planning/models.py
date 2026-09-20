@@ -33,16 +33,47 @@ class ResourceKey:
         )
 
     @classmethod
-    def input_setting(cls, input_name: str, setting: str) -> "ResourceKey":
-        return cls("input", (str(input_name),), f"settings.{str(setting)}")
+    def input_setting(
+        cls,
+        input_name: str,
+        setting: str,
+        *,
+        collection: str = "",
+    ) -> "ResourceKey":
+        return cls(
+            "input",
+            (str(collection), str(input_name)),
+            f"settings.{str(setting)}",
+        )
 
     @classmethod
-    def filter_enabled(cls, source: str, filter_name: str) -> "ResourceKey":
-        return cls("filter", (str(source), str(filter_name)), "enabled")
+    def filter_enabled(
+        cls,
+        source: str,
+        filter_name: str,
+        *,
+        collection: str = "",
+    ) -> "ResourceKey":
+        return cls(
+            "filter",
+            (str(collection), str(source), str(filter_name)),
+            "enabled",
+        )
 
     @classmethod
-    def filter_setting(cls, source: str, filter_name: str, setting: str) -> "ResourceKey":
-        return cls("filter", (str(source), str(filter_name)), f"settings.{str(setting)}")
+    def filter_setting(
+        cls,
+        source: str,
+        filter_name: str,
+        setting: str,
+        *,
+        collection: str = "",
+    ) -> "ResourceKey":
+        return cls(
+            "filter",
+            (str(collection), str(source), str(filter_name)),
+            f"settings.{str(setting)}",
+        )
 
     @classmethod
     def layout_profile(cls) -> "ResourceKey":
@@ -175,15 +206,27 @@ def values_equal(left: object, right: object) -> bool:
 def _canonical_value(value: object) -> object:
     if isinstance(value, Mapping):
         items = [
-            (str(key), _canonical_value(item))
+            (_canonical_key(key), _canonical_value(item))
             for key, item in value.items()
         ]
         return (
             "mapping",
-            tuple(sorted(items, key=lambda pair: (pair[0], repr(pair[1])))),
+            tuple(sorted(items, key=repr)),
         )
     if isinstance(value, (list, tuple)):
         return ("sequence", tuple(_canonical_value(item) for item in value))
     if isinstance(value, set):
         return ("set", tuple(sorted((_canonical_value(item) for item in value), key=repr)))
-    return value
+    if isinstance(value, bool):
+        return ("bool", value)
+    if value is None:
+        return ("none", None)
+    if isinstance(value, (int, float)):
+        return ("number", float(value))
+    if isinstance(value, str):
+        return ("string", value)
+    return (type(value).__qualname__, repr(value))
+
+
+def _canonical_key(value: object) -> tuple[str, str]:
+    return (type(value).__qualname__, repr(value))
