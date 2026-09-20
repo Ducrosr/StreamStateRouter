@@ -181,10 +181,45 @@ class OBSDispatcherTests(unittest.TestCase):
         dispatcher.set_manual_layout_hold("A")
         self.assertNotIn("layout", dispatcher.pending_domains(state_a))
 
-        # A genuinely different routed layout releases the manual divergence.
-        dispatcher.dispatch_state(state_b)
+        # Only a genuine router state change releases the manual divergence;
+        # periodic reconciliation of the same state must never do so.
+        dispatcher.dispatch_change(
+            StateChange(
+                previous=state_a,
+                current=state_b,
+                reason="foreground",
+                rule_name="B",
+                app=None,
+            )
+        )
 
         self.assertIn("layout", dispatcher.pending_domains(state_a))
+
+    def test_manual_layout_hold_with_unknown_baseline_adopts_first_routed_layout(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+        state_a = StreamState(layout_profile="A")
+
+        dispatcher.set_manual_layout_hold("")
+        dispatcher.invalidate_applied_state()
+
+        # Reconciliation alone cannot release an unknown-baseline manual hold.
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+        dispatcher.dispatch_state(state_a)
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+
+        # The first real routing decision establishes A as the baseline while
+        # keeping the explicit manual layout visible.
+        dispatcher.dispatch_change(
+            StateChange(
+                previous=None,
+                current=state_a,
+                reason="foreground",
+                rule_name="A",
+                app=None,
+            )
+        )
+        self.assertEqual(dispatcher._manual_layout_routing_baseline, "A")
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
 
     def test_explicit_layout_apply_records_current_routing_baseline(self):
         dispatcher = OBSDispatcher(
