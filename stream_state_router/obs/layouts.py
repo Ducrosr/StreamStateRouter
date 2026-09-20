@@ -1914,15 +1914,18 @@ class OBSLayoutManager:
                 continue
 
             if fade:
+                # A filter mutation can succeed in OBS even when the response is
+                # lost. Arm neutralization before the first fade I/O so every
+                # uncertain temporary filter state has durable recovery work.
+                touched_fades.add(source)
+                self._ensure_pending_fade(source, fade_collection)
                 try:
                     if bool(target_enabled):
                         self._set_source_opacity(source, 0.0)
-                        touched_fades.add(source)
                         self._set_enabled(container, source, True)
                         fade_state[index] = (0.0, 1.0)
                     else:
                         self._ensure_fade_filter(source, 1.0)
-                        touched_fades.add(source)
                         fade_state[index] = (1.0, 0.0)
                 except Exception as exc:
                     warnings.append(f"Fondu indisponible pour {source}: {exc}")
