@@ -233,6 +233,8 @@ class OBSDispatcher:
         return True
 
     def conditions_match(self, conditions: Mapping[str, Any] | None) -> bool:
+        if not conditions:
+            return True
         return self.conditions_match_context(conditions, self.obs_context())
 
     @staticmethod
