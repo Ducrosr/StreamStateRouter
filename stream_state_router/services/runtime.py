@@ -1563,7 +1563,7 @@ class RoutingService:
                 else:
                     raise ValueError(f"Commande OBS inconnue : {command.action}")
             if command.action == "catalog.sync":
-                self._emit_obs_result(command, success=True, result=result)
+                self._emit_obs_result(command, success=True, result=result.summary())
                 return
             warnings = tuple(getattr(result, "warnings", ()) or ()) if result is not None else ()
             missing = tuple(getattr(result, "missing_sources", ()) or ()) if result is not None else ()
