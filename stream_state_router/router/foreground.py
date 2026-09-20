@@ -56,6 +56,14 @@ class WindowsForegroundProvider:
         if not pid.value:
             return None
 
+        # Never synchronously query the title of SSR's own Qt window from the
+        # routing worker. GetWindowText* may send WM_GETTEXT(LENGTH) to a
+        # same-process window and wait for its UI thread. During save/restart the
+        # UI thread is synchronously joining this worker, which can otherwise
+        # create a circular wait until the join timeout expires.
+        if int(pid.value) == os.getpid():
+            return None
+
         title = self._window_title(hwnd)
         path = self._process_path(pid.value)
         exe = os.path.basename(path) if path else ""
