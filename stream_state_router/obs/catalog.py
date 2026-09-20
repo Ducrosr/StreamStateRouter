@@ -181,7 +181,7 @@ class OBSResourceCatalogReader:
     def _send(self, request: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._cooperative_yield is not None:
             self._cooperative_yield()
-        return self._send(request, data)
+        return self.client.send(request, data)
 
     def sync(self, *, include_settings: bool = False) -> OBSResourceCatalog:
         before = self._request_count()
