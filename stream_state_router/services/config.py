@@ -773,7 +773,12 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 if "enabled" in action and not isinstance(action.get("enabled"), bool):
                     errors.append(f"{aprefix}.enabled doit être booléen")
 
-                def required_text(key: str) -> None:
+                def required_text(
+                    key: str,
+                    *,
+                    params: Mapping[str, Any] = params,
+                    aprefix: str = aprefix,
+                ) -> None:
                     if not str(params.get(key) or "").strip():
                         errors.append(f"{aprefix}.params.{key} est requis")
 
