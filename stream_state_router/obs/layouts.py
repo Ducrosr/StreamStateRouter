@@ -435,8 +435,39 @@ class OBSLayoutManager:
     ) -> tuple[str, ...]:
         warnings: list[str] = []
         collection = str(collection or self._fade_collection_context()).strip()
-        for source in {str(item) for item in sources if str(item)}:
-            pending = self._ensure_pending_fade(source, collection)
+        wanted_sources = {str(item) for item in sources if str(item)}
+        if not wanted_sources:
+            return ()
+
+        # Neutralization is a mutation and must obey the same Scene Collection
+        # boundary as deferred retries. If the origin is unknown, or OBS is now
+        # in another collection, keep the obligation but never guess/replay it.
+        for source in wanted_sources:
+            self._ensure_pending_fade(source, collection)
+        if not collection or collection == "<unknown>":
+            return tuple(
+                f"{source}: neutralisation suspendue (Scene Collection d'origine inconnue)"
+                for source in sorted(wanted_sources, key=str.casefold)
+            )
+        try:
+            current = self._scene_collection_name()
+        except Exception as exc:
+            for source in wanted_sources:
+                pending = self._pending_fade_cleanup[(collection, source)]
+                pending.attempts += 1
+                pending.last_error = str(exc)
+            return tuple(
+                f"{source}: neutralisation suspendue (collection OBS non lisible: {exc})"
+                for source in sorted(wanted_sources, key=str.casefold)
+            )
+        if current != collection:
+            return tuple(
+                f"{source}: neutralisation suspendue ({collection} != {current})"
+                for source in sorted(wanted_sources, key=str.casefold)
+            )
+
+        for source in wanted_sources:
+            pending = self._pending_fade_cleanup[(collection, source)]
             try:
                 self._set_source_opacity(source, 1.0)
             except Exception as exc:
