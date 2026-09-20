@@ -117,14 +117,36 @@ class StateRouterEngine:
                     )
                 )
             )
+        candidate_matches = (
+            self._candidate is not None
+            and self._candidate == resolution
+        )
+        candidate_elapsed_ms = (
+            max(0.0, (timestamp - self._candidate_since) * 1000.0)
+            if candidate_matches and self._candidate_since
+            else 0.0
+        )
+        would_change = effective is not None and effective != self._current_state
         return {
             **explanation.as_mapping(),
             "effective_state": effective.as_variables() if effective is not None else None,
             "current_state": (
                 self._current_state.as_variables() if self._current_state is not None else None
             ),
-            "would_change": effective is not None and effective != self._current_state,
+            "would_change": would_change,
             "debounce_ms": debounce_ms,
+            "candidate_active": candidate_matches,
+            "candidate_elapsed_ms": round(candidate_elapsed_ms, 3),
+            "would_commit_now": (
+                bool(would_change)
+                and (
+                    debounce_ms == 0
+                    or (
+                        candidate_matches
+                        and candidate_elapsed_ms >= float(debounce_ms)
+                    )
+                )
+            ),
         }
 
     def set_manual_override(
