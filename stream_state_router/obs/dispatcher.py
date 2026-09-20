@@ -136,8 +136,17 @@ class OBSDispatcher:
         self._manual_layout_routing_baseline = ""
 
     def _layout_is_manually_held_for(self, state: StreamState) -> bool:
-        del state
-        return self._manual_layout_hold_active
+        if not self._manual_layout_hold_active:
+            return False
+        baseline = self._manual_layout_routing_baseline
+        if not baseline:
+            # During restart the routed baseline can be temporarily unknown.
+            # Hold every layout until the first genuine StateChange adopts one.
+            return True
+        # Once known, only the unchanged routed baseline is suppressed. A
+        # different routed LayoutProfile must remain eligible so dispatch_change
+        # can release the manual hold and apply the new automatic target.
+        return state.profile_name("layout") == baseline
 
     def pending_domains(self, state: StreamState | None = None) -> tuple[str, ...]:
         wanted = state or self._desired_state
