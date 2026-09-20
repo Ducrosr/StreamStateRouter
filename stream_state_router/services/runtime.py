@@ -939,6 +939,7 @@ class RoutingService:
                 except _RuntimeShutdownRequested:
                     if self._stopping:
                         self._worker_phase = "shutdown_cleanup"
+                        self._cancel_queued_commands_after_cooperative_shutdown()
                         self._perform_orderly_shutdown()
                         break
                     raise
@@ -1306,6 +1307,32 @@ class RoutingService:
             return controller.eligibility(policy_name, policy)
         except Exception as exc:
             return False, f"évaluation impossible : {exc}"
+
+    def _cancel_queued_commands_after_cooperative_shutdown(self) -> None:
+        """Consume the posted shutdown marker after cooperative interruption.
+
+        stop() closes admission and increments the command generation before it
+        posts the shutdown command. A cooperative checkpoint can observe that
+        state and unwind the current OBS operation before the normal queue drain
+        reaches the marker. At that point every remaining non-shutdown command
+        is stale and must be completed as cancelled; the shutdown marker itself
+        is simply consumed so diagnostics do not report a phantom pending
+        command after the worker has already committed to orderly shutdown.
+        """
+        while True:
+            try:
+                command = self._runtime_commands.get_nowait()
+            except queue.Empty:
+                break
+
+            if isinstance(command, _ActivationCommand) and command.action == "shutdown":
+                continue
+
+            error = "Commande annulée par arrêt/reconfiguration du runtime"
+            if isinstance(command, _ActivationCommand):
+                self._emit_activation_result(command, success=False, error=error)
+            else:
+                self._emit_obs_result(command, success=False, error=error)
 
     def _drain_runtime_commands(self, *, allow_obs: bool = True) -> bool:
         deferred: list[_ActivationCommand | _OBSCommand] = []
