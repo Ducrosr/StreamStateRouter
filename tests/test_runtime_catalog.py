@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from stream_state_router.obs.catalog import OBSInputRef, OBSResourceCatalog
 from stream_state_router.services.runtime import RoutingService, _OBSCommand
 
 
@@ -93,6 +94,48 @@ class RuntimeCatalogTests(unittest.TestCase):
                 for request, _data in client.calls
             )
         )
+
+    def test_public_catalog_snapshot_redacts_settings(self):
+        service = RoutingService(SimpleNamespace(), SimpleNamespace(client=FakeCatalogClient()))
+        service._obs_catalog = OBSResourceCatalog(
+            inputs=(
+                OBSInputRef(
+                    name="Browser",
+                    kind="browser_source",
+                    settings={"url": "https://example.invalid/?token=secret"},
+                ),
+            )
+        )
+
+        public = service.catalog_snapshot()
+        internal = service.catalog_snapshot(include_settings=True)
+
+        self.assertIsNone(public["inputs"][0]["settings"])
+        self.assertEqual(
+            internal["inputs"][0]["settings"],
+            {"url": "https://example.invalid/?token=secret"},
+        )
+
+    def test_catalog_cache_is_invalidated_when_obs_disconnects(self):
+        class ProbeClient:
+            def __init__(self):
+                self.config = SimpleNamespace(enabled=True)
+
+            def probe(self):
+                return False, "offline"
+
+        service = RoutingService(
+            SimpleNamespace(),
+            SimpleNamespace(client=ProbeClient()),
+            obs_probe_seconds=0.5,
+        )
+        service._obs_catalog = OBSResourceCatalog(scene_collection="Midgar")
+        service._last_obs_connected = True
+
+        service._probe_obs_if_due()
+
+        self.assertEqual(service.catalog_snapshot(), {})
+        self.assertFalse(service._last_obs_connected)
 
 
 if __name__ == "__main__":
