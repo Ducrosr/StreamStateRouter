@@ -403,7 +403,10 @@ class OBSDispatcherTests(unittest.TestCase):
         )
 
         self.assertEqual(client.calls, [])
-        self.assertEqual(plan["declarative_error"]["code"], "property_conflict")
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
         self.assertEqual(plan["declarative_desired"], {"properties": []})
 
     def test_resolve_desired_state_raises_same_cross_domain_conflict(self):
@@ -441,7 +444,7 @@ class OBSDispatcherTests(unittest.TestCase):
         )
         dispatcher = OBSDispatcher(FakeClient(), profiles)
 
-        with self.assertRaisesRegex(ValueError, "Conflicting desired values"):
+        with self.assertRaisesRegex(ValueError, "multiple owners"):
             dispatcher.resolve_desired_state(
                 StreamState(game="A", overlay_profile="B"),
                 context={
