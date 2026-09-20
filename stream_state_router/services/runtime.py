@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import logging
 import queue
+import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -26,6 +28,10 @@ from ..obs.dispatcher import DispatchResult, OBSDispatcher
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
+
+
+class _RuntimeShutdownRequested(BaseException):
+    """Internal cooperative-cancellation signal for the runtime worker."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +138,7 @@ class RuntimeShutdownResult:
     pending_commands: int = 0
     shutdown_phase: str = ""
     active_operation: str = ""
+    worker_phase: str = ""
 
     @property
     def success(self) -> bool:
@@ -160,6 +167,7 @@ class RuntimeShutdownResult:
             f"pending_commands={self.pending_commands}; "
             f"phase={self.shutdown_phase or 'unknown'}; "
             f"active_operation={self.active_operation or 'none'}; "
+            f"worker_phase={self.worker_phase or 'unknown'}; "
             f"elapsed_ms={self.elapsed_ms:.1f}"
         )
 
@@ -250,6 +258,8 @@ class RoutingService:
         self._shutdown_complete = threading.Event()
         self._shutdown_phase = "idle"
         self._active_operation = ""
+        self._worker_phase = "idle"
+        self._shutdown_cleanup_active = False
         self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
         self._command_status: dict[str, dict[str, object]] = {}
         self._simulation_executor = ThreadPoolExecutor(
@@ -289,6 +299,8 @@ class RoutingService:
             self._stopping = False
             self._shutdown_phase = "running"
             self._active_operation = ""
+            self._worker_phase = "starting"
+            self._shutdown_cleanup_active = False
             self._runtime_operational = True
             self._accept_activation_commands = True
             self._accept_obs_commands = True
@@ -325,6 +337,7 @@ class RoutingService:
         with self._lock:
             phase = self._shutdown_phase
             active_operation = self._active_operation
+        worker_phase = self._worker_phase
         result = RuntimeShutdownResult(
             worker_stopped=worker_stopped,
             dispatch_quiescent=dispatch_quiescent,
@@ -334,6 +347,7 @@ class RoutingService:
             pending_commands=max(0, self._runtime_commands.qsize()),
             shutdown_phase=phase,
             active_operation=active_operation,
+            worker_phase=worker_phase,
         )
         self._shutdown_result = result
         log = self.logger.info if result else self.logger.error
@@ -382,6 +396,7 @@ class RoutingService:
         thread.join(timeout=max(0.0, deadline - time.monotonic()))
         worker_stopped = not thread.is_alive()
         if not worker_stopped:
+            self._log_worker_stack(thread)
             self.logger.error(
                 "Routing service did not stop within %.1f s; refusing replacement runtime",
                 timeout,
@@ -411,6 +426,28 @@ class RoutingService:
             dispatch_quiescent=quiescent,
             pending_cleanup=pending,
             started_at=started_at,
+        )
+
+    def _log_worker_stack(self, thread: threading.Thread) -> None:
+        """Capture the worker stack without requiring cooperation from it."""
+        ident = thread.ident
+        if ident is None:
+            self.logger.error("SSR-Router stack unavailable: thread has no ident")
+            return
+        frame = sys._current_frames().get(ident)
+        if frame is None:
+            self.logger.error("SSR-Router stack unavailable: no current frame")
+            return
+        try:
+            stack = "".join(traceback.format_stack(frame))
+        except Exception as exc:
+            self.logger.error("SSR-Router stack capture failed: %s", exc)
+            return
+        self.logger.error(
+            "SSR-Router stack at stop timeout (phase=%s, active_operation=%s):\n%s",
+            self._worker_phase or "unknown",
+            self._active_operation or "none",
+            stack,
         )
 
     def pause(self, paused: bool = True) -> None:
@@ -837,12 +874,15 @@ class RoutingService:
             while not self._stop.is_set():
                 started = time.monotonic()
                 try:
+                    self._worker_phase = "commands"
                     if self._drain_runtime_commands():
                         break
+                    self._worker_phase = "probe"
                     self._probe_obs_if_due()
                     with self._lock:
                         if self._stopping:
                             continue
+                    self._worker_phase = "foreground"
                     app = self.provider.get()
                     with self._lock:
                         changed_app = app != self._last_app
@@ -857,19 +897,30 @@ class RoutingService:
                         if self.on_foreground:
                             self.on_foreground(app)
                     if not paused:
+                        self._worker_phase = "observe"
                         with self._lock:
                             change = self.engine.observe(app)
                         if change:
                             self._apply_change(change)
+                    self._worker_phase = "due_dispatch"
                     self._process_due_dispatch()
                     with self._lock:
                         if self._stopping:
                             continue
+                    self._worker_phase = "reconcile"
                     self._reconcile_desired_state_if_due()
                     with self._lock:
                         if self._stopping:
                             continue
+                    self._worker_phase = "activation_tick"
                     self._tick_activation(paused=paused)
+                    self._worker_phase = "idle"
+                except _RuntimeShutdownRequested:
+                    if self._stopping:
+                        self._worker_phase = "shutdown_cleanup"
+                        self._perform_activation_shutdown()
+                        break
+                    raise
                 except Exception as exc:
                     self.logger.exception("Routing loop error")
                     self._emit(RuntimeEvent("error", str(exc)))
@@ -889,6 +940,7 @@ class RoutingService:
                 self._accept_obs_commands = False
                 self._shutdown_phase = "stopped"
                 self._active_operation = ""
+                self._worker_phase = "stopped"
             self._shutdown_complete.set()
             self.logger.info("Routing service stopped")
 
@@ -1284,14 +1336,23 @@ class RoutingService:
         return should_stop
 
     def _cooperative_obs_yield(self) -> None:
+        """Pure cancellation checkpoint used inside potentially long OBS work.
+
+        It must never start probes, scheduler ticks, cleanup or other OBS I/O:
+        doing so makes the checkpoint re-entrant and can recursively re-enter the
+        operation that called it. Orderly cleanup is performed only by the outer
+        runtime loop after the interrupted operation has unwound.
+        """
         if self._thread is None or threading.current_thread() is not self._thread:
             return
-        if self._drain_runtime_commands(allow_obs=False):
-            raise RuntimeError("Arrêt du runtime demandé pendant une opération OBS")
-        self._probe_obs_if_due()
-        self._tick_activation(paused=self.paused)
-        if self._stop.is_set():
-            raise RuntimeError("Runtime arrêté pendant une opération OBS")
+        if self._shutdown_cleanup_active:
+            return
+        with self._lock:
+            stopping = self._stopping
+        if stopping or self._stop.is_set():
+            raise _RuntimeShutdownRequested(
+                "Arrêt du runtime demandé pendant une opération OBS"
+            )
 
     def _execute_obs_command(self, command: _OBSCommand) -> None:
         with self._lock:
@@ -1357,6 +1418,10 @@ class RoutingService:
                 )
             else:
                 self._emit_obs_result(command, success=True, result=result)
+        except _RuntimeShutdownRequested as exc:
+            self.logger.info("OBS command interrupted [%s]: %s", command.action, exc)
+            self._emit_obs_result(command, success=False, error=str(exc))
+            raise
         except Exception as exc:
             self.logger.error("OBS command failed [%s]: %s", command.action, exc)
             self._emit_obs_result(command, success=False, error=str(exc))
