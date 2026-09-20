@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from stream_state_router.obs.layouts import OBSLayoutManager, split_module_source
+from stream_state_router.obs.client import OBSResourceNotFoundError
+from stream_state_router.obs.layouts import (
+    OBSLayoutManager,
+    compact_layout_overrides,
+    split_module_source,
+)
 
 
 class FakeLayoutClient:
@@ -190,6 +195,15 @@ class LayoutTests(unittest.TestCase):
         class PartialClient(FakeLayoutClient):
             def send(self, request, data=None):
                 payload = dict(data or {})
+                if request == "GetSceneList":
+                    return {
+                        "currentProgramSceneName": "Gameplay",
+                        "scenes": [
+                            {"sceneName": "Gameplay"},
+                            {"sceneName": "Pause"},
+                            {"sceneName": "[Webcam] Cadre"},
+                        ],
+                    }
                 if request == "GetSceneItemList" and payload.get("sceneName") == "[Webcam] Cadre":
                     raise RuntimeError("nested read failed")
                 return super().send(request, data)
@@ -264,14 +278,15 @@ class LayoutTests(unittest.TestCase):
 
         self.assertEqual(result.elements_applied, 2)
         transform_calls = [payload for request, payload in client.calls if request == "SetSceneItemTransform"]
-        self.assertEqual(len(transform_calls), 2)
+        # The unchanged Avatar is processed but intentionally receives no OBS
+        # mutation; no-op writes are suppressed.
+        self.assertEqual(len(transform_calls), 1)
         by_id = {call["sceneItemId"]: call["sceneItemTransform"] for call in transform_calls}
+        self.assertEqual(set(by_id), {1})
         self.assertEqual(by_id[1]["positionX"], 200.0)
         self.assertEqual(by_id[1]["positionY"], 300.0)
         self.assertEqual(by_id[1]["scaleX"], 2.0)
         self.assertEqual(by_id[1]["scaleY"], 2.0)
-        self.assertEqual(by_id[2]["positionX"], 300.0)
-        self.assertEqual(by_id[2]["positionY"], 200.0)
 
 
     def test_apply_refreshes_stale_scene_item_ids_after_one_source_is_deleted(self):
@@ -400,7 +415,7 @@ class LayoutTests(unittest.TestCase):
         client = PersistentFailureClient()
         manager = OBSLayoutManager(client)
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(OBSResourceNotFoundError):
             manager._set_source_opacity("[Webcam] Avatar", 0.5)
 
         self.assertEqual(client.settings_attempts, 2)
@@ -728,6 +743,7 @@ class LayoutTests(unittest.TestCase):
         manager = OBSLayoutManager(client)
         profile = manager.capture_profile("Gameplay")
         profile["modules"]["[Webcam] Avatar"]["elements"][0]["included"] = False
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] += 50.0
         client.calls.clear()
 
         result = manager.apply_profile(profile)
@@ -748,6 +764,7 @@ class LayoutTests(unittest.TestCase):
         profile = manager.capture_profile("Gameplay")
         profile["modules"]["[Webcam] Avatar"]["visible"] = True
         profile["modules"]["[Webcam] Avatar"]["elements"][0]["enabled"] = True
+        profile["modules"]["[Webcam] Avatar"]["geometry"]["x"] += 25.0
 
         manager.set_runtime_visibility_owners({("Gameplay", "[Webcam] Avatar")})
         client.calls.clear()
@@ -847,8 +864,8 @@ class LayoutTests(unittest.TestCase):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
         profile = manager.capture_profile("Gameplay")
-        element = profile["modules"]["[Webcam] Cadre"]["elements"][0]
-        element["transform"]["scaleX"] = float(element["transform"].get("scaleX", 1.0)) + 0.1
+        module = profile["modules"]["[Webcam] Cadre"]
+        module["geometry"]["width"] = float(module["geometry"]["width"]) + 2.0
 
         diffs = manager.diff_profile(profile)
 
