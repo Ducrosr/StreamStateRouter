@@ -437,7 +437,6 @@ class ActivationScheduler:
         state.active_container = ""
         state.active_container_kind = "scene"
         state.active_collection = ""
-        state.active_collection = ""
         state.visible_until = None
         cooldown = self._cooldown(policy)
         if enter_cooldown and cooldown > 0:
@@ -639,3 +638,4 @@ class ActivationScheduler:
         state.active_source = ""
         state.active_container = ""
         state.active_container_kind = "scene"
+        state.active_collection = ""
