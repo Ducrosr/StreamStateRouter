@@ -5,7 +5,6 @@ import unittest
 from stream_state_router.obs.models import OBSAction
 from stream_state_router.planning import (
     DesiredOwnershipConflict,
-    DesiredStateConflict,
     PropertyKey,
     UnsupportedIntentAction,
     desired_assignments_from_actions,
