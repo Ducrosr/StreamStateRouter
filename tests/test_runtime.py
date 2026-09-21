@@ -1237,6 +1237,56 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_stale_plan_id_does_not_consume_current_preparation(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared = collector.wait(prepare_id)
+            self.assertTrue(prepared.success, prepared.error)
+            plan_id = prepared.result["plan_id"]
+
+            wrong_id = service.request_execute_declarative_plan("stale-plan-id")
+            wrong = collector.wait(wrong_id)
+            self.assertFalse(wrong.success)
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+            self.assertTrue(executed.success, executed.error)
+            self.assertTrue(executed.result["converged"])
+        finally:
+            self.assertTrue(service.stop())
+
     def test_resume_since_prepare_invalidates_declarative_ticket(self):
         state = StreamState(audio_profile="Mute")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
