@@ -332,7 +332,6 @@ class DeclarativeExecutor:
         binding: ExecutionBinding,
         target: bool,
     ) -> None:
-        self._yield()
         if isinstance(binding, SceneItemBinding):
             self.client.send(
                 "SetSceneItemEnabled",
@@ -366,6 +365,12 @@ class DeclarativeExecutor:
         def publish_progress() -> None:
             if progress is not None:
                 progress(tuple(steps))
+
+        def replace_step(step: ExecutionStepResult) -> None:
+            nonlocal steps
+            steps = [item for item in steps if item.key != step.key]
+            steps.append(step)
+            publish_progress()
 
         def finish(
             status: str,
@@ -497,10 +502,26 @@ class DeclarativeExecutor:
                         diagnostic=reason,
                     )
 
+                # Pure cooperative checkpoint immediately before the write.
+                # Once the request is handed to obs-websocket it cannot be
+                # rolled back or safely retried by this executor.
+                self._yield()
+                replace_step(
+                    ExecutionStepResult(
+                        key,
+                        operation.operation,
+                        True,
+                        None,
+                        False,
+                        None,
+                        "unacknowledged",
+                        "write_inflight",
+                    )
+                )
                 try:
                     self._write_binding(prepared, binding, target)
                 except OBSUnavailableError as exc:
-                    steps.append(
+                    replace_step(
                         ExecutionStepResult(
                             key,
                             operation.operation,
@@ -512,14 +533,13 @@ class DeclarativeExecutor:
                             "transport_failure",
                         )
                     )
-                    publish_progress()
                     return finish(
                         "failed",
                         replan_required=True,
                         diagnostic=str(exc),
                     )
                 except OBSRequestError as exc:
-                    steps.append(
+                    replace_step(
                         ExecutionStepResult(
                             key,
                             operation.operation,
@@ -531,18 +551,29 @@ class DeclarativeExecutor:
                             "obs_request_failed",
                         )
                     )
-                    publish_progress()
                     return finish(
                         "failed",
                         replan_required=True,
                         diagnostic=str(exc),
                     )
 
+                replace_step(
+                    ExecutionStepResult(
+                        key,
+                        operation.operation,
+                        True,
+                        True,
+                        False,
+                        None,
+                        "unacknowledged",
+                        "awaiting_readback",
+                    )
+                )
                 try:
                     self._context_check(prepared)
                     ack = self._read_binding(prepared, binding)
                 except _ReplanRequired as exc:
-                    steps.append(
+                    replace_step(
                         ExecutionStepResult(
                             key,
                             operation.operation,
@@ -554,14 +585,13 @@ class DeclarativeExecutor:
                             "context_changed_after_write",
                         )
                     )
-                    publish_progress()
                     return finish(
                         "replan_required",
                         replan_required=True,
                         diagnostic=str(exc),
                     )
                 except (OBSUnavailableError, _ExecutionBlocked) as exc:
-                    steps.append(
+                    replace_step(
                         ExecutionStepResult(
                             key,
                             operation.operation,
@@ -573,16 +603,14 @@ class DeclarativeExecutor:
                             "ack_unavailable",
                         )
                     )
-                    publish_progress()
                     return finish(
                         "failed",
                         replan_required=True,
                         diagnostic=str(exc),
                     )
 
-                steps = [step for step in steps if step.key != key]
                 if ack is target:
-                    steps.append(
+                    replace_step(
                         ExecutionStepResult(
                             key,
                             operation.operation,
@@ -593,9 +621,8 @@ class DeclarativeExecutor:
                             "applied",
                         )
                     )
-                    publish_progress()
                     continue
-                steps.append(
+                replace_step(
                     ExecutionStepResult(
                         key,
                         operation.operation,
@@ -607,7 +634,6 @@ class DeclarativeExecutor:
                         "readback_differs",
                     )
                 )
-                publish_progress()
                 return finish(
                     "divergent",
                     replan_required=True,
