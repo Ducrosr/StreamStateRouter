@@ -20,6 +20,8 @@ jobs:
         run: python -m ruff check .
       - name: Config smoke test
         run: python main.py --check-config
+      - name: Declarative coverage smoke test
+        run: python main.py --coverage-report
 
   streamdeck:
     runs-on: windows-latest
