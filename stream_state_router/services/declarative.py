@@ -226,6 +226,7 @@ class DeclarativePlanningService:
         desired: DesiredState,
         *,
         refresh_catalog: bool = False,
+        blocked_provenance: Mapping[str, str] | None = None,
     ) -> ExecutionPlan:
         catalog = self._catalog
         if refresh_catalog or catalog is None:
@@ -265,6 +266,21 @@ class DeclarativePlanningService:
             filter_index=filter_index,
             unreadable_filter_sources=frozenset(unreadable_filter_sources),
         )
+        for assignment in concrete_desired.assignments:
+            for provenance in assignment.provenance:
+                reason = (blocked_provenance or {}).get(provenance)
+                if not reason:
+                    continue
+                preflight.setdefault(
+                    assignment.key,
+                    PlanDiagnostic(
+                        "warning",
+                        "condition_blocked",
+                        reason,
+                        assignment.key,
+                    ),
+                )
+                break
         observable = DesiredState.build(
             assignment
             for assignment in concrete_desired.assignments
@@ -282,6 +298,11 @@ class DeclarativePlanningService:
         desired: DesiredState,
         *,
         refresh_catalog: bool = False,
+        blocked_provenance: Mapping[str, str] | None = None,
     ) -> ExecutionPlan:
         """Compatibility/readability alias for the canonical planning path."""
-        return self.plan_state(desired, refresh_catalog=refresh_catalog)
+        return self.plan_state(
+            desired,
+            refresh_catalog=refresh_catalog,
+            blocked_provenance=blocked_provenance,
+        )
