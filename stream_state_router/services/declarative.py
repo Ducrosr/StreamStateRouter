@@ -328,6 +328,25 @@ class DeclarativePlanningService:
         except (AttributeError, TypeError, ValueError):
             return 0
 
+    def context_identity(self) -> tuple[str, int]:
+        """Return the live Scene Collection/session boundary for planner resolution."""
+
+        generation_before = self._session_generation()
+        collection = self._catalog_reader.current_collection()
+        generation_after = self._session_generation()
+        if (
+            generation_before
+            and generation_after
+            and generation_before != generation_after
+        ):
+            raise RuntimeError(
+                "OBS session changed while reading declarative context identity"
+            )
+        generation = generation_after or generation_before
+        if not collection:
+            raise RuntimeError("Active OBS Scene Collection could not be established")
+        return collection, generation
+
     def _context_error(self, catalog: OBSResourceCatalog) -> str:
         current_collection = self._catalog_reader.current_collection()
         current_generation = self._session_generation()
