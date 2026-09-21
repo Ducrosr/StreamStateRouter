@@ -257,11 +257,13 @@ class DeclarativePlanningService:
 
         condition_preflight: dict[PropertyKey, PlanDiagnostic] = {}
         blocked_provenance = blocked_provenance or {}
+        matched_blocked_provenance: set[str] = set()
         for assignment in concrete_desired.assignments:
             for provenance in assignment.provenance:
                 reason = blocked_provenance.get(provenance)
                 if not reason:
                     continue
+                matched_blocked_provenance.add(provenance)
                 condition_preflight[assignment.key] = PlanDiagnostic(
                     "warning",
                     "condition_blocked",
@@ -311,10 +313,27 @@ class DeclarativePlanningService:
             if assignment.key not in preflight
         )
         observed = observe_desired_state(self.client, catalog, observable)
-        return build_execution_plan(
+        plan = build_execution_plan(
             concrete_desired,
             observed,
             preflight=preflight,
+        )
+        global_blocks = tuple(
+            PlanDiagnostic(
+                "error",
+                "resolution_blocked",
+                f"{provenance}: {reason}",
+            )
+            for provenance, reason in sorted(blocked_provenance.items())
+            if provenance not in matched_blocked_provenance
+        )
+        if not global_blocks:
+            return plan
+        return ExecutionPlan(
+            target_signature=plan.target_signature,
+            diff=plan.diff,
+            operations=plan.operations,
+            diagnostics=(*plan.diagnostics, *global_blocks),
         )
 
     def dry_run(
