@@ -114,11 +114,8 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
             if request
             in {
                 "GetVersion",
-                "GetSceneCollectionList",
                 "GetSceneList",
                 "GetGroupList",
-                "GetSceneItemList",
-                "GetGroupSceneItemList",
                 "GetInputList",
                 "GetSceneTransitionList",
                 "GetVideoSettings",
@@ -131,11 +128,8 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
             if request
             in {
                 "GetVersion",
-                "GetSceneCollectionList",
                 "GetSceneList",
                 "GetGroupList",
-                "GetSceneItemList",
-                "GetGroupSceneItemList",
                 "GetInputList",
                 "GetSceneTransitionList",
                 "GetVideoSettings",
@@ -162,11 +156,8 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
             if request
             in {
                 "GetVersion",
-                "GetSceneCollectionList",
                 "GetSceneList",
                 "GetGroupList",
-                "GetSceneItemList",
-                "GetGroupSceneItemList",
                 "GetInputList",
                 "GetSceneTransitionList",
                 "GetVideoSettings",
