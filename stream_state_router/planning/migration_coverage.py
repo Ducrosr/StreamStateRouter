@@ -19,6 +19,7 @@ PLANNABLE_PROPERTY_KINDS = frozenset(
     }
 )
 CLASSIFICATIONS = (
+    "empty",
     "declarative_executable",
     "declarative_plannable",
     "declarative_intent_only",
@@ -151,14 +152,15 @@ def _classification_for_property_kinds(kinds: set[str]) -> str:
 
 def _profile_classification(actions: list[ActionCoverage]) -> str:
     if not actions:
-        return "declarative_executable"
+        return "empty"
     priority = {
-        "invalid": 5,
-        "legacy_only": 4,
-        "declarative_intent_only": 3,
-        "declarative_plannable": 2,
-        "declarative_executable": 1,
-        "delegated": 0,
+        "invalid": 6,
+        "legacy_only": 5,
+        "declarative_intent_only": 4,
+        "declarative_plannable": 3,
+        "declarative_executable": 2,
+        "delegated": 1,
+        "empty": 0,
     }
     return max(actions, key=lambda item: priority[item.classification]).classification
 
