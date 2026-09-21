@@ -10,11 +10,23 @@ from stream_state_router.services.api import APIConfig, LocalControlAPI
 
 class APITests(unittest.TestCase):
     def setUp(self):
-        self.requests = {"abc": {"request_id": "abc", "status": "completed", "action": "layout.apply"}}
+        self.requests = {
+            "abc": {
+                "request_id": "abc",
+                "status": "completed",
+                "action": "layout.apply",
+            }
+        }
+        self.actions = []
+
+        def action(name, payload):
+            self.actions.append((name, dict(payload)))
+            return {"status": "accepted", "request_id": "abc"}
+
         self.api = LocalControlAPI(
             APIConfig(enabled=True, port=0, token="secret", max_body_bytes=32),
             status=lambda: {"paused": False},
-            action=lambda action, payload: {"status": "accepted", "request_id": "abc"},
+            action=action,
             request_status=lambda request_id: self.requests.get(request_id),
         )
         self.api.start()
@@ -61,6 +73,19 @@ class APITests(unittest.TestCase):
                 headers={"Authorization": "Bearer secret", "Origin": "http://example.invalid"},
             )
         self.assertEqual(error.exception.code, 403)
+
+    def test_nested_post_path_maps_to_dot_action_name(self):
+        response = self.open(
+            "/catalog/sync",
+            data=b"{}",
+            headers={
+                "Authorization": "Bearer secret",
+                "Content-Type": "application/json",
+            },
+        )
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(self.actions[-1], ("catalog.sync", {}))
 
     def test_async_action_returns_202(self):
         response = self.open(
