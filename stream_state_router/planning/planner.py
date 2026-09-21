@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 import math
 from typing import Any, Mapping
 
-from .models import DesiredAssignment, DesiredState, ObservedState, PropertyKey
+from .models import (
+    DesiredAssignment,
+    DesiredState,
+    ObservedState,
+    PropertyKey,
+    json_values_equal,
+)
 
 
 _OPERATION_TYPES = {
@@ -28,6 +35,11 @@ class DiffEntry:
     observed: Any
     desired: Any
     provenance: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observed", deepcopy(self.observed))
+        object.__setattr__(self, "desired", deepcopy(self.desired))
+        object.__setattr__(self, "provenance", tuple(self.provenance))
 
     def as_mapping(self) -> dict[str, object]:
         sensitive = self.key.kind in {"input_setting", "filter_setting"}
@@ -53,6 +65,11 @@ class PlanOperation:
     target: Any
     provenance: tuple[str, ...] = ()
     reason: str = "value_differs"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observed", deepcopy(self.observed))
+        object.__setattr__(self, "target", deepcopy(self.target))
+        object.__setattr__(self, "provenance", tuple(self.provenance))
 
     def as_mapping(self) -> dict[str, object]:
         sensitive = self.key.kind in {"input_setting", "filter_setting"}
@@ -208,23 +225,25 @@ def _assignment_validation_error(
     return None
 
 
-def _values_equal(left: Any, right: Any) -> bool:
-    if (
-        isinstance(left, (int, float))
-        and not isinstance(left, bool)
-        and isinstance(right, (int, float))
-        and not isinstance(right, bool)
-    ):
-        try:
-            return math.isclose(
-                float(left),
-                float(right),
-                rel_tol=1e-9,
-                abs_tol=1e-6,
-            )
-        except (TypeError, ValueError, OverflowError):
-            return False
-    return left == right
+def _values_equal(key: PropertyKey, left: Any, right: Any) -> bool:
+    if key.kind == "input_volume_db":
+        if (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+        ):
+            try:
+                return math.isclose(
+                    float(left),
+                    float(right),
+                    rel_tol=1e-9,
+                    abs_tol=1e-6,
+                )
+            except (TypeError, ValueError, OverflowError):
+                return False
+        return False
+    return json_values_equal(left, right)
 
 
 def build_execution_plan(
@@ -324,7 +343,7 @@ def build_execution_plan(
             )
             continue
 
-        if _values_equal(current.value, assignment.value):
+        if _values_equal(key, current.value, assignment.value):
             diff.append(
                 DiffEntry(
                     key=key,
