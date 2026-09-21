@@ -493,6 +493,10 @@ class DeclarativeExecutor:
                 # deliberately repeated after the fresh physical read so a
                 # resume/override that raced with preflight cannot authorize a
                 # write from the old target.
+                # Revalidate the executor-owned context first, then let
+                # the runtime callback perform its own fresh condition/target
+                # resolution and final runtime-generation check.
+                self._context_check(prepared)
                 valid, reason = validate_target()
                 if not valid:
                     return finish(
@@ -500,10 +504,6 @@ class DeclarativeExecutor:
                         replan_required=True,
                         diagnostic=reason,
                     )
-                # Make the collection/session boundary the final OBS read before
-                # the guarded Set*. The client generation guard then closes the
-                # reconnect-side race.
-                self._context_check(prepared)
 
                 # Pure cooperative checkpoint immediately before the write.
                 # Once the request is handed to obs-websocket it cannot be
