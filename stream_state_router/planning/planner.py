@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 import math
@@ -29,6 +30,10 @@ class DiffEntry:
     desired: Any
     provenance: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observed", deepcopy(self.observed))
+        object.__setattr__(self, "desired", deepcopy(self.desired))
+
     def as_mapping(self) -> dict[str, object]:
         sensitive = self.key.kind in {"input_setting", "filter_setting"}
         return {
@@ -53,6 +58,10 @@ class PlanOperation:
     target: Any
     provenance: tuple[str, ...] = ()
     reason: str = "value_differs"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observed", deepcopy(self.observed))
+        object.__setattr__(self, "target", deepcopy(self.target))
 
     def as_mapping(self) -> dict[str, object]:
         sensitive = self.key.kind in {"input_setting", "filter_setting"}
@@ -208,23 +217,47 @@ def _assignment_validation_error(
     return None
 
 
-def _values_equal(left: Any, right: Any) -> bool:
-    if (
-        isinstance(left, (int, float))
-        and not isinstance(left, bool)
-        and isinstance(right, (int, float))
-        and not isinstance(right, bool)
-    ):
-        try:
-            return math.isclose(
-                float(left),
-                float(right),
-                rel_tol=1e-9,
-                abs_tol=1e-6,
-            )
-        except (TypeError, ValueError, OverflowError):
+def _strict_values_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        if isinstance(left, float) and not math.isfinite(left):
             return False
+        if isinstance(right, float) and not math.isfinite(right):
+            return False
+        return left == right
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if set(left) != set(right):
+            return False
+        return all(_strict_values_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _strict_values_equal(l_item, r_item)
+            for l_item, r_item in zip(left, right)
+        )
+    if type(left) is not type(right):
+        return False
     return left == right
+
+
+def _values_equal(key: PropertyKey, left: Any, right: Any) -> bool:
+    if key.kind == "input_volume_db":
+        if (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+        ):
+            try:
+                return math.isclose(
+                    float(left),
+                    float(right),
+                    rel_tol=1e-9,
+                    abs_tol=1e-6,
+                )
+            except (TypeError, ValueError, OverflowError):
+                return False
+    return _strict_values_equal(left, right)
 
 
 def build_execution_plan(
@@ -324,7 +357,7 @@ def build_execution_plan(
             )
             continue
 
-        if _values_equal(current.value, assignment.value):
+        if _values_equal(key, current.value, assignment.value):
             diff.append(
                 DiffEntry(
                     key=key,
