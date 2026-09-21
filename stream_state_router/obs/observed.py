@@ -1,10 +1,105 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from ..planning.models import DesiredState, ObservedState, ObservedValue, PropertyKey
 from .catalog import OBSResourceCatalog
 from .client import OBSClientManager, OBSRequestError
+
+
+
+@dataclass(frozen=True, slots=True)
+class SceneItemBinding:
+    key: PropertyKey
+    container_uuid: str
+    source_uuid: str
+    scene_item_id: int
+    occurrence_fingerprint: tuple[tuple[int, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class InputBinding:
+    key: PropertyKey
+    input_uuid: str
+
+
+ExecutionBinding = SceneItemBinding | InputBinding
+
+
+def build_execution_bindings(
+    catalog: OBSResourceCatalog,
+    desired: DesiredState,
+) -> tuple[ExecutionBinding, ...]:
+    """Bind the MVP executable properties to verified physical OBS identities.
+
+    These bindings are snapshots, not durable permissions.  The executor must
+    revalidate them immediately before every mutation and acknowledgement.
+    """
+
+    scenes = {item.name: item for item in catalog.scenes}
+    inputs = {item.name: item for item in catalog.inputs}
+    bindings: list[ExecutionBinding] = []
+
+    for assignment in desired.assignments:
+        key = assignment.key
+        if key.kind == "scene_item_visibility":
+            if key.container in catalog.groups:
+                raise ValueError(
+                    "Group scene-item containers are not executable in the MVP"
+                )
+            scene = scenes.get(key.container)
+            if scene is None or not scene.uuid:
+                raise ValueError(
+                    f"Scene container '{key.container}' has no stable UUID binding"
+                )
+            refs = sorted(
+                (
+                    item
+                    for item in catalog.scene_items
+                    if item.container == key.container and item.source == key.source
+                ),
+                key=lambda item: item.occurrence,
+            )
+            if key.occurrence >= len(refs):
+                raise ValueError(
+                    f"Scene-item occurrence {key.occurrence} is not bound"
+                )
+            expected_occurrences = list(range(len(refs)))
+            actual_occurrences = [item.occurrence for item in refs]
+            if actual_occurrences != expected_occurrences:
+                raise ValueError("Scene-item occurrence set is incomplete or ambiguous")
+            if any(item.scene_item_id is None or not item.source_uuid for item in refs):
+                raise ValueError("Scene-item physical identity is incomplete")
+            reference = refs[key.occurrence]
+            bindings.append(
+                SceneItemBinding(
+                    key=key,
+                    container_uuid=scene.uuid,
+                    source_uuid=reference.source_uuid,
+                    scene_item_id=int(reference.scene_item_id),
+                    occurrence_fingerprint=tuple(
+                        (int(item.scene_item_id), item.source_uuid)
+                        for item in refs
+                    ),
+                )
+            )
+            continue
+
+        if key.kind == "input_mute":
+            input_ref = inputs.get(key.source)
+            if input_ref is None or not input_ref.uuid:
+                raise ValueError(
+                    f"Input '{key.source}' has no stable UUID binding"
+                )
+            bindings.append(InputBinding(key=key, input_uuid=input_ref.uuid))
+            continue
+
+        raise ValueError(
+            f"Property kind '{key.kind}' is outside the declarative executor MVP allowlist"
+        )
+
+    return tuple(bindings)
 
 
 def observe_desired_state(
@@ -159,14 +254,16 @@ def observe_desired_state(
                     reason="Scene-item visibility could not be read from OBS.",
                 )
             else:
-                if "sceneItemEnabled" in response:
-                    values[key] = ObservedValue.known_value(
-                        bool(response.get("sceneItemEnabled"))
-                    )
+                raw_enabled = response.get("sceneItemEnabled")
+                if isinstance(raw_enabled, bool):
+                    values[key] = ObservedValue.known_value(raw_enabled)
                 else:
                     values[key] = ObservedValue.unknown(
                         code="scene_item_visibility_unknown",
-                        reason="OBS omitted sceneItemEnabled for the bound occurrence.",
+                        reason=(
+                            "OBS omitted sceneItemEnabled or returned a non-boolean "
+                            "value for the bound occurrence."
+                        ),
                     )
             continue
 
@@ -179,12 +276,14 @@ def observe_desired_state(
             except OBSRequestError:
                 values[key] = ObservedValue.unknown()
             else:
-                if "inputMuted" in response:
-                    values[key] = ObservedValue.known_value(
-                        bool(response.get("inputMuted"))
-                    )
+                raw_muted = response.get("inputMuted")
+                if isinstance(raw_muted, bool):
+                    values[key] = ObservedValue.known_value(raw_muted)
                 else:
-                    values[key] = ObservedValue.unknown()
+                    values[key] = ObservedValue.unknown(
+                        code="input_mute_unknown",
+                        reason="OBS omitted inputMuted or returned a non-boolean value.",
+                    )
             continue
 
         if key.kind == "input_volume_db":
@@ -244,10 +343,9 @@ def observe_desired_state(
                 values[key] = ObservedValue.unknown()
                 continue
             if key.kind == "filter_enabled":
-                if "filterEnabled" in response:
-                    values[key] = ObservedValue.known_value(
-                        bool(response.get("filterEnabled"))
-                    )
+                raw_enabled = response.get("filterEnabled")
+                if isinstance(raw_enabled, bool):
+                    values[key] = ObservedValue.known_value(raw_enabled)
                 else:
                     values[key] = ObservedValue.unknown()
                 continue
