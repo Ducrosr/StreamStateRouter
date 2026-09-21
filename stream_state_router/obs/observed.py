@@ -137,7 +137,11 @@ def observe_desired_state(
             except OBSRequestError:
                 values[key] = ObservedValue.unknown()
             else:
-                scene = str(response.get("currentProgramSceneName") or "").strip()
+                scene = str(
+                    response.get("sceneName")
+                    or response.get("currentProgramSceneName")
+                    or ""
+                ).strip()
                 values[key] = (
                     ObservedValue.known_value(scene)
                     if scene
