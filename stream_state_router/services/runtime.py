@@ -242,6 +242,7 @@ class RoutingService:
         self._dispatch_lock = threading.RLock()
         self._paused = False
         self._resume_revalidation_pending = False
+        self._resume_revalidation_generation = 0
         self._last_app: ForegroundApp | None = None
         # Keep the last real external foreground independently from transient
         # None values produced while SSR itself owns the foreground window.
@@ -514,7 +515,10 @@ class RoutingService:
                 # A pending automatic decision may have expired while routing
                 # was suspended. Force exactly one fresh routing decision before
                 # it can be released so normal debounce state cannot make an old
-                # decision appear current after resume.
+                # decision appear current after resume. The generation prevents
+                # an older in-flight observation from acknowledging a newer
+                # pause/resume cycle.
+                self._resume_revalidation_generation += 1
                 self._resume_revalidation_pending = True
         self._wake.set()
         self._emit(
@@ -1003,8 +1007,11 @@ class RoutingService:
                         resume_revalidation = (
                             self._resume_revalidation_pending and not paused
                         )
-                        if resume_revalidation:
-                            self._resume_revalidation_pending = False
+                        resume_revalidation_generation = (
+                            self._resume_revalidation_generation
+                            if resume_revalidation
+                            else 0
+                        )
                     routing_app = bootstrap_app if bootstrap_routing else app
                     if changed_app:
                         self.logger.info(
@@ -1038,6 +1045,18 @@ class RoutingService:
                             )
                         if change:
                             self._apply_change(change)
+                        if resume_revalidation:
+                            with self._lock:
+                                if (
+                                    self._resume_revalidation_pending
+                                    and not self._paused
+                                    and self._resume_revalidation_generation
+                                    == resume_revalidation_generation
+                                ):
+                                    # Acknowledge only the exact resume cycle
+                                    # that this observation revalidated. A newer
+                                    # pause/resume request remains a hard barrier.
+                                    self._resume_revalidation_pending = False
                     self._worker_phase = "due_dispatch"
                     self._process_due_dispatch()
                     with self._lock:
@@ -1066,10 +1085,11 @@ class RoutingService:
                 wait_for = max(0.0, self.poll_seconds - elapsed)
                 with self._lock:
                     pending = self._pending_dispatch
-                    paused = self._paused
-                if pending is not None and (
-                    not paused or self._pending_dispatch_allowed_while_paused(pending)
-                ):
+                    pending_blocked = (
+                        pending is not None
+                        and self._pending_dispatch_blocked_locked(pending)
+                    )
+                if pending is not None and not pending_blocked:
                     wait_for = min(
                         wait_for,
                         max(0.0, pending.deadline - time.monotonic()),
@@ -1179,6 +1199,7 @@ class RoutingService:
             if (
                 self._stopping
                 or self._paused
+                or self._resume_revalidation_pending
                 or self._pending_dispatch is not None
             ):
                 return
@@ -2144,6 +2165,15 @@ class RoutingService:
     ) -> bool:
         return pending.origin in {"manual_override", "manual_override_clear"}
 
+    def _pending_dispatch_blocked_locked(
+        self,
+        pending: _PendingDispatch,
+    ) -> bool:
+        return (
+            (self._paused or self._resume_revalidation_pending)
+            and not self._pending_dispatch_allowed_while_paused(pending)
+        )
+
     def _apply_change(
         self,
         change: StateChange,
@@ -2242,10 +2272,7 @@ class RoutingService:
             if (
                 pending is None
                 or pending.deadline > time.monotonic()
-                or (
-                    self._paused
-                    and not self._pending_dispatch_allowed_while_paused(pending)
-                )
+                or self._pending_dispatch_blocked_locked(pending)
             ):
                 return
             self._pending_dispatch = None
