@@ -114,11 +114,33 @@ class OBSClientManager:
         except Exception as exc:
             return False, str(exc)
 
-    def send(self, request: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    def send(
+        self,
+        request: str,
+        data: dict[str, Any] | None = None,
+        *,
+        expected_session_generation: int | None = None,
+    ) -> dict[str, Any]:
         if not self._config.enabled:
             raise OBSUnavailableError("L'intégration OBS est désactivée")
         with self._lock:
-            client = self._ensure_client()
+            if expected_session_generation is None:
+                client = self._ensure_client()
+            else:
+                expected = int(expected_session_generation)
+                if expected <= 0:
+                    raise OBSUnavailableError(
+                        "Invalid expected OBS session generation for guarded request"
+                    )
+                if (
+                    self._client is None
+                    or not self._connected
+                    or self._session_generation != expected
+                ):
+                    raise OBSUnavailableError(
+                        "OBS session changed before guarded request; refusing reconnect"
+                    )
+                client = self._client
             self._request_count += 1
             try:
                 if data is None:
