@@ -884,6 +884,48 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_pause_suspends_background_obs_reconciliation(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(StreamState(game="Vanilla"))
+        client = CatalogRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Vanilla": {
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Gameplay"},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        service.pause(True)
+        service.start()
+        try:
+            time.sleep(0.08)
+            self.assertFalse(
+                any(
+                    request.startswith("Set")
+                    for request, _data in client.calls
+                )
+            )
+            self.assertIn(
+                "game",
+                dispatcher.pending_domains(engine.current_state),
+            )
+        finally:
+            self.assertTrue(service.stop())
+
     def test_current_declarative_plan_runs_on_serialized_runtime_worker(self):
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
         engine.set_manual_override(StreamState(game="Vanilla"))
