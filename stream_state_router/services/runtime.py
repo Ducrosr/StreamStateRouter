@@ -1689,39 +1689,13 @@ class RoutingService:
                             "reason": "Aucun état de routage courant",
                         }
                     else:
-                        context = self.dispatcher.obs_context()
-                        intent = self.dispatcher.plan_state(
+                        result = self._build_current_declarative_plan(
                             state,
-                            context=context,
-                        )
-                        desired = self.dispatcher.resolve_desired_state(
-                            state,
-                            context=context,
-                        )
-                        blocked_provenance = {
-                            str(row.get("provenance") or ""): str(
-                                row.get("reason") or "conditions bloquées"
-                            )
-                            for row in intent.get("declarative_blocks", [])
-                            if isinstance(row, Mapping)
-                            and str(row.get("provenance") or "").strip()
-                        }
-                        plan = planning.plan_state(
-                            desired,
+                            planning,
                             refresh_catalog=bool(
                                 command.options.get("refresh_catalog", True)
                             ),
-                            blocked_provenance=blocked_provenance,
                         )
-                        result = {
-                            "available": True,
-                            "state": state.as_variables(),
-                            "plan": plan.as_mapping(),
-                            "declarative_blocks": intent.get(
-                                "declarative_blocks",
-                                [],
-                            ),
-                        }
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
