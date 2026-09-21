@@ -48,7 +48,15 @@ def desired_assignments_from_actions(
     actions already supported by SSR are translated.  Temporal effects belong to
     future recipes, not this adapter.
     """
-    result: list[DesiredAssignment] = []
+    result: dict[PropertyKey, DesiredAssignment] = {}
+
+    def assign(assignment: DesiredAssignment) -> None:
+        # Action-profile inheritance is already resolved into one ordered action
+        # list by OBSDispatcher. Preserve its historical final-value semantics:
+        # within one owner, the later assignment overrides the earlier one.
+        # Cross-owner collisions are still rejected by
+        # desired_state_from_action_sets().
+        result[assignment.key] = assignment
     for action in actions:
         if not action.enabled:
             continue
@@ -59,7 +67,7 @@ def desired_assignments_from_actions(
             scene = str(params.get("scene") or "").strip()
             if not scene:
                 raise ValueError("set_program_scene requires params.scene")
-            result.append(
+            assign(
                 DesiredAssignment.create(
                     PropertyKey.program_scene(collection=collection),
                     scene,
@@ -75,7 +83,7 @@ def desired_assignments_from_actions(
                 raise ValueError(
                     "scene_item_enabled requires params.scene and params.source"
                 )
-            result.append(
+            assign(
                 DesiredAssignment.create(
                     PropertyKey.scene_item_visibility(
                         collection=collection,
@@ -95,7 +103,7 @@ def desired_assignments_from_actions(
                 raise ValueError(
                     "source_filter_enabled requires params.source and params.filter"
                 )
-            result.append(
+            assign(
                 DesiredAssignment.create(
                     PropertyKey.filter_enabled(
                         collection=collection,
@@ -112,7 +120,7 @@ def desired_assignments_from_actions(
             input_name = str(params.get("input") or "").strip()
             if not input_name:
                 raise ValueError("input_mute requires params.input")
-            result.append(
+            assign(
                 DesiredAssignment.create(
                     PropertyKey.input_mute(
                         collection=collection,
@@ -128,7 +136,7 @@ def desired_assignments_from_actions(
             input_name = str(params.get("input") or "").strip()
             if not input_name:
                 raise ValueError("input_volume_db requires params.input")
-            result.append(
+            assign(
                 DesiredAssignment.create(
                     PropertyKey.input_volume_db(
                         collection=collection,
@@ -165,7 +173,7 @@ def desired_assignments_from_actions(
             f"OBS action cannot be represented as a stable desired property: {action.type}"
         )
 
-    return tuple(result)
+    return tuple(result.values())
 
 
 def desired_state_from_action_sets(
