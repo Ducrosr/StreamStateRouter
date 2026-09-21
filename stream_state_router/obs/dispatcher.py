@@ -13,7 +13,7 @@ from ..planning import (
     desired_state_from_action_sets,
 )
 from ..router.engine import StateChange
-from ..router.models import StreamState
+from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
 from .client import OBSClientManager
 from .layouts import OBSLayoutManager, resolve_layout_profile
 from .models import OBSAction, OBSProfile
@@ -22,15 +22,6 @@ from .models import OBSAction, OBSProfile
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
 STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
-_DEFAULT_PROFILE_NAMES = {
-    "game": "Vanilla",
-    "overlay": "Vanilla",
-    "capture": "Default",
-    "audio": "Default",
-    "layout": "Vanilla",
-}
-
-
 @dataclass(frozen=True, slots=True)
 class DomainDispatchStatus:
     domain: str
@@ -166,7 +157,7 @@ class OBSDispatcher:
     def _is_unmanaged_default(self, domain: str, profile_name: str) -> bool:
         """Return whether the domain intentionally has no OBS profile owner."""
 
-        if str(profile_name) != _DEFAULT_PROFILE_NAMES.get(domain, ""):
+        if str(profile_name) != DEFAULT_PROFILE_NAMES.get(domain, ""):
             return False
         if domain == "layout":
             return not self._layout_profiles
