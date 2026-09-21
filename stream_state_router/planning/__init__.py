@@ -16,6 +16,7 @@ from .migration_coverage import (
     MigrationCoverageReport,
     ProfileCoverage,
     build_migration_coverage_report,
+    render_migration_coverage_report,
 )
 from .models import (
     DesiredAssignment,
@@ -55,6 +56,7 @@ __all__ = [
     "PropertyKey",
     "build_execution_plan",
     "build_migration_coverage_report",
+    "render_migration_coverage_report",
     "validate_state_coverage",
     "render_execution_plan",
 ]
