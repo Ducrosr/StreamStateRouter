@@ -546,6 +546,48 @@ class DeclarativePlanningTests(unittest.TestCase):
 
         self.assertEqual(len(build_execution_plan(desired, observed).operations), 1)
 
+    def test_direct_desired_state_construction_cannot_bypass_conflicts(self):
+        key = PropertyKey.input_mute(
+            collection="Main",
+            input_name="Mic",
+        )
+
+        with self.assertRaises(DesiredStateConflict):
+            DesiredState(
+                (
+                    DesiredAssignment.create(key, True, provenance="A"),
+                    DesiredAssignment.create(key, False, provenance="B"),
+                )
+            )
+
+    def test_direct_desired_state_construction_merges_identical_duplicates(self):
+        key = PropertyKey.input_mute(
+            collection="Main",
+            input_name="Mic",
+        )
+
+        state = DesiredState(
+            (
+                DesiredAssignment.create(key, True, provenance="A"),
+                DesiredAssignment.create(key, True, provenance="B"),
+            )
+        )
+
+        self.assertEqual(len(state.assignments), 1)
+        self.assertEqual(state.assignments[0].provenance, ("A", "B"))
+
+    def test_property_key_normalizes_direct_kind_and_occurrence(self):
+        key = PropertyKey(
+            kind=" input_setting ",
+            collection="Main",
+            source="Capture",
+            setting="window",
+            occurrence="0",
+        )
+
+        self.assertEqual(key.kind, "input_setting")
+        self.assertEqual(key.occurrence, 0)
+
     def test_property_key_rejects_irrelevant_identity_fields(self):
         with self.assertRaisesRegex(ValueError, "container"):
             PropertyKey(
