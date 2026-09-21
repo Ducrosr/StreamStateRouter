@@ -513,7 +513,7 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertIn("layout:Layout", plan["declarative_error"]["message"])
         self.assertIn("overlay:B", plan["declarative_error"]["message"])
 
-    def test_runtime_owned_layout_visibility_is_not_reserved(self):
+    def test_runtime_owned_visibility_conflicts_with_action_profile(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
             {
@@ -564,7 +564,12 @@ class OBSDispatcherTests(unittest.TestCase):
             },
         )
 
-        self.assertNotIn("declarative_error", plan)
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
+        self.assertIn("runtime:visibility", plan["declarative_error"]["message"])
+        self.assertIn("overlay:B", plan["declarative_error"]["message"])
 
     def test_read_only_plan_reports_blocked_conditions_without_mutation(self):
         client = FakeClient()
@@ -604,6 +609,49 @@ class OBSDispatcherTests(unittest.TestCase):
                 and row["value"] == "Live"
                 for row in properties
             )
+        )
+
+    def test_applied_profile_does_not_bypass_current_condition_block(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Live": {
+                        "conditions": {"streaming": True},
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Live"},
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        dispatcher._applied_profiles["game"] = "Live"
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Live"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "Idle",
+            },
+        )
+
+        game = next(row for row in plan["domains"] if row["domain"] == "game")
+        self.assertFalse(game["needs_apply"])
+        self.assertEqual(game["status"], "blocked")
+        self.assertEqual(
+            plan["declarative_blocks"],
+            [
+                {
+                    "provenance": "game:Live",
+                    "reason": "conditions OBS non satisfaites",
+                }
+            ],
         )
 
     def test_supported_action_shapes(self):
