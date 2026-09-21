@@ -22,6 +22,13 @@ from .models import OBSAction, OBSProfile
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
 STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
+_DEFAULT_PROFILE_NAMES = {
+    "game": "Vanilla",
+    "overlay": "Vanilla",
+    "capture": "Default",
+    "audio": "Default",
+    "layout": "Vanilla",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,13 +415,22 @@ class OBSDispatcher:
                         }
                     )
                 if desired not in self._layout_profiles:
-                    row.update(status="missing", message="LayoutProfile introuvable")
-                    declarative_blocks.append(
-                        {
-                            "provenance": f"{domain}:{desired}",
-                            "reason": "LayoutProfile introuvable",
-                        }
-                    )
+                    if (
+                        not self._layout_profiles
+                        and desired == _DEFAULT_PROFILE_NAMES[domain]
+                    ):
+                        row.update(
+                            status="unmanaged",
+                            message="Aucun LayoutProfile configuré pour ce domaine",
+                        )
+                    else:
+                        row.update(status="missing", message="LayoutProfile introuvable")
+                        declarative_blocks.append(
+                            {
+                                "provenance": f"{domain}:{desired}",
+                                "reason": "LayoutProfile introuvable",
+                            }
+                        )
                     domains.append(row)
                     continue
                 try:
@@ -493,13 +509,23 @@ class OBSDispatcher:
                 domains.append(row)
                 continue
             if profile is None:
-                row.update(status="missing", message="Profil OBS introuvable")
-                declarative_blocks.append(
-                    {
-                        "provenance": f"{domain}:{desired}",
-                        "reason": "Profil OBS introuvable",
-                    }
-                )
+                domain_profiles = self._profiles.get(domain, {})
+                if (
+                    not domain_profiles
+                    and desired == _DEFAULT_PROFILE_NAMES[domain]
+                ):
+                    row.update(
+                        status="unmanaged",
+                        message="Aucun profil OBS configuré pour ce domaine",
+                    )
+                else:
+                    row.update(status="missing", message="Profil OBS introuvable")
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": "Profil OBS introuvable",
+                        }
+                    )
                 domains.append(row)
                 continue
 
