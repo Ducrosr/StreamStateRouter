@@ -156,7 +156,7 @@ def desired_assignments_from_actions(
             if not isinstance(settings, Mapping):
                 raise ValueError("set_input_settings requires params.settings")
             for setting in sorted(settings, key=str):
-                result.append(
+                assign(
                     DesiredAssignment.create(
                         PropertyKey.input_setting(
                             collection=collection,
