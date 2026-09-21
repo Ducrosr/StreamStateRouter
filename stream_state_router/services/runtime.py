@@ -1566,6 +1566,83 @@ class RoutingService:
                 "Arrêt du runtime demandé pendant une opération OBS"
             )
 
+    def _build_current_declarative_plan(
+        self,
+        state: StreamState,
+        planning: DeclarativePlanningService,
+        *,
+        refresh_catalog: bool,
+    ) -> dict[str, object]:
+        last_boundary_error = "OBS planner context changed during resolution"
+        for attempt in range(2):
+            try:
+                boundary_before = planning.context_identity()
+                context = self.dispatcher.obs_context(force_refresh=True)
+                boundary_after_context = planning.context_identity()
+            except RuntimeError:
+                if attempt == 0:
+                    continue
+                raise
+
+            if boundary_before != boundary_after_context:
+                last_boundary_error = (
+                    "OBS planner context changed while reading profile conditions"
+                )
+                planning.invalidate_catalog(last_boundary_error)
+                continue
+
+            intent = self.dispatcher.plan_state(state, context=context)
+            desired = self.dispatcher.resolve_desired_state(
+                state,
+                context=context,
+            )
+            blocked_provenance = {
+                str(row.get("provenance") or ""): str(
+                    row.get("reason") or "conditions bloquées"
+                )
+                for row in intent.get("declarative_blocks", [])
+                if isinstance(row, Mapping)
+                and str(row.get("provenance") or "").strip()
+            }
+
+            try:
+                plan = planning.plan_state(
+                    desired,
+                    refresh_catalog=refresh_catalog,
+                    blocked_provenance=blocked_provenance,
+                )
+            except RuntimeError:
+                try:
+                    boundary_after_failure = planning.context_identity()
+                except RuntimeError:
+                    if attempt == 0:
+                        continue
+                    raise
+                if boundary_after_failure != boundary_after_context and attempt == 0:
+                    last_boundary_error = (
+                        "OBS planner context changed during catalog/observation"
+                    )
+                    planning.invalidate_catalog(last_boundary_error)
+                    continue
+                raise
+
+            boundary_after_plan = planning.context_identity()
+            if boundary_after_plan != boundary_after_context:
+                last_boundary_error = (
+                    "OBS planner context changed before plan publication"
+                )
+                planning.invalidate_catalog(last_boundary_error)
+                continue
+
+            return {
+                "available": True,
+                "state": state.as_variables(),
+                "plan": plan.as_mapping(),
+                "declarative_blocks": intent.get("declarative_blocks", []),
+            }
+
+        raise RuntimeError(last_boundary_error)
+
     def _execute_obs_command(self, command: _OBSCommand) -> None:
         with self._lock:
             self._active_operation = command.action
