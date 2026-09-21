@@ -9,6 +9,7 @@ from ..obs.observed import observe_desired_state
 from ..planning import (
     DesiredState,
     ExecutionPlan,
+    ObservedState,
     PlanDiagnostic,
     PropertyKey,
     build_execution_plan,
@@ -70,6 +71,14 @@ def _catalog_preflight(
     for assignment in desired.assignments:
         key = assignment.key
 
+        if key.collection and not catalog.collection:
+            reject(
+                key,
+                "scene_collection_unknown",
+                "Active OBS Scene Collection could not be determined",
+            )
+            continue
+
         if (
             key.collection
             and catalog.collection
@@ -108,6 +117,16 @@ def _catalog_preflight(
             continue
 
         if key.kind == "scene_item_visibility":
+            if key.container in catalog.unreadable_containers:
+                reject(
+                    key,
+                    "scene_item_unverified",
+                    (
+                        f"Container '{key.container}' could not be read; "
+                        "scene-item absence is not confirmed"
+                    ),
+                )
+                continue
             required = ("GetSceneItemId", "GetSceneItemEnabled")
             missing = [
                 request
@@ -229,6 +248,17 @@ class DeclarativePlanningService:
         self.scope = scope or ControlScope()
         self._catalog_reader = OBSResourceCatalogReader(client)
         self._catalog: OBSResourceCatalog | None = None
+        self._cooperative_yield = None
+
+    def set_cooperative_yield(self, callback) -> None:
+        self._cooperative_yield = callback
+        self._catalog_reader.set_cooperative_yield(callback)
+
+    def _current_collection(self) -> str:
+        if self._cooperative_yield is not None:
+            self._cooperative_yield()
+        response = self.client.send("GetSceneCollectionList")
+        return str(response.get("currentSceneCollectionName") or "").strip()
 
     @property
     def catalog(self) -> OBSResourceCatalog | None:
@@ -253,6 +283,35 @@ class DeclarativePlanningService:
         catalog = self._catalog
         if refresh_catalog or catalog is None:
             catalog = self.sync_catalog()
+
+        live_collection = self._current_collection()
+        if (
+            catalog.collection
+            and live_collection
+            and live_collection != catalog.collection
+        ):
+            self.invalidate_catalog()
+            catalog = self.sync_catalog()
+            live_collection = self._current_collection()
+        if (
+            catalog.collection
+            and live_collection
+            and live_collection != catalog.collection
+        ):
+            self.invalidate_catalog()
+            diagnostic = PlanDiagnostic(
+                "error",
+                "scene_collection_changed",
+                (
+                    "OBS Scene Collection changed while preparing the "
+                    "declarative plan"
+                ),
+            )
+            return build_execution_plan(
+                desired,
+                ObservedState.empty(),
+                extra_diagnostics=(*tuple(global_diagnostics), diagnostic),
+            )
 
         concrete_desired = desired.bind_collection(catalog.collection)
 
@@ -311,7 +370,33 @@ class DeclarativePlanningService:
             for assignment in concrete_desired.assignments
             if assignment.key not in preflight
         )
-        observed = observe_desired_state(self.client, catalog, observable)
+        observed = observe_desired_state(
+            self.client,
+            catalog,
+            observable,
+            cooperative_yield=self._cooperative_yield,
+        )
+        final_collection = self._current_collection()
+        if (
+            catalog.collection
+            and final_collection
+            and final_collection != catalog.collection
+        ):
+            self.invalidate_catalog()
+            diagnostic = PlanDiagnostic(
+                "error",
+                "scene_collection_changed",
+                (
+                    "OBS Scene Collection changed during physical observation; "
+                    "the observation was discarded"
+                ),
+            )
+            return build_execution_plan(
+                concrete_desired,
+                ObservedState.empty(),
+                preflight=preflight,
+                extra_diagnostics=(*tuple(global_diagnostics), diagnostic),
+            )
         return build_execution_plan(
             concrete_desired,
             observed,
