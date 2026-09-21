@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .client import OBSClientManager, OBSRequestError
 
@@ -24,8 +24,8 @@ class SceneItemRef:
     source_uuid: str
     source_kind: str
     occurrence: int
-    scene_item_id: int
-    enabled: bool
+    scene_item_id: int | None
+    enabled: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +40,7 @@ class FilterRef:
     source: str
     name: str
     kind: str
-    enabled: bool
+    enabled: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +63,8 @@ class OBSResourceCatalog:
     transitions: tuple[TransitionRef, ...]
     available_requests: frozenset[str] = frozenset()
     warnings: tuple[str, ...] = ()
+    unreadable_containers: frozenset[str] = frozenset()
+    session_generation: int = 0
 
     def supports(self, request: str) -> bool | None:
         if not self.available_requests:
@@ -82,6 +84,10 @@ class OBSResourceCatalog:
             "transitions": len(self.transitions),
             "available_requests": len(self.available_requests),
             "warnings": list(self.warnings),
+            "complete": not self.warnings and not self.unreadable_containers,
+            "partial": bool(self.warnings or self.unreadable_containers),
+            "unreadable_containers": sorted(self.unreadable_containers),
+            "session_generation": self.session_generation,
         }
 
 
@@ -105,8 +111,36 @@ class OBSResourceCatalogReader:
     lightweight: input settings and filter settings are loaded on demand.
     """
 
-    def __init__(self, client: OBSClientManager):
+    def __init__(
+        self,
+        client: OBSClientManager,
+        *,
+        cooperative_yield: Callable[[], None] | None = None,
+    ):
         self.client = client
+        self._cooperative_yield = cooperative_yield
+
+    def set_cooperative_yield(self, callback: Callable[[], None] | None) -> None:
+        self._cooperative_yield = callback
+
+    def _send(
+        self,
+        request: str,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if self._cooperative_yield is not None:
+            self._cooperative_yield()
+        return self._send(request, data)
+
+    def _session_generation(self) -> int:
+        try:
+            return int(getattr(self.client, "session_generation"))
+        except (AttributeError, TypeError, ValueError):
+            return 0
+
+    def current_collection(self) -> str:
+        response = self._send("GetSceneCollectionList")
+        return str(response.get("currentSceneCollectionName") or "").strip()
 
     @staticmethod
     def _mapping_list(value: Any) -> list[Mapping[str, Any]]:
@@ -114,20 +148,22 @@ class OBSResourceCatalogReader:
 
     def sync(self) -> OBSResourceCatalog:
         warnings: list[str] = []
+        unreadable_containers: set[str] = set()
 
-        version_response = self.client.send("GetVersion")
+        version_response = self._send("GetVersion")
         available_requests = frozenset(
             str(name).strip()
             for name in version_response.get("availableRequests", []) or []
             if str(name).strip()
         )
 
-        collection_response = self.client.send("GetSceneCollectionList")
+        collection_response = self._send("GetSceneCollectionList")
         collection = str(
             collection_response.get("currentSceneCollectionName") or ""
         ).strip()
+        session_generation = self._session_generation()
 
-        scene_response = self.client.send("GetSceneList")
+        scene_response = self._send("GetSceneList")
         scene_rows = self._mapping_list(scene_response.get("scenes"))
         scenes = tuple(
             SceneRef(
@@ -150,7 +186,7 @@ class OBSResourceCatalogReader:
             if available_requests and "GetGroupList" not in available_requests:
                 warnings.append("Group list unavailable: request not advertised by OBS")
             else:
-                group_response = self.client.send("GetGroupList")
+                group_response = self._send("GetGroupList")
                 group_names.update(
                     str(name).strip()
                     for name in group_response.get("groups", []) or []
@@ -162,12 +198,13 @@ class OBSResourceCatalogReader:
         scene_items: list[SceneItemRef] = []
         for scene in scenes:
             try:
-                response = self.client.send(
+                response = self._send(
                     "GetSceneItemList",
                     {"sceneName": scene.name},
                 )
             except OBSRequestError as exc:
                 warnings.append(f"Scene '{scene.name}' unreadable: {exc}")
+                unreadable_containers.add(scene.name)
                 continue
             rows = self._mapping_list(response.get("sceneItems"))
             group_names.update(
@@ -186,19 +223,35 @@ class OBSResourceCatalogReader:
                 rows=rows,
             )
 
-        groups = tuple(sorted(group_names, key=str.casefold))
-        for group in groups:
+        visited_groups: set[str] = set()
+        pending_groups = sorted(group_names, key=str.casefold)
+        while pending_groups:
+            group = pending_groups.pop(0)
+            if group in visited_groups:
+                continue
+            visited_groups.add(group)
             try:
-                response = self.client.send(
+                response = self._send(
                     "GetGroupSceneItemList",
                     {"sceneName": group},
                 )
             except OBSRequestError as exc:
                 warnings.append(f"Group '{group}' unreadable: {exc}")
+                unreadable_containers.add(group)
                 continue
-            # A group can be referenced from several root scenes.  Its internal
-            # membership is still one OBS container and is catalogued exactly
-            # once instead of being duplicated for each parent occurrence.
+            rows = self._mapping_list(response.get("sceneItems"))
+            discovered_groups = {
+                str(row.get("sourceName") or "").strip()
+                for row in rows
+                if bool(row.get("isGroup", False))
+                and str(row.get("sourceName") or "").strip()
+            }
+            for child in sorted(discovered_groups, key=str.casefold):
+                group_names.add(child)
+                if child not in visited_groups:
+                    pending_groups.append(child)
+            # A group can be referenced from several root scenes. Its internal
+            # membership is one OBS container and is catalogued exactly once.
             self._append_container_items(
                 scene_items,
                 collection=collection,
@@ -206,10 +259,11 @@ class OBSResourceCatalogReader:
                 container=group,
                 container_kind="group",
                 path=(group,),
-                rows=self._mapping_list(response.get("sceneItems")),
+                rows=rows,
             )
+        groups = tuple(sorted(group_names, key=str.casefold))
 
-        input_response = self.client.send("GetInputList")
+        input_response = self._send("GetInputList")
         inputs = tuple(
             sorted(
                 (
@@ -225,7 +279,7 @@ class OBSResourceCatalogReader:
             )
         )
 
-        transition_response = self.client.send("GetSceneTransitionList")
+        transition_response = self._send("GetSceneTransitionList")
         transitions = tuple(
             TransitionRef(
                 name=str(row.get("transitionName") or "").strip(),
@@ -238,13 +292,22 @@ class OBSResourceCatalogReader:
 
         canvas: tuple[int, int] | None = None
         try:
-            video = self.client.send("GetVideoSettings")
+            video = self._send("GetVideoSettings")
             width = int(video.get("baseWidth") or 0)
             height = int(video.get("baseHeight") or 0)
             if width > 0 and height > 0:
                 canvas = (width, height)
         except OBSRequestError as exc:
             warnings.append(f"Video settings unavailable: {exc}")
+
+        final_collection = self.current_collection()
+        if collection and final_collection and final_collection != collection:
+            raise RuntimeError(
+                "OBS Scene Collection changed during catalog synchronization: "
+                f"{collection} -> {final_collection}"
+            )
+        if self._session_generation() != session_generation:
+            raise RuntimeError("OBS session changed during catalog synchronization")
 
         return OBSResourceCatalog(
             collection=collection,
@@ -267,6 +330,8 @@ class OBSResourceCatalogReader:
             transitions=transitions,
             available_requests=available_requests,
             warnings=tuple(warnings),
+            unreadable_containers=frozenset(unreadable_containers),
+            session_generation=session_generation,
         )
 
     def input_details(self, input_name: str) -> InputDetails:
@@ -274,7 +339,7 @@ class OBSResourceCatalogReader:
         if not name:
             raise ValueError("input_name is required")
 
-        settings_response = self.client.send(
+        settings_response = self._send(
             "GetInputSettings",
             {"inputName": name},
         )
@@ -298,7 +363,7 @@ class OBSResourceCatalogReader:
         source = str(source_name or "").strip()
         if not source:
             raise ValueError("source_name is required")
-        response = self.client.send(
+        response = self._send(
             "GetSourceFilterList",
             {"sourceName": source},
         )
@@ -307,7 +372,11 @@ class OBSResourceCatalogReader:
                 source=source,
                 name=str(row.get("filterName") or "").strip(),
                 kind=str(row.get("filterKind") or "").strip(),
-                enabled=bool(row.get("filterEnabled", True)),
+                enabled=(
+                    bool(row.get("filterEnabled"))
+                    if "filterEnabled" in row
+                    else None
+                ),
             )
             for row in self._mapping_list(response.get("filters"))
             if str(row.get("filterName") or "").strip()
@@ -318,7 +387,7 @@ class OBSResourceCatalogReader:
         name = str(filter_name or "").strip()
         if not source or not name:
             raise ValueError("source_name and filter_name are required")
-        response = self.client.send(
+        response = self._send(
             "GetSourceFilter",
             {"sourceName": source, "filterName": name},
         )
@@ -329,7 +398,11 @@ class OBSResourceCatalogReader:
             source=source,
             name=name,
             kind=str(response.get("filterKind") or "").strip(),
-            enabled=bool(response.get("filterEnabled", True)),
+            enabled=(
+                bool(response.get("filterEnabled"))
+                if "filterEnabled" in response
+                else None
+            ),
         )
         return FilterDetails(filter=ref, settings=dict(settings))
 
@@ -368,10 +441,12 @@ class OBSResourceCatalogReader:
                 )
             )
             source_kind = "group" if is_group else ("scene" if is_scene else "input")
-            try:
-                scene_item_id = int(row.get("sceneItemId") or 0)
-            except (TypeError, ValueError, OverflowError):
-                scene_item_id = 0
+            scene_item_id: int | None = None
+            if "sceneItemId" in row:
+                try:
+                    scene_item_id = int(row.get("sceneItemId"))
+                except (TypeError, ValueError, OverflowError):
+                    scene_item_id = None
             out.append(
                 SceneItemRef(
                     collection=collection,
@@ -384,6 +459,10 @@ class OBSResourceCatalogReader:
                     source_kind=source_kind,
                     occurrence=occurrence,
                     scene_item_id=scene_item_id,
-                    enabled=bool(row.get("sceneItemEnabled", True)),
+                    enabled=(
+                        bool(row.get("sceneItemEnabled"))
+                        if "sceneItemEnabled" in row
+                        else None
+                    ),
                 )
             )
