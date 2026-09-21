@@ -889,6 +889,13 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         "audio": "AudioProfile",
         "layout": "LayoutProfile",
     }
+    default_profile_names = {
+        "game": "Vanilla",
+        "overlay": "Vanilla",
+        "capture": "Default",
+        "audio": "Default",
+        "layout": "Vanilla",
+    }
     profile_sets = {
         domain: set((profiles.get(domain) or {}).keys())
         if isinstance(profiles.get(domain, {}), Mapping)
@@ -903,8 +910,19 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         parsed = StreamState.from_mapping(state)
         for domain, key in profile_keys.items():
             value = parsed.profile_name(domain)
-            if value not in profile_sets[domain]:
-                errors.append(f"{where}.{key} référence un profil inexistant : {value}")
+            if value in profile_sets[domain]:
+                continue
+            # OBSDispatcher already treats a completely unconfigured domain
+            # targeting its canonical default as intentionally unmanaged.
+            # Configuration validation must accept the same state or an
+            # otherwise valid read-only/default domain becomes impossible to
+            # represent (notably the executor lab with no LayoutProfile).
+            if (
+                not profile_sets[domain]
+                and value == default_profile_names[domain]
+            ):
+                continue
+            errors.append(f"{where}.{key} référence un profil inexistant : {value}")
 
     check_state_refs(fallback, "router.fallback_state")
     for index, raw in enumerate(rules):
