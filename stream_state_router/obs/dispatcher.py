@@ -212,7 +212,11 @@ class OBSDispatcher:
         self._yield_runtime()
         try:
             scene = self.client.send("GetCurrentProgramScene")
-            context["program_scene"] = str(scene.get("currentProgramSceneName") or "")
+            context["program_scene"] = str(
+                scene.get("sceneName")
+                or scene.get("currentProgramSceneName")
+                or ""
+            )
         except Exception:
             context["program_scene"] = ""
         self._context_cache = (now, dict(context))
