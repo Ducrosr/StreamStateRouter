@@ -187,7 +187,7 @@ class DesiredAssignment:
 
     def as_mapping(self, *, diagnostic: bool = False) -> dict[str, object]:
         value: Any = self.value
-        if diagnostic and self.key.kind == "input_setting":
+        if diagnostic and self.key.kind in {"input_setting", "filter_setting"}:
             # Arbitrary OBS input settings may contain URLs/tokens.  The legacy
             # dispatcher intentionally avoids exposing their values in status
             # diagnostics; declarative diagnostics preserve that boundary.
