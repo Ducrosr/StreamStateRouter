@@ -7,7 +7,6 @@ import uuid
 from ..obs.client import OBSClientManager, OBSRequestError, OBSUnavailableError
 from ..obs.observed import (
     ExecutionBinding,
-    InputBinding,
     SceneItemBinding,
 )
 from ..planning.models import DesiredState, ObservedState, ObservedValue, PropertyKey
