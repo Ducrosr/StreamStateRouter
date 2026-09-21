@@ -309,7 +309,6 @@ class OBSDispatcher:
                         not isinstance(element, Mapping)
                         or not bool(element.get("included", True))
                         or bool(element.get("locked", False))
-                        or not bool(element.get("follow_visibility", True))
                     ):
                         continue
                     source = str(element.get("source") or "").strip()
@@ -320,19 +319,21 @@ class OBSDispatcher:
                     ).strip()
                     if not source or not container:
                         continue
+                    key = PropertyKey.scene_item_visibility(
+                        collection="",
+                        container=container,
+                        source=source,
+                    )
                     if self._layout_manager.runtime_visibility_owned(
                         container,
                         source,
                         element,
                     ):
+                        claims[key] = "runtime:visibility"
                         continue
-                    claims[
-                        PropertyKey.scene_item_visibility(
-                            collection="",
-                            container=container,
-                            source=source,
-                        )
-                    ] = owner
+                    if not bool(element.get("follow_visibility", True)):
+                        continue
+                    claims[key] = owner
 
         support = profile.get("support_items")
         if isinstance(support, list):
@@ -343,19 +344,19 @@ class OBSDispatcher:
                 container = str(item.get("container") or "").strip()
                 if not source or not container:
                     continue
+                key = PropertyKey.scene_item_visibility(
+                    collection="",
+                    container=container,
+                    source=source,
+                )
                 if self._layout_manager.runtime_visibility_owned(
                     container,
                     source,
                     item,
                 ):
+                    claims[key] = "runtime:visibility"
                     continue
-                claims[
-                    PropertyKey.scene_item_visibility(
-                        collection="",
-                        container=container,
-                        source=source,
-                    )
-                ] = owner
+                claims[key] = owner
         return claims
 
     def _resolve_state_plan(
