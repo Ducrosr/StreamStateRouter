@@ -102,6 +102,89 @@ class MigrationCoverageReport:
         profile_counts = self._counts(self.profiles)
         action_total = len(self.actions)
         profile_total = len(self.profiles)
+
+        domains: dict[str, dict[str, object]] = {}
+        domain_names = sorted(
+            {
+                *(item.domain for item in self.actions),
+                *(item.domain for item in self.profiles),
+            },
+            key=str.casefold,
+        )
+        for domain in domain_names:
+            domain_actions = tuple(
+                item for item in self.actions if item.domain == domain
+            )
+            domain_profiles = tuple(
+                item for item in self.profiles if item.domain == domain
+            )
+            domain_action_counts = self._counts(domain_actions)
+            domain_profile_counts = self._counts(domain_profiles)
+            managed_nonempty = (
+                len(domain_profiles)
+                - domain_profile_counts["empty"]
+                - domain_profile_counts["delegated"]
+            )
+            domains[domain] = {
+                "actions": {
+                    "total": len(domain_actions),
+                    "counts": domain_action_counts,
+                    "declarative_coverage_percent": (
+                        round(
+                            (
+                                domain_action_counts["declarative_executable"]
+                                + domain_action_counts["declarative_plannable"]
+                                + domain_action_counts["declarative_intent_only"]
+                            )
+                            * 100.0
+                            / len(domain_actions),
+                            2,
+                        )
+                        if domain_actions
+                        else 100.0
+                    ),
+                    "executable_percent": (
+                        round(
+                            domain_action_counts["declarative_executable"]
+                            * 100.0
+                            / len(domain_actions),
+                            2,
+                        )
+                        if domain_actions
+                        else 100.0
+                    ),
+                },
+                "profiles": {
+                    "total": len(domain_profiles),
+                    "managed_nonempty_total": managed_nonempty,
+                    "counts": domain_profile_counts,
+                    "declarative_coverage_percent": (
+                        round(
+                            (
+                                domain_profile_counts["declarative_executable"]
+                                + domain_profile_counts["declarative_plannable"]
+                                + domain_profile_counts["declarative_intent_only"]
+                            )
+                            * 100.0
+                            / managed_nonempty,
+                            2,
+                        )
+                        if managed_nonempty
+                        else 100.0
+                    ),
+                    "executable_percent": (
+                        round(
+                            domain_profile_counts["declarative_executable"]
+                            * 100.0
+                            / managed_nonempty,
+                            2,
+                        )
+                        if managed_nonempty
+                        else 100.0
+                    ),
+                },
+            }
+
         return {
             "summary": {
                 "actions": {
@@ -180,6 +263,7 @@ class MigrationCoverageReport:
                     ),
                 },
             },
+            "domains": domains,
             "profiles": [item.as_mapping() for item in self.profiles],
             "actions": [item.as_mapping() for item in self.actions],
         }
