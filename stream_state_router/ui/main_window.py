@@ -2214,6 +2214,8 @@ class MainWindow(QMainWindow):
         if action == "catalog.sync":
             request_id = self._service.request_catalog_sync()
             return {"request_id": request_id, "status": "accepted"}
+        if action == "catalog.snapshot":
+            return {"catalog": self._service.obs_catalog_snapshot()}
         if action == "planner.current":
             request_id = self._service.request_declarative_plan(
                 refresh_catalog=bool(payload.get("refresh_catalog", True))
