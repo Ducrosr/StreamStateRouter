@@ -375,6 +375,29 @@ La migration depuis Advanced Scene Switcher doit rester progressive. La synchron
 
 SSR distingue maintenant deux espaces de coordonnées : `root_canvas` pour les modules directement présents dans la scène du LayoutProfile, et `container_local` pour les modules situés dans une scène ou un groupe imbriqué. Seuls les modules racine sont adaptés au changement de résolution du canvas ; les descendants conservent leurs transforms locaux et suivent naturellement l’échelle de leur parent.
 
+
+
+### API locale de diagnostic
+
+Les opérations de lecture OBS du nouveau catalogue restent sérialisées sur le
+worker runtime existant. Elles ne créent ni seconde connexion OBS ni writer
+supplémentaire.
+
+`POST /catalog/sync` met en file une synchronisation explicite du catalogue et
+retourne un `request_id`. Le résultat se lit ensuite avec
+`GET /requests/<request_id>`.
+
+`POST /planner/current` met en file un dry-run du state courant. Le corps peut
+contenir `{"refresh_catalog": false}` pour réutiliser le dernier catalogue
+structurel ; par défaut le catalogue est resynchronisé. Le résultat est
+diagnostique uniquement : aucune opération planifiée n'est exécutée.
+
+`GET /status` expose également `obs_catalog`, qui indique si un catalogue a
+déjà été synchronisé et fournit uniquement son résumé.
+
+Les valeurs arbitraires de `inputSettings` sont masquées dans les sorties de
+diagnostic afin d'éviter de republier d'éventuels jetons ou URL sensibles.
+
 ## Fondation déclarative expérimentale
 
 SSR évolue vers un modèle où la configuration décrit principalement l'état final
