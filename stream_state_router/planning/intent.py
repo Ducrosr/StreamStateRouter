@@ -30,10 +30,10 @@ class DesiredOwnershipConflict(ValueError):
 
 
 def _owner_from_provenance(provenance: str) -> str:
+    """Return the concrete intent owner with full profile provenance."""
+
     text = str(provenance or "").strip()
-    if not text:
-        return "unknown"
-    return text.split(":", 1)[0].strip() or "unknown"
+    return text or "unknown"
 
 
 def desired_assignments_from_actions(
