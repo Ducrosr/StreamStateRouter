@@ -1,10 +1,48 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
 from typing import Any, Iterable, Mapping
+
+
+def json_values_equal(left: Any, right: Any) -> bool:
+    """Compare JSON-like values without Python's bool/int aliasing.
+
+    Arbitrary OBS settings use exact recursive comparison. Numeric tolerance is
+    intentionally handled by the property-specific planner layer.
+    """
+
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            return False
+        if {str(key) for key in left} != {str(key) for key in right}:
+            return False
+        left_by_name = {str(key): value for key, value in left.items()}
+        right_by_name = {str(key): value for key, value in right.items()}
+        return all(
+            json_values_equal(left_by_name[key], right_by_name[key])
+            for key in left_by_name
+        )
+    if isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
+        if not isinstance(left, (list, tuple)) or not isinstance(right, (list, tuple)):
+            return False
+        return len(left) == len(right) and all(
+            json_values_equal(a, b) for a, b in zip(left, right)
+        )
+    if isinstance(left, int) and isinstance(right, int):
+        return left == right
+    if isinstance(left, float) and isinstance(right, float):
+        return left == right
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        return False
+    return type(left) is type(right) and left == right
 
 
 def _canonical_signature_value(value: Any) -> Any:
@@ -47,10 +85,42 @@ class PropertyKey:
     setting: str = ""
 
     def __post_init__(self) -> None:
-        if not str(self.kind).strip():
+        kind = str(self.kind).strip()
+        if not kind:
             raise ValueError("PropertyKey.kind is required")
         if int(self.occurrence) < 0:
             raise ValueError("PropertyKey.occurrence must be >= 0")
+
+        allowed = {
+            "program_scene": {"collection"},
+            "scene_item_visibility": {"collection", "container", "source", "occurrence"},
+            "input_mute": {"collection", "source"},
+            "input_volume_db": {"collection", "source"},
+            "input_setting": {"collection", "source", "setting"},
+            "filter_enabled": {"collection", "source", "filter_name"},
+            "filter_setting": {"collection", "source", "filter_name", "setting"},
+            "layout_profile": {"collection", "container"},
+        }.get(kind)
+        if allowed is None:
+            return
+        values = {
+            "collection": self.collection,
+            "container": self.container,
+            "source": self.source,
+            "occurrence": self.occurrence,
+            "filter_name": self.filter_name,
+            "setting": self.setting,
+        }
+        defaults = {"occurrence": 0}
+        extras = [
+            name
+            for name, value in values.items()
+            if name not in allowed and value != defaults.get(name, "")
+        ]
+        if extras:
+            raise ValueError(
+                f"PropertyKey {kind} contains unsupported fields: {', '.join(extras)}"
+            )
 
     @classmethod
     def scene_item_visibility(
@@ -171,6 +241,10 @@ class DesiredAssignment:
     value: Any
     provenance: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", deepcopy(self.value))
+        object.__setattr__(self, "provenance", tuple(self.provenance))
+
     @classmethod
     def create(
         cls,
@@ -241,7 +315,7 @@ class DesiredState:
             if previous is None:
                 merged[assignment.key] = assignment
                 continue
-            if previous.value != assignment.value:
+            if not json_values_equal(previous.value, assignment.value):
                 raise DesiredStateConflict(assignment.key, previous, assignment)
             provenance = tuple(
                 dict.fromkeys((*previous.provenance, *assignment.provenance))
@@ -322,6 +396,9 @@ class ObservedValue:
     known: bool
     value: Any = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", deepcopy(self.value))
+
     @classmethod
     def unknown(cls) -> "ObservedValue":
         return cls(False, None)
@@ -334,6 +411,9 @@ class ObservedValue:
 @dataclass(frozen=True, slots=True)
 class ObservedState:
     values: Mapping[PropertyKey, ObservedValue]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", dict(self.values))
 
     @classmethod
     def empty(cls) -> "ObservedState":
