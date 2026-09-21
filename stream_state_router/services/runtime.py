@@ -292,6 +292,10 @@ class RoutingService:
             self.dispatcher.set_cooperative_yield(self._cooperative_obs_yield)
         elif layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
             layout_manager.set_cooperative_yield(self._cooperative_obs_yield)
+        if self._declarative_planning is not None:
+            self._declarative_planning.set_cooperative_yield(
+                self._cooperative_obs_yield
+            )
         if self.activation_controller is not None and hasattr(
             self.activation_controller, "set_cooperative_yield"
         ):
@@ -727,12 +731,15 @@ class RoutingService:
 
     def obs_catalog_status(self) -> dict[str, object]:
         planning = self._declarative_planning
-        if planning is None or planning.catalog is None:
-            return {"available": False}
-        return {
-            "available": True,
-            **planning.catalog.summary(),
-        }
+        if planning is None:
+            return {"available": False, "stale": False}
+        return planning.catalog_status()
+
+    def obs_catalog_snapshot(self) -> dict[str, object]:
+        planning = self._declarative_planning
+        if planning is None:
+            return {"available": False, "stale": False}
+        return planning.catalog_snapshot()
 
     def request_catalog_sync(self) -> str:
         return self.submit_obs_command("catalog.sync")
@@ -1057,6 +1064,8 @@ class RoutingService:
         config = getattr(client, "config", None)
         if client is None or config is None or not bool(getattr(config, "enabled", False)):
             self._last_obs_connected = None
+            if self._declarative_planning is not None:
+                self._declarative_planning.invalidate_catalog("OBS disabled")
             return
 
         now = time.monotonic()
@@ -1071,6 +1080,10 @@ class RoutingService:
                 self.logger.info("OBS connection established: %s", message)
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
+                if self._declarative_planning is not None:
+                    self._declarative_planning.invalidate_catalog(
+                        "OBS session connected or replaced"
+                    )
                 if manager is not None and hasattr(manager, "invalidate_session"):
                     manager.invalidate_session()
                 self._last_state_reconcile = 0.0
@@ -1097,6 +1110,10 @@ class RoutingService:
 
         if self._last_obs_connected is not False:
             self.logger.warning("OBS connection unavailable: %s", message)
+            if self._declarative_planning is not None:
+                self._declarative_planning.invalidate_catalog(
+                    "OBS connection unavailable"
+                )
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
 
@@ -2108,7 +2125,11 @@ class RoutingService:
     def _process_due_dispatch(self) -> None:
         with self._lock:
             pending = self._pending_dispatch
-            if pending is None or pending.deadline > time.monotonic():
+            if (
+                pending is None
+                or pending.deadline > time.monotonic()
+                or self._paused
+            ):
                 return
             self._pending_dispatch = None
         self._dispatch_if_current(pending)
