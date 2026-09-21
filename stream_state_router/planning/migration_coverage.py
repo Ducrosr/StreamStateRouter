@@ -133,6 +133,51 @@ class MigrationCoverageReport:
                     "total": profile_total,
                     "counts": profile_counts,
                     "percentages": self._percentages(profile_counts, profile_total),
+                    "managed_nonempty_total": (
+                        profile_total
+                        - profile_counts["empty"]
+                        - profile_counts["delegated"]
+                    ),
+                    "declarative_coverage_percent": (
+                        round(
+                            (
+                                profile_counts["declarative_executable"]
+                                + profile_counts["declarative_plannable"]
+                                + profile_counts["declarative_intent_only"]
+                            )
+                            * 100.0
+                            / (
+                                profile_total
+                                - profile_counts["empty"]
+                                - profile_counts["delegated"]
+                            ),
+                            2,
+                        )
+                        if (
+                            profile_total
+                            - profile_counts["empty"]
+                            - profile_counts["delegated"]
+                        )
+                        else 100.0
+                    ),
+                    "executable_percent": (
+                        round(
+                            profile_counts["declarative_executable"]
+                            * 100.0
+                            / (
+                                profile_total
+                                - profile_counts["empty"]
+                                - profile_counts["delegated"]
+                            ),
+                            2,
+                        )
+                        if (
+                            profile_total
+                            - profile_counts["empty"]
+                            - profile_counts["delegated"]
+                        )
+                        else 100.0
+                    ),
                 },
             },
             "profiles": [item.as_mapping() for item in self.profiles],
