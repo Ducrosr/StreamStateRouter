@@ -32,6 +32,26 @@ class FakeClient:
 
 
 class OBSDispatcherTests(unittest.TestCase):
+    def test_obs_context_prefers_modern_program_scene_field(self):
+        client = FakeClient()
+        original_send = client.send
+
+        def send(request, data=None):
+            if request == "GetCurrentProgramScene":
+                client.calls.append((request, data))
+                return {
+                    "sceneName": "Modern",
+                    "currentProgramSceneName": "Legacy",
+                }
+            return original_send(request, data)
+
+        client.send = send
+        dispatcher = OBSDispatcher(client, {})
+
+        context = dispatcher.obs_context(force_refresh=True)
+
+        self.assertEqual(context["program_scene"], "Modern")
+
     def test_obs_context_checks_shutdown_between_requests(self):
         client = FakeClient()
         client.config = SimpleNamespace(enabled=True)
