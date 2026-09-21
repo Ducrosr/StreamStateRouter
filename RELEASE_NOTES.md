@@ -42,6 +42,6 @@ La version du paquet est désormais dérivée de `stream_state_router.__version_
 
 Les modifications incluent des tests de régression dédiés à chaque étape, dont A → B différé → C, ciblage après réutilisation d'un `sceneItemId`, fondu en erreur persistante, contexte Preview/Undo, capture/héritage, diagnostics, scans mutualisés et explication sans mutation.
 
-La validation automatique complète de cette branche doit encore être exécutée dans un environnement Windows disposant des dépendances. Les GitHub-hosted runners de ce dépôt ont récemment échoué avant toute étape de job ; un tel échec d'infrastructure ne doit pas être interprété comme un échec de la suite Python.
+La validation automatique GitHub Actions est de nouveau opérationnelle : les jobs Windows et Stream Deck exécutent réellement leurs étapes et passent les gates Python, Ruff, configuration, TypeScript, build et validation du plugin sur le candidat courant.
 
-Une validation avec la vraie collection OBS reste requise avant de qualifier la 2.0.14 de validée en production.
+Les validations avec la vraie collection OBS restent complémentaires aux tests automatiques pour les changements qui touchent aux mutations OBS ou à l'identité physique des ressources.
