@@ -276,12 +276,9 @@ class DeclarativeExecutor:
                 if "sceneItemId" not in row:
                     raise _ExecutionBlocked("OBS omitted sceneItemId")
                 raw_id = row.get("sceneItemId")
-                if isinstance(raw_id, bool):
+                if isinstance(raw_id, bool) or not isinstance(raw_id, int):
                     raise _ExecutionBlocked("OBS returned invalid sceneItemId")
-                try:
-                    item_id = int(raw_id)
-                except (TypeError, ValueError, OverflowError) as exc:
-                    raise _ExecutionBlocked("OBS returned invalid sceneItemId") from exc
+                item_id = raw_id
                 source_uuid = str(row.get("sourceUuid") or "").strip()
                 if not source_uuid:
                     raise _ExecutionBlocked("OBS omitted sourceUuid")
@@ -444,6 +441,17 @@ class DeclarativeExecutor:
                         replan_required=True,
                         diagnostic="physical value no longer matches prepared observation",
                     )
+                steps.append(
+                    ExecutionStepResult(
+                        assignment.key,
+                        operation.operation,
+                        False,
+                        None,
+                        False,
+                        None,
+                        "not_run",
+                    )
+                )
                 candidates.append((assignment.key, binding, target))
 
             for key, binding, target in candidates:
