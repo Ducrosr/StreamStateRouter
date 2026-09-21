@@ -17,13 +17,21 @@ from stream_state_router.planning import (
 class _ObservedClient:
     def __init__(self):
         self.requests: list[tuple[str, dict | None]] = []
+        self.scene_items = [
+            {
+                "sourceName": "Chat",
+                "sourceUuid": "chat-1",
+                "sceneItemId": 7,
+                "sceneItemEnabled": True,
+            }
+        ]
 
     def send(self, request, data=None):
         self.requests.append((request, data))
         if request == "GetCurrentProgramScene":
             return {"currentProgramSceneName": "In Game"}
-        if request == "GetSceneItemId":
-            return {"sceneItemId": 7}
+        if request == "GetSceneItemList":
+            return {"sceneItems": list(self.scene_items)}
         if request == "GetSceneItemEnabled":
             return {"sceneItemEnabled": True}
         if request == "GetInputMute":
@@ -141,12 +149,14 @@ class ObservedStateReaderTests(unittest.TestCase):
         self.assertTrue(
             all(request.startswith("Get") for request, _data in client.requests)
         )
-        lookup = next(
-            data
-            for request, data in client.requests
-            if request == "GetSceneItemId"
+        self.assertEqual(
+            [request for request, _data in client.requests].count("GetSceneItemList"),
+            1,
         )
-        self.assertEqual(lookup["searchOffset"], 0)
+        self.assertNotIn(
+            "GetSceneItemId",
+            [request for request, _data in client.requests],
+        )
 
     def test_same_filter_is_read_once_for_multiple_properties(self):
         enabled = PropertyKey.filter_enabled(
@@ -199,6 +209,122 @@ class ObservedStateReaderTests(unittest.TestCase):
         self.assertFalse(observed.get(key).known)
         self.assertEqual(client.requests, [])
 
+
+    def test_reordered_duplicate_occurrence_is_reported_stale(self):
+        key = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="In Game",
+            source="Camera",
+            occurrence=0,
+        )
+        catalog = OBSResourceCatalog(
+            collection="Main",
+            current_program_scene="In Game",
+            current_program_scene_uuid="scene-1",
+            canvas=(1920, 1080),
+            scenes=(),
+            groups=(),
+            scene_items=(
+                SceneItemRef(
+                    collection="Main",
+                    root_scene="In Game",
+                    container="In Game",
+                    container_kind="scene",
+                    path=("In Game",),
+                    source="Camera",
+                    source_uuid="camera-1",
+                    source_kind="input",
+                    occurrence=0,
+                    scene_item_id=7,
+                    enabled=True,
+                ),
+                SceneItemRef(
+                    collection="Main",
+                    root_scene="In Game",
+                    container="In Game",
+                    container_kind="scene",
+                    path=("In Game",),
+                    source="Camera",
+                    source_uuid="camera-1",
+                    source_kind="input",
+                    occurrence=1,
+                    scene_item_id=8,
+                    enabled=False,
+                ),
+            ),
+            inputs=(),
+            transitions=(),
+        )
+        client = _ObservedClient()
+        client.scene_items = [
+            {
+                "sourceName": "Camera",
+                "sourceUuid": "camera-1",
+                "sceneItemId": 8,
+                "sceneItemEnabled": False,
+            },
+            {
+                "sourceName": "Camera",
+                "sourceUuid": "camera-1",
+                "sceneItemId": 7,
+                "sceneItemEnabled": True,
+            },
+        ]
+        desired = DesiredState.build([DesiredAssignment.create(key, False)])
+
+        observed = observe_desired_state(client, catalog, desired)
+
+        self.assertFalse(observed.get(key).known)
+        self.assertEqual(observed.get(key).code, "stale_reference")
+        self.assertFalse(
+            any(request == "GetSceneItemEnabled" for request, _data in client.requests)
+        )
+
+    def test_scene_item_id_zero_is_a_valid_bound_identity(self):
+        key = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="In Game",
+            source="Chat",
+        )
+        base = _catalog()
+        catalog = OBSResourceCatalog(
+            collection=base.collection,
+            current_program_scene=base.current_program_scene,
+            current_program_scene_uuid=base.current_program_scene_uuid,
+            canvas=base.canvas,
+            scenes=base.scenes,
+            groups=base.groups,
+            scene_items=(
+                SceneItemRef(
+                    collection="Main",
+                    root_scene="In Game",
+                    container="In Game",
+                    container_kind="scene",
+                    path=("In Game",),
+                    source="Chat",
+                    source_uuid="chat-1",
+                    source_kind="scene",
+                    occurrence=0,
+                    scene_item_id=0,
+                    enabled=True,
+                ),
+            ),
+            inputs=base.inputs,
+            transitions=base.transitions,
+        )
+        client = _ObservedClient()
+        client.scene_items[0]["sceneItemId"] = 0
+        desired = DesiredState.build([DesiredAssignment.create(key, False)])
+
+        observed = observe_desired_state(client, catalog, desired)
+
+        self.assertTrue(observed.get(key).known)
+        enabled_request = next(
+            data
+            for request, data in client.requests
+            if request == "GetSceneItemEnabled"
+        )
+        self.assertEqual(enabled_request["sceneItemId"], 0)
 
 if __name__ == "__main__":
     unittest.main()

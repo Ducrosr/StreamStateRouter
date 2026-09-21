@@ -264,5 +264,21 @@ class DeclarativeIntentTests(unittest.TestCase):
         self.assertEqual(key.source, "Mic")
 
 
+    def test_set_input_settings_overlay_false_is_not_projected(self):
+        action = OBSAction(
+            "set_input_settings",
+            {
+                "input": "Capture",
+                "settings": {"b": 2},
+                "overlay": False,
+            },
+        )
+
+        with self.assertRaisesRegex(UnsupportedIntentAction, "overlay=false"):
+            desired_assignments_from_actions(
+                (action,),
+                provenance="capture:Replace",
+            )
+
 if __name__ == "__main__":
     unittest.main()

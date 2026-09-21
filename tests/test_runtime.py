@@ -29,8 +29,10 @@ from stream_state_router.services.runtime import RoutingService
 class FakeProvider:
     def __init__(self, app):
         self.app = app
+        self.calls = 0
 
     def get(self):
+        self.calls += 1
         return self.app
 
 
@@ -44,6 +46,16 @@ class FakeDispatcher:
 
     def dispatch_state(self, state, force=False):
         return DispatchResult(0, 0, ("game",))
+
+
+class ThreadRecordingDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.thread_names = []
+
+    def dispatch_change(self, change):
+        self.thread_names.append(threading.current_thread().name)
+        return super().dispatch_change(change)
 
 
 class DiagnosticDispatcher(FakeDispatcher):
@@ -220,6 +232,7 @@ class FakeOBSHeartbeatClient:
         self.connected = False
         self.ok = True
         self.probes = 0
+        self.session_generation = 1
 
     def probe(self):
         self.probes += 1
@@ -239,6 +252,9 @@ class CatalogRuntimeClient:
         self.connected = True
         self.request_count = 0
         self.calls = []
+        self.collection = "Main"
+        self.program_scene = "Idle"
+        self.session_generation = 1
 
     def send(self, request, data=None):
         self.request_count += 1
@@ -258,10 +274,10 @@ class CatalogRuntimeClient:
                 ]
             }
         if request == "GetSceneCollectionList":
-            return {"currentSceneCollectionName": "Main"}
+            return {"currentSceneCollectionName": self.collection}
         if request == "GetSceneList":
             return {
-                "currentProgramSceneName": "Idle",
+                "currentProgramSceneName": self.program_scene,
                 "currentProgramSceneUuid": "idle-uuid",
                 "scenes": [
                     {
@@ -288,9 +304,13 @@ class CatalogRuntimeClient:
             return {"baseWidth": 1920, "baseHeight": 1080}
         if request == "GetCurrentProgramScene":
             return {
-                "currentProgramSceneName": "Idle",
+                "currentProgramSceneName": self.program_scene,
                 "currentProgramSceneUuid": "idle-uuid",
             }
+        if request == "GetStreamStatus":
+            return {"outputActive": False}
+        if request == "GetRecordStatus":
+            return {"outputActive": False}
         raise AssertionError(f"Unexpected catalog runtime request: {request}")
 
     def probe(self):
@@ -878,6 +898,15 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(status["available"])
             self.assertEqual(status["collection"], "Main")
             self.assertEqual(status["scenes"], 2)
+
+            before_snapshot = len(client.calls)
+            snapshot = service.obs_catalog_snapshot()
+            self.assertEqual(len(client.calls), before_snapshot)
+            self.assertTrue(snapshot["available"])
+            self.assertEqual(
+                [item["name"] for item in snapshot["scene_refs"]],
+                ["Idle", "Gameplay"],
+            )
             self.assertTrue(
                 all(request.startswith("Get") for request, _data in client.calls)
             )
@@ -977,6 +1006,86 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 service.engine.current_state.game,
                 "Vanilla",
+            )
+            self.assertFalse(
+                any(request.startswith("Set") for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_planner_does_not_reuse_condition_context_across_obs_session_change(self):
+        state = StreamState(game="Conditional")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = CatalogRuntimeClient()
+        client.config = SimpleNamespace(enabled=True)
+        client.collection = "Main"
+        client.program_scene = "In Game"
+        client.session_generation = 1
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Conditional": {
+                        "conditions": {"program_scene": "In Game"},
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Gameplay"},
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+
+        cached = dispatcher.obs_context()
+        self.assertEqual(cached["program_scene"], "In Game")
+
+        client.collection = "Other"
+        client.program_scene = "Pause"
+        client.session_generation = 3
+
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            request_id = service.request_declarative_plan(refresh_catalog=False)
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertTrue(result.result["available"])
+            self.assertTrue(result.result["plan"]["blocked"])
+            self.assertEqual(result.result["plan"]["operations"], [])
+            self.assertEqual(
+                result.result["declarative_blocks"],
+                [
+                    {
+                        "provenance": "game:Conditional",
+                        "reason": "conditions OBS non satisfaites",
+                    }
+                ],
+            )
+            self.assertEqual(
+                service.obs_catalog_status()["collection"],
+                "Other",
+            )
+            self.assertEqual(
+                service.obs_catalog_status()["session_generation"],
+                3,
+            )
+            self.assertEqual(
+                dispatcher.cached_obs_context()["program_scene"],
+                "Pause",
             )
             self.assertFalse(
                 any(request.startswith("Set") for request, _data in client.calls)
@@ -1520,6 +1629,29 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_obs_session_generation_change_invalidates_catalog_while_connected(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeHeartbeatDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+        invalidations = []
+        service._declarative_planning.invalidate_catalog = invalidations.append
+
+        service._probe_obs_if_due()
+        invalidations.clear()
+
+        dispatcher.client.session_generation += 1
+        service._last_obs_probe = 0.0
+        service._probe_obs_if_due()
+
+        self.assertEqual(
+            invalidations,
+            ["OBS session connected or replaced"],
+        )
+
     def test_obs_reconnect_reconciles_activation_fail_safe(self):
         app = ForegroundApp(1, 1, "terminal.exe")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
@@ -1970,6 +2102,361 @@ class RuntimeTests(unittest.TestCase):
             service.stop()
 
 
+
+    def test_pause_holds_due_delayed_dispatch_until_resume(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        state,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(app),
+        )
+        decision_seen = threading.Event()
+        dispatch_seen = threading.Event()
+        service.on_change = lambda _change: decision_seen.set()
+        service.on_dispatch = lambda _result: dispatch_seen.set()
+        service.start()
+        try:
+            self.assertTrue(decision_seen.wait(1.0))
+            service.pause(True)
+            time.sleep(0.2)
+
+            self.assertEqual(dispatcher.changes, [])
+            self.assertFalse(dispatch_seen.is_set())
+
+            service.pause(False)
+            self.assertTrue(dispatch_seen.wait(1.0))
+            self.assertEqual(len(dispatcher.changes), 1)
+            self.assertEqual(dispatcher.changes[0].current, state)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_resume_reobserves_before_applying_stale_delayed_decision(self):
+        game_app = ForegroundApp(1, 1, "game.exe")
+        other_app = ForegroundApp(2, 2, "other.exe")
+        game_state = StreamState(game="Game")
+        other_state = StreamState(game="Other")
+        provider = FakeProvider(game_app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        game_state,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    ),
+                    AppRule(
+                        "Other",
+                        other_state,
+                        exe="other.exe",
+                        apply_delay_ms=0,
+                    ),
+                ]
+            ),
+            debounce_ms=150,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=provider,
+        )
+        first_decision = threading.Event()
+        dispatch_seen = threading.Event()
+        service.on_change = lambda _change: first_decision.set()
+        service.on_dispatch = lambda _result: dispatch_seen.set()
+        service.start()
+        try:
+            self.assertTrue(first_decision.wait(1.0))
+            service.pause(True)
+            provider.app = other_app
+            service._wake.set()
+            time.sleep(0.2)
+            self.assertEqual(dispatcher.changes, [])
+
+            service.pause(False)
+            self.assertTrue(dispatch_seen.wait(1.0))
+            self.assertEqual(len(dispatcher.changes), 1)
+            self.assertEqual(dispatcher.changes[0].current, other_state)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_resume_between_pause_snapshot_and_due_dispatch_revalidates_first(self):
+        game_app = ForegroundApp(1, 1, "game.exe")
+        other_app = ForegroundApp(2, 2, "other.exe")
+        game_state = StreamState(game="Game")
+        other_state = StreamState(game="Other")
+        provider = FakeProvider(game_app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        game_state,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    ),
+                    AppRule(
+                        "Other",
+                        other_state,
+                        exe="other.exe",
+                        apply_delay_ms=0,
+                    ),
+                ]
+            ),
+            debounce_ms=150,
+        )
+        dispatcher = ThreadRecordingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=provider,
+        )
+        first_decision = threading.Event()
+        paused_snapshot_reached = threading.Event()
+        release_worker = threading.Event()
+        other_dispatched = threading.Event()
+
+        def on_change(change):
+            if change.current == game_state:
+                first_decision.set()
+
+        def on_foreground(app):
+            if app == other_app:
+                paused_snapshot_reached.set()
+                if not release_worker.wait(1.0):
+                    raise RuntimeError("resume race barrier timed out")
+
+        def on_dispatch(_result):
+            if dispatcher.changes and dispatcher.changes[-1].current == other_state:
+                other_dispatched.set()
+
+        service.on_change = on_change
+        service.on_foreground = on_foreground
+        service.on_dispatch = on_dispatch
+        service.start()
+        try:
+            self.assertTrue(first_decision.wait(1.0))
+            service.pause(True)
+            provider.app = other_app
+            service._wake.set()
+
+            self.assertTrue(paused_snapshot_reached.wait(1.0))
+            time.sleep(0.2)
+
+            # Resume exactly after the worker captured paused=True and before
+            # it can reach _process_due_dispatch(). The stale Game decision is
+            # already due at this point.
+            service.pause(False)
+            release_worker.set()
+
+            self.assertTrue(other_dispatched.wait(1.0))
+            time.sleep(0.05)
+            self.assertEqual(
+                [item.current for item in dispatcher.changes],
+                [other_state],
+            )
+            self.assertEqual(dispatcher.thread_names, ["SSR-Router"])
+        finally:
+            release_worker.set()
+            self.assertTrue(service.stop())
+
+    def test_paused_expired_automatic_dispatch_does_not_busy_spin(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        provider = FakeProvider(app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        state,
+                        exe="game.exe",
+                        apply_delay_ms=50,
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=provider,
+        )
+        decision_seen = threading.Event()
+        service.on_change = lambda _change: decision_seen.set()
+        service.start()
+        try:
+            self.assertTrue(decision_seen.wait(1.0))
+            service.pause(True)
+            time.sleep(0.08)
+
+            calls_before = provider.calls
+            time.sleep(0.08)
+            calls_after = provider.calls
+
+            self.assertEqual(dispatcher.changes, [])
+            self.assertLess(calls_after - calls_before, 20)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_manual_override_runs_on_worker_while_paused_and_supersedes_automatic(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        automatic = StreamState(game="Automatic")
+        manual = StreamState(game="Manual")
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Automatic",
+                        automatic,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = ThreadRecordingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(app),
+        )
+        first_decision = threading.Event()
+        manual_dispatched = threading.Event()
+
+        def on_change(change):
+            if change.current == automatic:
+                first_decision.set()
+
+        def on_dispatch(_result):
+            if dispatcher.changes and dispatcher.changes[-1].current == manual:
+                manual_dispatched.set()
+
+        service.on_change = on_change
+        service.on_dispatch = on_dispatch
+        service.start()
+        try:
+            self.assertTrue(first_decision.wait(1.0))
+            service.pause(True)
+
+            change = service.set_manual_override(manual)
+            self.assertIsNotNone(change)
+            self.assertTrue(manual_dispatched.wait(1.0))
+
+            time.sleep(0.2)
+            self.assertEqual(
+                [item.current for item in dispatcher.changes],
+                [manual],
+            )
+            self.assertEqual(dispatcher.thread_names, ["SSR-Router"])
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_clear_manual_override_runs_on_worker_while_paused(self):
+        automatic_app = ForegroundApp(1, 1, "automatic.exe")
+        automatic = StreamState(game="Automatic")
+        manual = StreamState(game="Manual")
+        provider = FakeProvider(automatic_app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Automatic",
+                        automatic,
+                        exe="automatic.exe",
+                    )
+                ]
+            ),
+            debounce_ms=150,
+        )
+        dispatcher = ThreadRecordingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=provider,
+        )
+        service.pause(True)
+        service.start()
+        try:
+            service.set_manual_override(manual)
+            deadline = time.monotonic() + 1.0
+            while (
+                (not dispatcher.changes or dispatcher.changes[-1].current != manual)
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertTrue(dispatcher.changes)
+            self.assertEqual(dispatcher.changes[-1].current, manual)
+
+            change = service.clear_manual_override()
+            self.assertIsNotNone(change)
+
+            deadline = time.monotonic() + 1.0
+            while (
+                dispatcher.changes[-1].current != automatic
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            self.assertEqual(
+                [item.current for item in dispatcher.changes],
+                [manual, automatic],
+            )
+            self.assertEqual(
+                dispatcher.thread_names,
+                ["SSR-Router", "SSR-Router"],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_explicit_profile_command_still_runs_while_paused(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service.start()
+        try:
+            request_id = service.request_profile("game", "Vanilla")
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(
+                dispatcher.profile_threads,
+                [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
 
 if __name__ == "__main__":
     unittest.main()

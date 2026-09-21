@@ -22,6 +22,13 @@ from .models import OBSAction, OBSProfile
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
 STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
+_DEFAULT_PROFILE_NAMES = {
+    "game": "Vanilla",
+    "overlay": "Vanilla",
+    "capture": "Default",
+    "audio": "Default",
+    "layout": "Vanilla",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,14 +174,20 @@ class OBSDispatcher:
             and self._applied_profiles.get(domain) != wanted.profile_name(domain)
         )
 
-    def obs_context(self) -> dict[str, Any]:
+    def obs_context(self, *, force_refresh: bool = False) -> dict[str, Any]:
         """Return a small current OBS context for conditional rules/profiles.
 
         Context is cached briefly so a foreground polling loop never turns into
-        a high-frequency obs-websocket polling loop.
+        a high-frequency obs-websocket polling loop. Explicit planner commands
+        may bypass that cache so profile conditions are resolved against the
+        same live OBS session as the catalog/observation pass.
         """
         now = time.monotonic()
-        if self._context_cache is not None and now - self._context_cache[0] < 0.5:
+        if (
+            not force_refresh
+            and self._context_cache is not None
+            and now - self._context_cache[0] < 0.5
+        ):
             return dict(self._context_cache[1])
         if not self.client.config.enabled:
             return {
@@ -278,16 +291,17 @@ class OBSDispatcher:
             description["setting_keys"] = sorted(str(key) for key in settings) if isinstance(settings, Mapping) else []
         return description
 
-    @staticmethod
     def _layout_visibility_owners(
+        self,
         profile: Mapping[str, Any],
         *,
         owner: str,
     ) -> dict[PropertyKey, str]:
-        """Expose only LayoutProfile visibility ownership for conflict checks.
+        """Expose specialized visibility ownership without duplicating layout rules.
 
-        Geometry remains opaque and delegated to OBSLayoutManager. This helper
-        does not calculate transforms or create executable visibility actions.
+        Geometry remains opaque and delegated to OBSLayoutManager. Runtime-owned
+        visibility is reserved here as a conflict claim; LayoutProfile owns only
+        the remaining visibility that its existing manager would actually apply.
         """
 
         claims: dict[PropertyKey, str] = {}
@@ -309,9 +323,6 @@ class OBSDispatcher:
                         not isinstance(element, Mapping)
                         or not bool(element.get("included", True))
                         or bool(element.get("locked", False))
-                        or not bool(element.get("follow_visibility", True))
-                        or str(element.get("visibility_owner") or "").casefold()
-                        == "runtime"
                     ):
                         continue
                     source = str(element.get("source") or "").strip()
@@ -322,32 +333,43 @@ class OBSDispatcher:
                     ).strip()
                     if not source or not container:
                         continue
-                    claims[
-                        PropertyKey.scene_item_visibility(
-                            collection="",
-                            container=container,
-                            source=source,
-                        )
-                    ] = owner
+                    key = PropertyKey.scene_item_visibility(
+                        collection="",
+                        container=container,
+                        source=source,
+                    )
+                    if self._layout_manager.runtime_visibility_owned(
+                        container,
+                        source,
+                        element,
+                    ):
+                        claims[key] = "runtime:visibility"
+                        continue
+                    if bool(element.get("follow_visibility", True)):
+                        claims[key] = owner
 
         support = profile.get("support_items")
         if isinstance(support, list):
             for item in support:
                 if not isinstance(item, Mapping):
                     continue
-                if str(item.get("visibility_owner") or "").casefold() == "runtime":
-                    continue
                 source = str(item.get("source") or "").strip()
                 container = str(item.get("container") or "").strip()
                 if not source or not container:
                     continue
-                claims[
-                    PropertyKey.scene_item_visibility(
-                        collection="",
-                        container=container,
-                        source=source,
-                    )
-                ] = owner
+                key = PropertyKey.scene_item_visibility(
+                    collection="",
+                    container=container,
+                    source=source,
+                )
+                if self._layout_manager.runtime_visibility_owned(
+                    container,
+                    source,
+                    item,
+                ):
+                    claims[key] = "runtime:visibility"
+                else:
+                    claims[key] = owner
         return claims
 
     def _resolve_state_plan(
@@ -366,7 +388,14 @@ class OBSDispatcher:
         domains: list[dict[str, object]] = []
         action_sets: list[tuple[str, tuple[OBSAction, ...]]] = []
         extra_assignments: list[DesiredAssignment] = []
-        reserved_owners: dict[PropertyKey, str] = {}
+        reserved_owners: dict[PropertyKey, str] = {
+            PropertyKey.scene_item_visibility(
+                collection="",
+                container=container,
+                source=source,
+            ): "runtime:visibility"
+            for container, source in self._layout_manager.runtime_visibility_claims()
+        }
         declarative_blocks: list[dict[str, str]] = []
 
         for domain in STATE_DOMAINS:
@@ -392,13 +421,34 @@ class OBSDispatcher:
                         }
                     )
                 if desired not in self._layout_profiles:
-                    row.update(status="missing", message="LayoutProfile introuvable")
+                    if (
+                        not self._layout_profiles
+                        and desired == _DEFAULT_PROFILE_NAMES[domain]
+                    ):
+                        row.update(
+                            status="unmanaged",
+                            message="Aucun LayoutProfile configuré pour ce domaine",
+                        )
+                    else:
+                        row.update(status="missing", message="LayoutProfile introuvable")
+                        declarative_blocks.append(
+                            {
+                                "provenance": f"{domain}:{desired}",
+                                "reason": "LayoutProfile introuvable",
+                            }
+                        )
                     domains.append(row)
                     continue
                 try:
                     profile = resolve_layout_profile(desired, self._layout_profiles)
                 except Exception as exc:
                     row.update(status="failed", message=str(exc))
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": f"Résolution LayoutProfile impossible : {exc}",
+                        }
+                    )
                     domains.append(row)
                     continue
                 conditions = profile.get("conditions")
@@ -407,7 +457,7 @@ class OBSDispatcher:
                     or self.conditions_match_context(conditions, context)
                 )
                 row["condition_match"] = condition_match
-                if row["needs_apply"] and not condition_match:
+                if not condition_match:
                     row.update(status="blocked", message="conditions OBS non satisfaites")
                     declarative_blocks.append(
                         {
@@ -456,16 +506,38 @@ class OBSDispatcher:
                 profile = self._resolve_action_profile(domain, desired)
             except Exception as exc:
                 row.update(status="failed", message=str(exc))
+                declarative_blocks.append(
+                    {
+                        "provenance": f"{domain}:{desired}",
+                        "reason": f"Résolution profil impossible : {exc}",
+                    }
+                )
                 domains.append(row)
                 continue
             if profile is None:
-                row.update(status="missing", message="Profil OBS introuvable")
+                domain_profiles = self._profiles.get(domain, {})
+                if (
+                    not domain_profiles
+                    and desired == _DEFAULT_PROFILE_NAMES[domain]
+                ):
+                    row.update(
+                        status="unmanaged",
+                        message="Aucun profil OBS configuré pour ce domaine",
+                    )
+                else:
+                    row.update(status="missing", message="Profil OBS introuvable")
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": "Profil OBS introuvable",
+                        }
+                    )
                 domains.append(row)
                 continue
 
             condition_match = self.conditions_match_context(profile.conditions, context)
             row["condition_match"] = condition_match
-            if row["needs_apply"] and not condition_match:
+            if not condition_match:
                 row.update(status="blocked", message="conditions OBS non satisfaites")
                 declarative_blocks.append(
                     {

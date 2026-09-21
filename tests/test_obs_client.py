@@ -134,5 +134,30 @@ class OBSClientManagerTests(unittest.TestCase):
         self.assertGreater(manager._last_failure, 0.0)
 
 
+    def test_session_generation_changes_across_transport_lifecycle(self):
+        fake_obs = SimpleNamespace(ReqClient=_ClosableReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True))
+
+        self.assertEqual(manager.session_generation, 0)
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            connected_generation = manager.session_generation
+            manager.close()
+
+        self.assertGreater(connected_generation, 0)
+        self.assertGreater(manager.session_generation, connected_generation)
+
+    def test_transport_failure_invalidates_session_generation(self):
+        fake_obs = SimpleNamespace(ReqClient=_TransportFailReqClient)
+        manager = OBSClientManager(
+            OBSConnectionConfig(enabled=True, reconnect_seconds=3.0)
+        )
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            with self.assertRaises(OBSUnavailableError):
+                manager.send("GetVersion")
+
+        self.assertGreaterEqual(manager.session_generation, 2)
+
 if __name__ == "__main__":
     unittest.main()

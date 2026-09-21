@@ -305,23 +305,15 @@ class DeclarativePlanningTests(unittest.TestCase):
         self.assertEqual(plan.operations, ())
         self.assertEqual(plan.diagnostics[0].code, "invalid_desired_value")
 
-    def test_incomplete_filter_key_is_blocked(self):
-        key = PropertyKey(
-            kind="filter_setting",
-            collection="Main",
-            source="Avatar",
-            filter_name="",
-            setting="strength",
-        )
-        desired = DesiredState.build(
-            [DesiredAssignment.create(key, 1.0, provenance="test")]
-        )
-
-        plan = build_execution_plan(desired, ObservedState.empty())
-
-        self.assertTrue(plan.blocked)
-        self.assertEqual(plan.operations, ())
-        self.assertEqual(plan.diagnostics[0].code, "invalid_property_key")
+    def test_incomplete_filter_key_is_rejected_at_construction(self):
+        with self.assertRaisesRegex(ValueError, "filter_name"):
+            PropertyKey(
+                kind="filter_setting",
+                collection="Main",
+                source="Avatar",
+                filter_name="",
+                setting="strength",
+            )
 
     def test_preflight_block_prevents_operation_even_with_known_diff(self):
         key = PropertyKey.scene_item_visibility(
@@ -509,6 +501,151 @@ class DeclarativePlanningTests(unittest.TestCase):
         self.assertEqual(len(plan.operations), 1)
         self.assertEqual(plan.operations[0].operation, "ApplyLayout")
 
+
+    def test_boolean_and_number_are_not_treated_as_converged(self):
+        key = PropertyKey.input_setting(
+            collection="Main",
+            input_name="Capture",
+            setting="flag",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, False)])
+        observed = ObservedState({key: ObservedValue.known_value(0)})
+
+        plan = build_execution_plan(desired, observed)
+
+        self.assertFalse(plan.converged)
+        self.assertEqual(len(plan.operations), 1)
+
+    def test_nested_boolean_and_number_are_not_treated_as_converged(self):
+        key = PropertyKey.input_setting(
+            collection="Main",
+            input_name="Capture",
+            setting="payload",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, {"nested": [False]})]
+        )
+        observed = ObservedState(
+            {key: ObservedValue.known_value({"nested": [0]})}
+        )
+
+        self.assertEqual(len(build_execution_plan(desired, observed).operations), 1)
+
+    def test_large_integers_are_compared_without_float_rounding(self):
+        key = PropertyKey.input_setting(
+            collection="Main",
+            input_name="Capture",
+            setting="counter",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, 1_000_000_001)]
+        )
+        observed = ObservedState(
+            {key: ObservedValue.known_value(1_000_000_000)}
+        )
+
+        self.assertEqual(len(build_execution_plan(desired, observed).operations), 1)
+
+    def test_direct_desired_state_construction_cannot_bypass_conflicts(self):
+        key = PropertyKey.input_mute(
+            collection="Main",
+            input_name="Mic",
+        )
+
+        with self.assertRaises(DesiredStateConflict):
+            DesiredState(
+                (
+                    DesiredAssignment.create(key, True, provenance="A"),
+                    DesiredAssignment.create(key, False, provenance="B"),
+                )
+            )
+
+    def test_direct_desired_state_construction_merges_identical_duplicates(self):
+        key = PropertyKey.input_mute(
+            collection="Main",
+            input_name="Mic",
+        )
+
+        state = DesiredState(
+            (
+                DesiredAssignment.create(key, True, provenance="A"),
+                DesiredAssignment.create(key, True, provenance="B"),
+            )
+        )
+
+        self.assertEqual(len(state.assignments), 1)
+        self.assertEqual(state.assignments[0].provenance, ("A", "B"))
+
+    def test_property_key_normalizes_direct_kind_and_occurrence(self):
+        key = PropertyKey(
+            kind=" input_setting ",
+            collection="Main",
+            source="Capture",
+            setting="window",
+            occurrence="0",
+        )
+
+        self.assertEqual(key.kind, "input_setting")
+        self.assertEqual(key.occurrence, 0)
+
+    def test_property_key_rejects_irrelevant_identity_fields(self):
+        with self.assertRaisesRegex(ValueError, "container"):
+            PropertyKey(
+                kind="input_setting",
+                collection="Main",
+                container="irrelevant",
+                source="Capture",
+                setting="window",
+            )
+
+    def test_plan_is_isolated_from_mutating_source_values(self):
+        payload = {"items": [1, 2]}
+        key = PropertyKey.input_setting(
+            collection="Main",
+            input_name="Capture",
+            setting="payload",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, payload)])
+        observed = ObservedState(
+            {key: ObservedValue.known_value({"items": [0]})}
+        )
+        plan = build_execution_plan(desired, observed)
+        signature = plan.target_signature
+
+        payload["items"].append(3)
+
+        self.assertEqual(plan.target_signature, signature)
+        self.assertEqual(
+            desired.as_mapping()["properties"][0]["value"],
+            {"items": [1, 2]},
+        )
+        self.assertEqual(
+            plan.as_mapping()["operations"][0]["target"],
+            "<redacted>",
+        )
+        with self.assertRaises(TypeError):
+            plan.operations[0].target["items"] = ()
+
+    def test_structured_unknown_reason_is_preserved(self):
+        key = PropertyKey.input_mute(
+            collection="Main",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        observed = ObservedState(
+            {
+                key: ObservedValue.unknown(
+                    code="stale_reference",
+                    reason="binding changed",
+                )
+            }
+        )
+
+        plan = build_execution_plan(desired, observed)
+
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.diagnostics[0].code, "stale_reference")
+        self.assertEqual(plan.diagnostics[0].message, "binding changed")
 
 if __name__ == "__main__":
     unittest.main()

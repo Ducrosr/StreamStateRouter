@@ -241,6 +241,8 @@ class RoutingService:
         self._lock = threading.RLock()
         self._dispatch_lock = threading.RLock()
         self._paused = False
+        self._resume_revalidation_pending = False
+        self._resume_revalidation_generation = 0
         self._last_app: ForegroundApp | None = None
         # Keep the last real external foreground independently from transient
         # None values produced while SSR itself owns the foreground window.
@@ -251,6 +253,7 @@ class RoutingService:
         self._dispatch_generation = 0
         self._last_obs_probe = 0.0
         self._last_obs_connected: bool | None = None
+        self._last_obs_session_generation: int | None = None
         self._last_state_reconcile = 0.0
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._routing_diagnostics: deque[RoutingDecisionStatus] = deque(maxlen=100)
@@ -292,6 +295,10 @@ class RoutingService:
             self.dispatcher.set_cooperative_yield(self._cooperative_obs_yield)
         elif layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
             layout_manager.set_cooperative_yield(self._cooperative_obs_yield)
+        if self._declarative_planning is not None:
+            self._declarative_planning.set_cooperative_yield(
+                self._cooperative_obs_yield
+            )
         if self.activation_controller is not None and hasattr(
             self.activation_controller, "set_cooperative_yield"
         ):
@@ -498,10 +505,28 @@ class RoutingService:
         )
 
     def pause(self, paused: bool = True) -> None:
+        requested = bool(paused)
         with self._lock:
-            self._paused = bool(paused)
+            was_paused = self._paused
+            self._paused = requested
+            if requested:
+                self._resume_revalidation_pending = False
+            elif was_paused:
+                # A pending automatic decision may have expired while routing
+                # was suspended. Force exactly one fresh routing decision before
+                # it can be released so normal debounce state cannot make an old
+                # decision appear current after resume. The generation prevents
+                # an older in-flight observation from acknowledging a newer
+                # pause/resume cycle.
+                self._resume_revalidation_generation += 1
+                self._resume_revalidation_pending = True
         self._wake.set()
-        self._emit(RuntimeEvent("pause", "Routage suspendu" if paused else "Routage repris"))
+        self._emit(
+            RuntimeEvent(
+                "pause",
+                "Routage suspendu" if requested else "Routage repris",
+            )
+        )
 
     def set_manual_override(
         self,
@@ -512,7 +537,7 @@ class RoutingService:
         with self._lock:
             change = self.engine.set_manual_override(state, duration_seconds=duration_seconds)
         if change:
-            self._apply_change(change)
+            self._apply_change(change, origin="manual_override")
         return change
 
     def clear_manual_override(self) -> StateChange | None:
@@ -530,7 +555,7 @@ class RoutingService:
                 use_context_provider=False,
             )
         if change:
-            self._apply_change(change)
+            self._apply_change(change, origin="manual_override_clear")
         return change
 
     def force_reapply(self) -> DispatchResult | None:
@@ -727,12 +752,15 @@ class RoutingService:
 
     def obs_catalog_status(self) -> dict[str, object]:
         planning = self._declarative_planning
-        if planning is None or planning.catalog is None:
-            return {"available": False}
-        return {
-            "available": True,
-            **planning.catalog.summary(),
-        }
+        if planning is None:
+            return {"available": False, "stale": False}
+        return planning.catalog_status()
+
+    def obs_catalog_snapshot(self) -> dict[str, object]:
+        planning = self._declarative_planning
+        if planning is None:
+            return {"available": False, "stale": False}
+        return planning.catalog_snapshot()
 
     def request_catalog_sync(self) -> str:
         return self.submit_obs_command("catalog.sync")
@@ -976,6 +1004,14 @@ class RoutingService:
                             # later always wins normally.
                             self._bootstrap_foreground = None
                         paused = self._paused
+                        resume_revalidation = (
+                            self._resume_revalidation_pending and not paused
+                        )
+                        resume_revalidation_generation = (
+                            self._resume_revalidation_generation
+                            if resume_revalidation
+                            else 0
+                        )
                     routing_app = bootstrap_app if bootstrap_routing else app
                     if changed_app:
                         self.logger.info(
@@ -1003,12 +1039,24 @@ class RoutingService:
                         with self._lock:
                             change = self.engine.observe(
                                 routing_app,
-                                force=bootstrap_routing,
+                                force=bootstrap_routing or resume_revalidation,
                                 context=routing_context,
                                 use_context_provider=False,
                             )
                         if change:
                             self._apply_change(change)
+                        if resume_revalidation:
+                            with self._lock:
+                                if (
+                                    self._resume_revalidation_pending
+                                    and not self._paused
+                                    and self._resume_revalidation_generation
+                                    == resume_revalidation_generation
+                                ):
+                                    # Acknowledge only the exact resume cycle
+                                    # that this observation revalidated. A newer
+                                    # pause/resume request remains a hard barrier.
+                                    self._resume_revalidation_pending = False
                     self._worker_phase = "due_dispatch"
                     self._process_due_dispatch()
                     with self._lock:
@@ -1037,8 +1085,15 @@ class RoutingService:
                 wait_for = max(0.0, self.poll_seconds - elapsed)
                 with self._lock:
                     pending = self._pending_dispatch
-                if pending is not None:
-                    wait_for = min(wait_for, max(0.0, pending.deadline - time.monotonic()))
+                    pending_blocked = (
+                        pending is not None
+                        and self._pending_dispatch_blocked_locked(pending)
+                    )
+                if pending is not None and not pending_blocked:
+                    wait_for = min(
+                        wait_for,
+                        max(0.0, pending.deadline - time.monotonic()),
+                    )
                 self._wake.wait(wait_for)
                 self._wake.clear()
         finally:
@@ -1057,6 +1112,9 @@ class RoutingService:
         config = getattr(client, "config", None)
         if client is None or config is None or not bool(getattr(config, "enabled", False)):
             self._last_obs_connected = None
+            self._last_obs_session_generation = None
+            if self._declarative_planning is not None:
+                self._declarative_planning.invalidate_catalog("OBS disabled")
             return
 
         now = time.monotonic()
@@ -1067,15 +1125,34 @@ class RoutingService:
         ok, message = client.probe()
         if ok:
             manager = getattr(self.dispatcher, "layout_manager", None)
-            if self._last_obs_connected is not True:
+            try:
+                session_generation = int(
+                    getattr(client, "session_generation", 0) or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                session_generation = 0
+            session_changed = bool(
+                session_generation
+                and self._last_obs_session_generation is not None
+                and session_generation != self._last_obs_session_generation
+            )
+            new_session = self._last_obs_connected is not True or session_changed
+            if new_session:
                 self.logger.info("OBS connection established: %s", message)
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
+                if self._declarative_planning is not None:
+                    self._declarative_planning.invalidate_catalog(
+                        "OBS session connected or replaced"
+                    )
                 if manager is not None and hasattr(manager, "invalidate_session"):
                     manager.invalidate_session()
                 self._last_state_reconcile = 0.0
                 self._reconcile_activation("connexion OBS")
                 self._emit(RuntimeEvent("obs_connected", message))
+            self._last_obs_session_generation = (
+                session_generation if session_generation else None
+            )
             if manager is not None and hasattr(manager, "retry_pending_fade_cleanup"):
                 cleanup_warnings = manager.retry_pending_fade_cleanup()
                 if cleanup_warnings:
@@ -1097,8 +1174,20 @@ class RoutingService:
 
         if self._last_obs_connected is not False:
             self.logger.warning("OBS connection unavailable: %s", message)
+            if self._declarative_planning is not None:
+                self._declarative_planning.invalidate_catalog(
+                    "OBS connection unavailable"
+                )
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
+        try:
+            failed_generation = int(
+                getattr(client, "session_generation", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            failed_generation = 0
+        if failed_generation:
+            self._last_obs_session_generation = failed_generation
 
     def _reconcile_desired_state_if_due(self) -> None:
         if self._last_obs_connected is False:
@@ -1110,6 +1199,7 @@ class RoutingService:
             if (
                 self._stopping
                 or self._paused
+                or self._resume_revalidation_pending
                 or self._pending_dispatch is not None
             ):
                 return
@@ -1497,6 +1587,83 @@ class RoutingService:
                 "Arrêt du runtime demandé pendant une opération OBS"
             )
 
+    def _build_current_declarative_plan(
+        self,
+        state: StreamState,
+        planning: DeclarativePlanningService,
+        *,
+        refresh_catalog: bool,
+    ) -> dict[str, object]:
+        last_boundary_error = "OBS planner context changed during resolution"
+        for attempt in range(2):
+            try:
+                boundary_before = planning.context_identity()
+                context = self.dispatcher.obs_context(force_refresh=True)
+                boundary_after_context = planning.context_identity()
+            except RuntimeError:
+                if attempt == 0:
+                    continue
+                raise
+
+            if boundary_before != boundary_after_context:
+                last_boundary_error = (
+                    "OBS planner context changed while reading profile conditions"
+                )
+                planning.invalidate_catalog(last_boundary_error)
+                continue
+
+            intent = self.dispatcher.plan_state(state, context=context)
+            desired = self.dispatcher.resolve_desired_state(
+                state,
+                context=context,
+            )
+            blocked_provenance = {
+                str(row.get("provenance") or ""): str(
+                    row.get("reason") or "conditions bloquées"
+                )
+                for row in intent.get("declarative_blocks", [])
+                if isinstance(row, Mapping)
+                and str(row.get("provenance") or "").strip()
+            }
+
+            try:
+                plan = planning.plan_state(
+                    desired,
+                    refresh_catalog=refresh_catalog,
+                    blocked_provenance=blocked_provenance,
+                )
+            except RuntimeError:
+                try:
+                    boundary_after_failure = planning.context_identity()
+                except RuntimeError:
+                    if attempt == 0:
+                        continue
+                    raise
+                if boundary_after_failure != boundary_after_context and attempt == 0:
+                    last_boundary_error = (
+                        "OBS planner context changed during catalog/observation"
+                    )
+                    planning.invalidate_catalog(last_boundary_error)
+                    continue
+                raise
+
+            boundary_after_plan = planning.context_identity()
+            if boundary_after_plan != boundary_after_context:
+                last_boundary_error = (
+                    "OBS planner context changed before plan publication"
+                )
+                planning.invalidate_catalog(last_boundary_error)
+                continue
+
+            return {
+                "available": True,
+                "state": state.as_variables(),
+                "plan": plan.as_mapping(),
+                "declarative_blocks": intent.get("declarative_blocks", []),
+            }
+
+        raise RuntimeError(last_boundary_error)
+
     def _execute_obs_command(self, command: _OBSCommand) -> None:
         with self._lock:
             self._active_operation = command.action
@@ -1543,39 +1710,13 @@ class RoutingService:
                             "reason": "Aucun état de routage courant",
                         }
                     else:
-                        context = self.dispatcher.obs_context()
-                        intent = self.dispatcher.plan_state(
+                        result = self._build_current_declarative_plan(
                             state,
-                            context=context,
-                        )
-                        desired = self.dispatcher.resolve_desired_state(
-                            state,
-                            context=context,
-                        )
-                        blocked_provenance = {
-                            str(row.get("provenance") or ""): str(
-                                row.get("reason") or "conditions bloquées"
-                            )
-                            for row in intent.get("declarative_blocks", [])
-                            if isinstance(row, Mapping)
-                            and str(row.get("provenance") or "").strip()
-                        }
-                        plan = planning.plan_state(
-                            desired,
+                            planning,
                             refresh_catalog=bool(
                                 command.options.get("refresh_catalog", True)
                             ),
-                            blocked_provenance=blocked_provenance,
                         )
-                        result = {
-                            "available": True,
-                            "state": state.as_variables(),
-                            "plan": plan.as_mapping(),
-                            "declarative_blocks": intent.get(
-                                "declarative_blocks",
-                                [],
-                            ),
-                        }
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
@@ -2018,7 +2159,27 @@ class RoutingService:
                     success=False,
                 )
             )
-    def _apply_change(self, change: StateChange) -> None:
+    @staticmethod
+    def _pending_dispatch_allowed_while_paused(
+        pending: _PendingDispatch,
+    ) -> bool:
+        return pending.origin in {"manual_override", "manual_override_clear"}
+
+    def _pending_dispatch_blocked_locked(
+        self,
+        pending: _PendingDispatch,
+    ) -> bool:
+        return (
+            (self._paused or self._resume_revalidation_pending)
+            and not self._pending_dispatch_allowed_while_paused(pending)
+        )
+
+    def _apply_change(
+        self,
+        change: StateChange,
+        *,
+        origin: str | None = None,
+    ) -> None:
         self.logger.info(
             "State decision [%s] -> %s (OBS delay %d ms)",
             change.rule_name,
@@ -2033,13 +2194,13 @@ class RoutingService:
             self._dispatch_generation += 1
             generation = self._dispatch_generation
             decision_id = uuid.uuid4().hex
-            origin = str(change.reason or "router")
+            dispatch_origin = str(origin or change.reason or "router")
             self._pending_dispatch = _PendingDispatch(
                 deadline=time.monotonic() + max(0, change.apply_delay_ms) / 1000.0,
                 generation=generation,
                 change=change,
                 decision_id=decision_id,
-                origin=origin,
+                origin=dispatch_origin,
             )
 
         if superseded is not None:
@@ -2086,7 +2247,7 @@ class RoutingService:
                 request_id=decision_id,
                 payload={
                     "decision_id": decision_id,
-                    "origin": origin,
+                    "origin": dispatch_origin,
                     "generation": generation,
                     "config_revision": self.config_revision,
                     "rule_name": change.rule_name,
@@ -2108,7 +2269,11 @@ class RoutingService:
     def _process_due_dispatch(self) -> None:
         with self._lock:
             pending = self._pending_dispatch
-            if pending is None or pending.deadline > time.monotonic():
+            if (
+                pending is None
+                or pending.deadline > time.monotonic()
+                or self._pending_dispatch_blocked_locked(pending)
+            ):
                 return
             self._pending_dispatch = None
         self._dispatch_if_current(pending)

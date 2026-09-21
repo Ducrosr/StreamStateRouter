@@ -155,6 +155,11 @@ def desired_assignments_from_actions(
                 raise ValueError("set_input_settings requires params.input")
             if not isinstance(settings, Mapping):
                 raise ValueError("set_input_settings requires params.settings")
+            if params.get("overlay") is False:
+                raise UnsupportedIntentAction(
+                    "set_input_settings with overlay=false cannot be represented "
+                    "as independent stable setting assignments"
+                )
             for setting in sorted(settings, key=str):
                 assign(
                     DesiredAssignment.create(

@@ -393,10 +393,19 @@ structurel ; par défaut le catalogue est resynchronisé. Le résultat est
 diagnostique uniquement : aucune opération planifiée n'est exécutée.
 
 `GET /status` expose également `obs_catalog`, qui indique si un catalogue a
-déjà été synchronisé et fournit uniquement son résumé.
+déjà été synchronisé, s'il est `stale` / partiel et fournit uniquement son résumé.
+`POST /catalog/snapshot` renvoie le dernier snapshot structurel déjà en cache,
+sans nouvelle lecture OBS et sans settings arbitraires.
 
-Les valeurs arbitraires de `inputSettings` sont masquées dans les sorties de
-diagnostic afin d'éviter de republier d'éventuels jetons ou URL sensibles.
+Le catalogue est un index de découverte, pas une copie durable de l'état OBS :
+une reconnexion ou un changement de Scene Collection l'invalide, et le planner
+revalide le contexte avant et après ses lectures ciblées. Une occurrence de
+Scene Item dont l'identité ou l'ordre a changé est signalée comme référence
+périmée au lieu d'être silencieusement réaffectée.
+
+Les valeurs arbitraires de `inputSettings` et de settings de filtres sont
+masquées dans les sorties de diagnostic afin d'éviter de republier d'éventuels
+jetons ou URL sensibles.
 
 ## Fondation déclarative expérimentale
 
@@ -436,6 +445,11 @@ La première fondation est volontairement **read-only** :
 l'exécution existante du dispatcher n'est pas remplacée et aucune nouvelle
 opération générée par le planner n'est envoyée à OBS. Les LayoutProfiles
 conservent leur moteur spécialisé validé.
+
+La pause suspend le routage automatique, la réconciliation périodique et le
+départ d'un dispatch différé encore en attente. Les commandes manuelles
+explicites et les cleanups de sécurité restent sérialisés sur le worker runtime ;
+la pause ne constitue donc pas une promesse « zéro écriture OBS » absolue.
 
 Les scopes d'ownership sont génériques et provider-agnostic. Ils permettent de
 déléguer l'intérieur d'un composant OBS à son propriétaire sans introduire de

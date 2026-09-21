@@ -174,6 +174,48 @@ class _TransportFailCatalogClient(_FakeCatalogClient):
         return super().send(request, data)
 
 
+class _NestedNoGroupsCatalogClient(_NoGroupsCatalogClient):
+    def send(self, request, data=None):
+        if request == "GetGroupSceneItemList":
+            self.requests.append((request, data))
+            group = data["sceneName"]
+            if group == "WebCam":
+                return {
+                    "sceneItems": [
+                        {
+                            "sourceName": "Inner",
+                            "sourceUuid": "group-2",
+                            "sceneItemId": 31,
+                            "sceneItemEnabled": True,
+                            "isGroup": True,
+                        }
+                    ]
+                }
+            if group == "Inner":
+                return {
+                    "sceneItems": [
+                        {
+                            "sourceName": "Avatar Dynamic",
+                            "sourceUuid": "avatar-1",
+                            "sceneItemId": 32,
+                            "sceneItemEnabled": True,
+                            "sourceType": "OBS_SOURCE_TYPE_INPUT",
+                            "inputKind": "image_source",
+                        }
+                    ]
+                }
+        return super().send(request, data)
+
+
+class _UnknownEnabledCatalogClient(_FakeCatalogClient):
+    def send(self, request, data=None):
+        response = super().send(request, data)
+        if request == "GetSceneItemList" and data["sceneName"] == "Nested":
+            response = {"sceneItems": [dict(response["sceneItems"][0])]}
+            response["sceneItems"][0].pop("sceneItemEnabled", None)
+        return response
+
+
 class OBSResourceCatalogTests(unittest.TestCase):
     def test_sync_builds_read_only_lightweight_catalog(self):
         client = _FakeCatalogClient()
@@ -240,6 +282,53 @@ class OBSResourceCatalogTests(unittest.TestCase):
             all(request.startswith("Get") for request, _data in client.requests)
         )
 
+
+    def test_nested_group_fallback_discovers_groups_recursively(self):
+        catalog = OBSResourceCatalogReader(_NestedNoGroupsCatalogClient()).sync()
+
+        self.assertEqual(catalog.groups, ("Inner", "WebCam"))
+        self.assertTrue(
+            any(
+                item.container == "Inner" and item.source == "Avatar Dynamic"
+                for item in catalog.scene_items
+            )
+        )
+
+    def test_missing_enabled_field_remains_unknown(self):
+        catalog = OBSResourceCatalogReader(_UnknownEnabledCatalogClient()).sync()
+
+        nested = next(
+            item
+            for item in catalog.scene_items
+            if item.container == "Nested" and item.source == "Avatar Dynamic"
+        )
+        self.assertIsNone(nested.enabled)
+
+    def test_catalog_reads_honor_cooperative_cancellation(self):
+        client = _FakeCatalogClient()
+        checkpoints = []
+
+        def checkpoint():
+            checkpoints.append(len(client.requests))
+            if len(checkpoints) == 3:
+                raise RuntimeError("shutdown requested")
+
+        reader = OBSResourceCatalogReader(
+            client,
+            cooperative_yield=checkpoint,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "shutdown requested"):
+            reader.sync()
+
+        self.assertEqual(len(client.requests), 2)
+
+    def test_summary_reports_partial_catalog(self):
+        catalog = OBSResourceCatalogReader(_NoGroupsCatalogClient()).sync()
+
+        summary = catalog.summary()
+        self.assertTrue(summary["partial"])
+        self.assertFalse(summary["complete"])
 
 if __name__ == "__main__":
     unittest.main()

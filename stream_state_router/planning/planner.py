@@ -5,7 +5,14 @@ import json
 import math
 from typing import Any, Mapping
 
-from .models import DesiredAssignment, DesiredState, ObservedState, PropertyKey
+from .models import (
+    DesiredAssignment,
+    DesiredState,
+    ObservedState,
+    PropertyKey,
+    _freeze_value,
+    _materialize_value,
+)
 
 
 _OPERATION_TYPES = {
@@ -29,6 +36,10 @@ class DiffEntry:
     desired: Any
     provenance: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observed", _freeze_value(self.observed))
+        object.__setattr__(self, "desired", _freeze_value(self.desired))
+
     def as_mapping(self) -> dict[str, object]:
         sensitive = self.key.kind in {"input_setting", "filter_setting"}
         return {
@@ -38,9 +49,13 @@ class DiffEntry:
             "observed": (
                 "<redacted>"
                 if sensitive and self.observed_known
-                else self.observed
+                else _materialize_value(self.observed)
             ),
-            "desired": "<redacted>" if sensitive else self.desired,
+            "desired": (
+                "<redacted>"
+                if sensitive
+                else _materialize_value(self.desired)
+            ),
             "provenance": list(self.provenance),
         }
 
@@ -54,13 +69,25 @@ class PlanOperation:
     provenance: tuple[str, ...] = ()
     reason: str = "value_differs"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observed", _freeze_value(self.observed))
+        object.__setattr__(self, "target", _freeze_value(self.target))
+
     def as_mapping(self) -> dict[str, object]:
         sensitive = self.key.kind in {"input_setting", "filter_setting"}
         return {
             "operation": self.operation,
             "property": self.key.as_mapping(),
-            "observed": "<redacted>" if sensitive else self.observed,
-            "target": "<redacted>" if sensitive else self.target,
+            "observed": (
+                "<redacted>"
+                if sensitive
+                else _materialize_value(self.observed)
+            ),
+            "target": (
+                "<redacted>"
+                if sensitive
+                else _materialize_value(self.target)
+            ),
             "provenance": list(self.provenance),
             "reason": self.reason,
         }
@@ -93,13 +120,20 @@ class ExecutionPlan:
 
     @property
     def converged(self) -> bool:
-        return not self.operations and all(item.status == "converged" for item in self.diff)
+        return (
+            not self.operations
+            and not self.blocked
+            and all(item.status == "converged" for item in self.diff)
+        )
 
     @property
     def blocked(self) -> bool:
-        return any(
-            item.status in {"unknown", "unsupported", "blocked"}
-            for item in self.diff
+        return (
+            any(
+                item.status in {"unknown", "unsupported", "blocked"}
+                for item in self.diff
+            )
+            or any(item.level == "error" for item in self.diagnostics)
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -119,7 +153,7 @@ def _operation_for(assignment: DesiredAssignment) -> str | None:
 
 def _is_json_compatible(value: Any) -> bool:
     try:
-        json.dumps(value, allow_nan=False)
+        json.dumps(_materialize_value(value), allow_nan=False)
     except (TypeError, ValueError, OverflowError):
         return False
     return True
@@ -208,23 +242,47 @@ def _assignment_validation_error(
     return None
 
 
-def _values_equal(left: Any, right: Any) -> bool:
-    if (
-        isinstance(left, (int, float))
-        and not isinstance(left, bool)
-        and isinstance(right, (int, float))
-        and not isinstance(right, bool)
-    ):
-        try:
-            return math.isclose(
-                float(left),
-                float(right),
-                rel_tol=1e-9,
-                abs_tol=1e-6,
-            )
-        except (TypeError, ValueError, OverflowError):
+def _strict_values_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        if isinstance(left, float) and not math.isfinite(left):
             return False
+        if isinstance(right, float) and not math.isfinite(right):
+            return False
+        return left == right
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if set(left) != set(right):
+            return False
+        return all(_strict_values_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _strict_values_equal(l_item, r_item)
+            for l_item, r_item in zip(left, right, strict=True)
+        )
+    if type(left) is not type(right):
+        return False
     return left == right
+
+
+def _values_equal(key: PropertyKey, left: Any, right: Any) -> bool:
+    if key.kind == "input_volume_db":
+        if (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+        ):
+            try:
+                return math.isclose(
+                    float(left),
+                    float(right),
+                    rel_tol=1e-9,
+                    abs_tol=1e-6,
+                )
+            except (TypeError, ValueError, OverflowError):
+                return False
+    return _strict_values_equal(left, right)
 
 
 def build_execution_plan(
@@ -317,14 +375,15 @@ def build_execution_plan(
             diagnostics.append(
                 PlanDiagnostic(
                     "warning",
-                    "observed_value_unknown",
-                    "Observed value is unknown; no write is planned until it is resolved.",
+                    current.code or "observed_value_unknown",
+                    current.reason
+                    or "Observed value is unknown; no write is planned until it is resolved.",
                     key,
                 )
             )
             continue
 
-        if _values_equal(current.value, assignment.value):
+        if _values_equal(key, current.value, assignment.value):
             diff.append(
                 DiffEntry(
                     key=key,
