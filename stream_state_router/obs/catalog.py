@@ -134,7 +134,7 @@ class OBSResourceCatalogReader:
 
     def _session_generation(self) -> int:
         try:
-            return int(getattr(self.client, "session_generation"))
+            return int(self.client.session_generation)
         except (AttributeError, TypeError, ValueError):
             return 0
 
