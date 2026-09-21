@@ -157,6 +157,69 @@ class MigrationCoverageTests(unittest.TestCase):
         )
         self.assertEqual(report.actions[0].property_kinds, ("filter_enabled",))
 
+    def test_profile_inherits_parent_migration_maturity_without_double_counting_actions(self):
+        config = {
+            "profiles": {
+                "game": {
+                    "Base": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Capture",
+                                    "settings": {"mode": "legacy"},
+                                    "overlay": False,
+                                },
+                            }
+                        ]
+                    },
+                    "Child": {
+                        "extends": "Base",
+                        "actions": [],
+                    },
+                }
+            }
+        }
+
+        mapped = build_migration_coverage_report(config).as_mapping()
+        profiles = {
+            row["profile"]: row
+            for row in mapped["profiles"]
+            if row["domain"] == "game"
+        }
+
+        self.assertEqual(mapped["summary"]["actions"]["total"], 1)
+        self.assertEqual(profiles["Base"]["classification"], "legacy_only")
+        self.assertEqual(profiles["Child"]["classification"], "legacy_only")
+        self.assertEqual(profiles["Child"]["enabled_actions"], 0)
+        self.assertEqual(profiles["Child"]["inherited_actions"], 1)
+        self.assertEqual(profiles["Child"]["effective_actions"], 1)
+
+    def test_invalid_profile_inheritance_is_reported_without_crashing(self):
+        for extends, expected in (
+            ("Missing", "missing parent profile"),
+            ("Self", "circular profile inheritance"),
+        ):
+            config = {
+                "profiles": {
+                    "game": {
+                        "Self": {
+                            "extends": extends,
+                            "actions": [],
+                        }
+                    }
+                }
+            }
+
+            mapped = build_migration_coverage_report(config).as_mapping()
+            row = mapped["profiles"][0]
+
+            self.assertEqual(row["classification"], "invalid")
+            self.assertTrue(
+                any(expected in reason for reason in row["reasons"]),
+                row,
+            )
+
     def test_safe_input_setting_report_never_exposes_setting_values(self):
         secret = "https://example.invalid/?token=super-secret"
         config = {
