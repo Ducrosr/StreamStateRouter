@@ -110,13 +110,20 @@ class ExecutionPlan:
 
     @property
     def converged(self) -> bool:
-        return not self.operations and all(item.status == "converged" for item in self.diff)
+        return (
+            not self.blocked
+            and not self.operations
+            and all(item.status == "converged" for item in self.diff)
+        )
 
     @property
     def blocked(self) -> bool:
-        return any(
-            item.status in {"unknown", "unsupported", "blocked"}
-            for item in self.diff
+        return (
+            any(
+                item.status in {"unknown", "unsupported", "blocked"}
+                for item in self.diff
+            )
+            or any(item.level == "error" for item in self.diagnostics)
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -251,6 +258,7 @@ def build_execution_plan(
     observed: ObservedState,
     *,
     preflight: Mapping[PropertyKey, PlanDiagnostic] | None = None,
+    extra_diagnostics: tuple[PlanDiagnostic, ...] = (),
 ) -> ExecutionPlan:
     """Compute a deterministic, side-effect-free dry-run plan.
 
@@ -260,7 +268,7 @@ def build_execution_plan(
     """
     diff: list[DiffEntry] = []
     operations: list[PlanOperation] = []
-    diagnostics: list[PlanDiagnostic] = []
+    diagnostics: list[PlanDiagnostic] = list(extra_diagnostics)
     preflight = preflight or {}
 
     for assignment in desired.assignments:
