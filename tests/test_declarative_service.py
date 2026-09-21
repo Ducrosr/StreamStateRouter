@@ -18,10 +18,13 @@ class _ServiceClient:
         self.requests: list[tuple[str, dict | None]] = []
         self.collection = "Main"
         self.flip_collection_after_visibility = False
+        self.fail_sync = False
 
     def send(self, request, data=None):
         self.requests.append((request, data))
         if request == "GetVersion":
+            if self.fail_sync:
+                raise RuntimeError("sync failed")
             return {
                 "availableRequests": [
                     "GetSceneCollectionList",
@@ -345,6 +348,19 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
 
         self.assertGreater(len(client.requests), previous)
 
+
+    def test_failed_catalog_sync_invalidates_prepared_epoch(self):
+        client = _ServiceClient()
+        service = DeclarativePlanningService(client)
+        service.sync_catalog()
+        previous_epoch = service.catalog_epoch
+        client.fail_sync = True
+
+        with self.assertRaisesRegex(RuntimeError, "sync failed"):
+            service.sync_catalog()
+
+        self.assertGreater(service.catalog_epoch, previous_epoch)
+        self.assertTrue(service.catalog_status()["stale"])
 
     def test_missing_profile_block_prevents_empty_plan_convergence(self):
         service = DeclarativePlanningService(_ServiceClient())
