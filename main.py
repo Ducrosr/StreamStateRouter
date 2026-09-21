@@ -22,6 +22,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--minimized", action="store_true", help="Démarrer dans la zone de notification")
     parser.add_argument("--headless", action="store_true", help="Afficher le routage dans la console sans interface")
     parser.add_argument("--check-config", action="store_true", help="Valider la configuration puis quitter")
+    coverage = parser.add_mutually_exclusive_group()
+    coverage.add_argument(
+        "--coverage-report",
+        action="store_true",
+        help="Afficher la couverture de migration déclarative puis quitter",
+    )
+    coverage.add_argument(
+        "--coverage-json",
+        action="store_true",
+        help="Afficher la couverture de migration déclarative en JSON puis quitter",
+    )
     return parser.parse_args(argv)
 
 
@@ -110,6 +121,33 @@ def main(argv: list[str] | None = None) -> int:
             print("Configuration invalide:\n- " + "\n- ".join(errors), file=sys.stderr)
             return 1
         print("Configuration valide.")
+        return 0
+
+    if args.coverage_report or args.coverage_json:
+        import json
+
+        from stream_state_router.planning.migration_coverage import (
+            build_migration_coverage,
+            render_migration_coverage,
+        )
+        from stream_state_router.services.declarative_execution import (
+            DECLARATIVE_EXECUTOR_KINDS,
+        )
+
+        report = build_migration_coverage(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        )
+        if args.coverage_json:
+            print(
+                json.dumps(
+                    report.as_mapping(),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            print(render_migration_coverage(report))
         return 0
 
     guard = SingleInstanceGuard()
