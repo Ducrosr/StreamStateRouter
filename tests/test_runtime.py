@@ -1230,10 +1230,10 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(client.set_threads, ["SSR-Router"])
             self.assertEqual(dispatcher._applied_profiles, {})
 
-            with self.assertRaisesRegex(RuntimeError, "inconnu|expiré|consommé"):
-                # Admission succeeds, but the ticket was consumed. The failure is
-                # surfaced asynchronously by the runtime command.
-                raise RuntimeError("plan_id inconnu, expiré ou déjà consommé")
+            retry_id = service.request_execute_declarative_plan(plan_id)
+            retry = collector.wait(retry_id)
+            self.assertFalse(retry.success)
+            self.assertRegex(retry.error, "inconnu|expiré|consommé")
         finally:
             self.assertTrue(service.stop())
 
