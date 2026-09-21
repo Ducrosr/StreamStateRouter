@@ -120,8 +120,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.declarative_coverage:
         from stream_state_router.planning import build_migration_coverage_report
+        from stream_state_router.services.declarative_execution import (
+            DECLARATIVE_EXECUTOR_KINDS,
+        )
 
-        report = build_migration_coverage_report(config)
+        report = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        )
         print(
             json.dumps(
                 report.as_mapping(),
