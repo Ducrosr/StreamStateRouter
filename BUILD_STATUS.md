@@ -39,7 +39,9 @@ Le workflow de release 2.0.14 ajoute en plus un build PyInstaller, un smoke test
 
 ## GitHub Actions
 
-Les exécutions GitHub-hosted récentes du dépôt ont échoué avant toute étape de job (`runner_id = 0` / `steps = null`). Tant que ce comportement persiste, ces runs ne constituent pas une validation du code.
+Les runners GitHub-hosted sont de nouveau opérationnels. Le candidat courant exécute réellement les jobs Windows et Stream Deck : tests unitaires, Ruff, smoke test de configuration, typecheck TypeScript, build et validation du plugin passent dans GitHub Actions.
+
+Les validations locales et OBS réel restent complémentaires pour les changements qui touchent aux mutations physiques ou aux interactions avec une Scene Collection réelle.
 
 ## Validation réelle OBS
 
