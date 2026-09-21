@@ -25,6 +25,7 @@ from ..activation import (
     TriggerTargetIdentity,
 )
 from ..obs.dispatcher import DispatchResult, OBSDispatcher
+from ..planning import PlanDiagnostic
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
@@ -1566,12 +1567,26 @@ class RoutingService:
                             if isinstance(row, Mapping)
                             and str(row.get("provenance") or "").strip()
                         }
+                        resolution_diagnostics = tuple(
+                            PlanDiagnostic(
+                                "error",
+                                "profile_resolution_failed",
+                                (
+                                    f"{row.get('domain', '')}: "
+                                    f"{row.get('message') or row.get('status') or 'résolution impossible'}"
+                                ),
+                            )
+                            for row in intent.get("domains", [])
+                            if isinstance(row, Mapping)
+                            and str(row.get("status") or "") in {"missing", "failed"}
+                        )
                         plan = planning.plan_state(
                             desired,
                             refresh_catalog=bool(
                                 command.options.get("refresh_catalog", True)
                             ),
                             blocked_provenance=blocked_provenance,
+                            global_diagnostics=resolution_diagnostics,
                         )
                         result = {
                             "available": True,
