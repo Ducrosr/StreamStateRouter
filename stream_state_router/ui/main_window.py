@@ -2187,6 +2187,11 @@ class MainWindow(QMainWindow):
                 "applied": self._applied_revision,
             },
             "routing": service.routing_status() if service else {},
+            "obs_catalog": (
+                service.obs_catalog_status()
+                if service
+                else {"available": False}
+            ),
         }
 
     def _api_request_status(self, request_id: str) -> dict | None:
@@ -2206,6 +2211,14 @@ class MainWindow(QMainWindow):
             self._service.pause(False)
             self._service.clear_manual_override()
             return {"paused": False}
+        if action == "catalog.sync":
+            request_id = self._service.request_catalog_sync()
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "planner.current":
+            request_id = self._service.request_declarative_plan(
+                refresh_catalog=bool(payload.get("refresh_catalog", True))
+            )
+            return {"request_id": request_id, "status": "accepted"}
         if action == "reapply":
             request_id = self._service.request_force_reapply()
             return {"request_id": request_id, "status": "accepted"}
