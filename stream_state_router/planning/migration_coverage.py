@@ -213,6 +213,48 @@ def _classify_action(
     )
 
 
+def _resolve_effective_profile_actions(
+    name: str,
+    *,
+    declared_by_profile: Mapping[str, list[ActionCoverage]],
+    parent_by_profile: Mapping[str, str],
+    invalid_profile_reason: Mapping[str, str],
+    resolved_cache: dict[str, tuple[list[ActionCoverage], int, str]],
+    stack: tuple[str, ...] = (),
+) -> tuple[list[ActionCoverage], int, str]:
+    cached = resolved_cache.get(name)
+    if cached is not None:
+        return cached
+    if name in stack:
+        return [], 0, "circular profile inheritance: " + " -> ".join((*stack, name))
+    if name in invalid_profile_reason:
+        return [], 0, invalid_profile_reason[name]
+
+    parent = parent_by_profile.get(name, "")
+    inherited: list[ActionCoverage] = []
+    inherited_count = 0
+    if parent:
+        if parent not in declared_by_profile:
+            return [], 0, f"missing parent profile: {parent}"
+        parent_actions, _parent_inherited, error = _resolve_effective_profile_actions(
+            parent,
+            declared_by_profile=declared_by_profile,
+            parent_by_profile=parent_by_profile,
+            invalid_profile_reason=invalid_profile_reason,
+            resolved_cache=resolved_cache,
+            stack=(*stack, name),
+        )
+        if error:
+            return [], 0, error
+        inherited = list(parent_actions)
+        inherited_count = len(parent_actions)
+
+    effective = [*inherited, *declared_by_profile.get(name, [])]
+    result = (effective, inherited_count, "")
+    resolved_cache[name] = result
+    return result
+
+
 def build_migration_coverage_report(
     config: Mapping[str, Any],
 ) -> MigrationCoverageReport:
@@ -283,39 +325,15 @@ def build_migration_coverage_report(
 
         resolved_cache: dict[str, tuple[list[ActionCoverage], int, str]] = {}
 
-        def resolve_effective(
-            name: str,
-            stack: tuple[str, ...] = (),
-        ) -> tuple[list[ActionCoverage], int, str]:
-            cached = resolved_cache.get(name)
-            if cached is not None:
-                return cached
-            if name in stack:
-                return [], 0, "circular profile inheritance: " + " -> ".join((*stack, name))
-            if name in invalid_profile_reason:
-                return [], 0, invalid_profile_reason[name]
-            parent = parent_by_profile.get(name, "")
-            inherited: list[ActionCoverage] = []
-            inherited_count = 0
-            if parent:
-                if parent not in declared_by_profile:
-                    return [], 0, f"missing parent profile: {parent}"
-                parent_actions, _parent_inherited, error = resolve_effective(
-                    parent,
-                    (*stack, name),
-                )
-                if error:
-                    return [], 0, error
-                inherited = list(parent_actions)
-                inherited_count = len(parent_actions)
-            effective = [*inherited, *declared_by_profile.get(name, [])]
-            result = (effective, inherited_count, "")
-            resolved_cache[name] = result
-            return result
-
         for raw_name in sorted(domain_profiles, key=lambda value: str(value).casefold()):
             name = str(raw_name)
-            effective, inherited_count, resolution_error = resolve_effective(name)
+            effective, inherited_count, resolution_error = _resolve_effective_profile_actions(
+                name,
+                declared_by_profile=declared_by_profile,
+                parent_by_profile=parent_by_profile,
+                invalid_profile_reason=invalid_profile_reason,
+                resolved_cache=resolved_cache,
+            )
             if resolution_error:
                 profile_rows.append(
                     ProfileCoverage(
