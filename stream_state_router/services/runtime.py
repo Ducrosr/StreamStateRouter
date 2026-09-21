@@ -1813,6 +1813,12 @@ class RoutingService:
             if self.config_revision != prepared.config_revision:
                 return False, "La révision de configuration a changé"
         try:
+            boundary_before = self._declarative_planning.context_identity()
+            if boundary_before != (
+                prepared.collection,
+                prepared.session_generation,
+            ):
+                return False, "Le contexte OBS a changé"
             context = self.dispatcher.obs_context(force_refresh=True)
             intent = self.dispatcher.plan_state(state, context=context)
             if intent.get("declarative_blocks"):
@@ -1821,10 +1827,27 @@ class RoutingService:
                 state,
                 context=context,
             ).bind_collection(prepared.collection)
+            boundary_after = self._declarative_planning.context_identity()
         except Exception as exc:
             return False, f"Revalidation de cible impossible : {exc}"
+        if boundary_after != boundary_before:
+            return False, "Le contexte OBS a changé pendant la revalidation"
         if desired.assignments != prepared.desired.assignments:
             return False, "La cible déclarative ou son ownership a changé"
+        # Recheck runtime state after all OBS reads. An API/UI override or a
+        # resume may race with those reads even though all OBS mutation remains
+        # serialized on SSR-Router.
+        with self._lock:
+            if not self._paused:
+                return False, "SSR a repris depuis la préparation"
+            if self.engine.current_state != state:
+                return False, "L'état logique courant a changé"
+            if self._dispatch_generation != prepared.dispatch_generation:
+                return False, "La génération de décision runtime a changé"
+            if self._resume_revalidation_generation != prepared.resume_generation:
+                return False, "La génération de reprise runtime a changé"
+            if self.config_revision != prepared.config_revision:
+                return False, "La révision de configuration a changé"
         return True, ""
 
     def _execute_obs_command(self, command: _OBSCommand) -> None:
