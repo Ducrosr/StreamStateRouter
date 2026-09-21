@@ -35,7 +35,7 @@
 
 ## 1. Validation automatisée prioritaire
 
-À exécuter dès qu'un runner ou un environnement Windows Python est disponible :
+Ces commandes sont exécutées par GitHub Actions sur Windows et restent également utilisables localement :
 
 ```powershell
 python -m unittest discover -s tests -v
