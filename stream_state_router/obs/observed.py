@@ -29,7 +29,7 @@ def observe_desired_state(
     ) -> dict[str, Any]:
         if cooperative_yield is not None:
             cooperative_yield()
-        return send(request, data)
+        return client.send(request, data)
     for assignment in desired.assignments:
         key = assignment.key
         if key.collection and catalog.collection and key.collection != catalog.collection:
