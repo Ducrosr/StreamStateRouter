@@ -30,12 +30,17 @@ class DiffEntry:
     provenance: tuple[str, ...] = ()
 
     def as_mapping(self) -> dict[str, object]:
+        sensitive = self.key.kind == "input_setting"
         return {
             "property": self.key.as_mapping(),
             "status": self.status,
             "observed_known": self.observed_known,
-            "observed": self.observed,
-            "desired": self.desired,
+            "observed": (
+                "<redacted>"
+                if sensitive and self.observed_known
+                else self.observed
+            ),
+            "desired": "<redacted>" if sensitive else self.desired,
             "provenance": list(self.provenance),
         }
 
@@ -50,11 +55,12 @@ class PlanOperation:
     reason: str = "value_differs"
 
     def as_mapping(self) -> dict[str, object]:
+        sensitive = self.key.kind == "input_setting"
         return {
             "operation": self.operation,
             "property": self.key.as_mapping(),
-            "observed": self.observed,
-            "target": self.target,
+            "observed": "<redacted>" if sensitive else self.observed,
+            "target": "<redacted>" if sensitive else self.target,
             "provenance": list(self.provenance),
             "reason": self.reason,
         }
