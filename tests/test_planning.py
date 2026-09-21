@@ -414,6 +414,39 @@ class DeclarativePlanningTests(unittest.TestCase):
         self.assertNotIn("old", text)
         self.assertIn("<redacted>", text)
 
+    def test_dry_run_redacts_arbitrary_filter_setting_values(self):
+        key = PropertyKey.filter_setting(
+            collection="Main",
+            source="Browser Source",
+            filter_name="Custom Filter",
+            setting="endpoint",
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(
+                    key,
+                    "https://example.invalid/?token=secret-filter",
+                    provenance="test",
+                )
+            ]
+        )
+        observed = ObservedState(
+            {
+                key: ObservedValue.known_value(
+                    "https://old.invalid/?token=old-filter"
+                )
+            }
+        )
+
+        plan = build_execution_plan(desired, observed)
+        text = render_execution_plan(plan)
+        mapped = plan.as_mapping()
+
+        self.assertNotIn("secret-filter", text)
+        self.assertNotIn("old-filter", text)
+        self.assertEqual(mapped["diff"][0]["desired"], "<redacted>")
+        self.assertEqual(mapped["operations"][0]["target"], "<redacted>")
+
     def test_planner_output_is_deterministic(self):
         first = PropertyKey.input_setting(
             collection="Main",
