@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from PySide6.QtCore import QObject, Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
@@ -703,6 +704,15 @@ class MainWindow(QMainWindow):
             config_revision=config_revision(self.config),
             bootstrap_foreground=bootstrap_foreground,
             startup_layout_profile=startup_layout_profile,
+            declarative_execution_enabled=(
+                str(
+                    os.environ.get(
+                        "SSR_ENABLE_DECLARATIVE_EXECUTION",
+                        "",
+                    )
+                ).strip().casefold()
+                in {"1", "true", "yes", "on"}
+            ),
         )
         self._pending_cleanup_transfer = ()
         self._service.on_foreground = self.bridge.foreground.emit
@@ -2220,6 +2230,15 @@ class MainWindow(QMainWindow):
             request_id = self._service.request_declarative_plan(
                 refresh_catalog=bool(payload.get("refresh_catalog", True))
             )
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "planner.prepare_current":
+            request_id = self._service.request_prepare_declarative_execution()
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "planner.execute":
+            plan_id = str(payload.get("plan_id") or "").strip()
+            if not plan_id:
+                raise ValueError("plan_id requis")
+            request_id = self._service.request_execute_declarative_plan(plan_id)
             return {"request_id": request_id, "status": "accepted"}
         if action == "reapply":
             request_id = self._service.request_force_reapply()
