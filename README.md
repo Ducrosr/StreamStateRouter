@@ -349,6 +349,37 @@ La configuration utilisateur est stockée dans :
 
 Le pilotage OBS est **désactivé par défaut** afin qu'un premier lancement ne modifie aucune scène.
 
+## Couverture de migration déclarative
+
+SSR peut analyser la configuration courante sans se connecter à OBS afin de mesurer
+la progression de la migration du dispatcher historique vers le modèle déclaratif :
+
+```powershell
+python main.py --coverage-report
+```
+
+Une sortie JSON exploitable par des outils est également disponible :
+
+```powershell
+python main.py --coverage-json
+```
+
+Le rapport distingue notamment :
+
+- `declarative_executable` : propriété représentable et autorisée par l'executor gardé actuel ;
+- `declarative_plannable` : propriété déjà représentable/planifiable mais pas encore exécutable ;
+- `declarative_intent_only` : intention stable mais couverture physique encore incomplète ;
+- `legacy_only` : action qui ne possède pas encore de représentation déclarative sûre ;
+- `delegated` : domaine volontairement conservé par un moteur spécialisé, notamment les LayoutProfiles ;
+- `invalid` / `disabled` : configuration invalide ou action désactivée.
+
+Les profils hérités sont évalués après résolution de l'héritage : une action héritée
+compte donc comme une **action effective** de chaque profil qui l'exécuterait.
+Les valeurs arbitraires de settings ne sont jamais incluses dans le rapport.
+
+Cette commande est strictement read-only : elle ne crée pas de connexion OBS et
+n'effectue aucune mutation.
+
 ## Validation développeur
 
 ```powershell
