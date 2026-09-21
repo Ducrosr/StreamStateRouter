@@ -3,10 +3,15 @@ from __future__ import annotations
 import unittest
 
 from stream_state_router.obs.catalog import (
+    InputRef,
     OBSResourceCatalog,
     SceneItemRef,
+    SceneRef,
 )
-from stream_state_router.obs.observed import observe_desired_state
+from stream_state_router.obs.observed import (
+    build_execution_bindings,
+    observe_desired_state,
+)
 from stream_state_router.planning import (
     DesiredAssignment,
     DesiredState,
@@ -156,6 +161,82 @@ class ObservedStateReaderTests(unittest.TestCase):
         self.assertNotIn(
             "GetSceneItemId",
             [request for request, _data in client.requests],
+        )
+
+    def test_non_boolean_executor_observations_are_unknown(self):
+        mute = PropertyKey.input_mute(
+            collection="Main",
+            input_name="Mic",
+        )
+        visibility = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="In Game",
+            source="Chat",
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(mute, True),
+                DesiredAssignment.create(visibility, False),
+            ]
+        )
+        client = _ObservedClient()
+        original_send = client.send
+
+        def send(request, data=None):
+            if request == "GetInputMute":
+                client.requests.append((request, data))
+                return {"inputMuted": 1}
+            if request == "GetSceneItemEnabled":
+                client.requests.append((request, data))
+                return {"sceneItemEnabled": "true"}
+            return original_send(request, data)
+
+        client.send = send
+        observed = observe_desired_state(client, _catalog(), desired)
+
+        self.assertFalse(observed.get(mute).known)
+        self.assertEqual(observed.get(mute).code, "input_mute_unknown")
+        self.assertFalse(observed.get(visibility).known)
+        self.assertEqual(
+            observed.get(visibility).code,
+            "scene_item_visibility_unknown",
+        )
+
+    def test_execution_bindings_require_scene_and_input_uuids(self):
+        visibility = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="In Game",
+            source="Chat",
+        )
+        mute = PropertyKey.input_mute(
+            collection="Main",
+            input_name="Mic",
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(visibility, False),
+                DesiredAssignment.create(mute, True),
+            ]
+        )
+        base = _catalog()
+        catalog = OBSResourceCatalog(
+            collection=base.collection,
+            current_program_scene=base.current_program_scene,
+            current_program_scene_uuid=base.current_program_scene_uuid,
+            canvas=base.canvas,
+            scenes=(SceneRef("In Game", "scene-1", 0),),
+            groups=(),
+            scene_items=base.scene_items,
+            inputs=(InputRef("Mic", "wasapi_input_capture", "mic-1"),),
+            transitions=(),
+        )
+
+        bindings = build_execution_bindings(catalog, desired)
+
+        self.assertEqual(len(bindings), 2)
+        self.assertEqual(
+            {binding.key for binding in bindings},
+            {visibility, mute},
         )
 
     def test_same_filter_is_read_once_for_multiple_properties(self):
