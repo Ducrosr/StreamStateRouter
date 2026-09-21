@@ -57,6 +57,7 @@ class OBSClientManager:
         self._last_failure = 0.0
         self._connected = False
         self._request_count = 0
+        self._session_generation = 0
         self.last_error = ""
 
     @property
@@ -73,6 +74,13 @@ class OBSClientManager:
         with self._lock:
             return int(self._request_count)
 
+    @property
+    def session_generation(self) -> int:
+        """Monotonic identity of the current OBS transport/session context."""
+
+        with self._lock:
+            return int(self._session_generation)
+
     def configure(self, config: OBSConnectionConfig) -> None:
         with self._lock:
             if config == self._config:
@@ -80,6 +88,7 @@ class OBSClientManager:
             self._config = config
             self._client = None
             self._connected = False
+            self._session_generation += 1
             self.last_error = ""
             self._last_failure = 0.0
 
@@ -89,6 +98,7 @@ class OBSClientManager:
             client = self._client
             self._client = None
             self._connected = False
+            self._session_generation += 1
             self.last_error = ""
         if client is None:
             return
@@ -134,6 +144,7 @@ class OBSClientManager:
                 # Transport/session failures really do invalidate the ReqClient.
                 self._client = None
                 self._connected = False
+                self._session_generation += 1
                 self.last_error = str(exc)
                 self._last_failure = time.monotonic()
                 raise OBSUnavailableError(f"OBS WebSocket : {exc}") from exc
@@ -157,6 +168,7 @@ class OBSClientManager:
                 timeout=self._config.timeout_seconds,
             )
             self._connected = True
+            self._session_generation += 1
             return self._client
         except Exception as exc:
             self._last_failure = time.monotonic()
