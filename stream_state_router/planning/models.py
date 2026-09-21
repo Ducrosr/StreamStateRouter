@@ -407,13 +407,20 @@ class DesiredState:
 class ObservedValue:
     known: bool
     value: Any = None
+    code: str = ""
+    reason: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", deepcopy(self.value))
 
     @classmethod
-    def unknown(cls) -> "ObservedValue":
-        return cls(False, None)
+    def unknown(
+        cls,
+        *,
+        code: str = "observed_value_unknown",
+        reason: str = "",
+    ) -> "ObservedValue":
+        return cls(False, None, str(code), str(reason))
 
     @classmethod
     def known_value(cls, value: Any) -> "ObservedValue":
