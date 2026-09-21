@@ -132,6 +132,10 @@ class MigrationCoverageTests(unittest.TestCase):
             profiles[("layout", "Gameplay")]["classification"],
             "delegated",
         )
+        profile_summary = report["summary"]["profiles"]
+        self.assertEqual(profile_summary["managed_nonempty_total"], 5)
+        self.assertEqual(profile_summary["declarative_coverage_percent"], 60.0)
+        self.assertEqual(profile_summary["executable_percent"], 20.0)
 
     def test_filter_enable_is_plannable_but_not_executor_enabled(self):
         config = {
