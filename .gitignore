@@ -8,3 +8,8 @@ build/
 dist/
 release/
 *.spec.bak
+
+# Stream Deck generated dependencies and build artifacts
+streamdeck-plugin/node_modules/
+streamdeck-plugin/com.remyducros.streamstaterouter.sdPlugin/bin/
+streamdeck-plugin/*.streamDeckPlugin
