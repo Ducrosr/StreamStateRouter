@@ -28,6 +28,7 @@ from ..obs.dispatcher import DispatchResult, OBSDispatcher
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
+from .declarative import DeclarativePlanningService
 
 
 class _RuntimeShutdownRequested(BaseException):
@@ -272,6 +273,12 @@ class RoutingService:
         self._shutdown_cleanup_active = False
         self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
         self._command_status: dict[str, dict[str, object]] = {}
+        client = getattr(self.dispatcher, "client", None)
+        self._declarative_planning = (
+            DeclarativePlanningService(client)
+            if client is not None
+            else None
+        )
         self._simulation_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="SSR-Activation-Sim",
@@ -717,6 +724,28 @@ class RoutingService:
         with self._lock:
             row = self._command_status.get(str(request_id))
             return dict(row) if row is not None else None
+
+    def obs_catalog_status(self) -> dict[str, object]:
+        planning = self._declarative_planning
+        if planning is None or planning.catalog is None:
+            return {"available": False}
+        return {
+            "available": True,
+            **planning.catalog.summary(),
+        }
+
+    def request_catalog_sync(self) -> str:
+        return self.submit_obs_command("catalog.sync")
+
+    def request_declarative_plan(
+        self,
+        *,
+        refresh_catalog: bool = True,
+    ) -> str:
+        return self.submit_obs_command(
+            "planner.current",
+            options={"refresh_catalog": bool(refresh_catalog)},
+        )
 
     def request_force_reapply(self) -> str:
         return self.submit_obs_command("reapply")
@@ -1493,6 +1522,56 @@ class RoutingService:
                             started_at=started_at,
                             obs_requests_before=obs_before,
                         )
+                elif command.action == "catalog.sync":
+                    planning = self._declarative_planning
+                    if planning is None:
+                        raise RuntimeError("Catalogue OBS indisponible")
+                    result = planning.sync_catalog().summary()
+                elif command.action == "planner.current":
+                    planning = self._declarative_planning
+                    if planning is None:
+                        raise RuntimeError("Planner déclaratif indisponible")
+                    with self._lock:
+                        state = self.engine.current_state
+                    if state is None:
+                        result = {
+                            "available": False,
+                            "reason": "Aucun état de routage courant",
+                        }
+                    else:
+                        context = self.dispatcher.obs_context()
+                        intent = self.dispatcher.plan_state(
+                            state,
+                            context=context,
+                        )
+                        desired = self.dispatcher.resolve_desired_state(
+                            state,
+                            context=context,
+                        )
+                        blocked_provenance = {
+                            str(row.get("provenance") or ""): str(
+                                row.get("reason") or "conditions bloquées"
+                            )
+                            for row in intent.get("declarative_blocks", [])
+                            if isinstance(row, Mapping)
+                            and str(row.get("provenance") or "").strip()
+                        }
+                        plan = planning.plan_state(
+                            desired,
+                            refresh_catalog=bool(
+                                command.options.get("refresh_catalog", True)
+                            ),
+                            blocked_provenance=blocked_provenance,
+                        )
+                        result = {
+                            "available": True,
+                            "state": state.as_variables(),
+                            "plan": plan.as_mapping(),
+                            "declarative_blocks": intent.get(
+                                "declarative_blocks",
+                                [],
+                            ),
+                        }
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
