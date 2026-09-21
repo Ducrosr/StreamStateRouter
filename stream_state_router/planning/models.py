@@ -103,10 +103,25 @@ class PropertyKey:
         kind = str(self.kind).strip()
         if not kind:
             raise ValueError("PropertyKey.kind is required")
-        try:
-            occurrence = int(self.occurrence)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("PropertyKey.occurrence must be an integer") from exc
+        raw_occurrence = self.occurrence
+        if isinstance(raw_occurrence, bool):
+            raise ValueError("PropertyKey.occurrence must be an integer")
+        if isinstance(raw_occurrence, int):
+            occurrence = raw_occurrence
+        elif isinstance(raw_occurrence, float):
+            if not math.isfinite(raw_occurrence) or not raw_occurrence.is_integer():
+                raise ValueError("PropertyKey.occurrence must be an integer")
+            occurrence = int(raw_occurrence)
+        elif isinstance(raw_occurrence, str):
+            text = raw_occurrence.strip()
+            if not text or not (
+                text.isdigit()
+                or (text.startswith(("+", "-")) and text[1:].isdigit())
+            ):
+                raise ValueError("PropertyKey.occurrence must be an integer")
+            occurrence = int(text)
+        else:
+            raise ValueError("PropertyKey.occurrence must be an integer")
         if occurrence < 0:
             raise ValueError("PropertyKey.occurrence must be >= 0")
 
@@ -185,7 +200,7 @@ class PropertyKey:
             str(collection),
             str(container),
             str(source),
-            int(occurrence),
+            occurrence,
         )
 
     @classmethod
