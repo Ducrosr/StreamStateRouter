@@ -1056,6 +1056,8 @@ class RoutingService:
         client = getattr(self.dispatcher, "client", None)
         config = getattr(client, "config", None)
         if client is None or config is None or not bool(getattr(config, "enabled", False)):
+            if self._declarative_planning is not None:
+                self._declarative_planning.invalidate_catalog()
             self._last_obs_connected = None
             return
 
@@ -1069,6 +1071,8 @@ class RoutingService:
             manager = getattr(self.dispatcher, "layout_manager", None)
             if self._last_obs_connected is not True:
                 self.logger.info("OBS connection established: %s", message)
+                if self._declarative_planning is not None:
+                    self._declarative_planning.invalidate_catalog()
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
                 if manager is not None and hasattr(manager, "invalidate_session"):
@@ -1097,6 +1101,8 @@ class RoutingService:
 
         if self._last_obs_connected is not False:
             self.logger.warning("OBS connection unavailable: %s", message)
+            if self._declarative_planning is not None:
+                self._declarative_planning.invalidate_catalog()
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
 
@@ -2108,7 +2114,11 @@ class RoutingService:
     def _process_due_dispatch(self) -> None:
         with self._lock:
             pending = self._pending_dispatch
-            if pending is None or pending.deadline > time.monotonic():
+            if (
+                self._paused
+                or pending is None
+                or pending.deadline > time.monotonic()
+            ):
                 return
             self._pending_dispatch = None
         self._dispatch_if_current(pending)
