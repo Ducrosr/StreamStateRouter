@@ -476,6 +476,19 @@ class DeclarativeExecutor:
                         diagnostic="physical value changed immediately before mutation",
                     )
 
+                # Last admission check immediately before the mutation.  This is
+                # deliberately repeated after the fresh physical read so a
+                # resume/override that raced with preflight cannot authorize a
+                # write from the old target.
+                self._context_check(prepared)
+                valid, reason = validate_target()
+                if not valid:
+                    return finish(
+                        "replan_required",
+                        replan_required=True,
+                        diagnostic=reason,
+                    )
+
                 try:
                     self._write_binding(prepared, binding, target)
                 except OBSUnavailableError as exc:
@@ -511,7 +524,11 @@ class DeclarativeExecutor:
                         )
                     )
                     publish_progress()
-                    return finish("failed", diagnostic=str(exc))
+                    return finish(
+                        "failed",
+                        replan_required=True,
+                        diagnostic=str(exc),
+                    )
 
                 try:
                     self._context_check(prepared)
@@ -602,6 +619,15 @@ class DeclarativeExecutor:
                 prepared.desired,
                 ObservedState(final_values),
             )
+            self._context_check(prepared)
+            valid, reason = validate_target()
+            if not valid:
+                return finish(
+                    "replan_required",
+                    replan_required=True,
+                    diagnostic=reason,
+                    final_plan=final_plan,
+                )
             if final_plan.converged:
                 return finish(
                     "converged",
@@ -621,4 +647,8 @@ class DeclarativeExecutor:
         except OBSUnavailableError as exc:
             return finish("failed", replan_required=True, diagnostic=str(exc))
         except OBSRequestError as exc:
-            return finish("failed", diagnostic=str(exc))
+            return finish(
+                "failed",
+                replan_required=True,
+                diagnostic=str(exc),
+            )
