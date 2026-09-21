@@ -1182,7 +1182,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(service.stop())
 
     def test_declarative_prepare_and_execute_are_serialized_on_ssr_router(self):
-        state = StreamState(audio="Mute")
+        state = StreamState(audio_profile="Mute")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
         engine.set_manual_override(state)
         client = DeclarativeExecutorRuntimeClient()
