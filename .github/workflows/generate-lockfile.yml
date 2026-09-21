@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - chore/npm-lockfile-reproducible
+  pull_request:
 
 permissions:
   contents: read
