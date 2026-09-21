@@ -11,6 +11,8 @@ def observe_desired_state(
     client: OBSClientManager,
     catalog: OBSResourceCatalog,
     desired: DesiredState,
+    *,
+    cooperative_yield=None,
 ) -> ObservedState:
     """Read only the physical values needed by one desired state.
 
@@ -20,6 +22,12 @@ def observe_desired_state(
     values: dict[PropertyKey, ObservedValue] = {}
     input_cache: dict[str, Mapping[str, Any] | None] = {}
     filter_cache: dict[tuple[str, str], Mapping[str, Any] | None] = {}
+    container_cache: dict[tuple[str, str], list[Mapping[str, Any]] | None] = {}
+
+    def send(request: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        if cooperative_yield is not None:
+            cooperative_yield()
+        return client.send(request, data)
     for assignment in desired.assignments:
         key = assignment.key
         if key.collection and catalog.collection and key.collection != catalog.collection:
@@ -28,7 +36,7 @@ def observe_desired_state(
 
         if key.kind == "program_scene":
             try:
-                response = client.send("GetCurrentProgramScene")
+                response = send("GetCurrentProgramScene")
             except OBSRequestError:
                 values[key] = ObservedValue.unknown()
             else:
@@ -41,8 +49,21 @@ def observe_desired_state(
             continue
 
         if key.kind == "scene_item_visibility":
+            expected = next(
+                (
+                    item
+                    for item in catalog.scene_items
+                    if item.container == key.container
+                    and item.source == key.source
+                    and item.occurrence == key.occurrence
+                ),
+                None,
+            )
+            if expected is None:
+                values[key] = ObservedValue.unknown()
+                continue
             try:
-                lookup = client.send(
+                lookup = send(
                     "GetSceneItemId",
                     {
                         "sceneName": key.container,
@@ -50,18 +71,60 @@ def observe_desired_state(
                         "searchOffset": int(key.occurrence),
                     },
                 )
-                item_id = int(lookup.get("sceneItemId") or 0)
-                if not item_id:
+                if "sceneItemId" not in lookup:
                     values[key] = ObservedValue.unknown()
                     continue
-                response = client.send(
+                item_id = int(lookup.get("sceneItemId"))
+                cache_key = (expected.container_kind, key.container)
+                rows = container_cache.get(cache_key)
+                if cache_key not in container_cache:
+                    request = (
+                        "GetGroupSceneItemList"
+                        if expected.container_kind == "group"
+                        else "GetSceneItemList"
+                    )
+                    raw = send(request, {"sceneName": key.container})
+                    rows = [
+                        row
+                        for row in (raw.get("sceneItems") or [])
+                        if isinstance(row, Mapping)
+                    ]
+                    container_cache[cache_key] = rows
+                matches = [
+                    row
+                    for row in (rows or [])
+                    if str(row.get("sourceName") or "").strip() == key.source
+                    and not bool(
+                        row.get("groupItemBackup", False)
+                        or row.get("group_item_backup", False)
+                    )
+                ]
+                if key.occurrence >= len(matches):
+                    values[key] = ObservedValue.unknown()
+                    continue
+                fresh = matches[key.occurrence]
+                fresh_id = int(fresh.get("sceneItemId")) if "sceneItemId" in fresh else None
+                fresh_uuid = str(fresh.get("sourceUuid") or "").strip()
+                if (
+                    fresh_id is None
+                    or fresh_id != item_id
+                    or fresh_id != expected.scene_item_id
+                    or (
+                        expected.source_uuid
+                        and fresh_uuid
+                        and fresh_uuid != expected.source_uuid
+                    )
+                ):
+                    values[key] = ObservedValue.unknown()
+                    continue
+                response = send(
                     "GetSceneItemEnabled",
                     {
                         "sceneName": key.container,
                         "sceneItemId": item_id,
                     },
                 )
-            except OBSRequestError:
+            except (OBSRequestError, TypeError, ValueError, OverflowError):
                 values[key] = ObservedValue.unknown()
             else:
                 if "sceneItemEnabled" in response:
@@ -74,7 +137,7 @@ def observe_desired_state(
 
         if key.kind == "input_mute":
             try:
-                response = client.send(
+                response = send(
                     "GetInputMute",
                     {"inputName": key.source},
                 )
@@ -91,7 +154,7 @@ def observe_desired_state(
 
         if key.kind == "input_volume_db":
             try:
-                response = client.send(
+                response = send(
                     "GetInputVolume",
                     {"inputName": key.source},
                 )
@@ -110,7 +173,7 @@ def observe_desired_state(
             settings = input_cache.get(key.source)
             if key.source not in input_cache:
                 try:
-                    response = client.send(
+                    response = send(
                         "GetInputSettings",
                         {"inputName": key.source},
                     )
@@ -130,7 +193,7 @@ def observe_desired_state(
             response = filter_cache.get(identity)
             if identity not in filter_cache:
                 try:
-                    raw_response = client.send(
+                    raw_response = send(
                         "GetSourceFilter",
                         {
                             "sourceName": key.source,
