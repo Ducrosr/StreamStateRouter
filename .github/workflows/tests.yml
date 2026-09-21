@@ -20,6 +20,27 @@ jobs:
         run: python -m ruff check .
       - name: Config smoke test
         run: python main.py --check-config
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $Scripts = @(
+            ".\Install-And-Run.ps1",
+            ".\scripts\build_windows.ps1",
+            ".\scripts\run_dev.ps1"
+          )
+          foreach ($Script in $Scripts) {
+            $Tokens = $null
+            $Errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $Script),
+              [ref]$Tokens,
+              [ref]$Errors
+            )
+            if ($Errors.Count -gt 0) {
+              $Details = ($Errors | ForEach-Object { $_.Message }) -join "; "
+              throw "PowerShell syntax error in $Script : $Details"
+            }
+          }
 
   streamdeck:
     runs-on: windows-latest
