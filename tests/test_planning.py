@@ -573,7 +573,16 @@ class DeclarativePlanningTests(unittest.TestCase):
         payload["items"].append(3)
 
         self.assertEqual(plan.target_signature, signature)
-        self.assertEqual(plan.operations[0].target, {"items": [1, 2]})
+        self.assertEqual(
+            desired.as_mapping()["properties"][0]["value"],
+            {"items": [1, 2]},
+        )
+        self.assertEqual(
+            plan.as_mapping()["operations"][0]["target"],
+            "<redacted>",
+        )
+        with self.assertRaises(TypeError):
+            plan.operations[0].target["items"] = ()
 
     def test_structured_unknown_reason_is_preserved(self):
         key = PropertyKey.input_mute(
