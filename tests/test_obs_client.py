@@ -147,6 +147,38 @@ class OBSClientManagerTests(unittest.TestCase):
         self.assertGreater(connected_generation, 0)
         self.assertGreater(manager.session_generation, connected_generation)
 
+    def test_guarded_send_refuses_changed_session_without_reconnecting(self):
+        _FakeReqClient.instances = 0
+        fake_obs = SimpleNamespace(ReqClient=_FakeReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True))
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            generation = manager.session_generation
+            manager.close()
+            instances_before = _FakeReqClient.instances
+
+            with self.assertRaisesRegex(OBSUnavailableError, "refusing reconnect"):
+                manager.send(
+                    "SetInputMute",
+                    {"inputUuid": "mic-1", "inputMuted": True},
+                    expected_session_generation=generation,
+                )
+
+        self.assertEqual(_FakeReqClient.instances, instances_before)
+
+    def test_legacy_send_keeps_existing_reconnect_behavior(self):
+        _FakeReqClient.instances = 0
+        fake_obs = SimpleNamespace(ReqClient=_FakeReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True))
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            manager.close()
+            manager.send("GetVersion")
+
+        self.assertEqual(_FakeReqClient.instances, 2)
+
     def test_transport_failure_invalidates_session_generation(self):
         fake_obs = SimpleNamespace(ReqClient=_TransportFailReqClient)
         manager = OBSClientManager(
