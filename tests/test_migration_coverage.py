@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import unittest
 
 from stream_state_router.planning import build_migration_coverage_report
@@ -368,6 +369,32 @@ class MigrationCoverageTests(unittest.TestCase):
         self.assertIn("legacy_only", rendered)
         self.assertIn("layout/Gameplay", rendered)
         self.assertNotIn(secret, rendered)
+
+    def test_repository_default_config_has_only_empty_action_profiles_and_delegated_layouts(self):
+        path = Path(__file__).resolve().parents[1] / "config" / "default.json"
+        config = json.loads(path.read_text(encoding="utf-8"))
+
+        mapped = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
+
+        self.assertEqual(mapped["summary"]["actions"]["total"], 0)
+        self.assertEqual(
+            mapped["summary"]["profiles"]["managed_nonempty_total"],
+            0,
+        )
+        self.assertGreater(
+            mapped["summary"]["profiles"]["counts"]["empty"],
+            0,
+        )
+        self.assertEqual(
+            mapped["summary"]["profiles"]["counts"]["delegated"],
+            len(config["layout_profiles"]),
+        )
+        serialized = json.dumps(mapped, ensure_ascii=False)
+        self.assertNotIn(str(config["obs"].get("password") or "<no-password>"), serialized)
+        self.assertNotIn(str(config["api"].get("token") or "<no-token>"), serialized)
 
     def test_empty_configuration_has_complete_zero_action_coverage(self):
         mapped = build_migration_coverage_report(
