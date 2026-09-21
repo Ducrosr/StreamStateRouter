@@ -1,0 +1,26 @@
+name: Generate npm lockfile
+
+on:
+  push:
+    branches:
+      - chore/npm-lockfile-reproducible
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Generate lockfile
+        working-directory: streamdeck-plugin
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Upload lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamdeck-package-lock
+          path: streamdeck-plugin/package-lock.json
