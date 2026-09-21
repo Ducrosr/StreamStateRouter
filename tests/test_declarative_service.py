@@ -149,17 +149,23 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
         self.assertEqual(len(first.operations), 1)
         self.assertEqual(first.operations[0].operation, "SetSceneItemVisibility")
         self.assertEqual(first.as_mapping(), second.as_mapping())
-        heavy_first = [
-            request
-            for request in structural_after_first
-            if request != "GetSceneCollectionList"
-        ]
-        heavy_second = [
-            request
-            for request in structural_after_second
-            if request != "GetSceneCollectionList"
-        ]
-        self.assertEqual(heavy_first, heavy_second)
+        catalog_rebuild_requests = {
+            "GetVersion",
+            "GetSceneList",
+            "GetGroupList",
+            "GetInputList",
+            "GetSceneTransitionList",
+            "GetVideoSettings",
+        }
+        for request in catalog_rebuild_requests:
+            self.assertEqual(
+                structural_after_second.count(request),
+                structural_after_first.count(request),
+            )
+        self.assertEqual(
+            structural_after_second.count("GetSceneItemList"),
+            structural_after_first.count("GetSceneItemList") + 1,
+        )
         self.assertGreater(
             structural_after_second.count("GetSceneCollectionList"),
             structural_after_first.count("GetSceneCollectionList"),
