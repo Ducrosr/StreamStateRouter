@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from ..obs.catalog import OBSResourceCatalog, OBSResourceCatalogReader
 from ..obs.client import OBSClientManager, OBSRequestError
@@ -248,6 +248,7 @@ class DeclarativePlanningService:
         *,
         refresh_catalog: bool = False,
         blocked_provenance: Mapping[str, str] | None = None,
+        global_diagnostics: Iterable[PlanDiagnostic] = (),
     ) -> ExecutionPlan:
         catalog = self._catalog
         if refresh_catalog or catalog is None:
@@ -315,6 +316,7 @@ class DeclarativePlanningService:
             concrete_desired,
             observed,
             preflight=preflight,
+            extra_diagnostics=tuple(global_diagnostics),
         )
 
     def dry_run(
