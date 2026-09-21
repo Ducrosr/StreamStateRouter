@@ -911,6 +911,9 @@ class RuntimeTests(unittest.TestCase):
         )
         collector = OBSResultCollector()
         service.on_event = collector.callback
+        # Normal routing is allowed to write to OBS. Suspend it here so this
+        # test isolates the planner command itself, which must stay read-only.
+        service.pause(True)
         service.start()
         try:
             request_id = service.request_declarative_plan()
