@@ -358,7 +358,13 @@ déclaratives actuellement disponibles, sans démarrer le runtime ni contacter O
 python main.py --declarative-coverage
 ```
 
-Le JSON distingue notamment :
+Pour la sortie JSON complète exploitable par un script :
+
+```powershell
+python main.py --declarative-coverage-json
+```
+
+Le rapport distingue notamment :
 
 - `empty` : profil sans aucune action effective, donc exclu d'une interprétation abusive de la couverture ;
 - `declarative_executable` : propriété déjà autorisée par l'executor gardé ;
