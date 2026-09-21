@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from stream_state_router.obs.client import OBSRequestError
 from stream_state_router.obs.catalog import (
     InputRef,
     OBSResourceCatalog,
@@ -201,6 +202,60 @@ class ObservedStateReaderTests(unittest.TestCase):
             observed.get(visibility).code,
             "scene_item_visibility_unknown",
         )
+
+    def test_input_volume_observation_is_strict_and_fail_closed(self):
+        key = PropertyKey.input_volume_db(
+            collection="Main",
+            input_name="Music",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, -12.0)]
+        )
+
+        for raw, known in (
+            (-7.5, True),
+            (-7, True),
+            (True, False),
+            ("-7.5", False),
+            (float("nan"), False),
+            (float("inf"), False),
+            (None, False),
+        ):
+            client = _ObservedClient()
+            original_send = client.send
+
+            def send(request, data=None, *, _raw=raw):
+                if request == "GetInputVolume":
+                    client.requests.append((request, data))
+                    if _raw is None:
+                        return {}
+                    return {"inputVolumeDb": _raw}
+                return original_send(request, data)
+
+            client.send = send
+            observed = observe_desired_state(client, _catalog(), desired)
+            value = observed.get(key)
+
+            self.assertEqual(value.known, known, raw)
+            if known:
+                self.assertEqual(value.value, float(raw))
+            else:
+                self.assertEqual(value.code, "input_volume_unknown")
+
+        client = _ObservedClient()
+        original_send = client.send
+
+        def reject(request, data=None):
+            if request == "GetInputVolume":
+                client.requests.append((request, data))
+                raise OBSRequestError(request, "test rejection")
+            return original_send(request, data)
+
+        client.send = reject
+        observed = observe_desired_state(client, _catalog(), desired)
+
+        self.assertFalse(observed.get(key).known)
+        self.assertEqual(observed.get(key).code, "input_volume_unknown")
 
     def test_execution_bindings_require_scene_and_input_uuids(self):
         visibility = PropertyKey.scene_item_visibility(
