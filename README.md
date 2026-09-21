@@ -360,6 +360,7 @@ python main.py --declarative-coverage
 
 Le JSON distingue notamment :
 
+- `empty` : profil sans aucune action effective, donc exclu d'une interprétation abusive de la couverture ;
 - `declarative_executable` : propriété déjà autorisée par l'executor gardé ;
 - `declarative_plannable` : intention traduite et planifiable, mais pas encore exécutable ;
 - `declarative_intent_only` : intention représentable dont la politique physique reste incomplète ;
