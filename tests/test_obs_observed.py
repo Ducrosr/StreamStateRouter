@@ -224,13 +224,20 @@ class ObservedStateReaderTests(unittest.TestCase):
             client = _ObservedClient()
             original_send = client.send
 
-            def send(request, data=None, *, _raw=raw):
+            def send(
+                request,
+                data=None,
+                *,
+                _raw=raw,
+                _client=client,
+                _original_send=original_send,
+            ):
                 if request == "GetInputVolume":
-                    client.requests.append((request, data))
+                    _client.requests.append((request, data))
                     if _raw is None:
                         return {}
                     return {"inputVolumeDb": _raw}
-                return original_send(request, data)
+                return _original_send(request, data)
 
             client.send = send
             observed = observe_desired_state(client, _catalog(), desired)
