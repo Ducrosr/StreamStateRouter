@@ -122,7 +122,7 @@ class OBSResourceCatalogReader:
     ) -> dict[str, Any]:
         if self._cooperative_yield is not None:
             self._cooperative_yield()
-        return self._send(request, data)
+        return self.client.send(request, data)
 
     @staticmethod
     def _mapping_list(value: Any) -> list[Mapping[str, Any]]:
