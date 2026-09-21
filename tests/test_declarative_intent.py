@@ -176,6 +176,31 @@ class DeclarativeIntentTests(unittest.TestCase):
                 ]
             )
 
+    def test_ownership_conflict_preserves_full_profile_provenance(self):
+        action = (
+            OBSAction(
+                "scene_item_enabled",
+                {
+                    "scene": "Gameplay",
+                    "source": "Chat",
+                    "enabled": True,
+                },
+            ),
+        )
+
+        with self.assertRaises(DesiredOwnershipConflict) as captured:
+            desired_state_from_action_sets(
+                [
+                    ("game:A", action),
+                    ("overlay:B", action),
+                ]
+            )
+
+        self.assertEqual(captured.exception.left_owner, "game:A")
+        self.assertEqual(captured.exception.right_owner, "overlay:B")
+        self.assertIn("game:A", str(captured.exception))
+        self.assertIn("overlay:B", str(captured.exception))
+
     def test_duplicate_same_owner_is_allowed_when_value_matches(self):
         action = OBSAction(
             "scene_item_enabled",
