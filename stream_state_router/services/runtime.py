@@ -1902,17 +1902,20 @@ class RoutingService:
                         self._declarative_execution_admissible_locked()
                         prepared = self._prepared_execution
                         prepared_state = self._prepared_execution_state
-                        # Tickets are single-use even when the subsequent
-                        # execution is blocked or fails.
+                        if (
+                            prepared is None
+                            or prepared_state is None
+                            or prepared.plan_id != requested_plan_id
+                        ):
+                            raise RuntimeError(
+                                "plan_id inconnu, expiré ou déjà consommé"
+                            )
+                        # A matching ticket is single-use even when the
+                        # subsequent execution is blocked or fails. A stale or
+                        # forged id must never consume a newer preparation.
                         self._prepared_execution = None
                         self._prepared_execution_state = None
                         self._active_declarative_partial = ()
-                    if (
-                        prepared is None
-                        or prepared_state is None
-                        or prepared.plan_id != requested_plan_id
-                    ):
-                        raise RuntimeError("plan_id inconnu, expiré ou déjà consommé")
                     result = executor.execute(
                         prepared,
                         validate_target=lambda: self._validate_prepared_execution_target(
