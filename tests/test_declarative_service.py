@@ -16,6 +16,8 @@ from stream_state_router.services.declarative import (
 class _ServiceClient:
     def __init__(self):
         self.requests: list[tuple[str, dict | None]] = []
+        self.collection = "Main"
+        self.flip_collection_after_visibility = False
 
     def send(self, request, data=None):
         self.requests.append((request, data))
@@ -41,7 +43,7 @@ class _ServiceClient:
                 ]
             }
         if request == "GetSceneCollectionList":
-            return {"currentSceneCollectionName": "Main"}
+            return {"currentSceneCollectionName": self.collection}
         if request == "GetSceneList":
             return {
                 "currentProgramSceneName": "In Game",
@@ -78,6 +80,8 @@ class _ServiceClient:
         if request == "GetSceneItemId":
             return {"sceneItemId": 7}
         if request == "GetSceneItemEnabled":
+            if self.flip_collection_after_visibility:
+                self.collection = "Other"
             return {"sceneItemEnabled": True}
         if request == "GetCurrentProgramScene":
             return {"currentProgramSceneName": "In Game"}
@@ -145,7 +149,21 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
         self.assertEqual(len(first.operations), 1)
         self.assertEqual(first.operations[0].operation, "SetSceneItemVisibility")
         self.assertEqual(first.as_mapping(), second.as_mapping())
-        self.assertEqual(structural_after_first, structural_after_second)
+        heavy_first = [
+            request
+            for request in structural_after_first
+            if request != "GetSceneCollectionList"
+        ]
+        heavy_second = [
+            request
+            for request in structural_after_second
+            if request != "GetSceneCollectionList"
+        ]
+        self.assertEqual(heavy_first, heavy_second)
+        self.assertGreater(
+            structural_after_second.count("GetSceneCollectionList"),
+            structural_after_first.count("GetSceneCollectionList"),
+        )
         self.assertEqual(
             [r for r, _d in client.requests].count("GetSceneItemEnabled"),
             2,
@@ -321,6 +339,73 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
 
         self.assertGreater(len(client.requests), previous)
 
+
+    def test_missing_profile_block_prevents_empty_plan_convergence(self):
+        service = DeclarativePlanningService(_ServiceClient())
+
+        plan = service.plan_state(
+            DesiredState.empty(),
+            blocked_provenance={
+                "overlay:Missing": "Profil OBS introuvable",
+            },
+        )
+
+        self.assertTrue(plan.blocked)
+        self.assertFalse(plan.converged)
+        self.assertEqual(plan.operations, ())
+        self.assertEqual(plan.diagnostics[-1].code, "resolution_blocked")
+
+    def test_cached_catalog_is_rebound_after_collection_change(self):
+        key = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="In Game",
+            source="Chat",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, False)])
+        client = _ServiceClient()
+        service = DeclarativePlanningService(client)
+
+        service.sync_catalog()
+        client.collection = "Other"
+        plan = service.plan_state(desired)
+
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.operations, ())
+        self.assertEqual(
+            plan.diagnostics[0].code,
+            "scene_collection_mismatch",
+        )
+        self.assertEqual(service.catalog.collection, "Other")
+
+    def test_context_change_during_observation_is_not_published(self):
+        key = PropertyKey.scene_item_visibility(
+            collection="Main",
+            container="In Game",
+            source="Chat",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, False)])
+        client = _ServiceClient()
+        service = DeclarativePlanningService(client)
+        client.flip_collection_after_visibility = True
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "context changed before publication",
+        ):
+            service.plan_state(desired)
+
+        self.assertTrue(service.catalog_status()["stale"])
+
+    def test_catalog_invalidation_keeps_snapshot_marked_stale_until_refresh(self):
+        service = DeclarativePlanningService(_ServiceClient())
+        service.sync_catalog()
+
+        service.invalidate_catalog("disconnect")
+
+        status = service.catalog_status()
+        self.assertTrue(status["available"])
+        self.assertTrue(status["stale"])
+        self.assertEqual(status["stale_reason"], "disconnect")
 
 if __name__ == "__main__":
     unittest.main()
