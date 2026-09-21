@@ -256,6 +256,7 @@ class DeclarativePlanningService:
         self._catalog_reader = OBSResourceCatalogReader(client)
         self._catalog: OBSResourceCatalog | None = None
         self._catalog_stale_reason = ""
+        self._catalog_epoch = 0
 
     def set_cooperative_yield(
         self,
@@ -268,16 +269,26 @@ class DeclarativePlanningService:
     def catalog(self) -> OBSResourceCatalog | None:
         return self._catalog
 
+    @property
+    def catalog_epoch(self) -> int:
+        return int(self._catalog_epoch)
+
     def invalidate_catalog(self, reason: str = "invalidated") -> None:
+        self._catalog_epoch += 1
         if self._catalog is not None:
             self._catalog_stale_reason = str(reason or "invalidated")
 
     def catalog_status(self) -> dict[str, object]:
         catalog = self._catalog
         if catalog is None:
-            return {"available": False, "stale": False}
+            return {
+                "available": False,
+                "stale": False,
+                "catalog_epoch": self.catalog_epoch,
+            }
         return {
             "available": True,
+            "catalog_epoch": self.catalog_epoch,
             "stale": bool(self._catalog_stale_reason),
             "stale_reason": self._catalog_stale_reason,
             **catalog.summary(),
@@ -370,7 +381,16 @@ class DeclarativePlanningService:
         return ""
 
     def sync_catalog(self) -> OBSResourceCatalog:
-        catalog = self._catalog_reader.sync()
+        # Every synchronization attempt advances the epoch.  A failed attempt
+        # therefore invalidates any execution preparation derived from the
+        # previous snapshot even when that diagnostic snapshot is retained.
+        self._catalog_epoch += 1
+        try:
+            catalog = self._catalog_reader.sync()
+        except Exception:
+            if self._catalog is not None:
+                self._catalog_stale_reason = "catalog synchronization failed"
+            raise
         self._catalog = catalog
         self._catalog_stale_reason = ""
         return catalog
