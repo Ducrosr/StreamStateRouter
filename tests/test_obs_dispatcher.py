@@ -651,6 +651,24 @@ class OBSDispatcherTests(unittest.TestCase):
             ],
         )
 
+    def test_unconfigured_default_domains_are_unmanaged_not_missing(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+
+        plan = dispatcher.plan_state(
+            StreamState(),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(plan["declarative_blocks"], [])
+        self.assertTrue(
+            all(row["status"] == "unmanaged" for row in plan["domains"])
+        )
+
     def test_missing_profile_is_reported_as_declarative_block(self):
         dispatcher = OBSDispatcher(FakeClient(), {})
 
