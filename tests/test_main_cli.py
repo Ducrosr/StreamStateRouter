@@ -33,7 +33,7 @@ class MainCliTests(unittest.TestCase):
             patch.object(app_main, "SingleInstanceGuard") as guard,
             redirect_stdout(output),
         ):
-            code = app_main.main(["--declarative-coverage"])
+            code = app_main.main(["--declarative-coverage-json"])
 
         self.assertEqual(code, 0)
         guard.assert_not_called()
@@ -43,6 +43,36 @@ class MainCliTests(unittest.TestCase):
             payload["summary"]["actions"]["counts"]["declarative_executable"],
             1,
         )
+
+    def test_human_coverage_cli_is_offline_and_readable(self):
+        config = {
+            "profiles": {
+                "audio": {
+                    "Default": {
+                        "actions": [
+                            {
+                                "type": "input_volume_db",
+                                "params": {"input": "Music", "volume_db": -8.0},
+                            }
+                        ]
+                    }
+                }
+            },
+            "layout_profiles": {},
+        }
+        output = io.StringIO()
+
+        with (
+            patch.object(app_main, "load_config", return_value=config),
+            patch.object(app_main, "SingleInstanceGuard") as guard,
+            redirect_stdout(output),
+        ):
+            code = app_main.main(["--declarative-coverage"])
+
+        self.assertEqual(code, 0)
+        guard.assert_not_called()
+        self.assertIn("Couverture de migration déclarative", output.getvalue())
+        self.assertIn("input_volume_db", output.getvalue())
 
 
 if __name__ == "__main__":
