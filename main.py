@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 
@@ -22,6 +23,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--minimized", action="store_true", help="Démarrer dans la zone de notification")
     parser.add_argument("--headless", action="store_true", help="Afficher le routage dans la console sans interface")
     parser.add_argument("--check-config", action="store_true", help="Valider la configuration puis quitter")
+    parser.add_argument(
+        "--declarative-coverage",
+        action="store_true",
+        help="Afficher le rapport read-only de couverture déclarative puis quitter",
+    )
     return parser.parse_args(argv)
 
 
@@ -110,6 +116,20 @@ def main(argv: list[str] | None = None) -> int:
             print("Configuration invalide:\n- " + "\n- ".join(errors), file=sys.stderr)
             return 1
         print("Configuration valide.")
+        return 0
+
+    if args.declarative_coverage:
+        from stream_state_router.planning import build_migration_coverage_report
+
+        report = build_migration_coverage_report(config)
+        print(
+            json.dumps(
+                report.as_mapping(),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
 
     guard = SingleInstanceGuard()
