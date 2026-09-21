@@ -66,6 +66,60 @@ class DeclarativeIntentTests(unittest.TestCase):
             all(item.provenance == ("game:Overwatch",) for item in state.assignments)
         )
 
+    def test_ordered_actions_collapse_to_final_value_within_owner(self):
+        actions = (
+            OBSAction(
+                "scene_item_enabled",
+                {
+                    "scene": "Gameplay",
+                    "source": "Chat",
+                    "enabled": True,
+                },
+            ),
+            OBSAction(
+                "scene_item_enabled",
+                {
+                    "scene": "Gameplay",
+                    "source": "Chat",
+                    "enabled": False,
+                },
+            ),
+        )
+
+        assignments = desired_assignments_from_actions(
+            actions,
+            provenance="game:Child",
+        )
+
+        self.assertEqual(len(assignments), 1)
+        self.assertFalse(assignments[0].value)
+
+    def test_ordered_input_settings_collapse_to_final_value_within_owner(self):
+        actions = (
+            OBSAction(
+                "set_input_settings",
+                {
+                    "input": "Capture",
+                    "settings": {"window": "Base"},
+                },
+            ),
+            OBSAction(
+                "set_input_settings",
+                {
+                    "input": "Capture",
+                    "settings": {"window": "Child"},
+                },
+            ),
+        )
+
+        assignments = desired_assignments_from_actions(
+            actions,
+            provenance="capture:Child",
+        )
+
+        self.assertEqual(len(assignments), 1)
+        self.assertEqual(assignments[0].value, "Child")
+
     def test_disabled_action_does_not_create_intent(self):
         assignments = desired_assignments_from_actions(
             [
