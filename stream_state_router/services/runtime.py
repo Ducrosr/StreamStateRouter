@@ -25,10 +25,16 @@ from ..activation import (
     TriggerTargetIdentity,
 )
 from ..obs.dispatcher import DispatchResult, OBSDispatcher
+from ..obs.observed import build_execution_bindings
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
 from .declarative import DeclarativePlanningService
+from .declarative_execution import (
+    DeclarativeExecutor,
+    ExecutionResult,
+    PreparedExecution,
+)
 
 
 class _RuntimeShutdownRequested(BaseException):
@@ -194,6 +200,7 @@ class RoutingService:
         config_revision: str = "",
         bootstrap_foreground: ForegroundApp | None = None,
         startup_layout_profile: str = "",
+        declarative_execution_enabled: bool = False,
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
@@ -203,6 +210,7 @@ class RoutingService:
         self.logger = logger or logging.getLogger("stream_state_router")
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
         self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
+        self.declarative_execution_enabled = bool(declarative_execution_enabled)
         policies = dict(activation_policies or {})
         transferred_cleanup = tuple(pending_activation_cleanup or ()) + tuple(pending_cleanup or ())
         activation_cleanup: list[Mapping[str, object]] = []
@@ -276,10 +284,22 @@ class RoutingService:
         self._shutdown_cleanup_active = False
         self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
         self._command_status: dict[str, dict[str, object]] = {}
+        self._prepared_execution: PreparedExecution | None = None
+        self._prepared_execution_state: StreamState | None = None
+        self._active_declarative_partial: tuple[object, ...] = ()
         client = getattr(self.dispatcher, "client", None)
         self._declarative_planning = (
             DeclarativePlanningService(client)
             if client is not None
+            else None
+        )
+        self._declarative_executor = (
+            DeclarativeExecutor(
+                client,
+                self._declarative_planning,
+                cooperative_yield=self._cooperative_obs_yield,
+            )
+            if client is not None and self._declarative_planning is not None
             else None
         )
         self._simulation_executor = ThreadPoolExecutor(
@@ -512,6 +532,10 @@ class RoutingService:
             if requested:
                 self._resume_revalidation_pending = False
             elif was_paused:
+                # Any prepared execution is scoped to the exact paused runtime
+                # generation. Resuming consumes that safety context.
+                self._prepared_execution = None
+                self._prepared_execution_state = None
                 # A pending automatic decision may have expired while routing
                 # was suspended. Force exactly one fresh routing decision before
                 # it can be released so normal debounce state cannot make an old
@@ -773,6 +797,38 @@ class RoutingService:
         return self.submit_obs_command(
             "planner.current",
             options={"refresh_catalog": bool(refresh_catalog)},
+        )
+
+    def _declarative_execution_admissible_locked(self) -> None:
+        if not self.declarative_execution_enabled:
+            raise RuntimeError("Exécution déclarative expérimentale désactivée")
+        if not self._runtime_operational or self._stopping:
+            raise RuntimeError("Runtime déclaratif indisponible ou en arrêt")
+        if not self._paused:
+            raise RuntimeError("L'exécution déclarative requiert SSR en pause")
+        pending = self._pending_dispatch
+        if pending is not None and self._pending_dispatch_allowed_while_paused(pending):
+            raise RuntimeError(
+                "Une commande explicite est encore en attente d'application"
+            )
+
+    def request_prepare_declarative_execution(self) -> str:
+        with self._lock:
+            self._declarative_execution_admissible_locked()
+        return self.submit_obs_command(
+            "planner.prepare_current",
+            options={"refresh_catalog": True},
+        )
+
+    def request_execute_declarative_plan(self, plan_id: str) -> str:
+        value = str(plan_id or "").strip()
+        if not value:
+            raise ValueError("plan_id requis")
+        with self._lock:
+            self._declarative_execution_admissible_locked()
+        return self.submit_obs_command(
+            "planner.execute",
+            options={"plan_id": value},
         )
 
     def request_force_reapply(self) -> str:
@@ -1587,13 +1643,13 @@ class RoutingService:
                 "Arrêt du runtime demandé pendant une opération OBS"
             )
 
-    def _build_current_declarative_plan(
+    def _resolve_current_declarative_plan(
         self,
         state: StreamState,
         planning: DeclarativePlanningService,
         *,
         refresh_catalog: bool,
-    ) -> dict[str, object]:
+    ):
         last_boundary_error = "OBS planner context changed during resolution"
         for attempt in range(2):
             try:
@@ -1654,15 +1710,123 @@ class RoutingService:
                 )
                 planning.invalidate_catalog(last_boundary_error)
                 continue
-
-            return {
-                "available": True,
-                "state": state.as_variables(),
-                "plan": plan.as_mapping(),
-                "declarative_blocks": intent.get("declarative_blocks", []),
-            }
+            catalog = planning.catalog
+            if catalog is None:
+                raise RuntimeError("Catalogue OBS indisponible après planification")
+            concrete_desired = desired.bind_collection(catalog.collection)
+            return concrete_desired, plan, intent, boundary_after_plan
 
         raise RuntimeError(last_boundary_error)
+
+    def _build_current_declarative_plan(
+        self,
+        state: StreamState,
+        planning: DeclarativePlanningService,
+        *,
+        refresh_catalog: bool,
+    ) -> dict[str, object]:
+        desired, plan, intent, _boundary = self._resolve_current_declarative_plan(
+            state,
+            planning,
+            refresh_catalog=refresh_catalog,
+        )
+        return {
+            "available": True,
+            "state": state.as_variables(),
+            "desired": desired.as_mapping(diagnostic=True),
+            "plan": plan.as_mapping(),
+            "declarative_blocks": intent.get("declarative_blocks", []),
+        }
+
+    def _prepare_current_declarative_execution(
+        self,
+        state: StreamState,
+        planning: DeclarativePlanningService,
+    ) -> PreparedExecution:
+        with self._lock:
+            self._declarative_execution_admissible_locked()
+            dispatch_generation = self._dispatch_generation
+            resume_generation = self._resume_revalidation_generation
+
+        desired, plan, intent, boundary = self._resolve_current_declarative_plan(
+            state,
+            planning,
+            refresh_catalog=True,
+        )
+        if plan.blocked:
+            raise RuntimeError("Le plan déclaratif courant est bloqué")
+        if intent.get("declarative_blocks"):
+            raise RuntimeError("Le plan contient des conditions déclaratives bloquées")
+        if any(
+            assignment.key.kind not in {"scene_item_visibility", "input_mute"}
+            for assignment in desired.assignments
+        ):
+            raise RuntimeError(
+                "Le DesiredState contient des propriétés hors allowlist du MVP"
+            )
+        catalog = planning.catalog
+        if catalog is None:
+            raise RuntimeError("Catalogue OBS indisponible")
+        if catalog.warnings or catalog.unreadable_containers:
+            raise RuntimeError("Catalogue OBS partiel : préparation refusée")
+        collection, session_generation = boundary
+        if not session_generation:
+            raise RuntimeError("Génération de session OBS non établie")
+        bindings = build_execution_bindings(catalog, desired)
+        with self._lock:
+            self._declarative_execution_admissible_locked()
+            if self.engine.current_state != state:
+                raise RuntimeError("État logique modifié pendant la préparation")
+            if (
+                self._dispatch_generation != dispatch_generation
+                or self._resume_revalidation_generation != resume_generation
+            ):
+                raise RuntimeError("Génération runtime modifiée pendant la préparation")
+            prepared = PreparedExecution.create(
+                desired=desired,
+                plan=plan,
+                collection=collection,
+                session_generation=session_generation,
+                catalog_epoch=planning.catalog_epoch,
+                config_revision=self.config_revision,
+                dispatch_generation=dispatch_generation,
+                resume_generation=resume_generation,
+                bindings=bindings,
+            )
+            self._prepared_execution = prepared
+            self._prepared_execution_state = state
+        return prepared
+
+    def _validate_prepared_execution_target(
+        self,
+        prepared: PreparedExecution,
+        state: StreamState,
+    ) -> tuple[bool, str]:
+        with self._lock:
+            if not self._paused:
+                return False, "SSR a repris depuis la préparation"
+            if self.engine.current_state != state:
+                return False, "L'état logique courant a changé"
+            if self._dispatch_generation != prepared.dispatch_generation:
+                return False, "La génération de décision runtime a changé"
+            if self._resume_revalidation_generation != prepared.resume_generation:
+                return False, "La génération de reprise runtime a changé"
+            if self.config_revision != prepared.config_revision:
+                return False, "La révision de configuration a changé"
+        try:
+            context = self.dispatcher.obs_context(force_refresh=True)
+            intent = self.dispatcher.plan_state(state, context=context)
+            if intent.get("declarative_blocks"):
+                return False, "Les conditions OBS ne sont plus satisfaites"
+            desired = self.dispatcher.resolve_desired_state(
+                state,
+                context=context,
+            ).bind_collection(prepared.collection)
+        except Exception as exc:
+            return False, f"Revalidation de cible impossible : {exc}"
+        if desired.assignments != prepared.desired.assignments:
+            return False, "La cible déclarative ou son ownership a changé"
+        return True, ""
 
     def _execute_obs_command(self, command: _OBSCommand) -> None:
         with self._lock:
@@ -1717,6 +1881,63 @@ class RoutingService:
                                 command.options.get("refresh_catalog", True)
                             ),
                         )
+                elif command.action == "planner.prepare_current":
+                    planning = self._declarative_planning
+                    if planning is None:
+                        raise RuntimeError("Planner déclaratif indisponible")
+                    with self._lock:
+                        state = self.engine.current_state
+                    if state is None:
+                        raise RuntimeError("Aucun état de routage courant")
+                    prepared = self._prepare_current_declarative_execution(
+                        state,
+                        planning,
+                    )
+                    result = prepared.as_mapping()
+                elif command.action == "planner.execute":
+                    executor = self._declarative_executor
+                    if executor is None:
+                        raise RuntimeError("Executor déclaratif indisponible")
+                    requested_plan_id = str(command.options.get("plan_id") or "")
+                    with self._lock:
+                        self._declarative_execution_admissible_locked()
+                        prepared = self._prepared_execution
+                        prepared_state = self._prepared_execution_state
+                        # Tickets are single-use even when the subsequent
+                        # execution is blocked or fails.
+                        self._prepared_execution = None
+                        self._prepared_execution_state = None
+                        self._active_declarative_partial = ()
+                    if (
+                        prepared is None
+                        or prepared_state is None
+                        or prepared.plan_id != requested_plan_id
+                    ):
+                        raise RuntimeError("plan_id inconnu, expiré ou déjà consommé")
+                    result = executor.execute(
+                        prepared,
+                        validate_target=lambda: self._validate_prepared_execution_target(
+                            prepared,
+                            prepared_state,
+                        ),
+                        progress=lambda steps: setattr(
+                            self,
+                            "_active_declarative_partial",
+                            tuple(steps),
+                        ),
+                    )
+                    self._active_declarative_partial = ()
+                    self._emit_obs_result(
+                        command,
+                        success=bool(result.converged),
+                        result=result.as_mapping(),
+                        error=(
+                            ""
+                            if result.converged
+                            else f"Exécution déclarative : {result.status}"
+                        ),
+                    )
+                    return
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
@@ -1755,7 +1976,25 @@ class RoutingService:
                 self._emit_obs_result(command, success=True, result=result)
         except _RuntimeShutdownRequested as exc:
             self.logger.info("OBS command interrupted [%s]: %s", command.action, exc)
-            self._emit_obs_result(command, success=False, error=str(exc))
+            partial = None
+            if command.action == "planner.execute" and self._active_declarative_partial:
+                partial = {
+                    "status": "cancelled",
+                    "converged": False,
+                    "replan_required": True,
+                    "steps": [
+                        step.as_mapping()
+                        for step in self._active_declarative_partial
+                        if hasattr(step, "as_mapping")
+                    ],
+                }
+            self._active_declarative_partial = ()
+            self._emit_obs_result(
+                command,
+                success=False,
+                result=partial,
+                error=str(exc),
+            )
             raise
         except Exception as exc:
             self.logger.error("OBS command failed [%s]: %s", command.action, exc)
