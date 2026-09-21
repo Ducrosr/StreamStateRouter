@@ -284,6 +284,18 @@ class DeclarativePlanningService:
         if refresh_catalog or catalog is None:
             catalog = self.sync_catalog()
 
+        if not catalog.collection:
+            diagnostic = PlanDiagnostic(
+                "error",
+                "scene_collection_unknown",
+                "Active OBS Scene Collection could not be determined",
+            )
+            return build_execution_plan(
+                desired,
+                ObservedState.empty(),
+                extra_diagnostics=(*tuple(global_diagnostics), diagnostic),
+            )
+
         live_collection = self._current_collection()
         if (
             catalog.collection
