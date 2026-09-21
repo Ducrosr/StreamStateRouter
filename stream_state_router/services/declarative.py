@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Callable, Mapping
 
 from ..obs.catalog import OBSResourceCatalog, OBSResourceCatalogReader
 from ..obs.client import OBSClientManager, OBSRequestError
@@ -70,6 +70,14 @@ def _catalog_preflight(
     for assignment in desired.assignments:
         key = assignment.key
 
+        if not catalog.collection:
+            reject(
+                key,
+                "scene_collection_unknown",
+                "Active OBS Scene Collection could not be established",
+            )
+            continue
+
         if (
             key.collection
             and catalog.collection
@@ -120,6 +128,16 @@ def _catalog_preflight(
                     "capability_missing",
                     "OBS does not advertise required request(s): "
                     + ", ".join(missing),
+                )
+                continue
+            if key.container in catalog.unreadable_containers:
+                reject(
+                    key,
+                    "scene_item_unverified",
+                    (
+                        f"Scene-item container '{key.container}' could not be "
+                        "verified in the OBS catalog"
+                    ),
                 )
                 continue
             identity = (key.container, key.source, key.occurrence)
@@ -227,19 +245,108 @@ class DeclarativePlanningService:
     ):
         self.client = client
         self.scope = scope or ControlScope()
+        self._cooperative_yield: Callable[[], None] | None = None
         self._catalog_reader = OBSResourceCatalogReader(client)
         self._catalog: OBSResourceCatalog | None = None
+        self._catalog_stale_reason = ""
+
+    def set_cooperative_yield(
+        self,
+        callback: Callable[[], None] | None,
+    ) -> None:
+        self._cooperative_yield = callback
+        self._catalog_reader.set_cooperative_yield(callback)
 
     @property
     def catalog(self) -> OBSResourceCatalog | None:
         return self._catalog
 
-    def invalidate_catalog(self) -> None:
-        self._catalog = None
+    def invalidate_catalog(self, reason: str = "invalidated") -> None:
+        if self._catalog is not None:
+            self._catalog_stale_reason = str(reason or "invalidated")
+
+    def catalog_status(self) -> dict[str, object]:
+        catalog = self._catalog
+        if catalog is None:
+            return {"available": False, "stale": False}
+        return {
+            "available": True,
+            "stale": bool(self._catalog_stale_reason),
+            "stale_reason": self._catalog_stale_reason,
+            **catalog.summary(),
+        }
+
+    def catalog_snapshot(self) -> dict[str, object]:
+        """Return the cached structural snapshot without issuing OBS I/O."""
+
+        catalog = self._catalog
+        if catalog is None:
+            return {"available": False, "stale": False}
+        return {
+            **self.catalog_status(),
+            "scene_refs": [
+                {"name": item.name, "uuid": item.uuid, "index": item.index}
+                for item in catalog.scenes
+            ],
+            "groups_list": list(catalog.groups),
+            "scene_item_refs": [
+                {
+                    "collection": item.collection,
+                    "root_scene": item.root_scene,
+                    "container": item.container,
+                    "container_kind": item.container_kind,
+                    "path": list(item.path),
+                    "source": item.source,
+                    "source_uuid": item.source_uuid,
+                    "source_kind": item.source_kind,
+                    "occurrence": item.occurrence,
+                    "scene_item_id": item.scene_item_id,
+                    "enabled": item.enabled,
+                }
+                for item in catalog.scene_items
+            ],
+            "input_refs": [
+                {"name": item.name, "kind": item.kind, "uuid": item.uuid}
+                for item in catalog.inputs
+            ],
+            "transition_refs": [
+                {"name": item.name, "kind": item.kind, "uuid": item.uuid}
+                for item in catalog.transitions
+            ],
+        }
+
+    def _session_generation(self) -> int:
+        try:
+            return int(getattr(self.client, "session_generation"))
+        except (AttributeError, TypeError, ValueError):
+            return 0
+
+    def _context_error(self, catalog: OBSResourceCatalog) -> str:
+        current_collection = self._catalog_reader.current_collection()
+        current_generation = self._session_generation()
+        if (
+            catalog.session_generation
+            and current_generation
+            and current_generation != catalog.session_generation
+        ):
+            return "OBS session changed since catalog synchronization"
+        if (
+            catalog.collection
+            and current_collection
+            and current_collection != catalog.collection
+        ):
+            return (
+                "OBS Scene Collection changed since catalog synchronization: "
+                f"{catalog.collection} -> {current_collection}"
+            )
+        if not current_collection:
+            return "Active OBS Scene Collection could not be established"
+        return ""
 
     def sync_catalog(self) -> OBSResourceCatalog:
         catalog = self._catalog_reader.sync()
         self._catalog = catalog
+        self._catalog_stale_reason = ""
         return catalog
 
     def plan_state(
@@ -250,8 +357,13 @@ class DeclarativePlanningService:
         blocked_provenance: Mapping[str, str] | None = None,
     ) -> ExecutionPlan:
         catalog = self._catalog
-        if refresh_catalog or catalog is None:
+        if refresh_catalog or catalog is None or self._catalog_stale_reason:
             catalog = self.sync_catalog()
+        else:
+            context_error = self._context_error(catalog)
+            if context_error:
+                self.invalidate_catalog(context_error)
+                catalog = self.sync_catalog()
 
         concrete_desired = desired.bind_collection(catalog.collection)
 
@@ -312,7 +424,19 @@ class DeclarativePlanningService:
             for assignment in concrete_desired.assignments
             if assignment.key not in preflight
         )
-        observed = observe_desired_state(self.client, catalog, observable)
+        observed = observe_desired_state(
+            self.client,
+            catalog,
+            observable,
+            cooperative_yield=self._cooperative_yield,
+        )
+        context_error = self._context_error(catalog)
+        if context_error:
+            self.invalidate_catalog(context_error)
+            raise RuntimeError(
+                "Declarative observation context changed before publication: "
+                + context_error
+            )
         plan = build_execution_plan(
             concrete_desired,
             observed,
