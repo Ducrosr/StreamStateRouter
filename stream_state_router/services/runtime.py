@@ -1107,7 +1107,11 @@ class RoutingService:
         if self._last_state_reconcile and now - self._last_state_reconcile < self.state_reconcile_seconds:
             return
         with self._lock:
-            if self._stopping or self._pending_dispatch is not None:
+            if (
+                self._stopping
+                or self._paused
+                or self._pending_dispatch is not None
+            ):
                 return
             state = self.engine.current_state
             generation = self._dispatch_generation
