@@ -517,3 +517,82 @@ def build_migration_coverage_report(
         actions=tuple(action_rows),
         profiles=tuple(profile_rows),
     )
+
+
+def render_migration_coverage_report(report: MigrationCoverageReport) -> str:
+    """Render a concise, secret-safe human summary of migration coverage."""
+
+    mapped = report.as_mapping()
+    summary = mapped["summary"]
+    actions = summary["actions"]
+    profiles = summary["profiles"]
+
+    lines = [
+        "Couverture de migration déclarative",
+        (
+            "Actions : "
+            f"{actions['total']} · représentées "
+            f"{actions['declarative_coverage_percent']}% · exécutables "
+            f"{actions['executable_percent']}%"
+        ),
+        (
+            "Profils actifs : "
+            f"{profiles['managed_nonempty_total']} · représentés "
+            f"{profiles['declarative_coverage_percent']}% · exécutables "
+            f"{profiles['executable_percent']}%"
+        ),
+        "",
+        "Par domaine :",
+    ]
+
+    domains = mapped.get("domains", {})
+    for domain in sorted(domains, key=str.casefold):
+        row = domains[domain]
+        domain_actions = row["actions"]
+        domain_profiles = row["profiles"]
+        lines.append(
+            f"- {domain}: actions {domain_actions['total']} "
+            f"(représentées {domain_actions['declarative_coverage_percent']}%, "
+            f"exécutables {domain_actions['executable_percent']}%) · "
+            f"profils actifs {domain_profiles['managed_nonempty_total']} "
+            f"(exécutables {domain_profiles['executable_percent']}%)"
+        )
+
+    notable = [
+        item
+        for item in report.actions
+        if item.classification not in {"declarative_executable"}
+    ]
+    if notable:
+        lines.extend(["", "Actions non exécutables actuellement :"])
+        for item in notable:
+            properties = (
+                " [" + ", ".join(item.property_kinds) + "]"
+                if item.property_kinds
+                else ""
+            )
+            reason = f" — {item.reason}" if item.reason else ""
+            lines.append(
+                f"- {item.domain}/{item.profile} #{item.action_index + 1} "
+                f"{item.action_type or '<invalide>'}: "
+                f"{item.classification}{properties}{reason}"
+            )
+
+    delegated = [
+        item
+        for item in report.profiles
+        if item.classification == "delegated"
+    ]
+    if delegated:
+        lines.extend(
+            [
+                "",
+                "Délégués : "
+                + ", ".join(
+                    f"{item.domain}/{item.profile}"
+                    for item in delegated
+                ),
+            ]
+        )
+
+    return "\n".join(lines)
