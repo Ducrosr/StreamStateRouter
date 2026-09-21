@@ -220,6 +220,7 @@ class FakeOBSHeartbeatClient:
         self.connected = False
         self.ok = True
         self.probes = 0
+        self.session_generation = 1
 
     def probe(self):
         self.probes += 1
@@ -1528,6 +1529,29 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(routed.wait(1.0))
         finally:
             self.assertTrue(service.stop())
+
+    def test_obs_session_generation_change_invalidates_catalog_while_connected(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeHeartbeatDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+        invalidations = []
+        service._declarative_planning.invalidate_catalog = invalidations.append
+
+        service._probe_obs_if_due()
+        invalidations.clear()
+
+        dispatcher.client.session_generation += 1
+        service._last_obs_probe = 0.0
+        service._probe_obs_if_due()
+
+        self.assertEqual(
+            invalidations,
+            ["OBS session connected or replaced"],
+        )
 
     def test_obs_reconnect_reconciles_activation_fail_safe(self):
         app = ForegroundApp(1, 1, "terminal.exe")
