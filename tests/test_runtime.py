@@ -1237,6 +1237,59 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_resume_since_prepare_invalidates_declarative_ticket(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared = collector.wait(prepare_id)
+            self.assertTrue(prepared.success, prepared.error)
+            plan_id = prepared.result["plan_id"]
+
+            service.pause(False)
+            service.pause(True)
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+
+            self.assertFalse(executed.success)
+            self.assertRegex(executed.error, "inconnu|expiré|consommé")
+            self.assertFalse(
+                any(request.startswith("Set") for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
     def test_declarative_execution_requires_flag_and_pause(self):
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
         disabled = RoutingService(
