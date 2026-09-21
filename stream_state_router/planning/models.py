@@ -103,8 +103,28 @@ class PropertyKey:
         kind = str(self.kind).strip()
         if not kind:
             raise ValueError("PropertyKey.kind is required")
-        if int(self.occurrence) < 0:
+        try:
+            occurrence = int(self.occurrence)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("PropertyKey.occurrence must be an integer") from exc
+        if occurrence < 0:
             raise ValueError("PropertyKey.occurrence must be >= 0")
+
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "occurrence", occurrence)
+        for field_name in (
+            "collection",
+            "container",
+            "source",
+            "filter_name",
+            "setting",
+        ):
+            value = getattr(self, field_name)
+            object.__setattr__(
+                self,
+                field_name,
+                "" if value is None else str(value),
+            )
 
         required: dict[str, tuple[str, ...]] = {
             "scene_item_visibility": ("container", "source"),
@@ -336,14 +356,11 @@ class DesiredStateConflict(ValueError):
 class DesiredState:
     assignments: tuple[DesiredAssignment, ...] = ()
 
-    @classmethod
-    def empty(cls) -> "DesiredState":
-        return cls()
-
-    @classmethod
-    def build(cls, values: Iterable[DesiredAssignment]) -> "DesiredState":
+    def __post_init__(self) -> None:
         merged: dict[PropertyKey, DesiredAssignment] = {}
-        for assignment in values:
+        for assignment in tuple(self.assignments):
+            if not isinstance(assignment, DesiredAssignment):
+                raise TypeError("DesiredState assignments must be DesiredAssignment")
             previous = merged.get(assignment.key)
             if previous is None:
                 merged[assignment.key] = assignment
@@ -358,12 +375,19 @@ class DesiredState:
                 value=assignment.value,
                 provenance=provenance,
             )
-        return cls(
-            tuple(
-                merged[key]
-                for key in sorted(merged)
-            )
+        object.__setattr__(
+            self,
+            "assignments",
+            tuple(merged[key] for key in sorted(merged)),
         )
+
+    @classmethod
+    def empty(cls) -> "DesiredState":
+        return cls()
+
+    @classmethod
+    def build(cls, values: Iterable[DesiredAssignment]) -> "DesiredState":
+        return cls(tuple(values))
 
     def by_key(self) -> dict[PropertyKey, DesiredAssignment]:
         return {item.key: item for item in self.assignments}
