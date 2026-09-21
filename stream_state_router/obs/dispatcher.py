@@ -528,7 +528,6 @@ class OBSDispatcher:
                 domains.append(row)
                 continue
             if profile is None:
-                domain_profiles = self._profiles.get(domain, {})
                 if self._is_unmanaged_default(domain, desired):
                     row.update(
                         status="unmanaged",
