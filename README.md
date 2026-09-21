@@ -349,6 +349,28 @@ La configuration utilisateur est stockée dans :
 
 Le pilotage OBS est **désactivé par défaut** afin qu'un premier lancement ne modifie aucune scène.
 
+## Couverture de migration déclarative
+
+Le rapport read-only de couverture compare les actions OBS configurées avec les capacités
+déclaratives actuellement disponibles, sans démarrer le runtime ni contacter OBS :
+
+```powershell
+python main.py --declarative-coverage
+```
+
+Le JSON distingue notamment :
+
+- `declarative_executable` : propriété déjà autorisée par l'executor gardé ;
+- `declarative_plannable` : intention traduite et planifiable, mais pas encore exécutable ;
+- `declarative_intent_only` : intention représentable dont la politique physique reste incomplète ;
+- `delegated` : propriété volontairement possédée par un sous-système spécialisé, notamment les LayoutProfiles ;
+- `legacy_only` : action encore non représentable comme propriété stable ;
+- `invalid` : action/profil invalide ou héritage incohérent.
+
+Les statistiques d'actions comptent chaque déclaration une seule fois. La classification d'un
+profil tient toutefois compte de ses actions héritées via `extends`. Les valeurs arbitraires de
+`set_input_settings` ne sont jamais incluses dans le rapport.
+
 ## Validation développeur
 
 ```powershell
