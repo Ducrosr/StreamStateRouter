@@ -163,6 +163,26 @@ class ObservedStateReaderTests(unittest.TestCase):
             [request for request, _data in client.requests],
         )
 
+    def test_program_scene_observation_accepts_modern_response_field(self):
+        key = PropertyKey.program_scene(collection="Main")
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, "Other")]
+        )
+        client = _ObservedClient()
+        original_send = client.send
+
+        def send(request, data=None):
+            if request == "GetCurrentProgramScene":
+                client.requests.append((request, data))
+                return {"sceneName": "Modern"}
+            return original_send(request, data)
+
+        client.send = send
+        observed = observe_desired_state(client, _catalog(), desired)
+
+        self.assertTrue(observed.get(key).known)
+        self.assertEqual(observed.get(key).value, "Modern")
+
     def test_non_boolean_executor_observations_are_unknown(self):
         mute = PropertyKey.input_mute(
             collection="Main",
