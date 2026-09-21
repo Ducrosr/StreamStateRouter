@@ -57,6 +57,7 @@ class ProfileCoverage:
     classification: str
     enabled_actions: int
     disabled_actions: int
+    inherited_actions: int = 0
     reasons: tuple[str, ...] = ()
 
     def as_mapping(self) -> dict[str, object]:
@@ -66,6 +67,7 @@ class ProfileCoverage:
             "classification": self.classification,
             "enabled_actions": self.enabled_actions,
             "disabled_actions": self.disabled_actions,
+            "inherited_actions": self.inherited_actions,
             "reasons": list(self.reasons),
         }
 
@@ -160,10 +162,64 @@ def _profile_classification(actions: list[ActionCoverage]) -> str:
     return max(actions, key=lambda item: priority[item.classification]).classification
 
 
+def _classify_action(
+    *,
+    domain: str,
+    profile: str,
+    action_index: int,
+    raw_action: Mapping[str, Any],
+) -> ActionCoverage | None:
+    action = OBSAction.from_mapping(raw_action)
+    if not action.enabled:
+        return None
+
+    provenance = f"{domain}:{profile}"
+    try:
+        assignments = desired_assignments_from_actions(
+            (action,),
+            provenance=provenance,
+        )
+    except UnsupportedIntentAction as exc:
+        return ActionCoverage(
+            domain,
+            profile,
+            action_index,
+            action.type,
+            "legacy_only",
+            (),
+            str(exc),
+        )
+    except (TypeError, ValueError) as exc:
+        return ActionCoverage(
+            domain,
+            profile,
+            action_index,
+            action.type,
+            "invalid",
+            (),
+            str(exc),
+        )
+
+    kinds = {assignment.key.kind for assignment in assignments}
+    return ActionCoverage(
+        domain,
+        profile,
+        action_index,
+        action.type,
+        _classification_for_property_kinds(kinds),
+        tuple(sorted(kinds)),
+        "" if assignments else "action produced no stable managed property",
+    )
+
+
 def build_migration_coverage_report(
     config: Mapping[str, Any],
 ) -> MigrationCoverageReport:
-    """Describe declarative migration maturity without OBS I/O or mutations."""
+    """Describe declarative migration maturity without OBS I/O or mutations.
+
+    Action totals count declarations once. Profile classifications use effective
+    inherited actions, so an empty child cannot hide a legacy-only parent.
+    """
 
     action_rows: list[ActionCoverage] = []
     profile_rows: list[ProfileCoverage] = []
@@ -174,105 +230,122 @@ def build_migration_coverage_report(
     for domain in ACTION_PROFILE_DOMAINS:
         raw_domain = profiles.get(domain)
         domain_profiles = raw_domain if isinstance(raw_domain, Mapping) else {}
-        for profile_name in sorted(domain_profiles, key=lambda value: str(value).casefold()):
-            raw_profile = domain_profiles.get(profile_name)
+        declared_by_profile: dict[str, list[ActionCoverage]] = {}
+        disabled_by_profile: dict[str, int] = {}
+        parent_by_profile: dict[str, str] = {}
+        invalid_profile_reason: dict[str, str] = {}
+
+        for raw_name in sorted(domain_profiles, key=lambda value: str(value).casefold()):
+            name = str(raw_name)
+            raw_profile = domain_profiles.get(raw_name)
             if not isinstance(raw_profile, Mapping):
-                profile_rows.append(
-                    ProfileCoverage(
-                        domain,
-                        str(profile_name),
-                        "invalid",
-                        0,
-                        0,
-                        ("profile is not an object",),
-                    )
-                )
+                declared_by_profile[name] = []
+                disabled_by_profile[name] = 0
+                parent_by_profile[name] = ""
+                invalid_profile_reason[name] = "profile is not an object"
                 continue
 
+            parent_by_profile[name] = str(raw_profile.get("extends") or "").strip()
             raw_actions = raw_profile.get("actions")
             actions = raw_actions if isinstance(raw_actions, list) else []
-            profile_actions: list[ActionCoverage] = []
+            declared: list[ActionCoverage] = []
             disabled = 0
             for index, raw_action in enumerate(actions):
                 if not isinstance(raw_action, Mapping):
                     row = ActionCoverage(
                         domain,
-                        str(profile_name),
+                        name,
                         index,
                         "",
                         "invalid",
                         (),
                         "action is not an object",
                     )
+                    declared.append(row)
                     action_rows.append(row)
-                    profile_actions.append(row)
                     continue
-
-                action = OBSAction.from_mapping(raw_action)
-                if not action.enabled:
+                parsed = OBSAction.from_mapping(raw_action)
+                if not parsed.enabled:
                     disabled += 1
                     continue
-
-                provenance = f"{domain}:{profile_name}"
-                try:
-                    assignments = desired_assignments_from_actions(
-                        (action,),
-                        provenance=provenance,
-                    )
-                except UnsupportedIntentAction as exc:
-                    row = ActionCoverage(
-                        domain,
-                        str(profile_name),
-                        index,
-                        action.type,
-                        "legacy_only",
-                        (),
-                        str(exc),
-                    )
-                except (TypeError, ValueError) as exc:
-                    row = ActionCoverage(
-                        domain,
-                        str(profile_name),
-                        index,
-                        action.type,
-                        "invalid",
-                        (),
-                        str(exc),
-                    )
-                else:
-                    kinds = {assignment.key.kind for assignment in assignments}
-                    classification = _classification_for_property_kinds(kinds)
-                    reason = (
-                        ""
-                        if assignments
-                        else "action produced no stable managed property"
-                    )
-                    row = ActionCoverage(
-                        domain,
-                        str(profile_name),
-                        index,
-                        action.type,
-                        classification,
-                        tuple(sorted(kinds)),
-                        reason,
-                    )
+                row = _classify_action(
+                    domain=domain,
+                    profile=name,
+                    action_index=index,
+                    raw_action=raw_action,
+                )
+                assert row is not None
+                declared.append(row)
                 action_rows.append(row)
-                profile_actions.append(row)
+            declared_by_profile[name] = declared
+            disabled_by_profile[name] = disabled
+
+        resolved_cache: dict[str, tuple[list[ActionCoverage], int, str]] = {}
+
+        def resolve_effective(
+            name: str,
+            stack: tuple[str, ...] = (),
+        ) -> tuple[list[ActionCoverage], int, str]:
+            cached = resolved_cache.get(name)
+            if cached is not None:
+                return cached
+            if name in stack:
+                return [], 0, "circular profile inheritance: " + " -> ".join((*stack, name))
+            if name in invalid_profile_reason:
+                return [], 0, invalid_profile_reason[name]
+            parent = parent_by_profile.get(name, "")
+            inherited: list[ActionCoverage] = []
+            inherited_count = 0
+            if parent:
+                if parent not in declared_by_profile:
+                    return [], 0, f"missing parent profile: {parent}"
+                parent_actions, parent_inherited, error = resolve_effective(
+                    parent,
+                    (*stack, name),
+                )
+                if error:
+                    return [], 0, error
+                inherited = list(parent_actions)
+                inherited_count = len(parent_actions)
+                # parent_inherited is already included in len(parent_actions).
+                del parent_inherited
+            effective = [*inherited, *declared_by_profile.get(name, [])]
+            result = (effective, inherited_count, "")
+            resolved_cache[name] = result
+            return result
+
+        for raw_name in sorted(domain_profiles, key=lambda value: str(value).casefold()):
+            name = str(raw_name)
+            effective, inherited_count, resolution_error = resolve_effective(name)
+            if resolution_error:
+                profile_rows.append(
+                    ProfileCoverage(
+                        domain,
+                        name,
+                        "invalid",
+                        len(declared_by_profile.get(name, [])),
+                        disabled_by_profile.get(name, 0),
+                        0,
+                        (resolution_error,),
+                    )
+                )
+                continue
 
             reasons = tuple(
                 dict.fromkeys(
                     item.reason
-                    for item in profile_actions
+                    for item in effective
                     if item.reason
                 )
             )
             profile_rows.append(
                 ProfileCoverage(
                     domain,
-                    str(profile_name),
-                    _profile_classification(profile_actions),
-                    len(profile_actions),
-                    disabled,
+                    name,
+                    _profile_classification(effective),
+                    len(declared_by_profile.get(name, [])),
+                    disabled_by_profile.get(name, 0),
+                    inherited_count,
                     reasons,
                 )
             )
@@ -285,6 +358,7 @@ def build_migration_coverage_report(
                 "layout",
                 str(profile_name),
                 "delegated",
+                0,
                 0,
                 0,
                 ("owned by OBSLayoutManager",),
