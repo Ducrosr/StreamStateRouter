@@ -281,6 +281,19 @@ class OBSResourceCatalogReader:
         except OBSRequestError as exc:
             warnings.append(f"Video settings unavailable: {exc}")
 
+        final_collection_response = self._send("GetSceneCollectionList")
+        final_collection = str(
+            final_collection_response.get("currentSceneCollectionName") or ""
+        ).strip()
+        if collection and final_collection and final_collection != collection:
+            raise OBSRequestError(
+                "GetSceneCollectionList",
+                (
+                    "Scene Collection changed during catalog sync: "
+                    f"{collection} -> {final_collection}"
+                ),
+            )
+
         return OBSResourceCatalog(
             collection=collection,
             current_program_scene=current_program_scene,
