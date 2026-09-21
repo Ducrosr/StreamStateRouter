@@ -241,6 +241,7 @@ class RoutingService:
         self._lock = threading.RLock()
         self._dispatch_lock = threading.RLock()
         self._paused = False
+        self._resume_revalidation_pending = False
         self._last_app: ForegroundApp | None = None
         # Keep the last real external foreground independently from transient
         # None values produced while SSR itself owns the foreground window.
@@ -503,10 +504,25 @@ class RoutingService:
         )
 
     def pause(self, paused: bool = True) -> None:
+        requested = bool(paused)
         with self._lock:
-            self._paused = bool(paused)
+            was_paused = self._paused
+            self._paused = requested
+            if requested:
+                self._resume_revalidation_pending = False
+            elif was_paused:
+                # A pending automatic decision may have expired while routing
+                # was suspended. Force exactly one fresh routing decision before
+                # it can be released so normal debounce state cannot make an old
+                # decision appear current after resume.
+                self._resume_revalidation_pending = True
         self._wake.set()
-        self._emit(RuntimeEvent("pause", "Routage suspendu" if paused else "Routage repris"))
+        self._emit(
+            RuntimeEvent(
+                "pause",
+                "Routage suspendu" if requested else "Routage repris",
+            )
+        )
 
     def set_manual_override(
         self,
@@ -517,7 +533,7 @@ class RoutingService:
         with self._lock:
             change = self.engine.set_manual_override(state, duration_seconds=duration_seconds)
         if change:
-            self._apply_change(change)
+            self._apply_change(change, origin="manual_override")
         return change
 
     def clear_manual_override(self) -> StateChange | None:
@@ -535,7 +551,7 @@ class RoutingService:
                 use_context_provider=False,
             )
         if change:
-            self._apply_change(change)
+            self._apply_change(change, origin="manual_override_clear")
         return change
 
     def force_reapply(self) -> DispatchResult | None:
@@ -984,6 +1000,11 @@ class RoutingService:
                             # later always wins normally.
                             self._bootstrap_foreground = None
                         paused = self._paused
+                        resume_revalidation = (
+                            self._resume_revalidation_pending and not paused
+                        )
+                        if resume_revalidation:
+                            self._resume_revalidation_pending = False
                     routing_app = bootstrap_app if bootstrap_routing else app
                     if changed_app:
                         self.logger.info(
@@ -1011,7 +1032,7 @@ class RoutingService:
                         with self._lock:
                             change = self.engine.observe(
                                 routing_app,
-                                force=bootstrap_routing,
+                                force=bootstrap_routing or resume_revalidation,
                                 context=routing_context,
                                 use_context_provider=False,
                             )
@@ -1045,8 +1066,14 @@ class RoutingService:
                 wait_for = max(0.0, self.poll_seconds - elapsed)
                 with self._lock:
                     pending = self._pending_dispatch
-                if pending is not None:
-                    wait_for = min(wait_for, max(0.0, pending.deadline - time.monotonic()))
+                    paused = self._paused
+                if pending is not None and (
+                    not paused or self._pending_dispatch_allowed_while_paused(pending)
+                ):
+                    wait_for = min(
+                        wait_for,
+                        max(0.0, pending.deadline - time.monotonic()),
+                    )
                 self._wake.wait(wait_for)
                 self._wake.clear()
         finally:
@@ -2060,7 +2087,18 @@ class RoutingService:
                     success=False,
                 )
             )
-    def _apply_change(self, change: StateChange) -> None:
+    @staticmethod
+    def _pending_dispatch_allowed_while_paused(
+        pending: _PendingDispatch,
+    ) -> bool:
+        return pending.origin in {"manual_override", "manual_override_clear"}
+
+    def _apply_change(
+        self,
+        change: StateChange,
+        *,
+        origin: str | None = None,
+    ) -> None:
         self.logger.info(
             "State decision [%s] -> %s (OBS delay %d ms)",
             change.rule_name,
@@ -2075,13 +2113,13 @@ class RoutingService:
             self._dispatch_generation += 1
             generation = self._dispatch_generation
             decision_id = uuid.uuid4().hex
-            origin = str(change.reason or "router")
+            dispatch_origin = str(origin or change.reason or "router")
             self._pending_dispatch = _PendingDispatch(
                 deadline=time.monotonic() + max(0, change.apply_delay_ms) / 1000.0,
                 generation=generation,
                 change=change,
                 decision_id=decision_id,
-                origin=origin,
+                origin=dispatch_origin,
             )
 
         if superseded is not None:
@@ -2128,7 +2166,7 @@ class RoutingService:
                 request_id=decision_id,
                 payload={
                     "decision_id": decision_id,
-                    "origin": origin,
+                    "origin": dispatch_origin,
                     "generation": generation,
                     "config_revision": self.config_revision,
                     "rule_name": change.rule_name,
@@ -2153,7 +2191,10 @@ class RoutingService:
             if (
                 pending is None
                 or pending.deadline > time.monotonic()
-                or self._paused
+                or (
+                    self._paused
+                    and not self._pending_dispatch_allowed_while_paused(pending)
+                )
             ):
                 return
             self._pending_dispatch = None
