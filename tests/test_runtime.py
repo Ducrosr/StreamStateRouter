@@ -1271,6 +1271,60 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_pause_holds_due_automatic_dispatch_until_resume(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", state, exe="game.exe", apply_delay_ms=80)]),
+            debounce_ms=0,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(app),
+        )
+        decided = threading.Event()
+        service.on_change = lambda _change: decided.set()
+        service.start()
+        try:
+            self.assertTrue(decided.wait(1.0))
+            service.pause(True)
+            time.sleep(0.12)
+            self.assertEqual(dispatcher.changes, [])
+
+            service.pause(False)
+            deadline = time.monotonic() + 1.0
+            while not dispatcher.changes and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(dispatcher.changes), 1)
+            self.assertEqual(dispatcher.changes[0].current.game, "Game")
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_manual_profile_command_remains_available_while_paused(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service.start()
+        try:
+            request_id = service.request_profile("game", "Vanilla")
+            result = collector.wait(request_id)
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(dispatcher.profile_threads[0][2], "SSR-Router")
+        finally:
+            self.assertTrue(service.stop())
+
     def test_service_routes_foreground_in_background(self):
         app = ForegroundApp(1, 1, "game.exe")
         state = StreamState(game="Game")
