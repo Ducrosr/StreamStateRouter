@@ -53,7 +53,7 @@ jobs:
           if (-not (Test-Path $Path)) { throw "Portable ZIP missing" }
       - name: Install Stream Deck dependencies
         working-directory: streamdeck-plugin
-        run: npm install --ignore-scripts --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build Stream Deck plugin
         working-directory: streamdeck-plugin
         run: |
