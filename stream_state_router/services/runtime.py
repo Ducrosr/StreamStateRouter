@@ -289,6 +289,10 @@ class RoutingService:
         self.on_change: Callable[[StateChange], None] | None = None
         self.on_dispatch: Callable[[DispatchResult], None] | None = None
         self.on_event: Callable[[RuntimeEvent], None] | None = None
+        if self._declarative_planning is not None:
+            self._declarative_planning.set_cooperative_yield(
+                self._cooperative_obs_yield
+            )
         if hasattr(self.dispatcher, "set_cooperative_yield"):
             self.dispatcher.set_cooperative_yield(self._cooperative_obs_yield)
         elif layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
