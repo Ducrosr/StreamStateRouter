@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass
+ from dataclasses import dataclass
 import json
 import math
 from typing import Any, Mapping
 
-from .models import DesiredAssignment, DesiredState, ObservedState, PropertyKey
+from .models import (
+    DesiredAssignment,
+    DesiredState,
+    ObservedState,
+    PropertyKey,
+    _freeze_value,
+    _materialize_value,
+)
 
 
 _OPERATION_TYPES = {
@@ -31,8 +37,8 @@ class DiffEntry:
     provenance: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "observed", deepcopy(self.observed))
-        object.__setattr__(self, "desired", deepcopy(self.desired))
+        object.__setattr__(self, "observed", _freeze_value(self.observed))
+        object.__setattr__(self, "desired", _freeze_value(self.desired))
 
     def as_mapping(self) -> dict[str, object]:
         sensitive = self.key.kind in {"input_setting", "filter_setting"}
@@ -43,9 +49,13 @@ class DiffEntry:
             "observed": (
                 "<redacted>"
                 if sensitive and self.observed_known
-                else self.observed
+                else _materialize_value(self.observed)
             ),
-            "desired": "<redacted>" if sensitive else self.desired,
+            "desired": (
+                "<redacted>"
+                if sensitive
+                else _materialize_value(self.desired)
+            ),
             "provenance": list(self.provenance),
         }
 
@@ -60,16 +70,24 @@ class PlanOperation:
     reason: str = "value_differs"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "observed", deepcopy(self.observed))
-        object.__setattr__(self, "target", deepcopy(self.target))
+        object.__setattr__(self, "observed", _freeze_value(self.observed))
+        object.__setattr__(self, "target", _freeze_value(self.target))
 
     def as_mapping(self) -> dict[str, object]:
         sensitive = self.key.kind in {"input_setting", "filter_setting"}
         return {
             "operation": self.operation,
             "property": self.key.as_mapping(),
-            "observed": "<redacted>" if sensitive else self.observed,
-            "target": "<redacted>" if sensitive else self.target,
+            "observed": (
+                "<redacted>"
+                if sensitive
+                else _materialize_value(self.observed)
+            ),
+            "target": (
+                "<redacted>"
+                if sensitive
+                else _materialize_value(self.target)
+            ),
             "provenance": list(self.provenance),
             "reason": self.reason,
         }
@@ -135,7 +153,7 @@ def _operation_for(assignment: DesiredAssignment) -> str | None:
 
 def _is_json_compatible(value: Any) -> bool:
     try:
-        json.dumps(value, allow_nan=False)
+        json.dumps(_materialize_value(value), allow_nan=False)
     except (TypeError, ValueError, OverflowError):
         return False
     return True
