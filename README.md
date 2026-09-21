@@ -389,8 +389,21 @@ retourne un `request_id`. Le résultat se lit ensuite avec
 
 `POST /planner/current` met en file un dry-run du state courant. Le corps peut
 contenir `{"refresh_catalog": false}` pour réutiliser le dernier catalogue
-structurel ; par défaut le catalogue est resynchronisé. Le résultat est
-diagnostique uniquement : aucune opération planifiée n'est exécutée.
+structurel ; par défaut le catalogue est resynchronisé.
+
+Un premier executor déclaratif expérimental est disponible uniquement avec
+`SSR_ENABLE_DECLARATIVE_EXECUTION=1` et lorsque SSR est explicitement en pause.
+Il reste opt-in et ne remplace pas le dispatcher historique :
+
+- `POST /planner/prepare_current` prépare un ticket mono-usage lié à la session
+  OBS, la Scene Collection, l'époque du catalogue et l'état logique courant ;
+- `POST /planner/execute` avec `{"plan_id": "..."}` consomme ce ticket ;
+- `GET /requests/<request_id>` expose le résultat asynchrone et son statut métier.
+
+Le MVP exécute uniquement `SetSceneItemVisibility` pour des conteneurs scène
+identifiés par UUID et `SetInputMute` pour des inputs identifiés par UUID.
+Toute autre propriété rend le DesiredState non exécutable. Les LayoutProfiles
+restent exclusivement délégués à `OBSLayoutManager`.
 
 `GET /status` expose également `obs_catalog`, qui indique si un catalogue a
 déjà été synchronisé, s'il est `stale` / partiel et fournit uniquement son résumé.
@@ -441,10 +454,14 @@ La première fondation est volontairement **read-only** :
 - un fingerprint de cible permet d'identifier deux résolutions conduisant au
   même résultat physique sans inclure la provenance.
 
-À ce stade, cette architecture reste un outil de **diagnostic/dry-run** :
-l'exécution existante du dispatcher n'est pas remplacée et aucune nouvelle
-opération générée par le planner n'est envoyée à OBS. Les LayoutProfiles
-conservent leur moteur spécialisé validé.
+Le planner reste un composant **pur et read-only**. L'exécution existante du
+dispatcher n'est pas remplacée. Le chemin expérimental décrit ci-dessus prépare
+et acquitte seulement deux propriétés simples via le worker `SSR-Router`, avec
+revalidation de session/collection/identité juste avant chaque mutation et
+relecture physique après chaque `Set*`. Il n'alimente pas `_applied_profiles`,
+n'effectue ni retry de mutation ni rollback, et exige une nouvelle préparation
+si ses hypothèses deviennent périmées. Les LayoutProfiles conservent leur moteur
+spécialisé validé.
 
 La pause suspend le routage automatique, la réconciliation périodique et le
 départ d'un dispatch différé encore en attente. Les commandes manuelles
