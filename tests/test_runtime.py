@@ -2198,6 +2198,87 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_resume_between_pause_snapshot_and_due_dispatch_revalidates_first(self):
+        game_app = ForegroundApp(1, 1, "game.exe")
+        other_app = ForegroundApp(2, 2, "other.exe")
+        game_state = StreamState(game="Game")
+        other_state = StreamState(game="Other")
+        provider = FakeProvider(game_app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        game_state,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    ),
+                    AppRule(
+                        "Other",
+                        other_state,
+                        exe="other.exe",
+                        apply_delay_ms=0,
+                    ),
+                ]
+            ),
+            debounce_ms=150,
+        )
+        dispatcher = ThreadRecordingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=provider,
+        )
+        first_decision = threading.Event()
+        paused_snapshot_reached = threading.Event()
+        release_worker = threading.Event()
+        other_dispatched = threading.Event()
+
+        def on_change(change):
+            if change.current == game_state:
+                first_decision.set()
+
+        def on_foreground(app):
+            if app == other_app:
+                paused_snapshot_reached.set()
+                if not release_worker.wait(1.0):
+                    raise RuntimeError("resume race barrier timed out")
+
+        def on_dispatch(_result):
+            if dispatcher.changes and dispatcher.changes[-1].current == other_state:
+                other_dispatched.set()
+
+        service.on_change = on_change
+        service.on_foreground = on_foreground
+        service.on_dispatch = on_dispatch
+        service.start()
+        try:
+            self.assertTrue(first_decision.wait(1.0))
+            service.pause(True)
+            provider.app = other_app
+            service._wake.set()
+
+            self.assertTrue(paused_snapshot_reached.wait(1.0))
+            time.sleep(0.2)
+
+            # Resume exactly after the worker captured paused=True and before
+            # it can reach _process_due_dispatch(). The stale Game decision is
+            # already due at this point.
+            service.pause(False)
+            release_worker.set()
+
+            self.assertTrue(other_dispatched.wait(1.0))
+            time.sleep(0.05)
+            self.assertEqual(
+                [item.current for item in dispatcher.changes],
+                [other_state],
+            )
+            self.assertEqual(dispatcher.thread_names, ["SSR-Router"])
+        finally:
+            release_worker.set()
+            self.assertTrue(service.stop())
+
     def test_paused_expired_automatic_dispatch_does_not_busy_spin(self):
         app = ForegroundApp(1, 1, "game.exe")
         state = StreamState(game="Game")
