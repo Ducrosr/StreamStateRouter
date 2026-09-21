@@ -251,6 +251,7 @@ class RoutingService:
         self._dispatch_generation = 0
         self._last_obs_probe = 0.0
         self._last_obs_connected: bool | None = None
+        self._last_obs_session_generation: int | None = None
         self._last_state_reconcile = 0.0
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._routing_diagnostics: deque[RoutingDecisionStatus] = deque(maxlen=100)
@@ -1064,6 +1065,7 @@ class RoutingService:
         config = getattr(client, "config", None)
         if client is None or config is None or not bool(getattr(config, "enabled", False)):
             self._last_obs_connected = None
+            self._last_obs_session_generation = None
             if self._declarative_planning is not None:
                 self._declarative_planning.invalidate_catalog("OBS disabled")
             return
@@ -1076,7 +1078,19 @@ class RoutingService:
         ok, message = client.probe()
         if ok:
             manager = getattr(self.dispatcher, "layout_manager", None)
-            if self._last_obs_connected is not True:
+            try:
+                session_generation = int(
+                    getattr(client, "session_generation", 0) or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                session_generation = 0
+            session_changed = bool(
+                session_generation
+                and self._last_obs_session_generation is not None
+                and session_generation != self._last_obs_session_generation
+            )
+            new_session = self._last_obs_connected is not True or session_changed
+            if new_session:
                 self.logger.info("OBS connection established: %s", message)
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
@@ -1089,6 +1103,9 @@ class RoutingService:
                 self._last_state_reconcile = 0.0
                 self._reconcile_activation("connexion OBS")
                 self._emit(RuntimeEvent("obs_connected", message))
+            self._last_obs_session_generation = (
+                session_generation if session_generation else None
+            )
             if manager is not None and hasattr(manager, "retry_pending_fade_cleanup"):
                 cleanup_warnings = manager.retry_pending_fade_cleanup()
                 if cleanup_warnings:
@@ -1116,6 +1133,14 @@ class RoutingService:
                 )
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
+        try:
+            failed_generation = int(
+                getattr(client, "session_generation", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            failed_generation = 0
+        if failed_generation:
+            self._last_obs_session_generation = failed_generation
 
     def _reconcile_desired_state_if_due(self) -> None:
         if self._last_obs_connected is False:
