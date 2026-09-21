@@ -257,7 +257,7 @@ class OBSResourceCatalogReader:
 
     def _request_count(self) -> int:
         try:
-            return int(getattr(self.client, "request_count"))
+            return int(self.client.request_count)
         except (AttributeError, TypeError, ValueError):
             return -1
 
