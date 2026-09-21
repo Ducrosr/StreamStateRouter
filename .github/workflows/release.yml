@@ -98,6 +98,27 @@ jobs:
           }
           $Plugin = Get-ChildItem .\streamdeck-plugin\*.streamDeckPlugin -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $Plugin) { throw "Stream Deck plugin artifact missing" }
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $Artifacts = @(
+            Get-Item ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-portable.zip",
+            Get-Item ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe",
+            Get-Item ".\release\build-manifest.json",
+            (Get-ChildItem .\streamdeck-plugin\*.streamDeckPlugin -ErrorAction Stop | Select-Object -First 1)
+          ) | Sort-Object Name
+
+          $Lines = foreach ($Artifact in $Artifacts) {
+            if (-not $Artifact -or -not (Test-Path $Artifact.FullName)) {
+              throw "Cannot hash missing release artifact"
+            }
+            $Hash = (Get-FileHash -Algorithm SHA256 -Path $Artifact.FullName).Hash.ToLowerInvariant()
+            "$Hash  $($Artifact.Name)"
+          }
+
+          $ChecksumPath = ".\release\SHA256SUMS.txt"
+          $Lines | Set-Content -Path $ChecksumPath -Encoding utf8
+          if (-not (Test-Path $ChecksumPath)) { throw "Checksum manifest missing" }
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -106,4 +127,5 @@ jobs:
             release/Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe
             streamdeck-plugin/*.streamDeckPlugin
             release/build-manifest.json
+            release/SHA256SUMS.txt
           generate_release_notes: true
