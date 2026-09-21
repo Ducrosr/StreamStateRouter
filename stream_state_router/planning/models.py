@@ -1,10 +1,42 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping
+
+
+def _typed_values_equal(left: Any, right: Any) -> bool:
+    """Strict recursive equality for managed JSON-like values.
+
+    Booleans are never interchangeable with numbers and integers are compared
+    without lossy float conversion. Numeric tolerance belongs to the specific
+    physical property that needs it, not to arbitrary settings.
+    """
+
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        if isinstance(left, float) and not math.isfinite(left):
+            return False
+        if isinstance(right, float) and not math.isfinite(right):
+            return False
+        return left == right
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if set(left) != set(right):
+            return False
+        return all(_typed_values_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _typed_values_equal(l_item, r_item)
+            for l_item, r_item in zip(left, right)
+        )
+    if type(left) is not type(right):
+        return False
+    return left == right
 
 
 def _canonical_signature_value(value: Any) -> Any:
@@ -47,10 +79,56 @@ class PropertyKey:
     setting: str = ""
 
     def __post_init__(self) -> None:
-        if not str(self.kind).strip():
+        kind = str(self.kind).strip()
+        if not kind:
             raise ValueError("PropertyKey.kind is required")
         if int(self.occurrence) < 0:
             raise ValueError("PropertyKey.occurrence must be >= 0")
+
+        required: dict[str, tuple[str, ...]] = {
+            "scene_item_visibility": ("container", "source"),
+            "input_mute": ("source",),
+            "input_volume_db": ("source",),
+            "input_setting": ("source", "setting"),
+            "filter_enabled": ("source", "filter_name"),
+            "filter_setting": ("source", "filter_name", "setting"),
+        }
+        allowed: dict[str, frozenset[str]] = {
+            "program_scene": frozenset({"collection"}),
+            "scene_item_visibility": frozenset(
+                {"collection", "container", "source", "occurrence"}
+            ),
+            "input_mute": frozenset({"collection", "source"}),
+            "input_volume_db": frozenset({"collection", "source"}),
+            "input_setting": frozenset({"collection", "source", "setting"}),
+            "filter_enabled": frozenset({"collection", "source", "filter_name"}),
+            "filter_setting": frozenset(
+                {"collection", "source", "filter_name", "setting"}
+            ),
+            "layout_profile": frozenset({"collection", "container"}),
+        }
+
+        if kind in allowed:
+            values = {
+                "collection": self.collection,
+                "container": self.container,
+                "source": self.source,
+                "occurrence": self.occurrence,
+                "filter_name": self.filter_name,
+                "setting": self.setting,
+            }
+            for field_name, value in values.items():
+                if field_name in allowed[kind]:
+                    continue
+                if value not in {"", 0}:
+                    raise ValueError(
+                        f"PropertyKey.{field_name} is not valid for {kind}"
+                    )
+            for field_name in required.get(kind, ()):
+                if not str(getattr(self, field_name) or "").strip():
+                    raise ValueError(
+                        f"PropertyKey.{field_name} is required for {kind}"
+                    )
 
     @classmethod
     def scene_item_visibility(
@@ -171,6 +249,14 @@ class DesiredAssignment:
     value: Any
     provenance: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", deepcopy(self.value))
+        object.__setattr__(
+            self,
+            "provenance",
+            tuple(str(item) for item in self.provenance if str(item)),
+        )
+
     @classmethod
     def create(
         cls,
@@ -241,7 +327,7 @@ class DesiredState:
             if previous is None:
                 merged[assignment.key] = assignment
                 continue
-            if previous.value != assignment.value:
+            if not _typed_values_equal(previous.value, assignment.value):
                 raise DesiredStateConflict(assignment.key, previous, assignment)
             provenance = tuple(
                 dict.fromkeys((*previous.provenance, *assignment.provenance))
@@ -322,6 +408,9 @@ class ObservedValue:
     known: bool
     value: Any = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", deepcopy(self.value))
+
     @classmethod
     def unknown(cls) -> "ObservedValue":
         return cls(False, None)
@@ -334,6 +423,9 @@ class ObservedValue:
 @dataclass(frozen=True, slots=True)
 class ObservedState:
     values: Mapping[PropertyKey, ObservedValue]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
 
     @classmethod
     def empty(cls) -> "ObservedState":
