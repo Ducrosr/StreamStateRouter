@@ -232,11 +232,22 @@ class DeclarativeIntentTests(unittest.TestCase):
             },
         )
 
-        with self.assertRaises(DesiredOwnershipConflict):
+        with self.assertRaises(DesiredOwnershipConflict) as captured:
             desired_state_from_action_sets(
                 [("overlay:Base", (action,))],
                 reserved_owners={key: "layout:Gameplay"},
             )
+
+        self.assertEqual(
+            captured.exception.left_owner,
+            "layout:Gameplay",
+        )
+        self.assertEqual(
+            captured.exception.right_owner,
+            "overlay:Base",
+        )
+        self.assertIn("layout:Gameplay", str(captured.exception))
+        self.assertIn("overlay:Base", str(captured.exception))
 
     def test_unknown_action_is_not_interpreted_as_macro(self):
         with self.assertRaises(UnsupportedIntentAction):
