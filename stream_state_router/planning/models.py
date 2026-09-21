@@ -39,6 +39,27 @@ def _typed_values_equal(left: Any, right: Any) -> bool:
     return left == right
 
 
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    return deepcopy(value)
+
+
+def _materialize_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _materialize_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_materialize_value(item) for item in value]
+    return deepcopy(value)
+
+
 def _canonical_signature_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, str)):
         return value
@@ -250,7 +271,7 @@ class DesiredAssignment:
     provenance: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "value", deepcopy(self.value))
+        object.__setattr__(self, "value", _freeze_value(self.value))
         object.__setattr__(
             self,
             "provenance",
@@ -272,7 +293,7 @@ class DesiredAssignment:
         return cls(key=key, value=value, provenance=values)
 
     def as_mapping(self, *, diagnostic: bool = False) -> dict[str, object]:
-        value: Any = self.value
+        value: Any = _materialize_value(self.value)
         if diagnostic and self.key.kind in {"input_setting", "filter_setting"}:
             # Arbitrary OBS input settings may contain URLs/tokens.  The legacy
             # dispatcher intentionally avoids exposing their values in status
@@ -411,7 +432,7 @@ class ObservedValue:
     reason: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "value", deepcopy(self.value))
+        object.__setattr__(self, "value", _freeze_value(self.value))
 
     @classmethod
     def unknown(
