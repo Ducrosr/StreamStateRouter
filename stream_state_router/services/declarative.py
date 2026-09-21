@@ -59,10 +59,11 @@ def _catalog_preflight(
         *input_names,
         *(item.source for item in catalog.scene_items),
     }
-    item_keys = {
-        (item.container, item.source, item.occurrence)
+    item_by_key = {
+        (item.container, item.source, item.occurrence): item
         for item in catalog.scene_items
     }
+    item_keys = set(item_by_key)
 
     def reject(key: PropertyKey, code: str, message: str) -> None:
         blocked[key] = PlanDiagnostic("error", code, message, key)
@@ -116,7 +117,14 @@ def _catalog_preflight(
             continue
 
         if key.kind == "scene_item_visibility":
-            required = ("GetSceneItemId", "GetSceneItemEnabled")
+            identity = (key.container, key.source, key.occurrence)
+            reference = item_by_key.get(identity)
+            list_request = (
+                "GetGroupSceneItemList"
+                if reference is not None and reference.container_kind == "group"
+                else "GetSceneItemList"
+            )
+            required = (list_request, "GetSceneItemEnabled")
             missing = [
                 request
                 for request in required
@@ -140,7 +148,6 @@ def _catalog_preflight(
                     ),
                 )
                 continue
-            identity = (key.container, key.source, key.occurrence)
             if identity not in item_keys:
                 reject(
                     key,
