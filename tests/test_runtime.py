@@ -1004,7 +1004,7 @@ class RuntimeTests(unittest.TestCase):
     def test_unmanaged_default_domains_do_not_trigger_runtime_reconciliation(self):
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
         engine.set_manual_override(StreamState())
-        dispatcher = OBSDispatcher(FakeClient(), {})
+        dispatcher = OBSDispatcher(CatalogRuntimeClient(), {})
         service = RoutingService(
             engine,
             dispatcher,
