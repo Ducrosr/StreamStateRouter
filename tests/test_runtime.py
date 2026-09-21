@@ -29,8 +29,10 @@ from stream_state_router.services.runtime import RoutingService
 class FakeProvider:
     def __init__(self, app):
         self.app = app
+        self.calls = 0
 
     def get(self):
+        self.calls += 1
         return self.app
 
 
@@ -44,6 +46,16 @@ class FakeDispatcher:
 
     def dispatch_state(self, state, force=False):
         return DispatchResult(0, 0, ("game",))
+
+
+class ThreadRecordingDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.thread_names = []
+
+    def dispatch_change(self, change):
+        self.thread_names.append(threading.current_thread().name)
+        return super().dispatch_change(change)
 
 
 class DiagnosticDispatcher(FakeDispatcher):
@@ -240,6 +252,9 @@ class CatalogRuntimeClient:
         self.connected = True
         self.request_count = 0
         self.calls = []
+        self.collection = "Main"
+        self.program_scene = "Idle"
+        self.session_generation = 1
 
     def send(self, request, data=None):
         self.request_count += 1
@@ -259,10 +274,10 @@ class CatalogRuntimeClient:
                 ]
             }
         if request == "GetSceneCollectionList":
-            return {"currentSceneCollectionName": "Main"}
+            return {"currentSceneCollectionName": self.collection}
         if request == "GetSceneList":
             return {
-                "currentProgramSceneName": "Idle",
+                "currentProgramSceneName": self.program_scene,
                 "currentProgramSceneUuid": "idle-uuid",
                 "scenes": [
                     {
@@ -289,9 +304,13 @@ class CatalogRuntimeClient:
             return {"baseWidth": 1920, "baseHeight": 1080}
         if request == "GetCurrentProgramScene":
             return {
-                "currentProgramSceneName": "Idle",
+                "currentProgramSceneName": self.program_scene,
                 "currentProgramSceneUuid": "idle-uuid",
             }
+        if request == "GetStreamStatus":
+            return {"outputActive": False}
+        if request == "GetRecordStatus":
+            return {"outputActive": False}
         raise AssertionError(f"Unexpected catalog runtime request: {request}")
 
     def probe(self):
