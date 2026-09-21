@@ -513,7 +513,7 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertIn("layout:Layout", plan["declarative_error"]["message"])
         self.assertIn("overlay:B", plan["declarative_error"]["message"])
 
-    def test_runtime_owned_layout_visibility_is_not_reserved(self):
+    def test_runtime_owned_layout_visibility_is_reserved_against_action_profile(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
             {
@@ -564,7 +564,113 @@ class OBSDispatcherTests(unittest.TestCase):
             },
         )
 
-        self.assertNotIn("declarative_error", plan)
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
+        self.assertIn("runtime:visibility", plan["declarative_error"]["message"])
+        self.assertIn("overlay:B", plan["declarative_error"]["message"])
+
+    def test_runtime_owner_table_conflicts_without_persisted_marker(self):
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Alert",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+        dispatcher.layout_manager.set_runtime_visibility_owners(
+            [("In Game", "Alert")]
+        )
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="B"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
+        self.assertIn("runtime:visibility", plan["declarative_error"]["message"])
+
+    def test_false_condition_blocks_even_when_profile_was_already_applied(self):
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "B": {
+                        "conditions": {"streaming": True},
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+        dispatcher._applied_profiles["overlay"] = "B"
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="B"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(plan["domains"][1]["status"], "blocked")
+        self.assertEqual(
+            plan["declarative_blocks"],
+            [
+                {
+                    "provenance": "overlay:B",
+                    "reason": "conditions OBS non satisfaites",
+                }
+            ],
+        )
+
+    def test_missing_profile_is_reported_as_declarative_block(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="Missing"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertIn(
+            {
+                "provenance": "overlay:Missing",
+                "reason": "Profil OBS introuvable",
+            },
+            plan["declarative_blocks"],
+        )
 
     def test_read_only_plan_reports_blocked_conditions_without_mutation(self):
         client = FakeClient()
