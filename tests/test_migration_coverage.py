@@ -4,6 +4,9 @@ import json
 import unittest
 
 from stream_state_router.planning import build_migration_coverage_report
+from stream_state_router.services.declarative_execution import (
+    DECLARATIVE_EXECUTOR_KINDS,
+)
 from stream_state_router.planning.migration_coverage import EXECUTABLE_PROPERTY_KINDS
 from stream_state_router.services.declarative_execution import _ALLOWED_KINDS
 
@@ -91,7 +94,10 @@ class MigrationCoverageTests(unittest.TestCase):
         self.assertEqual(EXECUTABLE_PROPERTY_KINDS, _ALLOWED_KINDS)
 
     def test_classifies_actions_and_profiles_by_current_maturity(self):
-        report = build_migration_coverage_report(self.sample()).as_mapping()
+        report = build_migration_coverage_report(
+            self.sample(),
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
 
         actions = report["summary"]["actions"]
         self.assertEqual(actions["total"], 6)
@@ -173,7 +179,10 @@ class MigrationCoverageTests(unittest.TestCase):
             }
         }
 
-        report = build_migration_coverage_report(config)
+        report = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        )
 
         self.assertEqual(len(report.actions), 1)
         self.assertEqual(
@@ -206,7 +215,10 @@ class MigrationCoverageTests(unittest.TestCase):
             }
         }
 
-        mapped = build_migration_coverage_report(config).as_mapping()
+        mapped = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
         profiles = {
             row["profile"]: row
             for row in mapped["profiles"]
@@ -236,7 +248,10 @@ class MigrationCoverageTests(unittest.TestCase):
                 }
             }
 
-            mapped = build_migration_coverage_report(config).as_mapping()
+            mapped = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
             row = mapped["profiles"][0]
 
             self.assertEqual(row["classification"], "invalid")
@@ -266,7 +281,10 @@ class MigrationCoverageTests(unittest.TestCase):
             }
         }
 
-        mapped = build_migration_coverage_report(config).as_mapping()
+        mapped = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
         rendered = json.dumps(mapped, ensure_ascii=False)
 
         self.assertNotIn(secret, rendered)
@@ -279,8 +297,49 @@ class MigrationCoverageTests(unittest.TestCase):
             ["input_setting"],
         )
 
+
+    def test_future_executor_kind_updates_coverage_without_report_rewrite(self):
+        config = {
+            "profiles": {
+                "audio": {
+                    "Volume": {
+                        "actions": [
+                            {
+                                "type": "input_volume_db",
+                                "params": {"input": "Music", "volume_db": -8.5},
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+        current = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        )
+        future = build_migration_coverage_report(
+            config,
+            executable_kinds={
+                *DECLARATIVE_EXECUTOR_KINDS,
+                "input_volume_db",
+            },
+        )
+
+        self.assertEqual(
+            current.actions[0].classification,
+            "declarative_plannable",
+        )
+        self.assertEqual(
+            future.actions[0].classification,
+            "declarative_executable",
+        )
+
     def test_empty_configuration_has_complete_zero_action_coverage(self):
-        mapped = build_migration_coverage_report({}).as_mapping()
+        mapped = build_migration_coverage_report(
+            {},
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
 
         self.assertEqual(mapped["summary"]["actions"]["total"], 0)
         self.assertEqual(
