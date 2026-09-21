@@ -32,13 +32,7 @@ jobs:
         with:
           node-version: '24'
       - name: Install
-        run: npm install
-      - name: Emit generated lockfile
-        shell: pwsh
-        run: |
-          Write-Host "LOCKFILE_BASE64_BEGIN"
-          Write-Host ([Convert]::ToBase64String([IO.File]::ReadAllBytes("package-lock.json")))
-          Write-Host "LOCKFILE_BASE64_END"
+        run: npm ci
       - name: Typecheck
         run: npm run typecheck
       - name: Build
