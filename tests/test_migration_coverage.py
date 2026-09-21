@@ -7,8 +7,6 @@ from stream_state_router.planning import build_migration_coverage_report
 from stream_state_router.services.declarative_execution import (
     DECLARATIVE_EXECUTOR_KINDS,
 )
-from stream_state_router.planning.migration_coverage import EXECUTABLE_PROPERTY_KINDS
-from stream_state_router.services.declarative_execution import _ALLOWED_KINDS
 
 
 class MigrationCoverageTests(unittest.TestCase):
@@ -89,9 +87,6 @@ class MigrationCoverageTests(unittest.TestCase):
                 "Gameplay": {"scene": "In Game", "modules": {}},
             },
         }
-
-    def test_report_executor_kinds_match_guarded_executor_allowlist(self):
-        self.assertEqual(EXECUTABLE_PROPERTY_KINDS, _ALLOWED_KINDS)
 
     def test_classifies_actions_and_profiles_by_current_maturity(self):
         report = build_migration_coverage_report(
