@@ -330,6 +330,45 @@ class MigrationCoverageTests(unittest.TestCase):
             "declarative_executable",
         )
 
+    def test_human_report_is_secret_safe_and_surfaces_non_executable_actions(self):
+        from stream_state_router.planning.migration_coverage import (
+            render_migration_coverage_report,
+        )
+
+        secret = "super-secret-value"
+        config = {
+            "profiles": {
+                "capture": {
+                    "Browser": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Browser",
+                                    "settings": {"url": secret},
+                                    "overlay": False,
+                                },
+                            }
+                        ]
+                    }
+                }
+            },
+            "layout_profiles": {
+                "Gameplay": {"scene": "In Game", "modules": {}},
+            },
+        }
+        report = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        )
+
+        rendered = render_migration_coverage_report(report)
+
+        self.assertIn("Couverture de migration déclarative", rendered)
+        self.assertIn("legacy_only", rendered)
+        self.assertIn("layout/Gameplay", rendered)
+        self.assertNotIn(secret, rendered)
+
     def test_empty_configuration_has_complete_zero_action_coverage(self):
         mapped = build_migration_coverage_report(
             {},
