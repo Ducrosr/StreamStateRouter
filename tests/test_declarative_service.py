@@ -30,6 +30,9 @@ class _ServiceClient:
                     "GetInputList",
                     "GetSceneTransitionList",
                     "GetVideoSettings",
+                    "GetCurrentProgramScene",
+                    "GetSceneItemId",
+                    "GetSceneItemEnabled",
                     "GetInputSettings",
                     "GetInputMute",
                     "GetInputVolume",
@@ -207,6 +210,41 @@ class DeclarativePlanningServiceTests(unittest.TestCase):
         self.assertEqual(plan.diagnostics[0].code, "input_missing")
         self.assertFalse(
             any(request == "GetInputSettings" for request, _data in client.requests)
+        )
+
+    def test_condition_blocked_filter_skips_filter_discovery_and_read(self):
+        key = PropertyKey.filter_enabled(
+            collection="Main",
+            source="Chat",
+            filter_name="Existing Filter",
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(
+                    key,
+                    True,
+                    provenance="game:Conditional",
+                )
+            ]
+        )
+        client = _ServiceClient()
+        service = DeclarativePlanningService(client)
+
+        plan = service.plan_state(
+            desired,
+            blocked_provenance={
+                "game:Conditional": "conditions OBS non satisfaites"
+            },
+        )
+
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.operations, ())
+        self.assertEqual(plan.diagnostics[0].code, "condition_blocked")
+        self.assertFalse(
+            any(
+                request in {"GetSourceFilterList", "GetSourceFilter"}
+                for request, _data in client.requests
+            )
         )
 
     def test_missing_filter_is_blocked_before_filter_read(self):
