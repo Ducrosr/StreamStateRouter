@@ -53,6 +53,30 @@ class ConfigTests(unittest.TestCase):
     def test_valid_config_passes(self):
         self.assertEqual(validate_config(self.sample()), [])
 
+    def test_empty_default_domains_are_valid_as_unmanaged(self):
+        data = self.sample()
+        data["profiles"]["game"] = {}
+        data["profiles"]["capture"] = {}
+        data["layout_profiles"] = {}
+
+        self.assertEqual(validate_config(data), [])
+
+    def test_empty_domain_still_rejects_non_default_reference(self):
+        data = self.sample()
+        data["profiles"]["game"] = {}
+        data["router"]["fallback_state"]["Game"] = "Custom"
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(
+                "router.fallback_state.Game référence un profil inexistant : Custom"
+                in error
+                for error in errors
+            ),
+            errors,
+        )
+
     def test_invalid_duplicate_rule_is_reported(self):
         data = self.sample()
         data["rules"].append({"name": "Game", "behavior": "ignore", "exe": "x.exe"})
