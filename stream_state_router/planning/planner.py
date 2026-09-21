@@ -102,13 +102,20 @@ class ExecutionPlan:
 
     @property
     def converged(self) -> bool:
-        return not self.operations and all(item.status == "converged" for item in self.diff)
+        return (
+            not self.operations
+            and not self.blocked
+            and all(item.status == "converged" for item in self.diff)
+        )
 
     @property
     def blocked(self) -> bool:
-        return any(
-            item.status in {"unknown", "unsupported", "blocked"}
-            for item in self.diff
+        return (
+            any(
+                item.status in {"unknown", "unsupported", "blocked"}
+                for item in self.diff
+            )
+            or any(item.level == "error" for item in self.diagnostics)
         )
 
     def as_mapping(self) -> dict[str, object]:
