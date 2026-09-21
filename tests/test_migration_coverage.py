@@ -122,7 +122,7 @@ class MigrationCoverageTests(unittest.TestCase):
         )
         self.assertEqual(
             profiles[("overlay", "DisabledOnly")]["classification"],
-            "declarative_executable",
+            "empty",
         )
         self.assertEqual(
             profiles[("overlay", "DisabledOnly")]["disabled_actions"],
