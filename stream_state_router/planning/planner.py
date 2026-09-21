@@ -357,8 +357,9 @@ def build_execution_plan(
             diagnostics.append(
                 PlanDiagnostic(
                     "warning",
-                    "observed_value_unknown",
-                    "Observed value is unknown; no write is planned until it is resolved.",
+                    current.code or "observed_value_unknown",
+                    current.reason
+                    or "Observed value is unknown; no write is planned until it is resolved.",
                     key,
                 )
             )
