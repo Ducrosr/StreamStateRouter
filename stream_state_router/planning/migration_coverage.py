@@ -68,6 +68,7 @@ class ProfileCoverage:
             "enabled_actions": self.enabled_actions,
             "disabled_actions": self.disabled_actions,
             "inherited_actions": self.inherited_actions,
+            "effective_actions": self.enabled_actions + self.inherited_actions,
             "reasons": list(self.reasons),
         }
 
@@ -299,7 +300,7 @@ def build_migration_coverage_report(
             if parent:
                 if parent not in declared_by_profile:
                     return [], 0, f"missing parent profile: {parent}"
-                parent_actions, parent_inherited, error = resolve_effective(
+                parent_actions, _parent_inherited, error = resolve_effective(
                     parent,
                     (*stack, name),
                 )
@@ -307,8 +308,6 @@ def build_migration_coverage_report(
                     return [], 0, error
                 inherited = list(parent_actions)
                 inherited_count = len(parent_actions)
-                # parent_inherited is already included in len(parent_actions).
-                del parent_inherited
             effective = [*inherited, *declared_by_profile.get(name, [])]
             result = (effective, inherited_count, "")
             resolved_cache[name] = result
