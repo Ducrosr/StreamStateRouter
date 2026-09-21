@@ -308,6 +308,124 @@ class DeclarativeExecutorTests(unittest.TestCase):
         )
         self.assertEqual(write["sceneItemId"], 0)
 
+    def test_target_revalidation_immediately_before_write_can_cancel_mutation(self):
+        key = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(False)},
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+        calls = 0
+
+        def validate_target():
+            nonlocal calls
+            calls += 1
+            return (calls < 3, "target changed")
+
+        result = executor.execute(prepared, validate_target=validate_target)
+
+        self.assertEqual(result.status, "replan_required")
+        self.assertTrue(result.replan_required)
+        self.assertFalse(any(name.startswith("Set") for name, _data in client.requests))
+
+    def test_session_change_between_operations_preserves_not_run_step(self):
+        mute = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        visibility = PropertyKey.scene_item_visibility(
+            collection="Lab Collection",
+            container="Lab",
+            source="Probe",
+            occurrence=0,
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(mute, True),
+                DesiredAssignment.create(visibility, True),
+            ]
+        )
+        prepared = _prepared(
+            desired,
+            {
+                mute: ObservedValue.known_value(False),
+                visibility: ObservedValue.known_value(False),
+            },
+        )
+        client = _ExecutorClient()
+        planning = _PlanningStub(_catalog())
+        executor = DeclarativeExecutor(client, planning)
+
+        def progress(steps):
+            if any(step.key == mute and step.status == "applied" for step in steps):
+                planning.generation = 2
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+            progress=progress,
+        )
+
+        self.assertEqual(result.status, "replan_required")
+        by_key = {step.key: step for step in result.steps}
+        self.assertEqual(by_key[mute].status, "applied")
+        self.assertEqual(by_key[visibility].status, "not_run")
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputMute"),
+            1,
+        )
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetSceneItemEnabled"),
+            0,
+        )
+
+    def test_sensitive_setting_is_redacted_even_when_plan_is_not_executable(self):
+        key = PropertyKey.input_setting(
+            collection="Lab Collection",
+            input_name="Browser",
+            setting="url",
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(
+                    key,
+                    "https://example.invalid/?token=secret",
+                )
+            ]
+        )
+        plan = build_execution_plan(
+            desired,
+            ObservedState(
+                {
+                    key: ObservedValue.known_value(
+                        "https://old.invalid/?token=old-secret"
+                    )
+                }
+            ),
+        )
+        prepared = PreparedExecution.create(
+            desired=desired,
+            plan=plan,
+            collection="Lab Collection",
+            session_generation=1,
+            catalog_epoch=7,
+            config_revision="cfg",
+            dispatch_generation=2,
+            resume_generation=3,
+            bindings=(),
+        )
+
+        diagnostic = str(prepared.as_mapping())
+
+        self.assertNotIn("token=secret", diagnostic)
+        self.assertNotIn("old-secret", diagnostic)
+        self.assertIn("<redacted>", diagnostic)
+
     def test_positive_set_response_requires_matching_readback(self):
         key = PropertyKey.input_mute(
             collection="Lab Collection",
