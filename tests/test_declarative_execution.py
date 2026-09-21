@@ -254,6 +254,51 @@ class DeclarativeExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "replan_required")
         self.assertTrue(result.replan_required)
 
+    def test_input_recreated_under_same_name_requires_replan_without_write(self):
+        key = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(False)},
+        )
+        client = _ExecutorClient()
+        client.input_uuid = "mic-recreated"
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(prepared, validate_target=lambda: (True, ""))
+
+        self.assertEqual(result.status, "replan_required")
+        self.assertTrue(result.replan_required)
+        self.assertFalse(
+            any(name == "SetInputMute" for name, _data in client.requests)
+        )
+
+    def test_catalog_epoch_change_requires_replan_without_write(self):
+        key = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(False)},
+        )
+        planning = _PlanningStub(_catalog())
+        planning.catalog_epoch += 1
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, planning)
+
+        result = executor.execute(prepared, validate_target=lambda: (True, ""))
+
+        self.assertEqual(result.status, "replan_required")
+        self.assertTrue(result.replan_required)
+        self.assertFalse(
+            any(name.startswith("Set") for name, _data in client.requests)
+        )
+
     def test_scene_item_duplicate_added_requires_replan_without_write(self):
         key = PropertyKey.scene_item_visibility(
             collection="Lab Collection",
