@@ -30,7 +30,7 @@ class DiffEntry:
     provenance: tuple[str, ...] = ()
 
     def as_mapping(self) -> dict[str, object]:
-        sensitive = self.key.kind == "input_setting"
+        sensitive = self.key.kind in {"input_setting", "filter_setting"}
         return {
             "property": self.key.as_mapping(),
             "status": self.status,
@@ -55,7 +55,7 @@ class PlanOperation:
     reason: str = "value_differs"
 
     def as_mapping(self) -> dict[str, object]:
-        sensitive = self.key.kind == "input_setting"
+        sensitive = self.key.kind in {"input_setting", "filter_setting"}
         return {
             "operation": self.operation,
             "property": self.key.as_mapping(),
@@ -366,7 +366,7 @@ def build_execution_plan(
 
 
 def _display_value(key: PropertyKey, value: Any) -> str:
-    if key.kind == "input_setting":
+    if key.kind in {"input_setting", "filter_setting"}:
         return "<redacted>"
     return repr(value)
 
