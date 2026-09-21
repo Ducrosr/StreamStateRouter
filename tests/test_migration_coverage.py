@@ -136,6 +136,22 @@ class MigrationCoverageTests(unittest.TestCase):
         self.assertEqual(profile_summary["managed_nonempty_total"], 5)
         self.assertEqual(profile_summary["declarative_coverage_percent"], 60.0)
         self.assertEqual(profile_summary["executable_percent"], 20.0)
+        self.assertEqual(
+            report["domains"]["overlay"]["actions"]["executable_percent"],
+            100.0,
+        )
+        self.assertEqual(
+            report["domains"]["audio"]["actions"]["declarative_coverage_percent"],
+            100.0,
+        )
+        self.assertEqual(
+            report["domains"]["capture"]["profiles"]["executable_percent"],
+            0.0,
+        )
+        self.assertEqual(
+            report["domains"]["layout"]["profiles"]["managed_nonempty_total"],
+            0,
+        )
 
     def test_filter_enable_is_plannable_but_not_executor_enabled(self):
         config = {
