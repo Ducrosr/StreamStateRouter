@@ -55,6 +55,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_empty_default_domains_are_valid_as_unmanaged(self):
         data = self.sample()
+        data["rules"] = []
         data["profiles"]["game"] = {}
         data["profiles"]["capture"] = {}
         data["layout_profiles"] = {}
