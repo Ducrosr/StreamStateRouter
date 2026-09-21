@@ -11,6 +11,12 @@ from .intent import (
     desired_assignments_from_actions,
     desired_state_from_action_sets,
 )
+from .migration_coverage import (
+    ActionCoverage,
+    MigrationCoverageReport,
+    ProfileCoverage,
+    build_migration_coverage_report,
+)
 from .models import (
     DesiredAssignment,
     DesiredState,
@@ -29,7 +35,10 @@ from .planner import (
 )
 
 __all__ = [
+    "ActionCoverage",
     "CoverageIssue",
+    "MigrationCoverageReport",
+    "ProfileCoverage",
     "DesiredAssignment",
     "DesiredOwnershipConflict",
     "UnsupportedIntentAction",
@@ -45,6 +54,7 @@ __all__ = [
     "PlanOperation",
     "PropertyKey",
     "build_execution_plan",
+    "build_migration_coverage_report",
     "validate_state_coverage",
     "render_execution_plan",
 ]
