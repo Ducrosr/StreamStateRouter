@@ -47,7 +47,7 @@ $Npm = Get-Command npm -ErrorAction SilentlyContinue
 if ($Npm) {
     Push-Location .\streamdeck-plugin
     try {
-        Invoke-Native $Npm.Source install --ignore-scripts --no-audit --no-fund
+        Invoke-Native $Npm.Source ci --ignore-scripts --no-audit --no-fund
         Invoke-Native $Npm.Source run typecheck
         Invoke-Native $Npm.Source run build
         Invoke-Native $Npm.Source run validate
