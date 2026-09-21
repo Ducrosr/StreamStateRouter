@@ -401,6 +401,10 @@ class OBSDispatcher:
             }
 
             if domain == "layout":
+                if not self._layout_profiles:
+                    row.update(status="unconfigured", message="Aucun LayoutProfile configuré")
+                    domains.append(row)
+                    continue
                 if held:
                     declarative_blocks.append(
                         {
@@ -481,6 +485,11 @@ class OBSDispatcher:
                 domains.append(row)
                 continue
 
+            domain_profiles = self._profiles.get(domain, {})
+            if not domain_profiles:
+                row.update(status="unconfigured", message="Domaine OBS non configuré")
+                domains.append(row)
+                continue
             try:
                 profile = self._resolve_action_profile(domain, desired)
             except Exception as exc:
