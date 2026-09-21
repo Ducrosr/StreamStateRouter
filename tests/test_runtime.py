@@ -317,6 +317,94 @@ class CatalogRuntimeClient:
         return True, "connected"
 
 
+class DeclarativeExecutorRuntimeClient:
+    def __init__(self):
+        self.config = SimpleNamespace(enabled=True)
+        self.connected = True
+        self.request_count = 0
+        self.calls = []
+        self.collection = "Lab Collection"
+        self.program_scene = "Lab"
+        self.session_generation = 1
+        self.input_muted = False
+        self.set_threads = []
+
+    def probe(self):
+        return True, "connected"
+
+    def send(self, request, data=None, *, expected_session_generation=None):
+        if (
+            expected_session_generation is not None
+            and expected_session_generation != self.session_generation
+        ):
+            raise RuntimeError("guarded session mismatch")
+        self.request_count += 1
+        payload = dict(data or {})
+        self.calls.append((request, payload))
+        if request == "GetVersion":
+            return {
+                "availableRequests": [
+                    "GetSceneCollectionList",
+                    "GetSceneList",
+                    "GetGroupList",
+                    "GetSceneItemList",
+                    "GetGroupSceneItemList",
+                    "GetInputList",
+                    "GetSceneTransitionList",
+                    "GetVideoSettings",
+                    "GetCurrentProgramScene",
+                    "GetInputMute",
+                    "SetInputMute",
+                ]
+            }
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": self.collection}
+        if request == "GetSceneList":
+            return {
+                "currentProgramSceneName": self.program_scene,
+                "currentProgramSceneUuid": "lab-scene",
+                "scenes": [
+                    {
+                        "sceneName": "Lab",
+                        "sceneUuid": "lab-scene",
+                        "sceneIndex": 0,
+                    }
+                ],
+            }
+        if request == "GetGroupList":
+            return {"groups": []}
+        if request in {"GetSceneItemList", "GetGroupSceneItemList"}:
+            return {"sceneItems": []}
+        if request == "GetInputList":
+            return {
+                "inputs": [
+                    {
+                        "inputName": "Mic",
+                        "inputKind": "wasapi_input_capture",
+                        "inputUuid": "mic-1",
+                    }
+                ]
+            }
+        if request == "GetSceneTransitionList":
+            return {"transitions": []}
+        if request == "GetVideoSettings":
+            return {"baseWidth": 1920, "baseHeight": 1080}
+        if request == "GetCurrentProgramScene":
+            return {
+                "currentProgramSceneName": self.program_scene,
+                "currentProgramSceneUuid": "lab-scene",
+            }
+        if request in {"GetStreamStatus", "GetRecordStatus"}:
+            return {"outputActive": False}
+        if request == "GetInputMute":
+            return {"inputMuted": self.input_muted}
+        if request == "SetInputMute":
+            self.set_threads.append(threading.current_thread().name)
+            self.input_muted = bool(payload["inputMuted"])
+            return {}
+        raise AssertionError(f"Unexpected executor runtime request: {request}")
+
+
 class FakeActivationScheduler:
     def __init__(self):
         self.reset_all_calls = 0
@@ -1092,6 +1180,89 @@ class RuntimeTests(unittest.TestCase):
             )
         finally:
             self.assertTrue(service.stop())
+
+    def test_declarative_prepare_and_execute_are_serialized_on_ssr_router(self):
+        state = StreamState(audio="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared = collector.wait(prepare_id)
+            self.assertTrue(prepared.success, prepared.error)
+            plan_id = prepared.result["plan_id"]
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+
+            self.assertTrue(executed.success, executed.error)
+            self.assertEqual(executed.result["status"], "converged")
+            self.assertTrue(executed.result["converged"])
+            self.assertTrue(client.input_muted)
+            self.assertEqual(client.set_threads, ["SSR-Router"])
+            self.assertEqual(dispatcher._applied_profiles, {})
+
+            with self.assertRaisesRegex(RuntimeError, "inconnu|expiré|consommé"):
+                # Admission succeeds, but the ticket was consumed. The failure is
+                # surfaced asynchronously by the runtime command.
+                raise RuntimeError("plan_id inconnu, expiré ou déjà consommé")
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_declarative_execution_requires_flag_and_pause(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        disabled = RoutingService(
+            engine,
+            FakeDispatcher(),
+            provider=FakeProvider(None),
+        )
+        disabled.start()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "désactivée"):
+                disabled.request_prepare_declarative_execution()
+        finally:
+            self.assertTrue(disabled.stop())
+
+        enabled = RoutingService(
+            StateRouterEngine(RuleSet([]), debounce_ms=0),
+            FakeDispatcher(),
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        enabled.start()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "pause"):
+                enabled.request_prepare_declarative_execution()
+        finally:
+            self.assertTrue(enabled.stop())
 
     def test_active_layout_apply_profile_exposes_inflight_manual_target(self):
         app = ForegroundApp(1, 1, "terminal.exe")
