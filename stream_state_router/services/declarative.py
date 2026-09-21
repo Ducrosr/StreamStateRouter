@@ -91,6 +91,13 @@ def _catalog_preflight(
             continue
 
         if key.kind == "program_scene":
+            if catalog.supports("GetCurrentProgramScene") is False:
+                reject(
+                    key,
+                    "capability_missing",
+                    "OBS does not advertise required request GetCurrentProgramScene",
+                )
+                continue
             target = str(assignment.value or "")
             if target not in scene_names:
                 reject(
@@ -101,6 +108,20 @@ def _catalog_preflight(
             continue
 
         if key.kind == "scene_item_visibility":
+            required = ("GetSceneItemId", "GetSceneItemEnabled")
+            missing = [
+                request
+                for request in required
+                if catalog.supports(request) is False
+            ]
+            if missing:
+                reject(
+                    key,
+                    "capability_missing",
+                    "OBS does not advertise required request(s): "
+                    + ", ".join(missing),
+                )
+                continue
             identity = (key.container, key.source, key.occurrence)
             if identity not in item_keys:
                 reject(
@@ -234,10 +255,26 @@ class DeclarativePlanningService:
 
         concrete_desired = desired.bind_collection(catalog.collection)
 
+        condition_preflight: dict[PropertyKey, PlanDiagnostic] = {}
+        blocked_provenance = blocked_provenance or {}
+        for assignment in concrete_desired.assignments:
+            for provenance in assignment.provenance:
+                reason = blocked_provenance.get(provenance)
+                if not reason:
+                    continue
+                condition_preflight[assignment.key] = PlanDiagnostic(
+                    "warning",
+                    "condition_blocked",
+                    reason,
+                    assignment.key,
+                )
+                break
+
         filter_sources = {
             assignment.key.source
             for assignment in concrete_desired.assignments
-            if assignment.key.kind in {"filter_enabled", "filter_setting"}
+            if assignment.key not in condition_preflight
+            and assignment.key.kind in {"filter_enabled", "filter_setting"}
             and assignment.key.source
         }
         filter_index: dict[str, frozenset[str]] = {}
@@ -266,21 +303,8 @@ class DeclarativePlanningService:
             filter_index=filter_index,
             unreadable_filter_sources=frozenset(unreadable_filter_sources),
         )
-        for assignment in concrete_desired.assignments:
-            for provenance in assignment.provenance:
-                reason = (blocked_provenance or {}).get(provenance)
-                if not reason:
-                    continue
-                preflight.setdefault(
-                    assignment.key,
-                    PlanDiagnostic(
-                        "warning",
-                        "condition_blocked",
-                        reason,
-                        assignment.key,
-                    ),
-                )
-                break
+        for key, diagnostic in condition_preflight.items():
+            preflight.setdefault(key, diagnostic)
         observable = DesiredState.build(
             assignment
             for assignment in concrete_desired.assignments
