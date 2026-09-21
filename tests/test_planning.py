@@ -33,6 +33,26 @@ class DeclarativePlanningTests(unittest.TestCase):
         self.assertNotEqual(left, right)
         self.assertNotEqual(hash(left), hash(right))
 
+    def test_property_occurrence_rejects_fraction_and_bool_before_coercion(self):
+        for invalid in (True, False, 1.5, "1.5"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "occurrence"):
+                    PropertyKey.scene_item_visibility(
+                        collection="Main",
+                        container="In Game",
+                        source="Camera",
+                        occurrence=invalid,
+                    )
+
+        direct = PropertyKey(
+            kind="scene_item_visibility",
+            collection="Main",
+            container="In Game",
+            source="Camera",
+            occurrence="2",
+        )
+        self.assertEqual(direct.occurrence, 2)
+
     def test_desired_state_binds_only_blank_scene_collection_keys(self):
         blank = PropertyKey.input_setting(
             collection="",
