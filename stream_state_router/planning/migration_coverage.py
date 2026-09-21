@@ -1,23 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from ..obs.models import OBSAction
 from .intent import UnsupportedIntentAction, desired_assignments_from_actions
 
 
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
-EXECUTABLE_PROPERTY_KINDS = frozenset({"scene_item_visibility", "input_mute"})
-PLANNABLE_PROPERTY_KINDS = frozenset(
-    {
-        "program_scene",
-        "input_volume_db",
-        "input_setting",
-        "filter_enabled",
-        "filter_setting",
-    }
-)
 CLASSIFICATIONS = (
     "empty",
     "declarative_executable",
@@ -269,14 +259,16 @@ class MigrationCoverageReport:
         }
 
 
-def _classification_for_property_kinds(kinds: set[str]) -> str:
+def _classification_for_property_kinds(
+    kinds: set[str],
+    *,
+    executable_kinds: frozenset[str],
+) -> str:
     if not kinds:
-        return "legacy_only"
-    if kinds <= EXECUTABLE_PROPERTY_KINDS:
+        return "declarative_intent_only"
+    if kinds <= executable_kinds:
         return "declarative_executable"
-    if kinds <= (EXECUTABLE_PROPERTY_KINDS | PLANNABLE_PROPERTY_KINDS):
-        return "declarative_plannable"
-    return "declarative_intent_only"
+    return "declarative_plannable"
 
 
 def _profile_classification(actions: list[ActionCoverage]) -> str:
@@ -300,6 +292,7 @@ def _classify_action(
     profile: str,
     action_index: int,
     raw_action: Mapping[str, Any],
+    executable_kinds: frozenset[str],
 ) -> ActionCoverage | None:
     action = OBSAction.from_mapping(raw_action)
     if not action.enabled:
@@ -338,7 +331,10 @@ def _classify_action(
         profile,
         action_index,
         action.type,
-        _classification_for_property_kinds(kinds),
+        _classification_for_property_kinds(
+            kinds,
+            executable_kinds=executable_kinds,
+        ),
         tuple(sorted(kinds)),
         "" if assignments else "action produced no stable managed property",
     )
@@ -388,6 +384,8 @@ def _resolve_effective_profile_actions(
 
 def build_migration_coverage_report(
     config: Mapping[str, Any],
+    *,
+    executable_kinds: Iterable[str],
 ) -> MigrationCoverageReport:
     """Describe declarative migration maturity without OBS I/O or mutations.
 
@@ -395,6 +393,7 @@ def build_migration_coverage_report(
     inherited actions, so an empty child cannot hide a legacy-only parent.
     """
 
+    executable = frozenset(str(item) for item in executable_kinds)
     action_rows: list[ActionCoverage] = []
     profile_rows: list[ProfileCoverage] = []
 
@@ -447,6 +446,7 @@ def build_migration_coverage_report(
                     profile=name,
                     action_index=index,
                     raw_action=raw_action,
+                    executable_kinds=executable,
                 )
                 assert row is not None
                 declared.append(row)
