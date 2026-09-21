@@ -32,7 +32,7 @@ def _typed_values_equal(left: Any, right: Any) -> bool:
     if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
         return len(left) == len(right) and all(
             _typed_values_equal(l_item, r_item)
-            for l_item, r_item in zip(left, right)
+            for l_item, r_item in zip(left, right, strict=True)
         )
     if type(left) is not type(right):
         return False
