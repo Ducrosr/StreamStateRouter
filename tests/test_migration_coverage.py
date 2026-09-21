@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import unittest
 
 from stream_state_router.planning.migration_coverage import (
@@ -239,6 +240,22 @@ class MigrationCoverageTests(unittest.TestCase):
             report.summary()["profiles"]["counts"],
             {DELEGATED: 2},
         )
+
+    def test_repository_default_config_produces_coverage_report(self):
+        path = Path(__file__).resolve().parents[1] / "config" / "default.json"
+        config = json.loads(path.read_text(encoding="utf-8"))
+
+        report = build_migration_coverage(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        )
+
+        mapping = report.as_mapping()
+        self.assertIn("summary", mapping)
+        self.assertIn("profiles", mapping)
+        self.assertGreaterEqual(mapping["summary"]["actions"]["active"], 0)
+        self.assertNotIn("password", json.dumps(mapping, ensure_ascii=False))
+        self.assertNotIn("token", json.dumps(mapping, ensure_ascii=False))
 
     def test_future_executor_kinds_change_coverage_without_report_rewrite(self):
         config = {
