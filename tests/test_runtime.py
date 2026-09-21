@@ -878,6 +878,15 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(status["available"])
             self.assertEqual(status["collection"], "Main")
             self.assertEqual(status["scenes"], 2)
+
+            before_snapshot = len(client.calls)
+            snapshot = service.obs_catalog_snapshot()
+            self.assertEqual(len(client.calls), before_snapshot)
+            self.assertTrue(snapshot["available"])
+            self.assertEqual(
+                [item["name"] for item in snapshot["scene_refs"]],
+                ["Idle", "Gameplay"],
+            )
             self.assertTrue(
                 all(request.startswith("Get") for request, _data in client.calls)
             )
