@@ -610,6 +610,11 @@ class OBSLayoutManager:
             and str(raw.get("visibility_owner") or "").casefold() == "runtime"
         )
 
+    def runtime_visibility_claims(self) -> frozenset[tuple[str, str]]:
+        """Return current runtime visibility ownership without exposing storage."""
+
+        return frozenset(self._runtime_visibility_owners)
+
     def reset_cache(self) -> None:
         self._scene_item_cache.clear()
 
