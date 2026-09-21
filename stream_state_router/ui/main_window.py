@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
 )
 
+from .. import __version__
 from ..activation import TriggerTargetIdentity
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
@@ -91,7 +92,7 @@ class MainWindow(QMainWindow):
         runtime_marker=None,
     ):
         super().__init__()
-        self.setWindowTitle("Stream State Router 2.0.13")
+        self.setWindowTitle(f"Stream State Router {__version__}")
         self.resize(1180, 760)
         self.config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
