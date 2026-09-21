@@ -1,3 +1,4 @@
+import type { JsonObject } from "@elgato/utils";
 import type { KeyDownEvent } from "@elgato/streamdeck";
 import streamDeck, { action, SingletonAction } from "@elgato/streamdeck";
 import { saveConnectionSettings, ssrClient } from "../ssr-client";
@@ -6,7 +7,7 @@ type EmptySettings = Record<string, never>;
 type LayoutSettings = { layout?: string; mode?: "apply" | "preview" };
 type ConnectionSettings = { port?: number; token?: string };
 
-abstract class CommandAction<T extends object> extends SingletonAction<T> {
+abstract class CommandAction<T extends JsonObject> extends SingletonAction<T> {
   protected async run(ev: KeyDownEvent<T>, fn: () => Promise<unknown>): Promise<void> {
     try {
       await fn();
