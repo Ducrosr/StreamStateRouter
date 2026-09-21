@@ -174,14 +174,20 @@ class OBSDispatcher:
             and self._applied_profiles.get(domain) != wanted.profile_name(domain)
         )
 
-    def obs_context(self) -> dict[str, Any]:
+    def obs_context(self, *, force_refresh: bool = False) -> dict[str, Any]:
         """Return a small current OBS context for conditional rules/profiles.
 
         Context is cached briefly so a foreground polling loop never turns into
-        a high-frequency obs-websocket polling loop.
+        a high-frequency obs-websocket polling loop. Explicit planner commands
+        may bypass that cache so profile conditions are resolved against the
+        same live OBS session as the catalog/observation pass.
         """
         now = time.monotonic()
-        if self._context_cache is not None and now - self._context_cache[0] < 0.5:
+        if (
+            not force_refresh
+            and self._context_cache is not None
+            and now - self._context_cache[0] < 0.5
+        ):
             return dict(self._context_cache[1])
         if not self.client.config.enabled:
             return {
