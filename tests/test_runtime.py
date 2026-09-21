@@ -14,7 +14,12 @@ from stream_state_router.activation import (
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
-from stream_state_router.obs.dispatcher import DispatchResult, DomainDispatchStatus
+from stream_state_router.obs.dispatcher import (
+    DispatchResult,
+    DomainDispatchStatus,
+    OBSDispatcher,
+    profile_map_from_raw,
+)
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
@@ -226,6 +231,70 @@ class FakeHeartbeatDispatcher(FakeDispatcher):
     def __init__(self):
         super().__init__()
         self.client = FakeOBSHeartbeatClient()
+
+
+class CatalogRuntimeClient:
+    def __init__(self):
+        self.config = SimpleNamespace(enabled=False)
+        self.connected = True
+        self.request_count = 0
+        self.calls = []
+
+    def send(self, request, data=None):
+        self.request_count += 1
+        self.calls.append((request, data))
+        if request == "GetVersion":
+            return {
+                "availableRequests": [
+                    "GetSceneCollectionList",
+                    "GetSceneList",
+                    "GetGroupList",
+                    "GetSceneItemList",
+                    "GetGroupSceneItemList",
+                    "GetInputList",
+                    "GetSceneTransitionList",
+                    "GetVideoSettings",
+                    "GetCurrentProgramScene",
+                ]
+            }
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": "Main"}
+        if request == "GetSceneList":
+            return {
+                "currentProgramSceneName": "Idle",
+                "currentProgramSceneUuid": "idle-uuid",
+                "scenes": [
+                    {
+                        "sceneName": "Idle",
+                        "sceneUuid": "idle-uuid",
+                        "sceneIndex": 0,
+                    },
+                    {
+                        "sceneName": "Gameplay",
+                        "sceneUuid": "game-uuid",
+                        "sceneIndex": 1,
+                    },
+                ],
+            }
+        if request == "GetGroupList":
+            return {"groups": []}
+        if request == "GetSceneItemList":
+            return {"sceneItems": []}
+        if request == "GetInputList":
+            return {"inputs": []}
+        if request == "GetSceneTransitionList":
+            return {"transitions": []}
+        if request == "GetVideoSettings":
+            return {"baseWidth": 1920, "baseHeight": 1080}
+        if request == "GetCurrentProgramScene":
+            return {
+                "currentProgramSceneName": "Idle",
+                "currentProgramSceneUuid": "idle-uuid",
+            }
+        raise AssertionError(f"Unexpected catalog runtime request: {request}")
+
+    def probe(self):
+        return True, "connected"
 
 
 class FakeActivationScheduler:
@@ -782,6 +851,90 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.profile_threads,
                 [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_catalog_sync_runs_on_runtime_worker_and_updates_status(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        client = CatalogRuntimeClient()
+        dispatcher = OBSDispatcher(client, {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_catalog_sync()
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(result.result["collection"], "Main")
+            status = service.obs_catalog_status()
+            self.assertTrue(status["available"])
+            self.assertEqual(status["collection"], "Main")
+            self.assertEqual(status["scenes"], 2)
+            self.assertTrue(
+                all(request.startswith("Get") for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_current_declarative_plan_runs_on_serialized_runtime_worker(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(StreamState(game="Vanilla"))
+        client = CatalogRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Vanilla": {
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Gameplay"},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_declarative_plan()
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertTrue(result.result["available"])
+            plan = result.result["plan"]
+            self.assertFalse(plan["blocked"])
+            self.assertEqual(len(plan["operations"]), 1)
+            self.assertEqual(
+                plan["operations"][0]["operation"],
+                "SetProgramScene",
+            )
+            self.assertEqual(
+                plan["operations"][0]["target"],
+                "Gameplay",
+            )
+            self.assertEqual(
+                service.engine.current_state.game,
+                "Vanilla",
+            )
+            self.assertFalse(
+                any(request.startswith("Set") for request, _data in client.calls)
             )
         finally:
             self.assertTrue(service.stop())
