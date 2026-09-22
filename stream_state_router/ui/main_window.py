@@ -42,6 +42,7 @@ from ..activation import TriggerTargetIdentity
 from ..importers import (
     AdvancedSceneSwitcherImporter,
     SceneCollectionImporter,
+    neutralize_referenced_test_layout_profiles,
     wire_windows_hdr_capture_profiles,
 )
 from ..obs.client import OBSClientManager
@@ -1527,6 +1528,7 @@ class MainWindow(QMainWindow):
         asc_path = ""
         layout_report = None
         hdr_profiles_changed: tuple[str, ...] = ()
+        test_layouts_neutralized: tuple[str, ...] = ()
         try:
             report = None
             if mode == "snapshot_profile":
@@ -1592,6 +1594,9 @@ class MainWindow(QMainWindow):
                     asc_data,
                     self.config,
                     snapshot=snapshot,
+                    enable_created_rules=bool(
+                        options.get("enable_converted_rules", False)
+                    ),
                 )
 
             if (
@@ -1600,6 +1605,13 @@ class MainWindow(QMainWindow):
             ):
                 hdr_profiles_changed = wire_windows_hdr_capture_profiles(
                     self.config
+                )
+            if (
+                mode == "logic_migration"
+                and bool(options.get("neutralize_test_layouts", False))
+            ):
+                test_layouts_neutralized = (
+                    neutralize_referenced_test_layout_profiles(self.config)
                 )
 
             errors = validate_config(self.config)
@@ -1660,6 +1672,20 @@ class MainWindow(QMainWindow):
                     "\n\nHDR Windows\nLes CaptureProfiles HDR/Default "
                     "étaient déjà correctement câblés."
                 )
+        if bool(options.get("enable_converted_rules", False)):
+            summary += (
+                "\n\nRègles ASC\nLes nouvelles règles converties "
+                "ont été activées explicitement."
+            )
+        if bool(options.get("neutralize_test_layouts", False)):
+            summary += (
+                "\n\nLayouts de test neutralisés : "
+                + (
+                    ", ".join(test_layouts_neutralized)
+                    if test_layouts_neutralized
+                    else "aucun"
+                )
+            )
         elif not asc_path:
             summary += (
                 "\n\nAdvanced Scene Switcher\n"

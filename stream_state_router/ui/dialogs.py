@@ -981,6 +981,18 @@ class CollectionLogicImportDialog(QDialog):
         self.hdr_profiles.setChecked(False)
         root.addWidget(self.hdr_profiles)
 
+        self.enable_rules = QCheckBox(
+            "Activer les nouvelles règles ASC converties après prévisualisation"
+        )
+        self.enable_rules.setChecked(False)
+        root.addWidget(self.enable_rules)
+
+        self.neutralize_test_layouts = QCheckBox(
+            "Neutraliser les LayoutProfiles actifs encore liés à [Module] TEST SSR"
+        )
+        self.neutralize_test_layouts.setChecked(False)
+        root.addWidget(self.neutralize_test_layouts)
+
         asc_group = QFormLayout()
         self.asc_path = QLineEdit()
         self.asc_path.setPlaceholderText(
@@ -1030,6 +1042,8 @@ class CollectionLogicImportDialog(QDialog):
         return {
             "include_layouts": self.layouts.isChecked(),
             "wire_hdr_profiles": self.hdr_profiles.isChecked(),
+            "enable_converted_rules": self.enable_rules.isChecked(),
+            "neutralize_test_layouts": self.neutralize_test_layouts.isChecked(),
             "asc_path": self.asc_path.text().strip(),
         }
 
