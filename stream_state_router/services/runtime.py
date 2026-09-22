@@ -1796,22 +1796,58 @@ class RoutingService:
             self._prepared_execution_state = state
         return prepared
 
+    def _validate_prepared_execution_runtime_locked(
+        self,
+        prepared: PreparedExecution,
+        state: StreamState,
+    ) -> tuple[bool, str]:
+        if self._stopping or not self._runtime_operational:
+            return False, "Runtime déclaratif indisponible ou en arrêt"
+        if not self._paused:
+            return False, "SSR a repris depuis la préparation"
+        if self.engine.current_state != state:
+            return False, "L'état logique courant a changé"
+        if self._dispatch_generation != prepared.dispatch_generation:
+            return False, "La génération de décision runtime a changé"
+        if self._resume_revalidation_generation != prepared.resume_generation:
+            return False, "La génération de reprise runtime a changé"
+        if self.config_revision != prepared.config_revision:
+            return False, "La révision de configuration a changé"
+        return True, ""
+
+    def _commit_prepared_execution_write(
+        self,
+        prepared: PreparedExecution,
+        state: StreamState,
+        write: Callable[[], None],
+    ) -> tuple[bool, str]:
+        """Atomically admit one prepared write against local runtime state."""
+
+        with self._lock:
+            valid, reason = self._validate_prepared_execution_runtime_locked(
+                prepared,
+                state,
+            )
+            if not valid:
+                return False, reason
+            # Keep the local runtime state stable until the single OBS Set*
+            # request has either returned or raised. No slow discovery/readback
+            # is performed while this lock is held.
+            write()
+            return True, ""
+
     def _validate_prepared_execution_target(
         self,
         prepared: PreparedExecution,
         state: StreamState,
     ) -> tuple[bool, str]:
         with self._lock:
-            if not self._paused:
-                return False, "SSR a repris depuis la préparation"
-            if self.engine.current_state != state:
-                return False, "L'état logique courant a changé"
-            if self._dispatch_generation != prepared.dispatch_generation:
-                return False, "La génération de décision runtime a changé"
-            if self._resume_revalidation_generation != prepared.resume_generation:
-                return False, "La génération de reprise runtime a changé"
-            if self.config_revision != prepared.config_revision:
-                return False, "La révision de configuration a changé"
+            valid, reason = self._validate_prepared_execution_runtime_locked(
+                prepared,
+                state,
+            )
+            if not valid:
+                return False, reason
         try:
             boundary_before = self._declarative_planning.context_identity()
             if boundary_before != (
@@ -1834,21 +1870,13 @@ class RoutingService:
             return False, "Le contexte OBS a changé pendant la revalidation"
         if desired.assignments != prepared.desired.assignments:
             return False, "La cible déclarative ou son ownership a changé"
-        # Recheck runtime state after all OBS reads. An API/UI override or a
-        # resume may race with those reads even though all OBS mutation remains
-        # serialized on SSR-Router.
+        # Recheck runtime state after all OBS reads. The actual write performs
+        # the same check once more atomically with the Set* request.
         with self._lock:
-            if not self._paused:
-                return False, "SSR a repris depuis la préparation"
-            if self.engine.current_state != state:
-                return False, "L'état logique courant a changé"
-            if self._dispatch_generation != prepared.dispatch_generation:
-                return False, "La génération de décision runtime a changé"
-            if self._resume_revalidation_generation != prepared.resume_generation:
-                return False, "La génération de reprise runtime a changé"
-            if self.config_revision != prepared.config_revision:
-                return False, "La révision de configuration a changé"
-        return True, ""
+            return self._validate_prepared_execution_runtime_locked(
+                prepared,
+                state,
+            )
 
     def _execute_obs_command(self, command: _OBSCommand) -> None:
         with self._lock:
@@ -1945,6 +1973,11 @@ class RoutingService:
                             prepared,
                             prepared_state,
                         ),
+                        commit_write=lambda write: self._commit_prepared_execution_write(
+                            prepared,
+                            prepared_state,
+                            write,
+                        ),
                         progress=lambda steps: setattr(
                             self,
                             "_active_declarative_partial",
@@ -2023,7 +2056,26 @@ class RoutingService:
             raise
         except Exception as exc:
             self.logger.error("OBS command failed [%s]: %s", command.action, exc)
-            self._emit_obs_result(command, success=False, error=str(exc))
+            partial = None
+            if command.action == "planner.execute" and self._active_declarative_partial:
+                partial = {
+                    "status": "failed",
+                    "converged": False,
+                    "replan_required": True,
+                    "diagnostics": [str(exc)],
+                    "steps": [
+                        step.as_mapping()
+                        for step in self._active_declarative_partial
+                        if hasattr(step, "as_mapping")
+                    ],
+                }
+            self._active_declarative_partial = ()
+            self._emit_obs_result(
+                command,
+                success=False,
+                result=partial,
+                error=str(exc),
+            )
         finally:
             with self._lock:
                 if self._active_obs_command is command:
