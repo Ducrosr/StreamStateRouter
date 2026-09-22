@@ -14,7 +14,9 @@ from ..planning.planner import ExecutionPlan, build_execution_plan
 from .declarative import DeclarativePlanningService
 
 
-_ALLOWED_KINDS = frozenset({"scene_item_visibility", "input_mute"})
+DECLARATIVE_EXECUTOR_KINDS = frozenset(
+    {"scene_item_visibility", "input_mute"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,7 +398,7 @@ class DeclarativeExecutor:
             if prepared.plan.blocked:
                 return finish("blocked", diagnostic="prepared plan is blocked")
             if any(
-                assignment.key.kind not in _ALLOWED_KINDS
+                assignment.key.kind not in DECLARATIVE_EXECUTOR_KINDS
                 for assignment in prepared.desired.assignments
             ):
                 return finish("blocked", diagnostic="desired state is outside MVP allowlist")
