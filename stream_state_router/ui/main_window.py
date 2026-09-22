@@ -1386,6 +1386,13 @@ class MainWindow(QMainWindow):
 
             asc_report = None
             asc_path = str(options.get("asc_path") or "").strip()
+            if not asc_path:
+                detected = (
+                    AdvancedSceneSwitcherImporter.find_scene_collection_file(
+                        snapshot.collection
+                    )
+                )
+                asc_path = str(detected) if detected is not None else ""
             if asc_path:
                 asc_data = AdvancedSceneSwitcherImporter.load(asc_path)
                 asc_report = AdvancedSceneSwitcherImporter.apply_to_config(
