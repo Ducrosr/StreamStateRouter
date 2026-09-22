@@ -40,6 +40,14 @@ def _parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--asc-path",
+        type=Path,
+        help=(
+            "Fichier JSON Advanced Scene Switcher explicite. "
+            "Sinon le fichier de la collection OBS est détecté automatiquement."
+        ),
+    )
+    parser.add_argument(
         "--test-filter",
         action="store_true",
         help="Réécrire à l'identique un filtre OBS existant et vérifier le readback.",
@@ -191,8 +199,42 @@ def main() -> int:
             f"{len(snapshot.scene_items)} Scene Item(s)"
         )
 
-        detected = AdvancedSceneSwitcherImporter.find_scene_collection_file(
-            snapshot.collection
+        preview_layout_config = copy.deepcopy(config)
+        layouts, layout_skipped = importer.capture_layout_profiles(
+            snapshot=snapshot,
+        )
+        layout_report = SceneCollectionImporter.apply_layout_profiles(
+            preview_layout_config,
+            collection=snapshot.collection,
+            profiles=layouts,
+            skipped=layout_skipped,
+        )
+        layout_errors = validate_config(preview_layout_config)
+        report["checks"]["collection_layout_preview"] = {
+            "ok": not layout_errors,
+            "profiles": len(layouts),
+            "added": layout_report.added,
+            "refreshed": layout_report.refreshed,
+            "skipped": list(layout_report.skipped),
+            "validation_errors": layout_errors,
+        }
+        print(
+            "Layouts importables : "
+            f"{len(layouts)} profil(s), "
+            f"{len(layout_report.skipped)} avertissement(s)."
+        )
+        if layout_errors:
+            raise RuntimeError(
+                "La capture exhaustive des layouts produit une configuration "
+                "invalide : " + " | ".join(layout_errors)
+            )
+
+        detected = (
+            args.asc_path
+            if args.asc_path is not None
+            else AdvancedSceneSwitcherImporter.find_scene_collection_file(
+                snapshot.collection
+            )
         )
         if detected is not None:
             preview_config = copy.deepcopy(config)
@@ -200,6 +242,7 @@ def main() -> int:
             asc_report = AdvancedSceneSwitcherImporter.apply_to_config(
                 asc_data,
                 preview_config,
+                snapshot=snapshot,
             )
             errors = validate_config(preview_config)
             report["checks"]["advanced_scene_switcher_preview"] = {
@@ -212,6 +255,7 @@ def main() -> int:
                 "profiles_created": asc_report.profiles_created,
                 "attached_to_existing_rules": asc_report.attached_to_existing_rules,
                 "skipped": list(asc_report.skipped),
+                "rejected_raw_count": len(asc_report.rejected_raw),
                 "validation_errors": errors,
             }
             print(
