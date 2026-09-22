@@ -111,6 +111,23 @@
       "SupportedInMultiActions": true
     },
     {
+      "Name": "Variable de contrôle",
+      "UUID": "com.remyducros.streamstaterouter.control-variable",
+      "Icon": "imgs/actions/icon",
+      "PropertyInspectorPath": "ui/control-variable.html",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/key",
+          "TitleAlignment": "bottom",
+          "TitleColor": "#FFFFFF"
+        }
+      ],
+      "SupportedInMultiActions": true
+    },
+    {
       "Name": "Connexion SSR",
       "UUID": "com.remyducros.streamstaterouter.connection",
       "Icon": "imgs/actions/icon",

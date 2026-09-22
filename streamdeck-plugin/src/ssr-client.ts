@@ -82,6 +82,8 @@ export const ssrClient = {
   pause: async (paused: boolean) => request("/pause", { paused }),
   auto: async () => request("/auto", {}),
   reapply: async () => command("/reapply"),
+  setControlVariable: async (name: string, value: string) =>
+    command("/control/set", { name, value }),
   applyLayout: async (name: string) => command("/layout/apply", { name }),
   previewLayout: async (name: string) => command("/layout/preview", { name }),
   cancelPreview: async () => command("/layout/cancel-preview"),
