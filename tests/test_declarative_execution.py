@@ -60,6 +60,7 @@ class _ExecutorClient:
         self.scene_enabled = False
         self.input_uuid = "mic-1"
         self.input_muted = False
+        self.input_volume_db = -12.0
         self.ignore_writes = False
 
     def send(self, request, data=None, *, expected_session_generation=None):
@@ -99,6 +100,12 @@ class _ExecutorClient:
             if not self.ignore_writes:
                 self.input_muted = bool(payload["inputMuted"])
             return {}
+        if request == "GetInputVolume":
+            return {"inputVolumeDb": self.input_volume_db}
+        if request == "SetInputVolume":
+            if not self.ignore_writes:
+                self.input_volume_db = float(payload["inputVolumeDb"])
+            return {}
         raise AssertionError(request)
 
 
@@ -112,6 +119,8 @@ def _catalog():
             "GetInputList",
             "GetInputMute",
             "SetInputMute",
+            "GetInputVolume",
+            "SetInputVolume",
         }
     )
     return OBSResourceCatalog(
@@ -190,6 +199,144 @@ class DeclarativeExecutorTests(unittest.TestCase):
             2,
         )
 
+    def test_input_volume_write_requires_readback_and_converges(self):
+        key = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, -6.25)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(-12.0)},
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertTrue(result.converged)
+        self.assertEqual(result.status, "converged")
+        self.assertEqual(result.steps[-1].status, "applied")
+        self.assertAlmostEqual(result.steps[-1].ack_value, -6.25)
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputVolume"),
+            1,
+        )
+        set_payload = next(
+            data
+            for name, data in client.requests
+            if name == "SetInputVolume"
+        )
+        self.assertEqual(set_payload["inputUuid"], "mic-1")
+        self.assertAlmostEqual(set_payload["inputVolumeDb"], -6.25)
+
+    def test_input_volume_tolerance_avoids_noop_write(self):
+        key = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, -6.0)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(-6.0000004)},
+        )
+        client = _ExecutorClient()
+        client.input_volume_db = -6.0000004
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(prepared, validate_target=lambda: (True, ""))
+
+        self.assertTrue(result.converged)
+        self.assertEqual(result.steps[0].status, "already_converged")
+        self.assertFalse(
+            any(name == "SetInputVolume" for name, _data in client.requests)
+        )
+
+    def test_input_volume_protocol_boundaries_are_executable(self):
+        for target in (-100.0, 26.0):
+            with self.subTest(target=target):
+                key = PropertyKey.input_volume_db(
+                    collection="Lab Collection",
+                    input_name="Mic",
+                )
+                desired = DesiredState.build(
+                    [DesiredAssignment.create(key, target)]
+                )
+                prepared = _prepared(
+                    desired,
+                    {key: ObservedValue.known_value(-12.0)},
+                )
+                client = _ExecutorClient()
+                executor = DeclarativeExecutor(
+                    client,
+                    _PlanningStub(_catalog()),
+                )
+
+                result = executor.execute(
+                    prepared,
+                    validate_target=lambda: (True, ""),
+                )
+
+                self.assertTrue(result.converged)
+                self.assertAlmostEqual(client.input_volume_db, target)
+
+    def test_finite_volume_above_db_write_limit_can_reconverge(self):
+        key = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, 26.0)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(26.0206)},
+        )
+        client = _ExecutorClient()
+        client.input_volume_db = 26.0206
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertTrue(result.converged)
+        self.assertAlmostEqual(client.input_volume_db, 26.0)
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputVolume"),
+            1,
+        )
+
+    def test_input_volume_positive_set_requires_matching_readback(self):
+        key = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, -6.0)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(-12.0)},
+        )
+        client = _ExecutorClient()
+        client.ignore_writes = True
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertEqual(result.status, "divergent")
+        self.assertTrue(result.replan_required)
+        self.assertEqual(result.steps[-1].status, "divergent")
+        self.assertAlmostEqual(result.steps[-1].ack_value, -12.0)
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputVolume"),
+            1,
+        )
+
     def test_converged_plan_sends_no_writes(self):
         key = PropertyKey.input_mute(
             collection="Lab Collection",
@@ -210,14 +357,13 @@ class DeclarativeExecutorTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("Set") for name, _data in client.requests))
 
     def test_out_of_allowlist_property_blocks_entire_plan(self):
-        key = PropertyKey.input_volume_db(
+        key = PropertyKey.program_scene(
             collection="Lab Collection",
-            input_name="Mic",
         )
-        desired = DesiredState.build([DesiredAssignment.create(key, -6.0)])
+        desired = DesiredState.build([DesiredAssignment.create(key, "Other")])
         plan = build_execution_plan(
             desired,
-            ObservedState({key: ObservedValue.known_value(-12.0)}),
+            ObservedState({key: ObservedValue.known_value("Lab")}),
         )
         prepared = PreparedExecution.create(
             desired=desired,
