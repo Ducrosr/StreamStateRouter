@@ -278,6 +278,55 @@ class DeclarativeExecutorTests(unittest.TestCase):
             any(name.startswith("Set") for name, _data in client.requests)
         )
 
+    def test_invalid_volume_blocks_mixed_plan_before_any_write(self):
+        mute = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        volume = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(mute, True),
+                DesiredAssignment.create(volume, 30.0),
+            ]
+        )
+        plan = build_execution_plan(
+            desired,
+            ObservedState(
+                {
+                    mute: ObservedValue.known_value(False),
+                    volume: ObservedValue.known_value(-12.0),
+                }
+            ),
+        )
+        prepared = PreparedExecution.create(
+            desired=desired,
+            plan=plan,
+            collection="Lab Collection",
+            session_generation=1,
+            catalog_epoch=7,
+            config_revision="cfg",
+            dispatch_generation=2,
+            resume_generation=3,
+            bindings=(),
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(result.replan_required)
+        self.assertFalse(
+            any(name.startswith("Set") for name, _data in client.requests)
+        )
+
     def test_mixed_mute_and_volume_plan_converges_serially(self):
         mute = PropertyKey.input_mute(
             collection="Lab Collection",
