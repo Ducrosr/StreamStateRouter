@@ -692,7 +692,11 @@ class OBSLayoutManager:
         if not current:
             try:
                 current_response = self.client.send("GetCurrentProgramScene")
-                current = str(current_response.get("currentProgramSceneName") or "")
+                current = str(
+                    current_response.get("sceneName")
+                    or current_response.get("currentProgramSceneName")
+                    or ""
+                )
             except Exception:
                 current = ""
         return names, current
