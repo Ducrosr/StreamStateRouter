@@ -25,6 +25,30 @@ Usage recommandé :
 Le chemin SoundVolumeView est configurable dans **Paramètres > Contrôle Windows**.
 HDR ne dépend d'aucun utilitaire externe.
 
+### Import de collection OBS / Advanced Scene Switcher
+
+Depuis l'onglet **Profils**, le bouton **Importer collection OBS…** peut lire la
+collection OBS courante sans la modifier et projeter dans le profil sélectionné :
+
+- les settings des inputs OBS ;
+- mute et volume ;
+- état et settings des filtres ;
+- la visibilité des Scene Items lorsque l'identité n'est pas ambiguë.
+
+La géométrie reste volontairement gérée par le système spécialisé
+**LayoutProfile / Capturer depuis OBS**.
+
+L'importeur peut également lire un export JSON Advanced Scene Switcher ou
+détecter automatiquement l'objet `advanced-scene-switcher` stocké dans le
+fichier de la collection OBS courante. Les macros ne sont converties que lorsque
+SSR peut reproduire exactement leur sémantique. Les macros avec waits, logique
+complexe, actions dynamiques, else-actions ou sélecteurs non stables sont
+signalées dans le rapport et laissées intactes.
+
+Les exports SSR « partageables » neutralisent les settings OBS importés et le
+chemin local SoundVolumeView afin d'éviter la fuite accidentelle d'URL, cookies,
+tokens ou informations locales.
+
 ## 2.1.0 — routage déclaratif gardé
 
 La 2.1.0 consolide la fondation déclarative construite au-dessus de l'architecture
