@@ -196,6 +196,11 @@ def _assignment_validation_error(
             or not math.isfinite(float(value))
         ):
             return "invalid_desired_value", "Input volume dB must be a finite number"
+        if not -100.0 <= float(value) <= 26.0:
+            return (
+                "invalid_desired_value",
+                "Input volume dB must be between -100 and 26",
+            )
         return None
 
     if key.kind == "input_setting":
