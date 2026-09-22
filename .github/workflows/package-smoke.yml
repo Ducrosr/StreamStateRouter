@@ -1,0 +1,72 @@
+name: Package Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/package-smoke.yml"
+      - "StreamStateRouter.spec"
+      - "installer/**"
+      - "scripts/build_windows.ps1"
+      - "streamdeck-plugin/**"
+      - "pyproject.toml"
+      - "main.py"
+      - "stream_state_router/**"
+
+jobs:
+  windows-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build distributable artifacts
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
+
+      - name: Verify package outputs
+        shell: pwsh
+        run: |
+          $Version = (
+            .\.venv\Scripts\python.exe -c "import stream_state_router; print(stream_state_router.__version__)"
+          ).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $Version) {
+            throw "Unable to resolve SSR version"
+          }
+
+          $Expected = @(
+            ".\dist\StreamStateRouter.exe",
+            ".\release\Stream-State-Router-v$Version-portable.zip",
+            ".\release\Stream-State-Router-v$Version-setup.exe",
+            ".\release\build-manifest.json"
+          )
+          foreach ($Path in $Expected) {
+            if (-not (Test-Path $Path)) {
+              throw "Package smoke artifact missing: $Path"
+            }
+          }
+
+          $Plugin = Get-ChildItem .\release\*.streamDeckPlugin -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $Plugin) {
+            throw "Package smoke Stream Deck artifact missing"
+          }
+
+      - name: Upload smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssr-package-smoke
+          retention-days: 3
+          path: |
+            release/**
