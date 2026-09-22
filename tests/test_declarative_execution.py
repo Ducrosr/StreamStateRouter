@@ -381,6 +381,131 @@ class DeclarativeExecutorTests(unittest.TestCase):
         self.assertTrue(result.replan_required)
         self.assertFalse(any(name.startswith("Set") for name, _data in client.requests))
 
+    def test_atomic_commit_rejects_runtime_change_without_write(self):
+        key = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(False)},
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+        commits = 0
+
+        def commit_write(_write):
+            nonlocal commits
+            commits += 1
+            return False, "runtime target changed at commit boundary"
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+            commit_write=commit_write,
+        )
+
+        self.assertEqual(commits, 1)
+        self.assertEqual(result.status, "replan_required")
+        self.assertTrue(result.replan_required)
+        self.assertFalse(any(name.startswith("Set") for name, _data in client.requests))
+        self.assertEqual(result.steps[0].status, "not_run")
+
+    def test_binding_drift_during_final_target_revalidation_prevents_write(self):
+        key = PropertyKey.scene_item_visibility(
+            collection="Lab Collection",
+            container="Lab",
+            source="Probe",
+            occurrence=0,
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(False)},
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+        validations = 0
+
+        def validate_target():
+            nonlocal validations
+            validations += 1
+            if validations == 3:
+                client.scene_items.append(
+                    {
+                        "sourceName": "Probe",
+                        "sourceUuid": "probe-1",
+                        "sceneItemId": 9,
+                    }
+                )
+            return True, ""
+
+        result = executor.execute(
+            prepared,
+            validate_target=validate_target,
+        )
+
+        self.assertEqual(result.status, "replan_required")
+        self.assertTrue(result.replan_required)
+        self.assertFalse(
+            any(name == "SetSceneItemEnabled" for name, _data in client.requests)
+        )
+
+    def test_blocked_second_operation_after_applied_write_requires_replan(self):
+        mute = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        visibility = PropertyKey.scene_item_visibility(
+            collection="Lab Collection",
+            container="Lab",
+            source="Probe",
+            occurrence=0,
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(mute, True),
+                DesiredAssignment.create(visibility, True),
+            ]
+        )
+        prepared = _prepared(
+            desired,
+            {
+                mute: ObservedValue.known_value(False),
+                visibility: ObservedValue.known_value(False),
+            },
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        def progress(steps):
+            if any(step.key == mute and step.status == "applied" for step in steps):
+                client.scene_items[0] = {
+                    "sourceName": "Probe",
+                    "sceneItemId": 0,
+                }
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+            progress=progress,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertTrue(result.replan_required)
+        by_key = {step.key: step for step in result.steps}
+        self.assertEqual(by_key[mute].status, "applied")
+        self.assertEqual(by_key[visibility].status, "not_run")
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputMute"),
+            1,
+        )
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetSceneItemEnabled"),
+            0,
+        )
+
     def test_session_change_between_operations_preserves_not_run_step(self):
         mute = PropertyKey.input_mute(
             collection="Lab Collection",
@@ -495,7 +620,7 @@ class DeclarativeExecutorTests(unittest.TestCase):
             )
             if request == "GetInputMute":
                 mute_reads += 1
-                if mute_reads == 3:
+                if mute_reads == 4:
                     planning.collection = "Other Collection"
             return response
 
@@ -534,7 +659,7 @@ class DeclarativeExecutorTests(unittest.TestCase):
             nonlocal mute_reads
             if request == "GetInputMute":
                 mute_reads += 1
-                if mute_reads == 4:
+                if mute_reads == 5:
                     if expected_session_generation != client.session_generation:
                         raise RuntimeError("session mismatch")
                     client.requests.append((request, dict(data or {})))
