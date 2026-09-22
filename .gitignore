@@ -4,7 +4,22 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+
+# Local user configuration / secrets
+/config.json
+/config.json.*
+.env
+.env.*
+*.log
+*.bak
+
+# Python / release artifacts
 build/
 dist/
 release/
 *.spec.bak
+
+# Node / Stream Deck generated artifacts
+node_modules/
+streamdeck-plugin/com.remyducros.streamstaterouter.sdPlugin/bin/
+*.streamDeckPlugin
