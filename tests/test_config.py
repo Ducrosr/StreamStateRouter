@@ -241,6 +241,22 @@ class ConfigTests(unittest.TestCase):
                 (value, errors),
             )
 
+    def test_input_volume_db_requires_explicit_volume_value(self):
+        data = self.sample()
+        data["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "input_volume_db",
+                "params": {"input": "Music"},
+            }
+        ]
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(".params.volume_db est obligatoire" in error for error in errors),
+            errors,
+        )
+
     def test_schema_v4_adds_activation_policies(self):
         data = self.sample()
         data["schema_version"] = 4
