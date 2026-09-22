@@ -149,7 +149,7 @@ def _select_input(
     selector: str | None,
 ) -> dict[str, str]:
     response = client.send("GetInputList")
-    rows = [
+    candidates = [
         {
             "name": str(row.get("inputName") or "").strip(),
             "uuid": str(row.get("inputUuid") or "").strip(),
@@ -160,8 +160,34 @@ def _select_input(
         and str(row.get("inputName") or "").strip()
         and str(row.get("inputUuid") or "").strip()
     ]
+
+    rows: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    for row in candidates:
+        try:
+            client.send(
+                "GetInputVolume",
+                {"inputUuid": row["uuid"]},
+            )
+        except Exception as exc:
+            skipped.append(
+                {
+                    **row,
+                    "reason": str(exc),
+                }
+            )
+            continue
+        rows.append(row)
+
+    if skipped:
+        print("\nInputs ignorés car ils ne supportent pas le volume audio :")
+        for row in skipped:
+            print(f"  - {row['name']}  [{row['kind']}]")
+
     if not rows:
-        raise RuntimeError("OBS ne retourne aucun input avec UUID exploitable.")
+        raise RuntimeError(
+            "OBS ne retourne aucun input audio avec UUID compatible GetInputVolume."
+        )
 
     if selector:
         wanted = selector.strip().casefold()
