@@ -70,11 +70,30 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build Stream Deck plugin
         working-directory: streamdeck-plugin
+        shell: pwsh
         run: |
-          npm run typecheck
-          npm run build
-          npm run validate
-          npm run pack
+          $Manifest = "com.remyducros.streamstaterouter.sdPlugin/manifest.json"
+          $ManifestPath = (Resolve-Path $Manifest).Path
+          $Before = [System.IO.File]::ReadAllBytes($ManifestPath)
+          $PluginVersion = "${{ steps.version.outputs.version }}.0"
+          try {
+            npm run typecheck
+            if ($LASTEXITCODE -ne 0) { throw "Stream Deck typecheck failed" }
+            npm run build
+            if ($LASTEXITCODE -ne 0) { throw "Stream Deck build failed" }
+            npm run validate
+            if ($LASTEXITCODE -ne 0) { throw "Stream Deck validation failed" }
+            npm run pack -- --version $PluginVersion
+            if ($LASTEXITCODE -ne 0) { throw "Stream Deck pack failed" }
+
+            $Stamped = (Get-Content $Manifest -Raw | ConvertFrom-Json).Version
+            if ($Stamped -ne $PluginVersion) {
+              throw "Stream Deck manifest version mismatch after pack: $Stamped != $PluginVersion"
+            }
+          }
+          finally {
+            [System.IO.File]::WriteAllBytes($ManifestPath, $Before)
+          }
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build installer
@@ -102,6 +121,7 @@ jobs:
             pyinstaller = (pyinstaller --version 2>&1).ToString().Trim()
             node = (node --version 2>&1).ToString().Trim()
             npm = (npm --version 2>&1).ToString().Trim()
+            streamdeck_plugin_version = "${{ steps.version.outputs.version }}.0"
             python_constraints_sha256 = $PythonConstraintsSha256
             streamdeck_lock_sha256 = $StreamDeckLockSha256
             runner_os = "${{ runner.os }}"
