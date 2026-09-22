@@ -1,10 +1,10 @@
-$ErrorActionPreference = "Stop"
-Set-Location (Split-Path -Parent $PSScriptRoot)
-
 param(
     [string]$Python = "python",
     [string]$Output = ".\constraints\windows-py312.txt"
 )
+
+$ErrorActionPreference = "Stop"
+Set-Location (Split-Path -Parent $PSScriptRoot)
 
 function Invoke-Native {
     param(
