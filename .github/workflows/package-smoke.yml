@@ -38,6 +38,18 @@ jobs:
         shell: pwsh
         run: .\scripts\build_windows.ps1
 
+      - name: Record Python build environment
+        shell: pwsh
+        run: |
+          $FreezePath = ".\release\python-build-freeze.txt"
+          .\.venv\Scripts\python.exe -m pip freeze --all |
+            Where-Object { $_ -notmatch "^-e\s" } |
+            Sort-Object |
+            Set-Content -Path $FreezePath -Encoding utf8
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $FreezePath)) {
+            throw "Unable to record Python build environment"
+          }
+
       - name: Verify package outputs
         shell: pwsh
         run: |
