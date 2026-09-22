@@ -20,7 +20,7 @@ jobs:
         with:
           node-version: '24'
       - name: Install Python
-        run: python -m pip install -e ".[all]"
+        run: python -m pip install -c constraints/windows-release.txt -e ".[all]"
       - name: Resolve and verify version
         id: version
         shell: pwsh
