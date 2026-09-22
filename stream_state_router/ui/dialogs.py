@@ -840,14 +840,17 @@ class ActionDialog(QDialog):
         ("Changer de scène programme", "set_program_scene"),
         ("Afficher/masquer une source de scène", "scene_item_enabled"),
         ("Activer/désactiver un filtre", "source_filter_enabled"),
+        ("Modifier les réglages d'un filtre", "source_filter_settings"),
         ("Mute/unmute une entrée", "input_mute"),
         ("Régler le volume d'une entrée (dB)", "input_volume_db"),
         ("Réglages avancés d'une entrée", "set_input_settings"),
+        ("Router l'audio Windows d'une application", "app_audio_output"),
+        ("Activer/désactiver HDR Windows", "windows_hdr"),
     ]
 
     def __init__(self, parent=None, action: dict | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Action OBS")
+        self.setWindowTitle("Action profil")
         self.resize(620, 470)
         source = OBSAction.from_mapping(action or {})
 
@@ -899,6 +902,29 @@ class ActionDialog(QDialog):
             fields[key] = widget
             form.addRow("", widget)
 
+        def combo(
+            key: str,
+            label: str,
+            choices: Sequence[tuple[str, str]],
+            default: str,
+        ):
+            widget = QComboBox()
+            for text, value in choices:
+                widget.addItem(text, value)
+            current = str(params.get(key) or default)
+            index = widget.findData(current)
+            widget.setCurrentIndex(max(0, index))
+            fields[key] = widget
+            form.addRow(label, widget)
+
+        def json_settings(label: str):
+            editor = QPlainTextEdit()
+            editor.setPlaceholderText('{"setting": "value"}')
+            settings = params.get("settings", {})
+            editor.setPlainText(json.dumps(settings, ensure_ascii=False, indent=2))
+            fields["settings"] = editor
+            form.addRow(label, editor)
+
         if kind == "set_program_scene":
             line("scene", "Scène")
         elif kind == "scene_item_enabled":
@@ -909,6 +935,11 @@ class ActionDialog(QDialog):
             line("source", "Source")
             line("filter", "Filtre")
             check("enabled", "Activer le filtre", True)
+        elif kind == "source_filter_settings":
+            line("source", "Source")
+            line("filter", "Filtre")
+            json_settings("Settings du filtre (JSON)")
+            check("overlay", "Fusionner avec les réglages existants", True)
         elif kind == "input_mute":
             line("input", "Entrée OBS")
             check("muted", "Couper le son", True)
@@ -920,13 +951,37 @@ class ActionDialog(QDialog):
             form.addRow("Volume (dB)", widget)
         elif kind == "set_input_settings":
             line("input", "Entrée OBS")
-            editor = QPlainTextEdit()
-            editor.setPlaceholderText('{"setting": "value"}')
-            settings = params.get("settings", {})
-            editor.setPlainText(json.dumps(settings, ensure_ascii=False, indent=2))
-            fields["settings"] = editor
-            form.addRow("Settings JSON", editor)
+            json_settings("Settings JSON")
             check("overlay", "Fusionner avec les réglages existants", True)
+        elif kind == "app_audio_output":
+            line(
+                "device",
+                "Périphérique audio",
+                "ex. Game ou Command-Line Friendly ID SoundVolumeView",
+            )
+            line("process", "Processus", "ex. Overwatch.exe")
+            combo(
+                "roles",
+                "Rôles Windows",
+                [
+                    ("Tous (Console + Multimedia + Communications)", "all"),
+                    ("Console", "0"),
+                    ("Multimedia", "1"),
+                    ("Communications", "2"),
+                ],
+                "all",
+            )
+        elif kind == "windows_hdr":
+            check("enabled", "Activer HDR", True)
+            combo(
+                "display",
+                "Écran",
+                [
+                    ("Écran principal", "primary"),
+                    ("Tous les écrans compatibles", "all"),
+                ],
+                "primary",
+            )
         return page, fields
 
     def _sync_page(self) -> None:
@@ -938,7 +993,7 @@ class ActionDialog(QDialog):
         try:
             self.result_action()
         except Exception as exc:
-            QMessageBox.warning(self, "Action OBS", str(exc))
+            QMessageBox.warning(self, "Action profil", str(exc))
             return
         self.accept()
 
@@ -949,6 +1004,8 @@ class ActionDialog(QDialog):
         for key, widget in fields.items():
             if isinstance(widget, QCheckBox):
                 params[key] = widget.isChecked()
+            elif isinstance(widget, QComboBox):
+                params[key] = str(widget.currentData() or "")
             elif isinstance(widget, QPlainTextEdit):
                 text = widget.toPlainText().strip() or "{}"
                 value = json.loads(text)
@@ -965,9 +1022,12 @@ class ActionDialog(QDialog):
             "set_program_scene": ("scene",),
             "scene_item_enabled": ("scene", "source"),
             "source_filter_enabled": ("source", "filter"),
+            "source_filter_settings": ("source", "filter", "settings"),
             "input_mute": ("input",),
             "input_volume_db": ("input",),
             "set_input_settings": ("input", "settings"),
+            "app_audio_output": ("device", "process", "roles"),
+            "windows_hdr": ("display",),
         }[kind]
         for key in required:
             if params.get(key) in (None, "", {}):
