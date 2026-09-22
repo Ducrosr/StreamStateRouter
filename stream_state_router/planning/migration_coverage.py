@@ -80,9 +80,9 @@ class MigrationCoverageReport:
         return Counter(profile.classification for profile in self.profiles)
 
     @staticmethod
-    def _percent(value: int, total: int) -> float:
+    def _percent(value: int, total: int) -> float | None:
         if total <= 0:
-            return 100.0
+            return None
         return round((value / total) * 100.0, 1)
 
     def summary(self) -> dict[str, object]:
@@ -338,6 +338,12 @@ def build_migration_coverage(
     return MigrationCoverageReport(tuple(rows))
 
 
+def _render_percent(value: object) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value}%"
+
+
 def render_migration_coverage(report: MigrationCoverageReport) -> str:
     summary = report.summary()
     actions = summary["actions"]
@@ -350,16 +356,21 @@ def render_migration_coverage(report: MigrationCoverageReport) -> str:
         (
             "Actions actives : "
             f"{actions['active']} · représentées "
-            f"{actions['represented_percent']}% · exécutables "
-            f"{actions['executable_percent']}%"
+            f"{_render_percent(actions['represented_percent'])} · exécutables "
+            f"{_render_percent(actions['executable_percent'])}"
         ),
         (
             "Profils : "
             f"{profiles['total']} · profils d'actions "
             f"{profiles['action_profiles']} · exécutables "
-            f"{profiles['executable_percent']}%"
+            f"{_render_percent(profiles['executable_percent'])}"
         ),
     ]
+
+    if actions.get("active") == 0:
+        lines.append(
+            "Aucune action OBS active à mesurer dans cette configuration."
+        )
 
     action_counts = actions.get("counts", {})
     if isinstance(action_counts, Mapping) and action_counts:
