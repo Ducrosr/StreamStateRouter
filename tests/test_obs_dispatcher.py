@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from stream_state_router.obs.dispatcher import OBSDispatcher, profile_map_from_raw
 from stream_state_router.router.engine import StateChange
 from stream_state_router.obs.models import OBSAction
-from stream_state_router.router.models import StreamState
+from stream_state_router.router.models import ForegroundApp, StreamState
 
 
 class FakeHostController:
