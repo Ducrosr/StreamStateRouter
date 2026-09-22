@@ -23,6 +23,7 @@ from stream_state_router.host import (
 from stream_state_router.importers import (
     AdvancedSceneSwitcherImporter,
     SceneCollectionImporter,
+    wire_windows_hdr_capture_profiles,
 )
 from stream_state_router.obs.client import OBSClientManager
 from stream_state_router.services.config import (
@@ -99,8 +100,24 @@ def _parse_args() -> argparse.Namespace:
         "--export-migration-preview",
         type=Path,
         help=(
-            "Écrit une copie de config avec migration logique ASC + layouts, "
+            "Écrit une copie de config avec migration logique ASC, "
             "sans modifier la configuration SSR active."
+        ),
+    )
+    parser.add_argument(
+        "--migration-include-layouts",
+        action="store_true",
+        help=(
+            "Inclut les LayoutProfiles exhaustifs dans l'export de migration. "
+            "Désactivé par défaut."
+        ),
+    )
+    parser.add_argument(
+        "--wire-hdr-profiles",
+        action="store_true",
+        help=(
+            "Ajoute Windows HDR ON à CaptureProfile HDR et OFF à Default "
+            "si aucune action contradictoire n'existe."
         ),
     )
     return parser.parse_args()
@@ -323,17 +340,23 @@ def main() -> int:
 
             if args.export_migration_preview is not None:
                 migration_preview_config = copy.deepcopy(config)
-                SceneCollectionImporter.apply_layout_profiles(
-                    migration_preview_config,
-                    collection=snapshot.collection,
-                    profiles=layouts,
-                    skipped=layout_skipped,
-                )
+                if args.migration_include_layouts:
+                    SceneCollectionImporter.apply_layout_profiles(
+                        migration_preview_config,
+                        collection=snapshot.collection,
+                        profiles=layouts,
+                        skipped=layout_skipped,
+                    )
                 AdvancedSceneSwitcherImporter.apply_to_config(
                     asc_data,
                     migration_preview_config,
                     snapshot=snapshot,
                 )
+                hdr_profiles_changed: tuple[str, ...] = ()
+                if args.wire_hdr_profiles:
+                    hdr_profiles_changed = wire_windows_hdr_capture_profiles(
+                        migration_preview_config
+                    )
                 migration_errors = validate_config(migration_preview_config)
                 if migration_errors:
                     raise RuntimeError(
@@ -357,9 +380,23 @@ def main() -> int:
                     "ok": True,
                     "path": str(args.export_migration_preview),
                     "mode": "logic_migration",
-                    "includes_layouts": True,
+                    "includes_layouts": bool(
+                        args.migration_include_layouts
+                    ),
                     "includes_global_snapshot_merge": False,
+                    "wire_hdr_profiles": bool(args.wire_hdr_profiles),
+                    "hdr_profiles_changed": list(hdr_profiles_changed),
                 }
+                if args.wire_hdr_profiles:
+                    if hdr_profiles_changed:
+                        print(
+                            "CaptureProfiles HDR câblés : "
+                            + ", ".join(hdr_profiles_changed)
+                        )
+                    else:
+                        print(
+                            "CaptureProfiles HDR déjà correctement câblés."
+                        )
                 print(
                     "Prévisualisation migration logique écrite : "
                     f"{args.export_migration_preview}"

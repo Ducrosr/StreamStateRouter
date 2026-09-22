@@ -3,6 +3,7 @@ from .advanced_scene_switcher import (
     AdvancedSceneSwitcherImporter,
     RejectedAdvancedSceneSwitcherMacro,
 )
+from .migration import wire_windows_hdr_capture_profiles
 from .scene_collection import (
     CollectionImportReport,
     LayoutImportReport,
@@ -18,4 +19,5 @@ __all__ = [
     "LayoutImportReport",
     "SceneCollectionImporter",
     "SceneCollectionSnapshot",
+    "wire_windows_hdr_capture_profiles",
 ]

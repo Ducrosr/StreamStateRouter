@@ -972,8 +972,14 @@ class CollectionLogicImportDialog(QDialog):
         self.layouts = QCheckBox(
             "Importer/rafraîchir un LayoutProfile pour chaque scène OBS"
         )
-        self.layouts.setChecked(True)
+        self.layouts.setChecked(False)
         root.addWidget(self.layouts)
+
+        self.hdr_profiles = QCheckBox(
+            "Configurer CaptureProfile HDR → Windows HDR ON et Default → OFF"
+        )
+        self.hdr_profiles.setChecked(False)
+        root.addWidget(self.hdr_profiles)
 
         asc_group = QFormLayout()
         self.asc_path = QLineEdit()
@@ -1023,6 +1029,7 @@ class CollectionLogicImportDialog(QDialog):
     def options(self) -> dict[str, object]:
         return {
             "include_layouts": self.layouts.isChecked(),
+            "wire_hdr_profiles": self.hdr_profiles.isChecked(),
             "asc_path": self.asc_path.text().strip(),
         }
 

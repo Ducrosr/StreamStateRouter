@@ -39,7 +39,11 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..activation import TriggerTargetIdentity
-from ..importers import AdvancedSceneSwitcherImporter, SceneCollectionImporter
+from ..importers import (
+    AdvancedSceneSwitcherImporter,
+    SceneCollectionImporter,
+    wire_windows_hdr_capture_profiles,
+)
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -1447,7 +1451,7 @@ class MainWindow(QMainWindow):
         options = dialog.options()
         try:
             request_id = self._service.request_collection_import_preview(
-                include_layouts=bool(options.get("include_layouts", True)),
+                include_layouts=bool(options.get("include_layouts", False)),
             )
         except Exception as exc:
             QMessageBox.critical(
@@ -1522,6 +1526,7 @@ class MainWindow(QMainWindow):
         asc_report = None
         asc_path = ""
         layout_report = None
+        hdr_profiles_changed: tuple[str, ...] = ()
         try:
             report = None
             if mode == "snapshot_profile":
@@ -1589,6 +1594,14 @@ class MainWindow(QMainWindow):
                     snapshot=snapshot,
                 )
 
+            if (
+                mode == "logic_migration"
+                and bool(options.get("wire_hdr_profiles", False))
+            ):
+                hdr_profiles_changed = wire_windows_hdr_capture_profiles(
+                    self.config
+                )
+
             errors = validate_config(self.config)
             if errors:
                 raise ValueError(
@@ -1636,6 +1649,17 @@ class MainWindow(QMainWindow):
                 "\n\nAdvanced Scene Switcher\n"
                 + asc_report.summary()
             )
+        if bool(options.get("wire_hdr_profiles", False)):
+            if hdr_profiles_changed:
+                summary += (
+                    "\n\nHDR Windows\nCaptureProfile(s) câblé(s) : "
+                    + ", ".join(hdr_profiles_changed)
+                )
+            else:
+                summary += (
+                    "\n\nHDR Windows\nLes CaptureProfiles HDR/Default "
+                    "étaient déjà correctement câblés."
+                )
         elif not asc_path:
             summary += (
                 "\n\nAdvanced Scene Switcher\n"
