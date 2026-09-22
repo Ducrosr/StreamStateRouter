@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import copy
 import json
+import math
 import os
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 
@@ -132,34 +134,112 @@ class AdvancedSceneSwitcherImporter:
         return None
 
     @staticmethod
-    def _process_selector(
+    def _translate_window_regex(
+        value: str,
+        raw_config: Any,
+    ) -> str | None:
+        config = raw_config if isinstance(raw_config, Mapping) else {}
+        if not bool(config.get("enable", False)):
+            return "^" + re.escape(value) + "$"
+        try:
+            options = int(config.get("options", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        # ASC uses QRegularExpression. The only options converted here are
+        # CaseInsensitiveOption (0x1) and DotMatchesEverythingOption (0x2).
+        if options & ~0x3:
+            return None
+        flags = ""
+        if options & 0x1:
+            flags += "i"
+        if options & 0x2:
+            flags += "s"
+        expression = value
+        if not bool(config.get("partial", False)):
+            expression = f"^(?:{expression})$"
+        return f"(?{flags}){expression}" if flags else expression
+
+    @classmethod
+    def _trigger_selector(
+        cls,
         macro_name: str,
         condition: Mapping[str, Any],
     ) -> tuple[dict[str, Any] | None, str]:
-        if str(condition.get("id") or "") != "process":
-            return None, (
-                f"{macro_name}: condition '{condition.get('id')}' non convertible "
-                "(seule la condition process focus est automatisée)"
+        condition_id = str(condition.get("id") or "").strip()
+
+        if condition_id == "process":
+            if not bool(condition.get("focus", False)):
+                return None, (
+                    f"{macro_name}: condition process sans focus actif non représentable "
+                    "par le routeur foreground SSR"
+                )
+            regex = condition.get("regexConfig")
+            if isinstance(regex, Mapping) and bool(regex.get("enable", False)):
+                return None, (
+                    f"{macro_name}: regex de processus ASC non convertie automatiquement"
+                )
+            process = str(condition.get("process") or "").strip()
+            if not process:
+                return None, f"{macro_name}: processus ASC vide"
+            path = ""
+            if bool(condition.get("checkPath", False)):
+                path_regex = condition.get("pathRegex")
+                if (
+                    isinstance(path_regex, Mapping)
+                    and bool(path_regex.get("enable", False))
+                ):
+                    return None, (
+                        f"{macro_name}: regex de chemin process ASC non convertible"
+                    )
+                path = str(condition.get("processPath") or "").strip()
+                if not path:
+                    return None, f"{macro_name}: chemin process ASC vide"
+            return {
+                "exe": process,
+                "path": path,
+                "title_regex": "",
+            }, ""
+
+        if condition_id == "window":
+            if not bool(condition.get("focus", False)):
+                return None, (
+                    f"{macro_name}: condition fenêtre sans focus actif non représentable"
+                )
+            if not bool(condition.get("checkTitle", False)):
+                return None, (
+                    f"{macro_name}: condition fenêtre sans titre non représentable"
+                )
+            for key in (
+                "fullscreen",
+                "maximized",
+                "windowFocusChanged",
+                "checkWindowText",
+            ):
+                if bool(condition.get(key, False)):
+                    return None, (
+                        f"{macro_name}: contrainte fenêtre ASC '{key}' non convertible"
+                    )
+            window = str(condition.get("window") or "").strip()
+            if not window:
+                return None, f"{macro_name}: titre de fenêtre ASC vide"
+            title_regex = cls._translate_window_regex(
+                window,
+                condition.get("windowRegexConfig"),
             )
-        if not bool(condition.get("focus", False)):
-            return None, (
-                f"{macro_name}: condition process sans focus actif non représentable "
-                "par le routeur foreground SSR"
-            )
-        regex = condition.get("regexConfig")
-        if isinstance(regex, Mapping) and bool(regex.get("enable", False)):
-            return None, (
-                f"{macro_name}: regex de processus ASC non convertie automatiquement"
-            )
-        if bool(condition.get("checkPath", False)):
-            return None, (
-                f"{macro_name}: condition process avec vérification de chemin "
-                "à migrer manuellement"
-            )
-        process = str(condition.get("process") or "").strip()
-        if not process:
-            return None, f"{macro_name}: processus ASC vide"
-        return {"exe": process}, ""
+            if not title_regex:
+                return None, (
+                    f"{macro_name}: options regex fenêtre ASC non convertibles"
+                )
+            return {
+                "exe": "",
+                "path": "",
+                "title_regex": title_regex,
+            }, ""
+
+        return None, (
+            f"{macro_name}: condition '{condition_id or '?'}' non convertible "
+            "(process/window foreground seulement)"
+        )
 
     @staticmethod
     def _convert_action(
@@ -186,6 +266,13 @@ class AdvancedSceneSwitcherImporter:
             )
 
         if action_id == "scene_visibility":
+            if bool(action.get("updateTransition", False)) or bool(
+                action.get("updateDuration", False)
+            ):
+                return None, (
+                    f"{macro_name}: visibilité avec transition/durée personnalisée "
+                    "non convertible exactement"
+                )
             scene = _scene_name(action)
             item = action.get("sceneItemSelection")
             source = (
@@ -306,6 +393,70 @@ class AdvancedSceneSwitcherImporter:
                 "",
             )
 
+        if action_id == "audio":
+            source = _selection_name(action.get("audioSource"))
+            if not source:
+                return None, (
+                    f"{macro_name}: source audio ASC dynamique non convertible"
+                )
+            mode = int(action.get("action", -1) or 0)
+            if mode == 0:
+                return (
+                    {
+                        "type": "input_mute",
+                        "name": f"Import ASC · {macro_name} · mute",
+                        "enabled": True,
+                        "params": {"input": source, "muted": True},
+                    },
+                    "",
+                )
+            if mode == 1:
+                return (
+                    {
+                        "type": "input_mute",
+                        "name": f"Import ASC · {macro_name} · unmute",
+                        "enabled": True,
+                        "params": {"input": source, "muted": False},
+                    },
+                    "",
+                )
+            if mode == 2:
+                if bool(action.get("fade", False)):
+                    return None, f"{macro_name}: fade audio ASC non convertible"
+                if not bool(action.get("useDb", False)):
+                    return None, (
+                        f"{macro_name}: volume ASC en pourcentage non converti "
+                        "automatiquement"
+                    )
+                raw = action.get("volumeDB")
+                if not isinstance(raw, Mapping):
+                    return None, f"{macro_name}: volume dB ASC invalide"
+                if int(raw.get("type", 0) or 0) != 0:
+                    return None, (
+                        f"{macro_name}: volume dB ASC dépend d'une variable"
+                    )
+                value = raw.get("value")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or not -100.0 <= float(value) <= 26.0
+                ):
+                    return None, f"{macro_name}: volume dB ASC invalide/hors plage"
+                return (
+                    {
+                        "type": "input_volume_db",
+                        "name": f"Import ASC · {macro_name} · volume",
+                        "enabled": True,
+                        "params": {
+                            "input": source,
+                            "volume_db": float(value),
+                        },
+                    },
+                    "",
+                )
+            return None, f"{macro_name}: action audio ASC {mode} non convertible"
+
         return None, f"{macro_name}: action ASC '{action_id}' non convertible"
 
     @staticmethod
@@ -410,7 +561,7 @@ class AdvancedSceneSwitcherImporter:
                     "SSR n'assemble pas automatiquement une logique ASC complexe"
                 )
                 continue
-            selector, reason = cls._process_selector(name, conditions[0])
+            selector, reason = cls._trigger_selector(name, conditions[0])
             if selector is None:
                 skipped.append(reason)
                 continue
@@ -436,19 +587,21 @@ class AdvancedSceneSwitcherImporter:
                 skipped.append(f"{name}: aucune action convertible")
                 continue
 
-            exe = str(selector["exe"])
+            exe = str(selector.get("exe") or "")
+            path = str(selector.get("path") or "")
+            title_regex = str(selector.get("title_regex") or "")
             matching_rules = [
                 rule
                 for rule in rules
                 if isinstance(rule, dict)
                 and str(rule.get("behavior", "match")).casefold() == "match"
                 and str(rule.get("exe") or "").casefold() == exe.casefold()
-                and not str(rule.get("path") or "").strip()
-                and not str(rule.get("title_regex") or "").strip()
+                and str(rule.get("path") or "").casefold() == path.casefold()
+                and str(rule.get("title_regex") or "") == title_regex
             ]
             if len(matching_rules) > 1:
                 skipped.append(
-                    f"{name}: plusieurs règles SSR correspondent déjà à {exe}"
+                    f"{name}: plusieurs règles SSR correspondent déjà au même déclencheur"
                 )
                 continue
 
@@ -491,11 +644,11 @@ class AdvancedSceneSwitcherImporter:
                     {
                         "name": rule_name,
                         "behavior": "match",
-                        "priority": 1000 - index,
-                        "enabled": True,
+                        "priority": 50 - index,
+                        "enabled": False,
                         "exe": exe,
-                        "path": "",
-                        "title_regex": "",
+                        "path": path,
+                        "title_regex": title_regex,
                         "state": state,
                         "apply_delay_ms": 0,
                         "conditions": {},
