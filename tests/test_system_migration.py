@@ -5,6 +5,7 @@ import unittest
 from stream_state_router.importers import (
     neutralize_referenced_test_layout_profiles,
     set_capture_profile_for_process,
+    set_fallback_capture_profile,
     set_game_profile_input_setting,
     wire_windows_hdr_capture_profiles,
 )
@@ -108,6 +109,33 @@ class SystemMigrationTests(unittest.TestCase):
         self.assertEqual(changed, ("Dofus Unity", "Dofus background"))
         self.assertEqual(config["rules"][0]["state"]["CaptureProfile"], "HDR")
         self.assertEqual(config["rules"][1]["state"]["CaptureProfile"], "HDR")
+
+    def test_sets_fallback_capture_profile(self):
+        config = {
+            "router": {
+                "fallback_state": {
+                    "Game": "Vanilla",
+                    "CaptureProfile": "Default",
+                }
+            },
+            "profiles": {
+                "capture": {
+                    "Default": {"actions": []},
+                    "SDR": {"actions": []},
+                }
+            },
+        }
+
+        previous = set_fallback_capture_profile(
+            config,
+            capture_profile="SDR",
+        )
+
+        self.assertEqual(previous, "Default")
+        self.assertEqual(
+            config["router"]["fallback_state"]["CaptureProfile"],
+            "SDR",
+        )
 
     def test_updates_one_game_input_setting(self):
         config = {

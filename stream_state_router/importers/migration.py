@@ -262,3 +262,38 @@ def set_game_profile_input_setting(
         )
     matches[0][wanted_setting] = value
     return 1
+
+
+def set_fallback_capture_profile(
+    config: dict[str, Any],
+    *,
+    capture_profile: str,
+) -> str:
+    """Set the router fallback CaptureProfile after validating the target."""
+    wanted_profile = str(capture_profile or "").strip()
+    if not wanted_profile:
+        raise ValueError("capture_profile est requis.")
+
+    profiles = config.get("profiles")
+    capture_profiles = (
+        profiles.get("capture")
+        if isinstance(profiles, Mapping)
+        else None
+    )
+    if (
+        not isinstance(capture_profiles, Mapping)
+        or wanted_profile not in capture_profiles
+    ):
+        raise ValueError(
+            f"CaptureProfile '{wanted_profile}' introuvable."
+        )
+
+    router = config.setdefault("router", {})
+    if not isinstance(router, dict):
+        raise ValueError("config.router doit être un objet.")
+    fallback = router.setdefault("fallback_state", {})
+    if not isinstance(fallback, dict):
+        raise ValueError("config.router.fallback_state doit être un objet.")
+    previous = str(fallback.get("CaptureProfile") or "")
+    fallback["CaptureProfile"] = wanted_profile
+    return previous

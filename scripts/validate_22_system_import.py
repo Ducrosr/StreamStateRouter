@@ -25,6 +25,7 @@ from stream_state_router.importers import (
     SceneCollectionImporter,
     neutralize_referenced_test_layout_profiles,
     set_capture_profile_for_process,
+    set_fallback_capture_profile,
     set_game_profile_input_setting,
     wire_windows_hdr_capture_profiles,
 )
@@ -154,6 +155,14 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Remplace une valeur set_input_settings dans un Game profile. "
             "La valeur est traitée comme chaîne. Répétable."
+        ),
+    )
+    parser.add_argument(
+        "--fallback-capture-profile",
+        metavar="PROFILE",
+        help=(
+            "Remplace explicitement le CaptureProfile de l'état fallback "
+            "(ex. SDR pour revenir au bureau en SDR)."
         ),
     )
     return parser.parse_args()
@@ -395,6 +404,7 @@ def main() -> int:
                 test_layouts_neutralized: tuple[str, ...] = ()
                 capture_route_changes: dict[str, list[str]] = {}
                 input_setting_changes: list[dict[str, str]] = []
+                fallback_capture_change: dict[str, str] | None = None
                 if args.wire_hdr_profiles:
                     hdr_profiles_changed = wire_windows_hdr_capture_profiles(
                         migration_preview_config
@@ -413,6 +423,16 @@ def main() -> int:
                         capture_profile=profile,
                     )
                     capture_route_changes[process] = list(changed_rules)
+
+                if args.fallback_capture_profile:
+                    previous_fallback_capture = set_fallback_capture_profile(
+                        migration_preview_config,
+                        capture_profile=args.fallback_capture_profile,
+                    )
+                    fallback_capture_change = {
+                        "previous": previous_fallback_capture,
+                        "current": args.fallback_capture_profile,
+                    }
 
                 for raw in args.game_input_setting:
                     parts = [item.strip() for item in str(raw).split("|", 3)]
@@ -484,6 +504,7 @@ def main() -> int:
                     ),
                     "capture_route_changes": capture_route_changes,
                     "input_setting_changes": input_setting_changes,
+                    "fallback_capture_change": fallback_capture_change,
                 }
                 if args.wire_hdr_profiles:
                     if hdr_profiles_changed:
@@ -503,6 +524,12 @@ def main() -> int:
                             f"CaptureProfile routé pour {process} : "
                             + ", ".join(rule_names)
                         )
+                if fallback_capture_change:
+                    print(
+                        "CaptureProfile fallback : "
+                        f"{fallback_capture_change['previous']} -> "
+                        f"{fallback_capture_change['current']}"
+                    )
                 if input_setting_changes:
                     for item in input_setting_changes:
                         print(
