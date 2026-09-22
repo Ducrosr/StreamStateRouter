@@ -82,3 +82,59 @@ def wire_windows_hdr_capture_profiles(
         changed.append(profile_name)
 
     return tuple(changed)
+
+def neutralize_referenced_test_layout_profiles(
+    config: dict[str, Any],
+    *,
+    marker: str = "[Module] TEST SSR",
+) -> tuple[str, ...]:
+    """Turn referenced legacy test layouts into explicit no-op profiles."""
+    layout_profiles = config.get("layout_profiles")
+    if not isinstance(layout_profiles, dict):
+        raise ValueError("config.layout_profiles doit être un objet.")
+
+    referenced: set[str] = set()
+    router = config.get("router")
+    if isinstance(router, Mapping):
+        fallback = router.get("fallback_state")
+        if isinstance(fallback, Mapping):
+            name = str(fallback.get("LayoutProfile") or "").strip()
+            if name:
+                referenced.add(name)
+
+    rules = config.get("rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if not isinstance(rule, Mapping):
+                continue
+            state = rule.get("state")
+            if not isinstance(state, Mapping):
+                continue
+            name = str(state.get("LayoutProfile") or "").strip()
+            if name:
+                referenced.add(name)
+
+    changed: list[str] = []
+    wanted_marker = str(marker or "").strip().casefold()
+    for name in sorted(referenced, key=str.casefold):
+        profile = layout_profiles.get(name)
+        if not isinstance(profile, dict):
+            continue
+        scene = str(profile.get("scene") or "").strip()
+        if not wanted_marker or wanted_marker not in scene.casefold():
+            continue
+        layout_profiles[name] = {
+            "scene": "",
+            "coordinate_mode": "normalized",
+            "modules": {},
+            "conditions": {},
+            "extends": "",
+            "transition": {
+                "mode": "instant",
+                "duration_ms": 0,
+                "steps": 8,
+            },
+        }
+        changed.append(name)
+
+    return tuple(changed)
