@@ -23,10 +23,9 @@ jobs:
       - name: PowerShell syntax
         shell: pwsh
         run: |
-          $Scripts = @(
-            ".\Install-And-Run.ps1",
-            ".\scripts\build_windows.ps1",
-            ".\scripts\run_dev.ps1"
+          $Scripts = @(".\Install-And-Run.ps1") + @(
+            Get-ChildItem ".\scripts" -Filter "*.ps1" -File |
+              Select-Object -ExpandProperty FullName
           )
           foreach ($Script in $Scripts) {
             $Tokens = $null
