@@ -9,6 +9,22 @@ from pathlib import Path
 import re
 from typing import Any, Mapping
 
+from .scene_collection import SceneCollectionSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedAdvancedSceneSwitcherMacro:
+    name: str
+    reason: str
+    raw: Mapping[str, Any]
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "reason": self.reason,
+            "raw": copy.deepcopy(dict(self.raw)),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class AdvancedSceneSwitcherImportReport:
@@ -19,6 +35,21 @@ class AdvancedSceneSwitcherImportReport:
     profiles_created: int
     attached_to_existing_rules: int
     skipped: tuple[str, ...]
+    rejected_raw: tuple[RejectedAdvancedSceneSwitcherMacro, ...] = ()
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "macros_total": self.macros_total,
+            "macros_converted": self.macros_converted,
+            "actions_converted": self.actions_converted,
+            "rules_created": self.rules_created,
+            "profiles_created": self.profiles_created,
+            "attached_to_existing_rules": self.attached_to_existing_rules,
+            "skipped": list(self.skipped),
+            "rejected_raw": [
+                item.as_mapping() for item in self.rejected_raw
+            ],
+        }
 
     def summary(self) -> str:
         lines = [
@@ -57,6 +88,20 @@ def _selection_name(value: Any) -> str:
 def _scene_name(action: Mapping[str, Any]) -> str:
     selection = action.get("sceneSelection")
     return _selection_name(selection)
+
+
+def _duration_is_zero(raw: Any) -> bool:
+    if raw in (None, {}):
+        return True
+    if not isinstance(raw, Mapping):
+        return False
+    value = raw.get("value", 0)
+    if isinstance(value, Mapping):
+        value = value.get("value", 0)
+    try:
+        return math.isfinite(float(value)) and float(value) == 0.0
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _action_identity(action: Mapping[str, Any]) -> tuple[str, ...]:
@@ -245,15 +290,40 @@ class AdvancedSceneSwitcherImporter:
     def _convert_action(
         macro_name: str,
         action: Mapping[str, Any],
+        *,
+        snapshot: SceneCollectionSnapshot | None = None,
     ) -> tuple[dict[str, Any] | None, str]:
         action_id = str(action.get("id") or "").strip()
         if action_id == "scene_switch":
             if int(action.get("action", 0) or 0) != 0:
                 return None, f"{macro_name}: variante scene_switch non prise en charge"
+            if int(action.get("sceneType", 0) or 0) != 0:
+                return None, f"{macro_name}: scène Preview non convertible"
+            scene_selection = action.get("sceneSelection")
             scene = _scene_name(action)
             if not scene:
                 return None, (
                     f"{macro_name}: scene_switch dynamique/courante non convertible"
+                )
+            if isinstance(scene_selection, Mapping):
+                canvas = str(
+                    scene_selection.get("canvasSelection") or ""
+                ).strip()
+                if canvas and canvas.casefold() != "main":
+                    return None, (
+                        f"{macro_name}: canvas '{canvas}' non pris en charge"
+                    )
+            if "transitionType" in action and int(
+                action.get("transitionType", 1) or 0
+            ) != 1:
+                return None, (
+                    f"{macro_name}: transition spécifique non représentée par SSR"
+                )
+            if "duration" in action and not _duration_is_zero(
+                action.get("duration")
+            ):
+                return None, (
+                    f"{macro_name}: durée de transition spécifique non représentée"
                 )
             return (
                 {
@@ -289,6 +359,13 @@ class AdvancedSceneSwitcherImporter:
                     f"{macro_name}: visibilité de scène dynamique, occurrence "
                     "spécifique ou toggle non convertible"
                 )
+            if snapshot is not None:
+                count = snapshot.scene_item_count(scene, source)
+                if count != 1:
+                    return None, (
+                        f"{macro_name}: {scene}/{source} possède "
+                        f"{count} occurrence(s) dans OBS"
+                    )
             return (
                 {
                     "type": "scene_item_enabled",
@@ -365,6 +442,10 @@ class AdvancedSceneSwitcherImporter:
                 return None, (
                     f"{macro_name}: action source ASC {mode} non convertible"
                 )
+            if snapshot is not None and source not in snapshot.input_names:
+                return None, (
+                    f"{macro_name}: '{source}' n'est pas un input OBS de la collection"
+                )
             if int(action.get("inputMethod", -1) or 0) != 2:
                 return None, (
                     f"{macro_name}: settings source ASC non-JSON "
@@ -398,6 +479,10 @@ class AdvancedSceneSwitcherImporter:
             if not source:
                 return None, (
                     f"{macro_name}: source audio ASC dynamique non convertible"
+                )
+            if snapshot is not None and source not in snapshot.input_names:
+                return None, (
+                    f"{macro_name}: '{source}' n'est pas un input OBS de la collection"
                 )
             mode = int(action.get("action", -1) or 0)
             if mode == 0:
@@ -498,6 +583,8 @@ class AdvancedSceneSwitcherImporter:
         cls,
         data: Mapping[str, Any],
         config: dict[str, Any],
+        *,
+        snapshot: SceneCollectionSnapshot | None = None,
     ) -> AdvancedSceneSwitcherImportReport:
         macros_raw = data.get("macros", [])
         macros = [
@@ -529,24 +616,39 @@ class AdvancedSceneSwitcherImporter:
         profiles_created = 0
         attached = 0
         skipped: list[str] = []
+        rejected_raw: list[RejectedAdvancedSceneSwitcherMacro] = []
+
+        def reject(
+            macro_name: str,
+            reason: str,
+            raw_macro: Mapping[str, Any],
+        ) -> None:
+            skipped.append(reason)
+            rejected_raw.append(
+                RejectedAdvancedSceneSwitcherMacro(
+                    name=macro_name,
+                    reason=reason,
+                    raw=copy.deepcopy(dict(raw_macro)),
+                )
+            )
 
         for index, macro in enumerate(macros):
             name = str(macro.get("name") or f"Macro {index + 1}").strip()
             if bool(macro.get("pause", False)):
-                skipped.append(f"{name}: macro en pause")
+                reject(name, f"{name}: macro en pause", macro)
                 continue
             if bool(macro.get("parallel", False)):
-                skipped.append(f"{name}: exécution parallèle non convertible")
+                reject(name, f"{name}: exécution parallèle non convertible", macro)
                 continue
             if bool(macro.get("skipExecOnStart", False)):
-                skipped.append(f"{name}: skipExecOnStart non convertible exactement")
+                reject(name, f"{name}: skipExecOnStart non convertible exactement", macro)
                 continue
             else_actions = macro.get("elseActions", [])
             if isinstance(else_actions, list) and any(
                 isinstance(item, Mapping) and _enabled(item)
                 for item in else_actions
             ):
-                skipped.append(f"{name}: elseActions non converties")
+                reject(name, f"{name}: elseActions non converties", macro)
                 continue
 
             conditions_raw = macro.get("conditions", [])
@@ -556,14 +658,16 @@ class AdvancedSceneSwitcherImporter:
                 if isinstance(item, Mapping) and _enabled(item)
             ] if isinstance(conditions_raw, list) else []
             if len(conditions) != 1:
-                skipped.append(
+                reject(
+                    name,
                     f"{name}: {len(conditions)} conditions actives ; "
-                    "SSR n'assemble pas automatiquement une logique ASC complexe"
+                    "SSR n'assemble pas automatiquement une logique ASC complexe",
+                    macro,
                 )
                 continue
             selector, reason = cls._trigger_selector(name, conditions[0])
             if selector is None:
-                skipped.append(reason)
+                reject(name, reason, macro)
                 continue
 
             actions_raw = macro.get("actions", [])
@@ -575,16 +679,20 @@ class AdvancedSceneSwitcherImporter:
             converted: list[dict[str, Any]] = []
             reasons: list[str] = []
             for action in active_actions:
-                mapped, action_reason = cls._convert_action(name, action)
+                mapped, action_reason = cls._convert_action(
+                    name,
+                    action,
+                    snapshot=snapshot,
+                )
                 if mapped is None:
                     reasons.append(action_reason)
                 else:
                     converted.append(mapped)
             if reasons:
-                skipped.extend(reasons)
+                reject(name, "; ".join(reasons), macro)
                 continue
             if not converted:
-                skipped.append(f"{name}: aucune action convertible")
+                reject(name, f"{name}: aucune action convertible", macro)
                 continue
 
             exe = str(selector.get("exe") or "")
@@ -600,8 +708,10 @@ class AdvancedSceneSwitcherImporter:
                 and str(rule.get("title_regex") or "") == title_regex
             ]
             if len(matching_rules) > 1:
-                skipped.append(
-                    f"{name}: plusieurs règles SSR correspondent déjà au même déclencheur"
+                reject(
+                    name,
+                    f"{name}: plusieurs règles SSR correspondent déjà au même déclencheur",
+                    macro,
                 )
                 continue
 
@@ -609,15 +719,19 @@ class AdvancedSceneSwitcherImporter:
                 rule = matching_rules[0]
                 state = rule.get("state")
                 if not isinstance(state, Mapping):
-                    skipped.append(
-                        f"{name}: règle SSR existante {exe} sans état exploitable"
+                    reject(
+                        name,
+                        f"{name}: règle SSR existante {exe} sans état exploitable",
+                        macro,
                     )
                     continue
                 profile_name = str(state.get("Game") or "").strip()
                 profile = game_profiles.get(profile_name)
                 if not profile_name or not isinstance(profile, dict):
-                    skipped.append(
-                        f"{name}: Game profile '{profile_name}' introuvable"
+                    reject(
+                        name,
+                        f"{name}: Game profile '{profile_name}' introuvable",
+                        macro,
                     )
                     continue
                 cls._merge_actions(profile, converted)
@@ -667,4 +781,5 @@ class AdvancedSceneSwitcherImporter:
             profiles_created=profiles_created,
             attached_to_existing_rules=attached,
             skipped=tuple(skipped),
+            rejected_raw=tuple(rejected_raw),
         )
