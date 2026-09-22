@@ -33,17 +33,26 @@ collection OBS courante sans la modifier et projeter dans le profil sélectionn�
 - les settings des inputs OBS ;
 - mute et volume ;
 - état et settings des filtres ;
-- la visibilité des Scene Items lorsque l'identité n'est pas ambiguë.
+- la visibilité des Scene Items lorsque l'identité n'est pas ambiguë ;
+- la géométrie de chaque scène sous forme de LayoutProfiles importés, y compris
+  les sources qui ne suivent pas la convention `[Type] Nom`.
 
-La géométrie reste volontairement gérée par le système spécialisé
-**LayoutProfile / Capturer depuis OBS**.
+Le mode d'import de layouts est plus large que la capture LayoutProfile
+historique : les sources ordinaires deviennent des modules génériques
+`Imported`. Lorsque plusieurs occurrences portent exactement le même nom dans
+le même conteneur, SSR les exclut de l'import géométrique et les signale au lieu
+de risquer de déplacer la mauvaise occurrence.
 
 L'importeur peut également lire un export JSON Advanced Scene Switcher ou
 détecter automatiquement l'objet `advanced-scene-switcher` stocké dans le
 fichier de la collection OBS courante. Les macros ne sont converties que lorsque
-SSR peut reproduire exactement leur sémantique. Les macros avec waits, logique
-complexe, actions dynamiques, else-actions ou sélecteurs non stables sont
-signalées dans le rapport et laissées intactes.
+leur déclencheur et leurs actions sont représentables comme un état SSR stable.
+Les waits, toggles, variables, scripts, `elseActions`, transitions spécifiques,
+logique négative/composée, contraintes temporelles et séquences qui écrivent
+plusieurs fois la même propriété sont conservés dans le rapport mais jamais
+approximés. Les nouvelles règles ASC sont créées désactivées pour revue, et un
+conflit avec une action SSR existante refuse toute la macro sans mutation
+partielle.
 
 Les exports SSR « partageables » neutralisent les settings OBS importés et le
 chemin local SoundVolumeView afin d'éviter la fuite accidentelle d'URL, cookies,
