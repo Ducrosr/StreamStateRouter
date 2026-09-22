@@ -116,9 +116,9 @@ jobs:
         shell: pwsh
         run: |
           $Artifacts = @(
-            Get-Item ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-portable.zip",
-            Get-Item ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe",
-            Get-Item ".\release\build-manifest.json",
+            (Get-Item ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-portable.zip")
+            (Get-Item ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe")
+            (Get-Item ".\release\build-manifest.json")
             (Get-ChildItem .\streamdeck-plugin\*.streamDeckPlugin -ErrorAction Stop | Select-Object -First 1)
           ) | Sort-Object Name
 
