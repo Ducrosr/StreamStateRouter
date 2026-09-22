@@ -1,4 +1,4 @@
-# Plan de validation — Stream State Router 2.0.14
+# Plan de validation — Stream State Router 2.1.0
 
 ## 0. Acceptation de la feuille de route Astra
 
@@ -238,4 +238,22 @@ elles ne les remplacent pas.
 Le cas d'un shutdown manuel déclenché exactement entre deux mutations reste
 principalement couvert par les tests automatisés, car le provoquer de manière
 déterministe dans OBS réel est intrinsèquement racy.
+
+## 11. Executor déclaratif Lot 3 — volume d'input
+
+Campagne dédiée au `input_volume_db`, avec validation automatisée et test réel
+sur OBS 32.2.2.
+
+- [x] Exiger `volume_db` explicitement ; absence, booléen, chaîne numérique, NaN/Infinity et hors-plage doivent être refusés.
+- [x] Accepter les cibles `-100 dB` et `+26 dB`.
+- [x] Lier `GetInputVolume` / `SetInputVolume` à l'UUID physique de l'input.
+- [x] Considérer un round-trip float32 OBS comme convergent avec la tolérance partagée `1e-4 dB`.
+- [x] Conserver une observation physique finie légèrement au-dessus de `+26 dB` comme état lisible pouvant reconverger.
+- [x] Vérifier qu'un `SetInputVolume` accepté mais non reflété au readback produit divergence + replan.
+- [x] Vérifier qu'un plan mixte mute + volume s'exécute séquentiellement sur `SSR-Router`.
+- [x] Vérifier qu'un volume invalide bloque un plan mixte avant toute première mutation.
+- [x] Sur OBS réel, résoudre `SSR Executor Mic` par UUID.
+- [x] Sur OBS réel, muter temporairement `0 dB -> -1 dB`, acquitter la valeur puis restaurer exactement `inputVolumeMul=1.0`.
+- [x] Vérifier qu'une source sans audio retourne OBS 604 avant mutation et soit filtrée par le labo durci.
+
 
