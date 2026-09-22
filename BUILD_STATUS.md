@@ -1,46 +1,95 @@
 # Build / validation status — 2.0.14
 
-## Base
+## Base actuelle
 
-- Base de travail : **2.0.13**.
-- Branche d'intégration : `feat/astra-architecture-roadmap`.
-- Objectif : appliquer la feuille de route d'architecture Astra sans créer d'architecture parallèle.
+- Socle architectural historique : **2.0.14**.
+- Fondation déclarative canonique : `7d1e41424d0ff64b84f061fda590648578cd1fde`.
+- Candidat Lot 2 : PR **#11** — `feat/declarative-executor-mvp`.
+- Head validé : `8655cedeaa383945b4a91714ff8f20ee6bad3d59`.
+- La PR #11 reste volontairement en **draft** dans l'attente de la relecture Astra.
 
-## État d'implémentation
+## Lot 2 — executor déclaratif gardé
 
-Les 18 propositions du plan recommandé sont présentes sur la branche, dans l'ordre de développement indiqué par l'audit :
+Le candidat ajoute un premier chemin d'exécution déclarative opt-in, sérialisé sur le worker `SSR-Router`, limité à :
 
-- Phase A : A2, A6, A7, A8, A16 ;
-- Phase B : A3, A1, A4, A5 ;
-- Phase C : A9, A10, A11, A13, A14, A15 ;
-- Phase D : A17, A12, A18.
+- visibilité de Scene Items ;
+- mute d'inputs.
 
-Des commits de stabilisation supplémentaires corrigent les interactions relevées pendant la revue : nettoyage de fondu interrompu, diagnostics d'applications partielles, provenance de build, import de validation regex et contexte de restauration.
+Le planner reste read-only, les LayoutProfiles restent délégués à `OBSLayoutManager`, et l'executor ne met pas à jour le bookkeeping legacy `_applied_profiles`.
 
-## Validation source
+Les tickets d'exécution sont liés au contexte OBS préparé et sont invalidés lorsqu'une hypothèse de sécurité change (session, Scene Collection, catalogue, configuration, état logique ou identité physique).
 
-Les tests de régression correspondants ont été ajoutés au dépôt. Dans l'environnement de cette session, l'accès réseau direct au dépôt depuis le conteneur est indisponible, ce qui empêche de cloner la branche et d'exécuter localement la suite complète.
+## Validation locale
 
-À exécuter sur Windows avant fusion/release :
+Le dernier gate Python/runtime avant les deux commits finaux limités au plugin Stream Deck a donné :
 
-```powershell
-python -m unittest discover -s tests -v
-python -m ruff check .
-python main.py --check-config
+- **329 tests réussis** ;
+- **1 test ignoré** ;
+- Ruff : **OK** ;
+- configuration Lab : **valide**.
 
-Set-Location .\streamdeck-plugin
-npm install --ignore-scripts --no-audit --no-fund
-npm run typecheck
-npm run build
-npm run validate
-```
+Sur le head actuel, le gate Stream Deck local a donné :
 
-Le workflow de release 2.0.14 ajoute en plus un build PyInstaller, un smoke test de l'EXE, la construction du plugin Stream Deck et de l'installateur Inno Setup avec vérification explicite des artefacts.
+- installation npm : **OK**, 0 vulnérabilité signalée ;
+- typecheck : **OK** ;
+- build : **OK** ;
+- validation du plugin Elgato : **OK**.
+
+Après la campagne Lab :
+
+- la configuration de production a été restaurée depuis la sauvegarde pré-Lab ;
+- `main.py --check-config` la valide ;
+- `SSR_ENABLE_DECLARATIVE_EXECUTION` a été retiré de l'environnement ;
+- le worktree local était propre.
 
 ## GitHub Actions
 
-Les exécutions GitHub-hosted récentes du dépôt ont échoué avant toute étape de job (`runner_id = 0` / `steps = null`). Tant que ce comportement persiste, ces runs ne constituent pas une validation du code.
+Après passage du dépôt en public, le provisioning des runners GitHub-hosted fonctionne normalement.
 
-## Validation réelle OBS
+Le workflow **Tests** du head `8655cedeaa383945b4a91714ff8f20ee6bad3d59` est entièrement vert :
 
-Toujours requise. La campagne détaillée dans `TESTING.md` doit notamment couvrir : ciblage après modification structurelle de scène, routage différé A→B→C, reconnexion, preview/undo, recapture héritée, diagnostic partiel et coût des scans sur la vraie collection.
+### Windows
+
+- checkout/setup : **OK** ;
+- installation Python : **OK** ;
+- tests unitaires : **OK** ;
+- Ruff : **OK** ;
+- smoke test configuration : **OK**.
+
+### Stream Deck
+
+- checkout/setup : **OK** ;
+- installation npm : **OK** ;
+- typecheck : **OK** ;
+- build : **OK** ;
+- validation du plugin : **OK**.
+
+Les anciens échecs `runner_id = 0` / `steps = null` étaient donc liés au provisioning/infrastructure et non à un échec du code.
+
+## Validation réelle OBS — Lot 2
+
+Une Scene Collection dédiée `SSR Executor Lab` a été utilisée pour tester le nouvel executor sans perturber la configuration de production.
+
+Scénarios validés :
+
+- découverte/catalogue complet et observation des cibles ;
+- mutation nominale de deux propriétés avec readback ciblé et convergence finale ;
+- chemin déjà convergé sans écriture ;
+- ticket périmé après redémarrage OBS ;
+- changement de Scene Collection ;
+- changement de cardinalité/ordre d'occurrences d'un Scene Item ;
+- suppression/recréation d'un Scene Item sous le même nom avec nouvelle identité physique ;
+- suppression/recréation d'un input sous le même nom avec nouvel UUID ;
+- conditions OBS devenues fausses après préparation ;
+- compatibilité du chemin legacy `reapply` ;
+- invalidation d'un ticket après pause → reprise.
+
+Dans les scénarios de contexte ou d'identité périmés, l'exécution a été refusée avant mutation et a demandé un replan.
+
+## Ce qui reste avant fusion du Lot 2
+
+- relecture architecture/code ciblée par Astra ;
+- correction et revalidation uniquement si cette revue identifie un blocker réel ;
+- fusion de la PR #11 seulement après approbation.
+
+Les validations ci-dessus concernent le Lot 2 et ne signifient pas que chaque scénario manuel historique de `TESTING.md` a été rejoué pour cette passe.
