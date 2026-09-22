@@ -620,7 +620,7 @@ class DeclarativeExecutorTests(unittest.TestCase):
             )
             if request == "GetInputMute":
                 mute_reads += 1
-                if mute_reads == 3:
+                if mute_reads == 4:
                     planning.collection = "Other Collection"
             return response
 
@@ -659,7 +659,7 @@ class DeclarativeExecutorTests(unittest.TestCase):
             nonlocal mute_reads
             if request == "GetInputMute":
                 mute_reads += 1
-                if mute_reads == 4:
+                if mute_reads == 5:
                     if expected_session_generation != client.session_generation:
                         raise RuntimeError("session mismatch")
                     client.requests.append((request, dict(data or {})))
