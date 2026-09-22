@@ -13,11 +13,14 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install
-        run: python -m pip install -e ".[all]"
-      - name: Emit generated Windows constraints
+        run: python -m pip install -e ".[desktop,dev]"
+      - name: Generate isolated Windows constraints
         shell: pwsh
         run: |
-          $Constraints = (python -m pip freeze --exclude-editable) -join "`n"
+          python -m venv .constraints-venv
+          .\.constraints-venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.constraints-venv\Scripts\python.exe -m pip install -e ".[all]"
+          $Constraints = (.\.constraints-venv\Scripts\python.exe -m pip freeze --exclude-editable) -join "`n"
           Write-Host "PY_CONSTRAINTS_BASE64_BEGIN"
           Write-Host ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Constraints + "`n")))
           Write-Host "PY_CONSTRAINTS_BASE64_END"
