@@ -394,6 +394,36 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
     api = result.get("api")
     if isinstance(api, dict):
         api["token"] = ""
+    host = result.get("host_control")
+    if isinstance(host, dict):
+        host["soundvolumeview_path"] = ""
+
+    profiles = result.get("profiles")
+    if isinstance(profiles, Mapping):
+        for domain_profiles in profiles.values():
+            if not isinstance(domain_profiles, Mapping):
+                continue
+            for profile in domain_profiles.values():
+                if not isinstance(profile, Mapping):
+                    continue
+                actions = profile.get("actions")
+                if not isinstance(actions, list):
+                    continue
+                for action in actions:
+                    if not isinstance(action, dict):
+                        continue
+                    if str(action.get("type") or "") not in {
+                        "set_input_settings",
+                        "source_filter_settings",
+                    }:
+                        continue
+                    params = action.get("params")
+                    if isinstance(params, dict):
+                        params["settings"] = {}
+                    # Arbitrary OBS settings may contain URLs, cookies, API
+                    # tokens or credentials. A shareable export must never
+                    # replay the redacted placeholder as an intentional write.
+                    action["enabled"] = False
     return result
 
 
