@@ -31,6 +31,7 @@ from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
 from .declarative import DeclarativePlanningService
 from .declarative_execution import (
+    DECLARATIVE_EXECUTOR_KINDS,
     DeclarativeExecutor,
     PreparedExecution,
 )
@@ -1757,7 +1758,7 @@ class RoutingService:
         if intent.get("declarative_blocks"):
             raise RuntimeError("Le plan contient des conditions déclaratives bloquées")
         if any(
-            assignment.key.kind not in {"scene_item_visibility", "input_mute"}
+            assignment.key.kind not in DECLARATIVE_EXECUTOR_KINDS
             for assignment in desired.assignments
         ):
             raise RuntimeError(
