@@ -351,34 +351,32 @@ Le pilotage OBS est **désactivé par défaut** afin qu'un premier lancement ne 
 
 ## Couverture de migration déclarative
 
-SSR peut analyser la configuration courante sans se connecter à OBS afin de mesurer
-la progression de la migration du dispatcher historique vers le modèle déclaratif :
+Le rapport read-only de couverture compare les actions OBS configurées avec les capacités
+déclaratives actuellement disponibles, sans démarrer le runtime ni contacter OBS :
 
 ```powershell
-python main.py --coverage-report
+python main.py --declarative-coverage
 ```
 
-Une sortie JSON exploitable par des outils est également disponible :
+Pour la sortie JSON complète exploitable par un script :
 
 ```powershell
-python main.py --coverage-json
+python main.py --declarative-coverage-json
 ```
 
 Le rapport distingue notamment :
 
-- `declarative_executable` : propriété représentable et autorisée par l'executor gardé actuel ;
-- `declarative_plannable` : propriété déjà représentable/planifiable mais pas encore exécutable ;
-- `declarative_intent_only` : intention stable mais couverture physique encore incomplète ;
-- `legacy_only` : action qui ne possède pas encore de représentation déclarative sûre ;
-- `delegated` : domaine volontairement conservé par un moteur spécialisé, notamment les LayoutProfiles ;
-- `invalid` / `disabled` : configuration invalide ou action désactivée.
+- `empty` : profil sans aucune action effective, donc exclu d'une interprétation abusive de la couverture ;
+- `declarative_executable` : propriété déjà autorisée par l'executor gardé ;
+- `declarative_plannable` : intention traduite et planifiable, mais pas encore exécutable ;
+- `declarative_intent_only` : intention représentable dont la politique physique reste incomplète ;
+- `delegated` : propriété volontairement possédée par un sous-système spécialisé, notamment les LayoutProfiles ;
+- `legacy_only` : action encore non représentable comme propriété stable ;
+- `invalid` : action/profil invalide ou héritage incohérent.
 
-Les profils hérités sont évalués après résolution de l'héritage : une action héritée
-compte donc comme une **action effective** de chaque profil qui l'exécuterait.
-Les valeurs arbitraires de settings ne sont jamais incluses dans le rapport.
-
-Cette commande est strictement read-only : elle ne crée pas de connexion OBS et
-n'effectue aucune mutation.
+Les statistiques d'actions comptent chaque déclaration une seule fois. La classification d'un
+profil tient toutefois compte de ses actions héritées via `extends`. Les valeurs arbitraires de
+`set_input_settings` ne sont jamais incluses dans le rapport.
 
 ## Validation développeur
 
