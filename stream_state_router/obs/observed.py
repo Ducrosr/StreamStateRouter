@@ -87,7 +87,7 @@ def build_execution_bindings(
             )
             continue
 
-        if key.kind == "input_mute":
+        if key.kind in {"input_mute", "input_volume_db"}:
             input_ref = inputs.get(key.source)
             if input_ref is None or not input_ref.uuid:
                 raise ValueError(
