@@ -42,6 +42,8 @@ La version du paquet est désormais dérivée de `stream_state_router.__version_
 
 Les modifications incluent des tests de régression dédiés à chaque étape, dont A → B différé → C, ciblage après réutilisation d'un `sceneItemId`, fondu en erreur persistante, contexte Preview/Undo, capture/héritage, diagnostics, scans mutualisés et explication sans mutation.
 
-La validation automatique complète de cette branche doit encore être exécutée dans un environnement Windows disposant des dépendances. Les GitHub-hosted runners de ce dépôt ont récemment échoué avant toute étape de job ; un tel échec d'infrastructure ne doit pas être interprété comme un échec de la suite Python.
+Les runners GitHub-hosted fonctionnent désormais normalement. Sur le candidat Lot 2 `8655cedeaa383945b4a91714ff8f20ee6bad3d59`, les jobs Windows et Stream Deck sont entièrement verts : tests unitaires, Ruff, smoke test configuration, typecheck, build et validation du plugin.
 
-Une validation avec la vraie collection OBS reste requise avant de qualifier la 2.0.14 de validée en production.
+Une campagne OBS dédiée au premier executor déclaratif a également été réalisée avec succès dans la Scene Collection `SSR Executor Lab`. Elle couvre notamment mutation + readback, zéro écriture lorsque l'état est déjà convergé, redémarrage OBS, changement de Scene Collection, suppression/recréation de ressources sous le même nom, changement d'occurrences, invalidation de conditions et invalidation de ticket après reprise.
+
+Cette campagne qualifie le périmètre Lot 2 ; elle ne remplace pas les autres scénarios manuels de release décrits dans `TESTING.md`.

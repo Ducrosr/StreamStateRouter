@@ -213,3 +213,29 @@ Toute stratégie de nettoyage/migration de ces marqueurs doit être décidée s�
 - [ ] Vérifier 1080p → QHD et retour.
 - [ ] Vérifier scène → groupe → scène imbriquée → PNG.
 - [ ] Vérifier que les correctifs de stabilisation des groupes restent intacts.
+
+
+## 10. Executor déclaratif Lot 2 — campagne OBS dédiée
+
+Campagne réalisée dans la Scene Collection isolée `SSR Executor Lab` sur le
+candidat PR #11. Ces validations complètent les scénarios historiques ci-dessus ;
+elles ne les remplacent pas.
+
+- [x] Synchroniser un catalogue complet et observer les deux propriétés MVP sans mutation.
+- [x] Préparer puis exécuter un état divergent `input_mute + scene_item_visibility` ; chaque écriture doit être suivie d'un readback ciblé et le sweep final doit converger.
+- [x] Préparer/exécuter un état déjà convergé ; aucune écriture OBS ne doit être envoyée.
+- [x] Redémarrer OBS après préparation ; l'ancien ticket doit être refusé et demander un replan.
+- [x] Changer de Scene Collection après préparation ; l'ancien ticket doit être refusé avant mutation.
+- [x] Ajouter une occurrence homonyme d'un Scene Item après préparation ; le fingerprint doit invalider le ticket.
+- [x] Supprimer/recréer le Scene Item sous le même nom ; la nouvelle identité physique doit invalider l'ancien ticket.
+- [x] Supprimer/recréer l'input sous le même nom ; le nouvel UUID doit invalider l'ancien ticket.
+- [x] Rendre une condition OBS de profil fausse après préparation sans changer de session/collection ; exécution refusée, zéro étape mutée.
+- [x] Vérifier que le dispatcher legacy `reapply` fonctionne encore sur les profils configurés.
+- [x] Préparer un ticket puis faire pause → reprise → pause ; l'ancien `plan_id` doit être invalide.
+- [x] Restaurer la configuration production après le Lab et vérifier `main.py --check-config`.
+- [x] Désactiver `SSR_ENABLE_DECLARATIVE_EXECUTION` après la campagne.
+
+Le cas d'un shutdown manuel déclenché exactement entre deux mutations reste
+principalement couvert par les tests automatisés, car le provoquer de manière
+déterministe dans OBS réel est intrinsèquement racy.
+
