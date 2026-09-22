@@ -976,5 +976,118 @@ class OBSDispatcherTests(unittest.TestCase):
             OBSDispatcher(FakeClient(), {}).execute_action(OBSAction("nope", {}))
 
 
+    def test_dynamic_templates_use_control_and_logical_variables(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Overwatch": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Avatar Dynamic",
+                                    "settings": {
+                                        "file": r"C:\\Avatars\\${Mood}_${Game}.png"
+                                    },
+                                    "overlay": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        dispatcher.set_control_variables({"Mood": "Happy"})
+
+        dispatcher.dispatch_state(StreamState(game="Overwatch"))
+
+        write = next(
+            payload
+            for request, payload in client.calls
+            if request == "SetInputSettings"
+        )
+        self.assertEqual(
+            write["inputSettings"]["file"],
+            r"C:\\Avatars\\Happy_Overwatch.png",
+        )
+
+    def test_wait_ms_is_classic_only_in_declarative_plan(self):
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Animated": {
+                        "actions": [
+                            {"type": "wait_ms", "params": {"duration_ms": 0}},
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            },
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Animated"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "OW",
+            },
+        )
+
+        self.assertTrue(
+            any("wait_ms" in row["reason"] for row in plan["declarative_blocks"]),
+            plan["declarative_blocks"],
+        )
+        kinds = {
+            row["property"]["kind"]
+            for row in plan["declarative_desired"]["properties"]
+        }
+        self.assertIn("input_mute", kinds)
+
+    def test_template_profile_is_classic_only_in_declarative_plan(self):
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Animated": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Avatar",
+                                    "settings": {"file": "${Mood}.png"},
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Animated"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "OW",
+            },
+        )
+
+        self.assertTrue(
+            any(
+                "paramètres dynamiques" in row["reason"]
+                for row in plan["declarative_blocks"]
+            ),
+            plan["declarative_blocks"],
+        )
+
 if __name__ == "__main__":
     unittest.main()

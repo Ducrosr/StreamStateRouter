@@ -125,8 +125,12 @@ class CommandDispatcher(FakeDispatcher):
         super().__init__()
         self.profile_threads = []
         self.layout_threads = []
+        self.control_values = {}
 
-    def execute_profile(self, domain, profile_name):
+    def set_control_variables(self, values):
+        self.control_values = dict(values)
+
+    def execute_profile(self, domain, profile_name, *, state=None):
         self.profile_threads.append((domain, profile_name, threading.current_thread().name))
         return DispatchResult(1, 0, (domain,))
 
@@ -751,6 +755,60 @@ def activation_policy(*, enabled=True, cooldown=20.0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_control_variable_command_runs_on_worker_and_reapplies_game_profile(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "game",
+                        StreamState(game="Game"),
+                        priority=100,
+                        exe="game.exe",
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            control_variables={"Mood": "Happy"},
+        )
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while engine.current_state is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            request_id = service.request_control_variable("Mood", "Angry")
+            deadline = time.monotonic() + 1.0
+            status = None
+            while time.monotonic() < deadline:
+                status = service.command_status(request_id)
+                if status and status.get("status") in {"completed", "failed"}:
+                    break
+                time.sleep(0.01)
+            self.assertIsNotNone(status)
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(service.control_variables()["Mood"], "Angry")
+            self.assertEqual(dispatcher.control_values["Mood"], "Angry")
+            self.assertTrue(dispatcher.profile_threads)
+            self.assertEqual(
+                dispatcher.profile_threads[-1][0:2],
+                ("game", "Game"),
+            )
+            self.assertTrue(
+                all(
+                    thread == "SSR-Router"
+                    for _domain, _profile, thread in dispatcher.profile_threads
+                )
+            )
+        finally:
+            service.stop()
+
     def test_process_context_routes_background_process_without_foreground_match(self):
         app = ForegroundApp(1, 1, "explorer.exe")
         rules = RuleSet(

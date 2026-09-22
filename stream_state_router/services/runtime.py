@@ -31,6 +31,7 @@ from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
 from ..router.processes import WindowsRunningProcessProvider
+from .control_variables import ControlVariableStore
 from .declarative import DeclarativePlanningService
 from .declarative_execution import (
     DECLARATIVE_EXECUTOR_KINDS,
@@ -204,6 +205,8 @@ class RoutingService:
         startup_layout_profile: str = "",
         declarative_execution_enabled: bool = False,
         process_provider=None,
+        control_variables: Mapping[str, object] | None = None,
+        control_store: ControlVariableStore | None = None,
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
@@ -220,6 +223,13 @@ class RoutingService:
             except RuntimeError:
                 self.process_provider = None
         self.logger = logger or logging.getLogger("stream_state_router")
+        self.control_store = control_store or ControlVariableStore(
+            control_variables or {}
+        )
+        if hasattr(self.dispatcher, "set_control_variables"):
+            self.dispatcher.set_control_variables(
+                self.control_store.snapshot()
+            )
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
         self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
         self.declarative_execution_enabled = bool(declarative_execution_enabled)
@@ -880,6 +890,15 @@ class RoutingService:
         return self.submit_obs_command(
             "planner.execute",
             options={"plan_id": value},
+        )
+
+    def control_variables(self) -> dict[str, str]:
+        return self.control_store.snapshot()
+
+    def request_control_variable(self, name: str, value: object) -> str:
+        return self.submit_obs_command(
+            "control.set",
+            options={"name": str(name), "value": str(value)},
         )
 
     def request_force_reapply(self) -> str:
@@ -1963,6 +1982,37 @@ class RoutingService:
                         "snapshot": snapshot.as_mapping(),
                         "layouts": copy.deepcopy(layouts),
                         "layout_skipped": list(layout_skipped),
+                    }
+                elif command.action == "control.set":
+                    name = str(command.options.get("name") or "").strip()
+                    if not name:
+                        raise ValueError("name requis")
+                    if "value" not in command.options:
+                        raise ValueError("value requis")
+                    value = str(command.options.get("value"))
+                    changed = self.control_store.set(name, value)
+                    snapshot = self.control_store.snapshot()
+                    if hasattr(self.dispatcher, "set_control_variables"):
+                        self.dispatcher.set_control_variables(snapshot)
+                    with self._lock:
+                        state = self.engine.current_state
+                    profile_result = None
+                    if changed and state is not None:
+                        profile_result = self.dispatcher.execute_profile(
+                            "game",
+                            state.game,
+                            state=state,
+                        )
+                        if self.on_dispatch:
+                            self.on_dispatch(profile_result)
+                    result = {
+                        "changed": changed,
+                        "name": name,
+                        "value": value,
+                        "variables": snapshot,
+                        "game_profile_reapplied": bool(
+                            changed and state is not None
+                        ),
                     }
                 elif command.action == "reapply":
                     with self._lock:

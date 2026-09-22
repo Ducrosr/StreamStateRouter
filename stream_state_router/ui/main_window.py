@@ -62,6 +62,7 @@ from ..services.config import (
     pop_layout_history,
     release_runtime_visibility_ownership,
 )
+from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
@@ -774,6 +775,16 @@ class MainWindow(QMainWindow):
                     )
                 ).strip().casefold()
                 in {"1", "true", "yes", "on"}
+            ),
+            control_variables=(
+                self.config.get("control_variables", {})
+                if isinstance(self.config.get("control_variables"), Mapping)
+                else {}
+            ),
+            control_store=ControlVariableStore.persistent(
+                self.config.get("control_variables", {})
+                if isinstance(self.config.get("control_variables"), Mapping)
+                else {}
             ),
         )
         self._pending_cleanup_transfer = ()
@@ -2576,6 +2587,9 @@ class MainWindow(QMainWindow):
             "rule": service.engine.current_rule if service else "",
             "state": state.as_variables() if state else {},
             "obs_connected": bool(self._client.connected) if self._client else False,
+            "control_variables": (
+                service.control_variables() if service else {}
+            ),
             "config_revision": {
                 "saved": self._saved_revision,
                 "applied": self._applied_revision,
@@ -2623,6 +2637,17 @@ class MainWindow(QMainWindow):
             if not plan_id:
                 raise ValueError("plan_id requis")
             request_id = self._service.request_execute_declarative_plan(plan_id)
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "control.set":
+            name = str(payload.get("name") or "").strip()
+            if not name:
+                raise ValueError("name requis")
+            if "value" not in payload:
+                raise ValueError("value requis")
+            request_id = self._service.request_control_variable(
+                name,
+                payload.get("value"),
+            )
             return {"request_id": request_id, "status": "accepted"}
         if action == "reapply":
             request_id = self._service.request_force_reapply()

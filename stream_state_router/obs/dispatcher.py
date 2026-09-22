@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import re
 import time
 from typing import Any, Mapping
 
@@ -24,6 +25,9 @@ from .models import OBSAction, OBSProfile
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
 STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
+_TEMPLATE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
 @dataclass(frozen=True, slots=True)
 class DomainDispatchStatus:
     domain: str
@@ -74,6 +78,65 @@ class OBSDispatcher:
         self._manual_layout_routing_baseline = ""
         self._context_cache: tuple[float, dict[str, Any]] | None = None
         self._cooperative_yield = None
+        self._control_variables: dict[str, str] = {}
+
+    def set_control_variables(
+        self,
+        values: Mapping[str, object] | None,
+    ) -> None:
+        self._control_variables = {
+            str(key): str(value)
+            for key, value in (values or {}).items()
+        }
+
+    def control_variables(self) -> dict[str, str]:
+        return dict(self._control_variables)
+
+    def _execution_variables(
+        self,
+        state: StreamState | None = None,
+    ) -> dict[str, str]:
+        values = dict(self._control_variables)
+        active = state or self._desired_state or self._last_state
+        if active is not None:
+            values.update(active.as_variables())
+        return values
+
+    @classmethod
+    def _render_value(
+        cls,
+        value: Any,
+        variables: Mapping[str, str],
+    ) -> Any:
+        if isinstance(value, str):
+            def replace(match: re.Match[str]) -> str:
+                key = match.group(1)
+                if key not in variables:
+                    raise ValueError(
+                        f"Variable SSR non définie dans le template : {key}"
+                    )
+                return str(variables[key])
+            return _TEMPLATE_RE.sub(replace, value)
+        if isinstance(value, Mapping):
+            return {
+                key: cls._render_value(item, variables)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._render_value(item, variables) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._render_value(item, variables) for item in value)
+        return value
+
+    @classmethod
+    def _contains_template(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(_TEMPLATE_RE.search(value))
+        if isinstance(value, Mapping):
+            return any(cls._contains_template(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(cls._contains_template(item) for item in value)
+        return False
 
     @property
     def layout_manager(self) -> OBSLayoutManager:
@@ -332,6 +395,8 @@ class OBSDispatcher:
             description["target"] = str(params.get("input") or "")
             settings = params.get("settings")
             description["setting_keys"] = sorted(str(key) for key in settings) if isinstance(settings, Mapping) else []
+        elif kind == "wait_ms":
+            description["value"] = params.get("duration_ms")
         return description
 
     def _layout_visibility_owners(
@@ -587,7 +652,36 @@ class OBSDispatcher:
                 )
             row["operations"] = [self._describe_action(action) for action in profile.actions]
             row["extends"] = profile.extends
-            action_sets.append((f"{domain}:{desired}", profile.actions))
+            provenance = f"{domain}:{desired}"
+            if any(
+                action.enabled
+                and action.type.strip().casefold() == "wait_ms"
+                for action in profile.actions
+            ):
+                declarative_blocks.append(
+                    {
+                        "provenance": provenance,
+                        "reason": (
+                            "Profil avec séquence temporelle wait_ms : "
+                            "exécution classic-only"
+                        ),
+                    }
+                )
+            if any(
+                action.enabled
+                and self._contains_template(action.params)
+                for action in profile.actions
+            ):
+                declarative_blocks.append(
+                    {
+                        "provenance": provenance,
+                        "reason": (
+                            "Profil avec paramètres dynamiques ${...} : "
+                            "exécution classic-only"
+                        ),
+                    }
+                )
+            action_sets.append((provenance, profile.actions))
             domains.append(row)
 
         try:
@@ -798,6 +892,7 @@ class OBSDispatcher:
             domain_executed = 0
             domain_skipped = 0
             failed = ""
+            variables = self._execution_variables(state)
             for action in profile.actions:
                 self._yield_runtime()
                 if not action.enabled:
@@ -805,7 +900,7 @@ class OBSDispatcher:
                     domain_skipped += 1
                     continue
                 try:
-                    self.execute_action(action)
+                    self.execute_action(action, variables=variables)
                 except Exception as exc:
                     failed = str(exc)
                     warnings.append(f"{domain}/{profile_name}: {exc}")
@@ -826,7 +921,13 @@ class OBSDispatcher:
             tuple(statuses),
         )
 
-    def execute_profile(self, domain: str, profile_name: str) -> DispatchResult:
+    def execute_profile(
+        self,
+        domain: str,
+        profile_name: str,
+        *,
+        state: StreamState | None = None,
+    ) -> DispatchResult:
         if domain not in ACTION_PROFILE_DOMAINS:
             raise ValueError(f"Domaine inconnu : {domain}")
         profile = self._resolve_action_profile(domain, profile_name)
@@ -836,12 +937,13 @@ class OBSDispatcher:
             return DispatchResult(0, len(profile.actions) or 1, (domain,))
         executed = 0
         skipped = 0
+        variables = self._execution_variables(state)
         for action in profile.actions:
             self._yield_runtime()
             if not action.enabled:
                 skipped += 1
                 continue
-            self.execute_action(action)
+            self.execute_action(action, variables=variables)
             executed += 1
         return DispatchResult(executed, skipped, (domain,))
 
@@ -904,10 +1006,38 @@ class OBSDispatcher:
             conditions=conditions,
         )
 
-    def execute_action(self, action: OBSAction) -> None:
+    def execute_action(
+        self,
+        action: OBSAction,
+        *,
+        variables: Mapping[str, str] | None = None,
+    ) -> None:
         self._yield_runtime()
         kind = action.type.strip().casefold()
-        p = dict(action.params)
+        p = self._render_value(
+            dict(action.params),
+            variables or self._execution_variables(),
+        )
+        if kind == "wait_ms":
+            raw = p.get("duration_ms")
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError("wait_ms requiert params.duration_ms numérique")
+            duration_ms = float(raw)
+            if (
+                not math.isfinite(duration_ms)
+                or not 0.0 <= duration_ms <= 10000.0
+            ):
+                raise ValueError(
+                    "wait_ms params.duration_ms doit être compris entre 0 et 10000"
+                )
+            deadline = time.monotonic() + duration_ms / 1000.0
+            while True:
+                self._yield_runtime()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+            return
         if kind == "set_program_scene":
             self.client.send(
                 "SetCurrentProgramScene",
