@@ -11,7 +11,11 @@ from ..obs.observed import (
     SceneItemBinding,
 )
 from ..planning.models import DesiredState, ObservedState, ObservedValue, PropertyKey
-from ..planning.planner import ExecutionPlan, build_execution_plan
+from ..planning.planner import (
+    INPUT_VOLUME_DB_ABS_TOLERANCE,
+    ExecutionPlan,
+    build_execution_plan,
+)
 from .declarative import DeclarativePlanningService
 
 
@@ -21,7 +25,6 @@ DECLARATIVE_EXECUTOR_KINDS = frozenset(
 
 _INPUT_VOLUME_DB_MIN = -100.0
 _INPUT_VOLUME_DB_MAX = 26.0
-_INPUT_VOLUME_DB_ABS_TOLERANCE = 1e-4
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +224,7 @@ def _executable_values_equal(
             left_value,
             right_value,
             rel_tol=1e-9,
-            abs_tol=_INPUT_VOLUME_DB_ABS_TOLERANCE,
+            abs_tol=INPUT_VOLUME_DB_ABS_TOLERANCE,
         )
 
     return False
