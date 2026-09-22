@@ -1,0 +1,29 @@
+version: 2
+
+updates:
+  # Python is intentionally excluded here. The human-maintained dependency
+  # intent lives in pyproject.toml while constraints/windows-release.txt is a
+  # resolver-generated exact Windows/Python 3.12 closure. Update Python intent,
+  # regenerate that snapshot with scripts/refresh_python_constraints.ps1, and
+  # review the resulting closure together.
+  - package-ecosystem: "npm"
+    directory: "/streamdeck-plugin"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      streamdeck-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
