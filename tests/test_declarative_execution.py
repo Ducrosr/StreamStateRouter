@@ -30,6 +30,7 @@ class _PlanningStub:
         self.collection = catalog.collection
         self.generation = catalog.session_generation
         self.stale = False
+        self.context_error = ""
 
     def catalog_status(self):
         return {
@@ -39,6 +40,8 @@ class _PlanningStub:
         }
 
     def context_identity(self):
+        if self.context_error:
+            raise RuntimeError(self.context_error)
         return self.collection, self.generation
 
 
@@ -427,6 +430,135 @@ class DeclarativeExecutorTests(unittest.TestCase):
         self.assertEqual(
             [name for name, _data in client.requests].count("SetSceneItemEnabled"),
             0,
+        )
+
+    def test_context_read_failure_after_write_preserves_partial_result(self):
+        key = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(False)},
+        )
+        client = _ExecutorClient()
+        planning = _PlanningStub(_catalog())
+        executor = DeclarativeExecutor(client, planning)
+
+        def progress(steps):
+            if any(
+                step.key == key and step.code == "awaiting_readback"
+                for step in steps
+            ):
+                planning.context_error = (
+                    "OBS session changed while reading declarative context identity"
+                )
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+            progress=progress,
+        )
+
+        self.assertEqual(result.status, "replan_required")
+        self.assertTrue(result.replan_required)
+        self.assertEqual(len(result.steps), 1)
+        self.assertEqual(result.steps[0].status, "unacknowledged")
+        self.assertEqual(result.steps[0].code, "context_changed_after_write")
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputMute"),
+            1,
+        )
+
+    def test_collection_change_after_matching_ack_is_not_reported_applied(self):
+        key = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(False)},
+        )
+        client = _ExecutorClient()
+        planning = _PlanningStub(_catalog())
+        original_send = client.send
+        mute_reads = 0
+
+        def send(request, data=None, *, expected_session_generation=None):
+            nonlocal mute_reads
+            response = original_send(
+                request,
+                data,
+                expected_session_generation=expected_session_generation,
+            )
+            if request == "GetInputMute":
+                mute_reads += 1
+                if mute_reads == 3:
+                    planning.collection = "Other Collection"
+            return response
+
+        client.send = send
+        executor = DeclarativeExecutor(client, planning)
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertEqual(result.status, "replan_required")
+        self.assertTrue(result.replan_required)
+        self.assertEqual(result.steps[0].status, "unacknowledged")
+        self.assertEqual(result.steps[0].code, "context_changed_after_write")
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputMute"),
+            1,
+        )
+
+    def test_unknown_final_observation_requires_replan(self):
+        key = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, True)])
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(False)},
+        )
+        client = _ExecutorClient()
+        original_send = client.send
+        mute_reads = 0
+
+        def send(request, data=None, *, expected_session_generation=None):
+            nonlocal mute_reads
+            if request == "GetInputMute":
+                mute_reads += 1
+                if mute_reads == 4:
+                    if expected_session_generation != client.session_generation:
+                        raise RuntimeError("session mismatch")
+                    client.requests.append((request, dict(data or {})))
+                    return {"inputMuted": "unknown"}
+            return original_send(
+                request,
+                data,
+                expected_session_generation=expected_session_generation,
+            )
+
+        client.send = send
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertFalse(result.converged)
+        self.assertTrue(result.replan_required)
+        self.assertEqual(result.steps[0].status, "applied")
+        self.assertTrue(
+            any("final observation unavailable" in item for item in result.diagnostics)
         )
 
     def test_sensitive_setting_is_redacted_even_when_plan_is_not_executable(self):
