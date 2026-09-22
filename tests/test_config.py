@@ -227,7 +227,14 @@ class ConfigTests(unittest.TestCase):
             ]
             self.assertEqual(validate_config(data), [], value)
 
-        for value in (-100.0001, 26.0001, float("nan"), float("inf"), True):
+        for value in (
+            -100.0001,
+            26.0001,
+            float("nan"),
+            float("inf"),
+            True,
+            "-6.0",
+        ):
             data = self.sample()
             data["profiles"]["audio"]["Default"]["actions"] = [
                 {
