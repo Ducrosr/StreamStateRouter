@@ -1,4 +1,32 @@
-# Stream State Router 2.0.14
+# Stream State Router 2.1.0
+
+## 2.1.0 — routage déclaratif gardé
+
+La 2.1.0 consolide la fondation déclarative construite au-dessus de l'architecture
+2.0.14. SSR peut désormais préparer, vérifier puis exécuter un état désiré OBS
+sur un périmètre volontairement restreint, sans transformer le planner en macro
+runner générique.
+
+Le chemin exécutable couvre actuellement :
+
+- visibilité d'un Scene Item lié à une identité physique vérifiée ;
+- mute d'un input OBS lié par UUID ;
+- volume d'un input en dB (`input_volume_db`) lié par UUID.
+
+Les écritures déclaratives restent opt-in et gardées : ticket mono-usage,
+génération de session OBS, Scene Collection, catalogue, configuration, état
+logique et identité physique sont revalidés avant mutation. Le dernier contrôle
+runtime est atomique avec le `Set*`, puis chaque écriture est acquittée par une
+relecture ciblée et un sweep final vérifie la convergence complète.
+
+Le volume déclaratif impose une cible finie entre `-100` et `+26 dB`,
+refuse les valeurs implicites ou coercées, et utilise une tolérance commune de
+`1e-4 dB` pour absorber le round-trip float32 natif d'OBS sans masquer une
+divergence réelle.
+
+La chaîne de livraison est également durcie : dépendances Python figées,
+`npm ci`, CodeQL, provenance, SHA-256, smoke du binaire portable et de
+l'installateur, ainsi qu'une version Stream Deck dérivée de la version SSR.
 
 ## 2.0.14 — feuille de route d'architecture Astra
 
