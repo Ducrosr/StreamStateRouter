@@ -210,6 +210,30 @@ class AdvancedSceneSwitcherImporter:
         macro_name: str,
         condition: Mapping[str, Any],
     ) -> tuple[dict[str, Any] | None, str]:
+        try:
+            logic = int(condition.get("logic", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None, f"{macro_name}: logique de condition ASC invalide"
+        if logic != 0:
+            return None, (
+                f"{macro_name}: logique de condition ASC {logic} non convertible "
+                "(la négation/logique composée n'est pas approximée)"
+            )
+
+        duration = condition.get("durationModifier")
+        if isinstance(duration, Mapping):
+            try:
+                constraint = int(duration.get("time_constraint", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                return None, (
+                    f"{macro_name}: contrainte de durée ASC invalide"
+                )
+            if constraint != 0:
+                return None, (
+                    f"{macro_name}: condition ASC avec contrainte de durée "
+                    "non convertible exactement"
+                )
+
         condition_id = str(condition.get("id") or "").strip()
 
         if condition_id == "process":
@@ -693,6 +717,27 @@ class AdvancedSceneSwitcherImporter:
                 continue
             if not converted:
                 reject(name, f"{name}: aucune action convertible", macro)
+                continue
+
+            identities = [_action_identity(action) for action in converted]
+            duplicates = sorted(
+                {
+                    identity
+                    for identity in identities
+                    if identities.count(identity) > 1
+                },
+                key=repr,
+            )
+            if duplicates:
+                reject(
+                    name,
+                    (
+                        f"{name}: plusieurs actions successives ciblent la même "
+                        "propriété SSR ; séquence non convertible en état final "
+                        f"({duplicates!r})"
+                    ),
+                    macro,
+                )
                 continue
 
             exe = str(selector.get("exe") or "")
