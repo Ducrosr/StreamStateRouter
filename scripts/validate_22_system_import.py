@@ -24,6 +24,8 @@ from stream_state_router.importers import (
     AdvancedSceneSwitcherImporter,
     SceneCollectionImporter,
     neutralize_referenced_test_layout_profiles,
+    set_capture_profile_for_process,
+    set_game_profile_input_setting,
     wire_windows_hdr_capture_profiles,
 )
 from stream_state_router.obs.client import OBSClientManager
@@ -132,6 +134,26 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Transforme en no-op les LayoutProfiles référencés dont la scène "
             "pointe encore vers [Module] TEST SSR."
+        ),
+    )
+    parser.add_argument(
+        "--route-capture-profile",
+        action="append",
+        default=[],
+        metavar="PROCESS=PROFILE",
+        help=(
+            "Remplace CaptureProfile pour toutes les règles foreground/background "
+            "du processus. Répétable."
+        ),
+    )
+    parser.add_argument(
+        "--game-input-setting",
+        action="append",
+        default=[],
+        metavar="GAME|INPUT|SETTING|VALUE",
+        help=(
+            "Remplace une valeur set_input_settings dans un Game profile. "
+            "La valeur est traitée comme chaîne. Répétable."
         ),
     )
     return parser.parse_args()
@@ -371,10 +393,51 @@ def main() -> int:
                 )
                 hdr_profiles_changed: tuple[str, ...] = ()
                 test_layouts_neutralized: tuple[str, ...] = ()
+                capture_route_changes: dict[str, list[str]] = {}
+                input_setting_changes: list[dict[str, str]] = []
                 if args.wire_hdr_profiles:
                     hdr_profiles_changed = wire_windows_hdr_capture_profiles(
                         migration_preview_config
                     )
+                for raw in args.route_capture_profile:
+                    process, separator, profile = str(raw).partition("=")
+                    process = process.strip()
+                    profile = profile.strip()
+                    if not separator or not process or not profile:
+                        raise RuntimeError(
+                            "--route-capture-profile attend PROCESS=PROFILE"
+                        )
+                    changed_rules = set_capture_profile_for_process(
+                        migration_preview_config,
+                        process=process,
+                        capture_profile=profile,
+                    )
+                    capture_route_changes[process] = list(changed_rules)
+
+                for raw in args.game_input_setting:
+                    parts = [item.strip() for item in str(raw).split("|", 3)]
+                    if len(parts) != 4 or not all(parts[:3]):
+                        raise RuntimeError(
+                            "--game-input-setting attend "
+                            "GAME|INPUT|SETTING|VALUE"
+                        )
+                    game_profile, input_name, setting, value = parts
+                    set_game_profile_input_setting(
+                        migration_preview_config,
+                        game_profile=game_profile,
+                        input_name=input_name,
+                        setting=setting,
+                        value=value,
+                    )
+                    input_setting_changes.append(
+                        {
+                            "game_profile": game_profile,
+                            "input": input_name,
+                            "setting": setting,
+                            "value": value,
+                        }
+                    )
+
                 if args.neutralize_test_layouts:
                     test_layouts_neutralized = (
                         neutralize_referenced_test_layout_profiles(
@@ -419,6 +482,8 @@ def main() -> int:
                     "test_layouts_neutralized": list(
                         test_layouts_neutralized
                     ),
+                    "capture_route_changes": capture_route_changes,
+                    "input_setting_changes": input_setting_changes,
                 }
                 if args.wire_hdr_profiles:
                     if hdr_profiles_changed:
@@ -432,6 +497,19 @@ def main() -> int:
                         )
                 if args.enable_converted_rules:
                     print("Nouvelles règles ASC converties : activées.")
+                if capture_route_changes:
+                    for process, rule_names in capture_route_changes.items():
+                        print(
+                            f"CaptureProfile routé pour {process} : "
+                            + ", ".join(rule_names)
+                        )
+                if input_setting_changes:
+                    for item in input_setting_changes:
+                        print(
+                            "Réglage Game profile remplacé : "
+                            f"{item['game_profile']} / {item['input']} / "
+                            f"{item['setting']}={item['value']}"
+                        )
                 if args.neutralize_test_layouts:
                     print(
                         "LayoutProfiles de test neutralisés : "
