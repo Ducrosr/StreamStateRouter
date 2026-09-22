@@ -1192,12 +1192,13 @@ class RoutingService:
                                     "refresh_foreground_actions",
                                 )
                             ):
-                                refreshed = (
-                                    self.dispatcher.refresh_foreground_actions(
-                                        self.engine.current_state,
-                                        routing_app,
+                                with self._dispatch_lock:
+                                    refreshed = (
+                                        self.dispatcher.refresh_foreground_actions(
+                                            self.engine.current_state,
+                                            routing_app,
+                                        )
                                     )
-                                )
                                 if refreshed.executed:
                                     if self.on_dispatch:
                                         self.on_dispatch(refreshed)
