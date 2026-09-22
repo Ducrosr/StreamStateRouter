@@ -1261,7 +1261,7 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
-    def test_commit_boundary_rejects_resume_without_obs_write(self):
+    def test_commit_boundary_rejects_generation_change_without_obs_write(self):
         state = StreamState(audio_profile="Mute")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
         engine.set_manual_override(state)
@@ -1302,11 +1302,12 @@ class RuntimeTests(unittest.TestCase):
 
             original_commit = service._commit_prepared_execution_write
 
-            def resume_then_commit(prepared, prepared_state, write):
-                service.pause(False)
+            def invalidate_then_commit(prepared, prepared_state, write):
+                with service._lock:
+                    service._dispatch_generation += 1
                 return original_commit(prepared, prepared_state, write)
 
-            service._commit_prepared_execution_write = resume_then_commit
+            service._commit_prepared_execution_write = invalidate_then_commit
 
             execute_id = service.request_execute_declarative_plan(plan_id)
             executed = collector.wait(execute_id)
