@@ -19,7 +19,7 @@ if (-not (Test-Path .venv)) {
 
 $Python = (Resolve-Path .\.venv\Scripts\python.exe).Path
 Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "-c", "constraints/windows-release.txt", "-e", ".[all]")
+Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "-c", "constraints/windows-release.txt", "-e", ".[all]")\nInvoke-Native -FilePath $Python -ArgumentList @("scripts/verify_constraints.py", "constraints/windows-release.txt")
 
 $Version = (& $Python -c "import stream_state_router; print(stream_state_router.__version__)").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "Impossible de déterminer la version SSR." }
