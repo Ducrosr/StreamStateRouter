@@ -327,6 +327,7 @@ class DeclarativeExecutorRuntimeClient:
         self.program_scene = "Lab"
         self.session_generation = 1
         self.input_muted = False
+        self.input_volume_db = -12.0
         self.set_threads = []
 
     def probe(self):
@@ -355,6 +356,8 @@ class DeclarativeExecutorRuntimeClient:
                     "GetCurrentProgramScene",
                     "GetInputMute",
                     "SetInputMute",
+                    "GetInputVolume",
+                    "SetInputVolume",
                 ]
             }
         if request == "GetSceneCollectionList":
@@ -401,6 +404,12 @@ class DeclarativeExecutorRuntimeClient:
         if request == "SetInputMute":
             self.set_threads.append(threading.current_thread().name)
             self.input_muted = bool(payload["inputMuted"])
+            return {}
+        if request == "GetInputVolume":
+            return {"inputVolumeDb": self.input_volume_db}
+        if request == "SetInputVolume":
+            self.set_threads.append(threading.current_thread().name)
+            self.input_volume_db = float(payload["inputVolumeDb"])
             return {}
         raise AssertionError(f"Unexpected executor runtime request: {request}")
 
@@ -1257,6 +1266,61 @@ class RuntimeTests(unittest.TestCase):
             retry = collector.wait(retry_id)
             self.assertFalse(retry.success)
             self.assertRegex(retry.error, "inconnu|expiré|consommé")
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_declarative_input_volume_executes_on_ssr_router(self):
+        state = StreamState(audio_profile="Volume")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Volume": {
+                        "actions": [
+                            {
+                                "type": "input_volume_db",
+                                "params": {
+                                    "input": "Mic",
+                                    "volume_db": -6.25,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared = collector.wait(prepare_id)
+            self.assertTrue(prepared.success, prepared.error)
+
+            execute_id = service.request_execute_declarative_plan(
+                prepared.result["plan_id"]
+            )
+            executed = collector.wait(execute_id)
+
+            self.assertTrue(executed.success, executed.error)
+            self.assertEqual(executed.result["status"], "converged")
+            self.assertTrue(executed.result["converged"])
+            self.assertAlmostEqual(client.input_volume_db, -6.25)
+            self.assertEqual(client.set_threads, ["SSR-Router"])
+            self.assertEqual(dispatcher._applied_profiles, {})
         finally:
             self.assertTrue(service.stop())
 
