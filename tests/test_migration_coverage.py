@@ -4,27 +4,28 @@ import json
 from pathlib import Path
 import unittest
 
-from stream_state_router.planning.migration_coverage import (
-    DECLARATIVE_EXECUTABLE,
-    DECLARATIVE_INTENT_ONLY,
-    DECLARATIVE_PLANNABLE,
-    DELEGATED,
-    DISABLED,
-    LEGACY_ONLY,
-    build_migration_coverage,
-    render_migration_coverage,
-)
+from stream_state_router.planning import build_migration_coverage_report
 from stream_state_router.services.declarative_execution import (
     DECLARATIVE_EXECUTOR_KINDS,
 )
 
 
 class MigrationCoverageTests(unittest.TestCase):
-    def test_classifies_current_executor_and_plannable_actions(self):
-        config = {
+    def sample(self):
+        return {
             "profiles": {
                 "game": {
-                    "Main": {
+                    "Scenes": {
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Gameplay"},
+                            }
+                        ]
+                    }
+                },
+                "overlay": {
+                    "Visibility": {
                         "actions": [
                             {
                                 "type": "scene_item_enabled",
@@ -33,238 +34,267 @@ class MigrationCoverageTests(unittest.TestCase):
                                     "source": "Chat",
                                     "enabled": True,
                                 },
-                            },
+                            }
+                        ]
+                    },
+                    "DisabledOnly": {
+                        "actions": [
+                            {
+                                "type": "future_unknown_action",
+                                "enabled": False,
+                                "params": {"secret": "must-not-appear"},
+                            }
+                        ]
+                    },
+                },
+                "capture": {
+                    "LegacySettings": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Capture",
+                                    "settings": {"url": "secret-value"},
+                                    "overlay": False,
+                                },
+                            }
+                        ]
+                    },
+                    "Invalid": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {"input": "Capture"},
+                            }
+                        ]
+                    },
+                },
+                "audio": {
+                    "Mix": {
+                        "actions": [
                             {
                                 "type": "input_mute",
                                 "params": {"input": "Mic", "muted": True},
                             },
                             {
                                 "type": "input_volume_db",
-                                "params": {"input": "Music", "volume_db": -12.0},
-                            },
-                            {
-                                "type": "set_program_scene",
-                                "params": {"scene": "In Game"},
-                            },
-                            {
-                                "type": "source_filter_enabled",
-                                "params": {
-                                    "source": "Avatar",
-                                    "filter": "Glow",
-                                    "enabled": True,
-                                },
+                                "params": {"input": "Music", "volume_db": -10.0},
                             },
                         ]
                     }
-                }
+                },
             },
-            "layout_profiles": {},
+            "layout_profiles": {
+                "Gameplay": {"scene": "In Game", "modules": {}},
+            },
         }
 
-        report = build_migration_coverage(
+    def test_classifies_actions_and_profiles_by_current_maturity(self):
+        report = build_migration_coverage_report(
+            self.sample(),
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
+
+        actions = report["summary"]["actions"]
+        self.assertEqual(actions["total"], 6)
+        self.assertEqual(actions["counts"]["declarative_executable"], 2)
+        self.assertEqual(actions["counts"]["declarative_plannable"], 2)
+        self.assertEqual(actions["counts"]["legacy_only"], 1)
+        self.assertEqual(actions["counts"]["invalid"], 1)
+
+        profiles = {
+            (row["domain"], row["profile"]): row
+            for row in report["profiles"]
+        }
+        self.assertEqual(
+            profiles[("overlay", "Visibility")]["classification"],
+            "declarative_executable",
+        )
+        self.assertEqual(
+            profiles[("audio", "Mix")]["classification"],
+            "declarative_plannable",
+        )
+        self.assertEqual(
+            profiles[("capture", "LegacySettings")]["classification"],
+            "legacy_only",
+        )
+        self.assertEqual(
+            profiles[("capture", "Invalid")]["classification"],
+            "invalid",
+        )
+        self.assertEqual(
+            profiles[("overlay", "DisabledOnly")]["classification"],
+            "empty",
+        )
+        self.assertEqual(
+            profiles[("overlay", "DisabledOnly")]["disabled_actions"],
+            1,
+        )
+        self.assertEqual(
+            profiles[("layout", "Gameplay")]["classification"],
+            "delegated",
+        )
+        profile_summary = report["summary"]["profiles"]
+        self.assertEqual(profile_summary["managed_nonempty_total"], 5)
+        self.assertEqual(profile_summary["declarative_coverage_percent"], 60.0)
+        self.assertEqual(profile_summary["executable_percent"], 20.0)
+        self.assertEqual(
+            report["domains"]["overlay"]["actions"]["executable_percent"],
+            100.0,
+        )
+        self.assertEqual(
+            report["domains"]["audio"]["actions"]["declarative_coverage_percent"],
+            100.0,
+        )
+        self.assertEqual(
+            report["domains"]["capture"]["profiles"]["executable_percent"],
+            0.0,
+        )
+        self.assertEqual(
+            report["domains"]["layout"]["profiles"]["managed_nonempty_total"],
+            0,
+        )
+
+    def test_filter_enable_is_plannable_but_not_executor_enabled(self):
+        config = {
+            "profiles": {
+                "game": {
+                    "Filtered": {
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Camera",
+                                    "filter": "Blur",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+        report = build_migration_coverage_report(
             config,
             executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
         )
 
-        profile = report.profiles[0]
-        self.assertEqual(profile.classification, DECLARATIVE_PLANNABLE)
+        self.assertEqual(len(report.actions), 1)
         self.assertEqual(
-            [item.classification for item in profile.actions],
-            [
-                DECLARATIVE_EXECUTABLE,
-                DECLARATIVE_EXECUTABLE,
-                DECLARATIVE_PLANNABLE,
-                DECLARATIVE_PLANNABLE,
-                DECLARATIVE_PLANNABLE,
-            ],
+            report.actions[0].classification,
+            "declarative_plannable",
         )
-        summary = report.summary()["actions"]
-        self.assertEqual(summary["active"], 5)
-        self.assertEqual(summary["represented_percent"], 100.0)
-        self.assertEqual(summary["executable_percent"], 40.0)
+        self.assertEqual(report.actions[0].property_kinds, ("filter_enabled",))
 
-    def test_inherited_actions_are_included_in_effective_profile_coverage(self):
+    def test_profile_inherits_parent_migration_maturity_without_double_counting_actions(self):
         config = {
             "profiles": {
-                "audio": {
+                "game": {
                     "Base": {
                         "actions": [
                             {
-                                "type": "input_volume_db",
-                                "params": {"input": "Music", "volume_db": -10.0},
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Capture",
+                                    "settings": {"mode": "legacy"},
+                                    "overlay": False,
+                                },
                             }
                         ]
                     },
                     "Child": {
                         "extends": "Base",
-                        "actions": [
-                            {
-                                "type": "input_mute",
-                                "params": {"input": "Music", "muted": False},
-                            }
-                        ],
+                        "actions": [],
                     },
                 }
-            },
-            "layout_profiles": {},
+            }
         }
 
-        report = build_migration_coverage(
+        mapped = build_migration_coverage_report(
             config,
             executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
-        )
-        child = next(
-            item
-            for item in report.profiles
-            if item.domain == "audio" and item.profile == "Child"
-        )
+        ).as_mapping()
+        profiles = {
+            row["profile"]: row
+            for row in mapped["profiles"]
+            if row["domain"] == "game"
+        }
 
-        self.assertEqual(child.classification, DECLARATIVE_PLANNABLE)
-        self.assertEqual(len(child.actions), 2)
-        self.assertEqual(
-            [item.action_type for item in child.actions],
-            ["input_volume_db", "input_mute"],
-        )
+        self.assertEqual(mapped["summary"]["actions"]["total"], 1)
+        self.assertEqual(profiles["Base"]["classification"], "legacy_only")
+        self.assertEqual(profiles["Child"]["classification"], "legacy_only")
+        self.assertEqual(profiles["Child"]["enabled_actions"], 0)
+        self.assertEqual(profiles["Child"]["inherited_actions"], 1)
+        self.assertEqual(profiles["Child"]["effective_actions"], 1)
 
-    def test_overlay_false_input_settings_remain_legacy_only(self):
+    def test_invalid_profile_inheritance_is_reported_without_crashing(self):
+        for extends, expected in (
+            ("Missing", "missing parent profile"),
+            ("Self", "circular profile inheritance"),
+        ):
+            config = {
+                "profiles": {
+                    "game": {
+                        "Self": {
+                            "extends": extends,
+                            "actions": [],
+                        }
+                    }
+                }
+            }
+
+            mapped = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
+            row = mapped["profiles"][0]
+
+            self.assertEqual(row["classification"], "invalid")
+            self.assertTrue(
+                any(expected in reason for reason in row["reasons"]),
+                row,
+            )
+
+    def test_safe_input_setting_report_never_exposes_setting_values(self):
+        secret = "https://example.invalid/?token=super-secret"
         config = {
             "profiles": {
                 "capture": {
-                    "Legacy": {
+                    "Browser": {
                         "actions": [
                             {
                                 "type": "set_input_settings",
                                 "params": {
-                                    "input": "Capture",
-                                    "overlay": False,
-                                    "settings": {"token": "SECRET"},
+                                    "input": "Browser",
+                                    "settings": {"url": secret},
+                                    "overlay": True,
                                 },
                             }
                         ]
                     }
                 }
-            },
-            "layout_profiles": {},
+            }
         }
 
-        report = build_migration_coverage(
+        mapped = build_migration_coverage_report(
             config,
             executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
-        )
-        profile = report.profiles[0]
+        ).as_mapping()
+        rendered = json.dumps(mapped, ensure_ascii=False)
 
-        self.assertEqual(profile.classification, LEGACY_ONLY)
-        self.assertEqual(profile.actions[0].classification, LEGACY_ONLY)
-        serialized = json.dumps(report.as_mapping(), ensure_ascii=False)
-        rendered = render_migration_coverage(report)
-        self.assertNotIn("SECRET", serialized)
-        self.assertNotIn("SECRET", rendered)
-
-    def test_empty_input_settings_are_intent_only(self):
-        config = {
-            "profiles": {
-                "capture": {
-                    "Empty": {
-                        "actions": [
-                            {
-                                "type": "set_input_settings",
-                                "params": {
-                                    "input": "Capture",
-                                    "settings": {},
-                                },
-                            }
-                        ]
-                    }
-                }
-            },
-            "layout_profiles": {},
-        }
-
-        report = build_migration_coverage(
-            config,
-            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
-        )
-
+        self.assertNotIn(secret, rendered)
         self.assertEqual(
-            report.profiles[0].classification,
-            DECLARATIVE_INTENT_ONLY,
-        )
-
-    def test_disabled_actions_do_not_reduce_active_coverage(self):
-        config = {
-            "profiles": {
-                "overlay": {
-                    "Disabled": {
-                        "actions": [
-                            {
-                                "type": "set_program_scene",
-                                "enabled": False,
-                                "params": {"scene": "Other"},
-                            }
-                        ]
-                    }
-                }
-            },
-            "layout_profiles": {},
-        }
-
-        report = build_migration_coverage(
-            config,
-            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
-        )
-
-        self.assertEqual(report.profiles[0].classification, DECLARATIVE_EXECUTABLE)
-        self.assertEqual(report.profiles[0].actions[0].classification, DISABLED)
-        self.assertEqual(report.summary()["actions"]["active"], 0)
-        self.assertIsNone(report.summary()["actions"]["executable_percent"])
-        self.assertIsNone(report.summary()["actions"]["represented_percent"])
-        self.assertIn(
-            "Aucune action OBS active à mesurer",
-            render_migration_coverage(report),
-        )
-
-    def test_layout_profiles_are_delegated_not_failed(self):
-        config = {
-            "profiles": {},
-            "layout_profiles": {
-                "Gameplay": {"scene": "In Game", "modules": {}},
-                "Chat": {"scene": "Just Chatting", "modules": {}},
-            },
-        }
-
-        report = build_migration_coverage(
-            config,
-            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
-        )
-
-        self.assertEqual(
-            [item.classification for item in report.profiles],
-            [DELEGATED, DELEGATED],
+            mapped["actions"][0]["classification"],
+            "declarative_plannable",
         )
         self.assertEqual(
-            report.summary()["profiles"]["counts"],
-            {DELEGATED: 2},
+            mapped["actions"][0]["property_kinds"],
+            ["input_setting"],
         )
 
-    def test_repository_default_config_produces_coverage_report(self):
-        path = Path(__file__).resolve().parents[1] / "config" / "default.json"
-        config = json.loads(path.read_text(encoding="utf-8"))
 
-        report = build_migration_coverage(
-            config,
-            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
-        )
-
-        mapping = report.as_mapping()
-        self.assertIn("summary", mapping)
-        self.assertIn("profiles", mapping)
-        self.assertEqual(mapping["summary"]["actions"]["active"], 0)
-        self.assertIsNone(mapping["summary"]["actions"]["represented_percent"])
-        self.assertIsNone(mapping["summary"]["actions"]["executable_percent"])
-        self.assertNotIn("password", json.dumps(mapping, ensure_ascii=False))
-        self.assertNotIn("token", json.dumps(mapping, ensure_ascii=False))
-
-    def test_future_executor_kinds_change_coverage_without_report_rewrite(self):
+    def test_future_executor_kind_updates_coverage_without_report_rewrite(self):
         config = {
             "profiles": {
                 "audio": {
@@ -277,11 +307,14 @@ class MigrationCoverageTests(unittest.TestCase):
                         ]
                     }
                 }
-            },
-            "layout_profiles": {},
+            }
         }
 
-        report = build_migration_coverage(
+        current = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        )
+        future = build_migration_coverage_report(
             config,
             executable_kinds={
                 *DECLARATIVE_EXECUTOR_KINDS,
@@ -290,13 +323,96 @@ class MigrationCoverageTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            report.profiles[0].classification,
-            DECLARATIVE_EXECUTABLE,
+            current.actions[0].classification,
+            "declarative_plannable",
         )
         self.assertEqual(
-            report.summary()["actions"]["executable_percent"],
+            future.actions[0].classification,
+            "declarative_executable",
+        )
+
+    def test_human_report_is_secret_safe_and_surfaces_non_executable_actions(self):
+        from stream_state_router.planning.migration_coverage import (
+            render_migration_coverage_report,
+        )
+
+        secret = "super-secret-value"
+        config = {
+            "profiles": {
+                "capture": {
+                    "Browser": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Browser",
+                                    "settings": {"url": secret},
+                                    "overlay": False,
+                                },
+                            }
+                        ]
+                    }
+                }
+            },
+            "layout_profiles": {
+                "Gameplay": {"scene": "In Game", "modules": {}},
+            },
+        }
+        report = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        )
+
+        rendered = render_migration_coverage_report(report)
+
+        self.assertIn("Couverture de migration déclarative", rendered)
+        self.assertIn("legacy_only", rendered)
+        self.assertIn("layout/Gameplay", rendered)
+        self.assertNotIn(secret, rendered)
+
+    def test_repository_default_config_has_only_empty_action_profiles_and_delegated_layouts(self):
+        path = Path(__file__).resolve().parents[1] / "config" / "default.json"
+        config = json.loads(path.read_text(encoding="utf-8"))
+
+        mapped = build_migration_coverage_report(
+            config,
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
+
+        self.assertEqual(mapped["summary"]["actions"]["total"], 0)
+        self.assertEqual(
+            mapped["summary"]["profiles"]["managed_nonempty_total"],
+            0,
+        )
+        self.assertGreater(
+            mapped["summary"]["profiles"]["counts"]["empty"],
+            0,
+        )
+        self.assertEqual(
+            mapped["summary"]["profiles"]["counts"]["delegated"],
+            len(config["layout_profiles"]),
+        )
+        serialized = json.dumps(mapped, ensure_ascii=False)
+        self.assertNotIn(str(config["obs"].get("password") or "<no-password>"), serialized)
+        self.assertNotIn(str(config["api"].get("token") or "<no-token>"), serialized)
+
+    def test_empty_configuration_has_complete_zero_action_coverage(self):
+        mapped = build_migration_coverage_report(
+            {},
+            executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
+        ).as_mapping()
+
+        self.assertEqual(mapped["summary"]["actions"]["total"], 0)
+        self.assertEqual(
+            mapped["summary"]["actions"]["declarative_coverage_percent"],
             100.0,
         )
+        self.assertEqual(
+            mapped["summary"]["actions"]["executable_percent"],
+            100.0,
+        )
+        self.assertEqual(mapped["profiles"], [])
+        self.assertEqual(mapped["actions"], [])
 
 
 if __name__ == "__main__":
