@@ -3,13 +3,13 @@ Set-Location $PSScriptRoot
 
 function Invoke-Native {
     param(
-        [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true, Position = 0)][string]$FilePath,
+        [Parameter(Position = 1)][string[]]$ArgumentList = @()
     )
 
-    & $FilePath @Arguments
+    & $FilePath @ArgumentList
     if ($LASTEXITCODE -ne 0) {
-        throw "Commande native échouée ($LASTEXITCODE) : $FilePath $($Arguments -join ' ')"
+        throw "Commande native échouée ($LASTEXITCODE) : $FilePath $($ArgumentList -join ' ')"
     }
 }
 
@@ -53,7 +53,7 @@ $SystemPython = $PythonCommand.Source
 Assert-Python312 $SystemPython "Python système"
 
 if (-not (Test-Path .venv)) {
-    Invoke-Native $SystemPython -m venv .venv
+    Invoke-Native -FilePath $SystemPython -ArgumentList @("-m", "venv", ".venv")
 }
 
 $VenvPythonPath = ".\.venv\Scripts\python.exe"
@@ -69,6 +69,6 @@ catch {
     throw "$($_.Exception.Message) Supprimez .venv puis relancez ce script pour le recréer."
 }
 
-Invoke-Native $VenvPython -m pip install --upgrade pip
-Invoke-Native $VenvPython -m pip install -e ".[desktop]"
-Invoke-Native $VenvPython main.py
+Invoke-Native -FilePath $VenvPython -ArgumentList @("-m", "pip", "install", "--upgrade", "pip")
+Invoke-Native -FilePath $VenvPython -ArgumentList @("-m", "pip", "install", "-e", ".[desktop]")
+Invoke-Native -FilePath $VenvPython -ArgumentList @("main.py")
