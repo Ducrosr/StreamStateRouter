@@ -88,6 +88,38 @@ class LayoutTests(unittest.TestCase):
         self.assertIsNone(split_module_source("Webcam Cadre"))
         self.assertIsNone(split_module_source("[Webcam]"))
 
+    def test_list_scenes_accepts_modern_current_program_scene_fallback(self):
+        class ModernFallbackClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                if request == "GetSceneList":
+                    self.calls.append((request, dict(data or {})))
+                    return {
+                        "currentProgramSceneName": "",
+                        "scenes": [
+                            {"sceneName": "Gameplay"},
+                            {"sceneName": "Pause"},
+                        ],
+                    }
+                if request == "GetCurrentProgramScene":
+                    self.calls.append((request, dict(data or {})))
+                    return {
+                        "sceneName": "Pause",
+                        "sceneUuid": "pause-uuid",
+                    }
+                return super().send(request, data)
+
+        client = ModernFallbackClient()
+        manager = OBSLayoutManager(client)
+
+        names, current = manager.list_scenes()
+
+        self.assertEqual(names, ["Gameplay", "Pause"])
+        self.assertEqual(current, "Pause")
+        self.assertIn(
+            ("GetCurrentProgramScene", {}),
+            client.calls,
+        )
+
     def test_topology_scan_honors_cooperative_shutdown_before_obs_io(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
