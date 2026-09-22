@@ -47,6 +47,7 @@ from ..services.config import (
     build_activation_policies,
     config_revision,
     build_obs_config,
+    build_host_controller,
     build_profiles,
     build_layout_profiles,
     build_ruleset,
@@ -517,6 +518,29 @@ class MainWindow(QMainWindow):
         obs_lay.addWidget(test, alignment=Qt.AlignLeft)
         root.addWidget(obs_card)
 
+        host_card, host_lay = self._card("Contrôle Windows")
+        host_form = QFormLayout()
+        self.soundvolumeview_path = QLineEdit()
+        self.soundvolumeview_path.setPlaceholderText(
+            r"C:\Streaming\OBS\Tools\SoundVolumeView\SoundVolumeView.exe"
+        )
+        host_form.addRow("SoundVolumeView.exe", self.soundvolumeview_path)
+        browse_row = QHBoxLayout()
+        browse = QPushButton("Parcourir…")
+        browse.clicked.connect(self._browse_soundvolumeview)
+        browse_row.addWidget(browse)
+        browse_row.addStretch(1)
+        host_lay.addLayout(host_form)
+        host_lay.addLayout(browse_row)
+        host_note = QLabel(
+            "Audio par application : backend SoundVolumeView. "
+            "HDR/SDR : contrôle natif Windows DisplayConfig."
+        )
+        host_note.setWordWrap(True)
+        host_note.setObjectName("Muted")
+        host_lay.addWidget(host_note)
+        root.addWidget(host_card)
+
         api_card, api_lay = self._card("API locale / Stream Deck")
         api_form = QFormLayout()
         self.api_enabled = QCheckBox("Activer l’API locale")
@@ -548,6 +572,16 @@ class MainWindow(QMainWindow):
         root.addWidget(behavior_card)
         root.addStretch(1)
         return page
+
+    def _browse_soundvolumeview(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner SoundVolumeView.exe",
+            self.soundvolumeview_path.text().strip() or "",
+            "Exécutables Windows (*.exe);;Tous les fichiers (*)",
+        )
+        if selected:
+            self.soundvolumeview_path.setText(selected)
 
     def _build_logs_tab(self) -> QWidget:
         page = QWidget()
@@ -601,6 +635,15 @@ class MainWindow(QMainWindow):
         self.obs_host.setText(str(obs.get("host") or "127.0.0.1"))
         self.obs_port.setValue(int(obs.get("port", 4455)))
         self.obs_password.setText(str(obs.get("password") or ""))
+        host = self.config.get("host_control", {})
+        self.soundvolumeview_path.setText(
+            str(
+                host.get("soundvolumeview_path")
+                if isinstance(host, dict)
+                else ""
+            )
+            or ""
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -623,7 +666,12 @@ class MainWindow(QMainWindow):
             widget.valueChanged.connect(self._mark_dirty)
         for widget in (self.obs_enabled, self.close_to_tray, self.start_with_windows, self.api_enabled, self.auto_detect_modules):
             widget.toggled.connect(self._mark_dirty)
-        for widget in (self.obs_host, self.obs_password, self.api_token):
+        for widget in (
+            self.obs_host,
+            self.obs_password,
+            self.api_token,
+            self.soundvolumeview_path,
+        ):
             widget.textChanged.connect(self._mark_dirty)
 
     def _collect_settings(self) -> None:
@@ -635,6 +683,9 @@ class MainWindow(QMainWindow):
         obs["host"] = self.obs_host.text().strip() or "127.0.0.1"
         obs["port"] = self.obs_port.value()
         obs["password"] = self.obs_password.text()
+        host = self.config.setdefault("host_control", {})
+        host["soundvolumeview_path"] = self.soundvolumeview_path.text().strip()
+        host.setdefault("audio_timeout_seconds", 5.0)
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -686,6 +737,7 @@ class MainWindow(QMainWindow):
             self._client,
             build_profiles(self.config),
             build_layout_profiles(self.config),
+            host_controller=build_host_controller(self.config),
         )
         if startup_layout_profile:
             self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
