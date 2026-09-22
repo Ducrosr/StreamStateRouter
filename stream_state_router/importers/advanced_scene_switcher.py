@@ -127,6 +127,22 @@ def _action_identity(action: Mapping[str, Any]) -> tuple[str, ...]:
     return (kind,)
 
 
+def _extract_advanced_scene_switcher_payload(
+    data: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    nested = data.get("advanced-scene-switcher")
+    if isinstance(nested, Mapping):
+        return nested
+
+    modules = data.get("modules")
+    if isinstance(modules, Mapping):
+        nested = modules.get("advanced-scene-switcher")
+        if isinstance(nested, Mapping):
+            return nested
+
+    return None
+
+
 class AdvancedSceneSwitcherImporter:
     """Conservative importer for Advanced Scene Switcher JSON exports.
 
@@ -140,8 +156,8 @@ class AdvancedSceneSwitcherImporter:
         data = json.loads(source.read_text(encoding="utf-8"))
         if not isinstance(data, Mapping):
             raise ValueError("Le fichier Advanced Scene Switcher doit être un objet JSON.")
-        nested = data.get("advanced-scene-switcher")
-        if isinstance(nested, Mapping):
+        nested = _extract_advanced_scene_switcher_payload(data)
+        if nested is not None:
             return copy.deepcopy(dict(nested))
         return copy.deepcopy(dict(data))
 
@@ -173,8 +189,8 @@ class AdvancedSceneSwitcherImporter:
                 continue
             if str(raw.get("name") or "").strip() != wanted:
                 continue
-            nested = raw.get("advanced-scene-switcher")
-            if isinstance(nested, Mapping):
+            nested = _extract_advanced_scene_switcher_payload(raw)
+            if nested is not None:
                 return candidate
         return None
 

@@ -346,6 +346,48 @@ class ImporterTests(unittest.TestCase):
 
         self.assertEqual(found, expected)
 
+    def test_advss_collection_file_is_auto_discovered_under_obs_modules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = root / "streaming.json"
+            expected.write_text(
+                json.dumps(
+                    {
+                        "name": "Streaming",
+                        "modules": {
+                            "advanced-scene-switcher": {
+                                "macros": [{"name": "One", "group": False}]
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            found = AdvancedSceneSwitcherImporter.find_scene_collection_file(
+                "Streaming",
+                scenes_dir=root,
+            )
+
+        self.assertEqual(found, expected)
+
+    def test_advss_obs_modules_payload_is_loaded(self):
+        payload = {
+            "name": "Streaming",
+            "modules": {
+                "advanced-scene-switcher": {
+                    "macros": [{"name": "One", "group": False}]
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collection.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            loaded = AdvancedSceneSwitcherImporter.load(path)
+
+        self.assertEqual(loaded["macros"][0]["name"], "One")
+
     def test_advss_nested_export_is_loaded(self):
         payload = {
             "advanced-scene-switcher": {
