@@ -97,8 +97,8 @@ class MigrationCoverageTests(unittest.TestCase):
 
         actions = report["summary"]["actions"]
         self.assertEqual(actions["total"], 6)
-        self.assertEqual(actions["counts"]["declarative_executable"], 2)
-        self.assertEqual(actions["counts"]["declarative_plannable"], 2)
+        self.assertEqual(actions["counts"]["declarative_executable"], 3)
+        self.assertEqual(actions["counts"]["declarative_plannable"], 1)
         self.assertEqual(actions["counts"]["legacy_only"], 1)
         self.assertEqual(actions["counts"]["invalid"], 1)
 
@@ -112,7 +112,7 @@ class MigrationCoverageTests(unittest.TestCase):
         )
         self.assertEqual(
             profiles[("audio", "Mix")]["classification"],
-            "declarative_plannable",
+            "declarative_executable",
         )
         self.assertEqual(
             profiles[("capture", "LegacySettings")]["classification"],
@@ -294,7 +294,7 @@ class MigrationCoverageTests(unittest.TestCase):
         )
 
 
-    def test_future_executor_kind_updates_coverage_without_report_rewrite(self):
+    def test_input_volume_is_reported_as_declarative_executable(self):
         config = {
             "profiles": {
                 "audio": {
@@ -310,24 +310,17 @@ class MigrationCoverageTests(unittest.TestCase):
             }
         }
 
-        current = build_migration_coverage_report(
+        report = build_migration_coverage_report(
             config,
             executable_kinds=DECLARATIVE_EXECUTOR_KINDS,
         )
-        future = build_migration_coverage_report(
-            config,
-            executable_kinds={
-                *DECLARATIVE_EXECUTOR_KINDS,
-                "input_volume_db",
-            },
-        )
 
         self.assertEqual(
-            current.actions[0].classification,
-            "declarative_plannable",
+            report.actions[0].classification,
+            "declarative_executable",
         )
         self.assertEqual(
-            future.actions[0].classification,
+            report.profiles[0].classification,
             "declarative_executable",
         )
 
