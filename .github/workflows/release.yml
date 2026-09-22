@@ -86,6 +86,49 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed: $LASTEXITCODE" }
           $Path = ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe"
           if (-not (Test-Path $Path)) { throw "Expected installer missing: $Path" }
+      - name: Smoke test installer
+        shell: pwsh
+        run: |
+          $Installer = ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe"
+          if (-not (Test-Path $Installer)) { throw "Installer missing before smoke test" }
+
+          $InstallDir = Join-Path $env:RUNNER_TEMP "SSR-Installer-Smoke"
+          if (Test-Path $InstallDir) {
+            Remove-Item $InstallDir -Recurse -Force
+          }
+
+          $Install = Start-Process -FilePath $Installer -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/SP-",
+            "/DIR=$InstallDir"
+          ) -Wait -PassThru
+          if ($Install.ExitCode -ne 0) {
+            throw "Installer smoke install failed: $($Install.ExitCode)"
+          }
+
+          $InstalledExe = Join-Path $InstallDir "StreamStateRouter.exe"
+          if (-not (Test-Path $InstalledExe)) {
+            throw "Installed StreamStateRouter.exe missing"
+          }
+          $AppSmoke = Start-Process -FilePath $InstalledExe -ArgumentList "--check-config" -Wait -PassThru
+          if ($AppSmoke.ExitCode -ne 0) {
+            throw "Installed EXE smoke test failed: $($AppSmoke.ExitCode)"
+          }
+
+          $Uninstaller = Join-Path $InstallDir "unins000.exe"
+          if (-not (Test-Path $Uninstaller)) {
+            throw "Inno uninstaller missing after install"
+          }
+          $Uninstall = Start-Process -FilePath $Uninstaller -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART"
+          ) -Wait -PassThru
+          if ($Uninstall.ExitCode -ne 0) {
+            throw "Installer smoke uninstall failed: $($Uninstall.ExitCode)"
+          }
       - name: Record build provenance
         shell: pwsh
         run: |
