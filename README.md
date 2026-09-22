@@ -1,5 +1,30 @@
 # Stream State Router 2.1.0
 
+## 2.2.0 — contrôle Windows et filtres avancés (en développement)
+
+SSR peut désormais associer aux profils existants des actions qui dépassent le
+seul état OBS, sans ajouter une nouvelle dimension de routage :
+
+- `app_audio_output` : affecte le périphérique audio Windows d'une application
+  via SoundVolumeView `/SetAppDefault`. Le backend est isolé derrière une
+  interface SSR afin de pouvoir être remplacé si Windows publie un jour une API
+  stable pour cette préférence ;
+- `windows_hdr` : active ou désactive HDR/Advanced Color sur l'écran principal
+  ou sur tous les écrans compatibles via l'API Win32 DisplayConfig ;
+- `source_filter_settings` : modifie les paramètres JSON d'un filtre OBS avec
+  `SetSourceFilterSettings`, en fusionnant par défaut avec les réglages
+  existants.
+
+Usage recommandé :
+
+- **AudioProfile** : routage du jeu vers le canal/périphérique Windows voulu ;
+- **CaptureProfile** : HDR/SDR Windows et réglages liés à la capture ;
+- **Game / Overlay / Capture / Audio** : réglages de filtres OBS lorsque cela
+  correspond au rôle du profil.
+
+Le chemin SoundVolumeView est configurable dans **Paramètres > Contrôle Windows**.
+HDR ne dépend d'aucun utilitaire externe.
+
 ## 2.1.0 — routage déclaratif gardé
 
 La 2.1.0 consolide la fondation déclarative construite au-dessus de l'architecture
