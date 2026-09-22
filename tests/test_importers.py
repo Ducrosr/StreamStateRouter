@@ -857,7 +857,7 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(actions[3]["params"]["duration_ms"], 90)
         self.assertEqual(
             actions[2]["params"]["settings"]["file"],
-            "C:/Avatars/${Mood}_${Game}.png",
+            "C:/Avatars/${Mood}_Vanilla.png",
         )
 
     def test_advss_negated_known_game_routes_are_absorbed_by_fallback(self):
@@ -951,6 +951,200 @@ class ImporterTests(unittest.TestCase):
             any("Vanilla fallback" in reason for reason in report.skipped),
             report.skipped,
         )
+
+    def test_advss_reuses_existing_process_game_profile_and_state(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Dofus state",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Dofus.exe",
+                            "focus": False,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Dofus",
+                        },
+                        {
+                            "id": "scene_visibility",
+                            "sceneSelection": {"type": 0, "name": "In Game"},
+                            "sceneItemSelection": {
+                                "type": 0,
+                                "idxType": 0,
+                                "idx": 0,
+                                "item": "Input Overlay",
+                            },
+                            "action": 0,
+                            "updateTransition": False,
+                            "updateDuration": False,
+                        },
+                    ],
+                    "elseActions": [],
+                }
+            ]
+        }
+        existing_state = {
+            "Game": "Dofus Unity",
+            "OverlayProfile": "Dofus",
+            "CaptureProfile": "Default",
+            "AudioProfile": "Game",
+            "LayoutProfile": "Dofus",
+        }
+        config = {
+            "router": {
+                "fallback_state": {
+                    "Game": "Vanilla",
+                    "OverlayProfile": "Vanilla",
+                    "CaptureProfile": "Default",
+                    "AudioProfile": "Default",
+                    "LayoutProfile": "Vanilla",
+                }
+            },
+            "rules": [
+                {
+                    "name": "Dofus Unity",
+                    "behavior": "match",
+                    "priority": 90,
+                    "enabled": True,
+                    "exe": "Dofus.exe",
+                    "path": "",
+                    "title_regex": "",
+                    "state": dict(existing_state),
+                    "apply_delay_ms": 0,
+                    "conditions": {},
+                }
+            ],
+            "profiles": {
+                "game": {
+                    "Vanilla": {"actions": []},
+                    "Dofus Unity": {"actions": []},
+                }
+            },
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 1)
+        self.assertNotIn("Dofus", config["profiles"]["game"])
+        self.assertEqual(
+            config["profiles"]["game"]["Dofus Unity"]["actions"][0]["type"],
+            "scene_item_enabled",
+        )
+        self.assertEqual(len(config["rules"]), 2)
+        background = config["rules"][1]
+        self.assertFalse(background["enabled"])
+        self.assertEqual(
+            background["conditions"],
+            {"process_running": "Dofus.exe"},
+        )
+        self.assertEqual(background["state"], existing_state)
+
+    def test_advss_avatar_game_template_uses_asc_value_for_reused_profile(self):
+        asc = {
+            "variables": [
+                {"name": "Mood", "value": "Happy", "defaultValue": ""},
+                {"name": "Game", "defaultValue": ""},
+            ],
+            "macros": [
+                {
+                    "name": "Avatar - Update",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "variable",
+                            "logic": 0,
+                            "variableName": "Mood",
+                            "condition": 5,
+                        },
+                        {
+                            "id": "variable",
+                            "logic": 102,
+                            "variableName": "Game",
+                            "condition": 5,
+                        },
+                    ],
+                    "actions": [
+                        {
+                            "id": "source",
+                            "source": {"type": 0, "name": "Avatar Dynamic"},
+                            "action": 2,
+                            "inputMethod": 0,
+                            "sourceSetting": {"id": "file", "type": 5},
+                            "manualSettingValue": (
+                                "C:/Avatars/${Mood}_${Game}.png"
+                            ),
+                        }
+                    ],
+                    "elseActions": [],
+                },
+                {
+                    "name": "Dofus state",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Dofus.exe",
+                            "focus": False,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Dofus",
+                        }
+                    ],
+                    "elseActions": [],
+                },
+            ],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [
+                {
+                    "name": "Dofus Unity",
+                    "behavior": "match",
+                    "priority": 90,
+                    "enabled": True,
+                    "exe": "Dofus.exe",
+                    "path": "",
+                    "title_regex": "",
+                    "state": {"Game": "Dofus Unity"},
+                    "apply_delay_ms": 0,
+                    "conditions": {},
+                }
+            ],
+            "profiles": {
+                "game": {
+                    "Vanilla": {"actions": []},
+                    "Dofus Unity": {"actions": []},
+                }
+            },
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 2)
+        avatar = config["profiles"]["game"]["Dofus Unity"]["actions"][0]
+        self.assertEqual(
+            avatar["params"]["settings"]["file"],
+            "C:/Avatars/${Mood}_Dofus.png",
+        )
+        self.assertNotIn("Dofus", config["profiles"]["game"])
 
     def test_advss_process_path_macro_creates_disabled_rule(self):
         asc = {

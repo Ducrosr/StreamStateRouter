@@ -248,6 +248,45 @@ def _asc_wait_ms(action: Mapping[str, Any]) -> int | None:
     return int(round(seconds * 1000.0))
 
 
+def _replace_template_variable(
+    value: Any,
+    *,
+    name: str,
+    replacement: str,
+) -> Any:
+    token = "${" + name + "}"
+    if isinstance(value, str):
+        return value.replace(token, replacement)
+    if isinstance(value, Mapping):
+        return {
+            key: _replace_template_variable(
+                item,
+                name=name,
+                replacement=replacement,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _replace_template_variable(
+                item,
+                name=name,
+                replacement=replacement,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _replace_template_variable(
+                item,
+                name=name,
+                replacement=replacement,
+            )
+            for item in value
+        )
+    return value
+
+
 def _append_exact_sequence(
     profile: dict[str, Any],
     actions: list[dict[str, Any]],
@@ -966,7 +1005,39 @@ class AdvancedSceneSwitcherImporter:
         ).items():
             control_variables.setdefault(variable_name, variable_value)
 
+        rules = config.setdefault("rules", [])
+        if not isinstance(rules, list):
+            raise ValueError("config.rules doit être une liste.")
+        profiles = config.setdefault("profiles", {})
+        game_profiles = profiles.setdefault("game", {})
+        if not isinstance(game_profiles, dict):
+            raise ValueError("config.profiles.game doit être un objet.")
+
+        fallback_raw = config.get("router", {}).get("fallback_state", {})
+        fallback = dict(fallback_raw) if isinstance(fallback_raw, Mapping) else {}
+
+        def existing_process_state(process: str) -> dict[str, Any] | None:
+            candidates: list[dict[str, Any]] = []
+            wanted = process.casefold()
+            for rule in rules:
+                if not isinstance(rule, Mapping):
+                    continue
+                if str(rule.get("behavior", "match")).casefold() != "match":
+                    continue
+                if str(rule.get("exe") or "").strip().casefold() != wanted:
+                    continue
+                if dict(rule.get("conditions") or {}):
+                    continue
+                state = rule.get("state")
+                if isinstance(state, Mapping):
+                    candidates.append(copy.deepcopy(dict(state)))
+            if len(candidates) != 1:
+                return None
+            return candidates[0]
+
         process_game_targets: dict[str, str] = {}
+        process_asc_game_values: dict[str, str] = {}
+        process_baseline_states: dict[str, dict[str, Any]] = {}
         ambiguous_process_targets: set[str] = set()
         for macro in macros:
             conditions_raw = macro.get("conditions", [])
@@ -996,25 +1067,30 @@ class AdvancedSceneSwitcherImporter:
             if not process or len(targets) != 1:
                 continue
             key = process.casefold()
-            target = next(iter(targets))
-            previous = process_game_targets.get(key)
-            if previous is not None and previous.casefold() != target.casefold():
+            asc_target = next(iter(targets))
+            previous = process_asc_game_values.get(key)
+            if (
+                previous is not None
+                and previous.casefold() != asc_target.casefold()
+            ):
                 ambiguous_process_targets.add(key)
                 process_game_targets.pop(key, None)
+                process_asc_game_values.pop(key, None)
+                process_baseline_states.pop(key, None)
                 continue
-            if key not in ambiguous_process_targets:
-                process_game_targets[key] = target
+            if key in ambiguous_process_targets:
+                continue
 
-        rules = config.setdefault("rules", [])
-        if not isinstance(rules, list):
-            raise ValueError("config.rules doit être une liste.")
-        profiles = config.setdefault("profiles", {})
-        game_profiles = profiles.setdefault("game", {})
-        if not isinstance(game_profiles, dict):
-            raise ValueError("config.profiles.game doit être un objet.")
+            baseline = existing_process_state(process)
+            resolved_target = asc_target
+            if baseline is not None:
+                existing_target = str(baseline.get("Game") or "").strip()
+                if existing_target:
+                    resolved_target = existing_target
+                    process_baseline_states[key] = baseline
 
-        fallback_raw = config.get("router", {}).get("fallback_state", {})
-        fallback = dict(fallback_raw) if isinstance(fallback_raw, Mapping) else {}
+            process_asc_game_values[key] = asc_target
+            process_game_targets[key] = resolved_target
         existing_rule_names = {
             str(rule.get("name") or "")
             for rule in rules
@@ -1099,39 +1175,66 @@ class AdvancedSceneSwitcherImporter:
                 if not converted_sequence:
                     reject(name, f"{name}: aucune action convertible", macro)
                     continue
-                target_profiles = {
-                    str(fallback.get("Game") or "Vanilla").strip() or "Vanilla",
-                    *(
-                        target
-                        for target in process_game_targets.values()
-                        if str(target).strip()
-                    ),
+                fallback_profile = (
+                    str(fallback.get("Game") or "Vanilla").strip()
+                    or "Vanilla"
+                )
+                profile_game_values: dict[str, str] = {
+                    fallback_profile: fallback_profile,
                 }
-                for profile_name in sorted(target_profiles):
-                    profile = game_profiles.get(profile_name)
-                    if profile is None:
-                        game_profiles[profile_name] = {
-                            "actions": [],
-                            "extends": "",
-                            "conditions": {},
-                        }
-                        existing_profile_names.add(profile_name)
-                        profiles_created += 1
-                        profile = game_profiles[profile_name]
-                    if not isinstance(profile, dict):
+                for process_key, profile_name in process_game_targets.items():
+                    if not str(profile_name).strip():
+                        continue
+                    asc_value = process_asc_game_values.get(
+                        process_key,
+                        profile_name,
+                    )
+                    previous_value = profile_game_values.get(profile_name)
+                    if (
+                        previous_value is not None
+                        and previous_value.casefold() != asc_value.casefold()
+                    ):
                         reject(
                             name,
-                            f"{name}: Game profile '{profile_name}' invalide",
+                            (
+                                f"{name}: plusieurs valeurs ASC Game ciblent "
+                                f"le même profil SSR '{profile_name}'"
+                            ),
                             macro,
                         )
                         break
-                    _append_exact_sequence(profile, converted_sequence)
+                    profile_game_values[profile_name] = asc_value
                 else:
-                    converted_macros += 1
-                    actions_converted += len(converted_sequence)
+                    for profile_name in sorted(profile_game_values):
+                        profile = game_profiles.get(profile_name)
+                        if profile is None:
+                            game_profiles[profile_name] = {
+                                "actions": [],
+                                "extends": "",
+                                "conditions": {},
+                            }
+                            existing_profile_names.add(profile_name)
+                            profiles_created += 1
+                            profile = game_profiles[profile_name]
+                        if not isinstance(profile, dict):
+                            reject(
+                                name,
+                                f"{name}: Game profile '{profile_name}' invalide",
+                                macro,
+                            )
+                            break
+                        bound_sequence = _replace_template_variable(
+                            converted_sequence,
+                            name="Game",
+                            replacement=profile_game_values[profile_name],
+                        )
+                        _append_exact_sequence(profile, bound_sequence)
+                    else:
+                        converted_macros += 1
+                        actions_converted += len(converted_sequence)
+                        continue
                     continue
                 continue
-
             if len(conditions) == 1:
                 condition = conditions[0]
                 if str(condition.get("id") or "").strip() == "streamdeck":
@@ -1313,14 +1416,29 @@ class AdvancedSceneSwitcherImporter:
                 if selector is not None
                 else ""
             )
+            process_key = process_name.casefold() if process_name else ""
             inferred_game_target = (
-                process_game_targets.get(process_name.casefold(), "")
-                if process_name
+                process_game_targets.get(process_key, "")
+                if process_key
                 else ""
             )
+            asc_process_target = (
+                process_asc_game_values.get(process_key, "")
+                if process_key
+                else ""
+            )
+            resolved_explicit_target = explicit_game_target
+            if (
+                inferred_game_target
+                and explicit_game_target
+                and asc_process_target
+                and explicit_game_target.casefold()
+                == asc_process_target.casefold()
+            ):
+                resolved_explicit_target = inferred_game_target
             profile_target = (
                 direct_profile_target
-                or explicit_game_target
+                or resolved_explicit_target
                 or inferred_game_target
             )
             if not converted and not (
@@ -1520,7 +1638,16 @@ class AdvancedSceneSwitcherImporter:
                         )
                         continue
 
-                state = dict(fallback)
+                baseline_state = (
+                    process_baseline_states.get(process_key)
+                    if process_key
+                    else None
+                )
+                state = (
+                    copy.deepcopy(baseline_state)
+                    if isinstance(baseline_state, Mapping)
+                    else dict(fallback)
+                )
                 state["Game"] = profile_name
                 rule_name = cls._unique_name(
                     existing_rule_names,
