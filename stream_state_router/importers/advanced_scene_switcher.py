@@ -122,7 +122,7 @@ def _action_identity(action: Mapping[str, Any]) -> tuple[str, ...]:
             str(params.get("source") or ""),
             str(params.get("filter") or ""),
         )
-    if kind == "set_input_settings":
+    if kind in {"set_input_settings", "input_mute", "input_volume_db"}:
         return (kind, str(params.get("input") or ""))
     return (kind,)
 
@@ -582,7 +582,12 @@ class AdvancedSceneSwitcherImporter:
         return name
 
     @staticmethod
-    def _merge_actions(profile: dict[str, Any], actions: list[dict[str, Any]]) -> int:
+    def _merge_actions(
+        profile: dict[str, Any],
+        actions: list[dict[str, Any]],
+        *,
+        reject_conflicts: bool = False,
+    ) -> tuple[int, tuple[str, ...]]:
         existing = profile.setdefault("actions", [])
         if not isinstance(existing, list):
             raise ValueError("Le profil SSR cible contient une liste d'actions invalide.")
@@ -592,15 +597,22 @@ class AdvancedSceneSwitcherImporter:
             if isinstance(item, Mapping)
         }
         changed = 0
+        conflicts: list[str] = []
         for action in actions:
             identity = _action_identity(action)
             if identity in positions:
+                previous = existing[positions[identity]]
+                if previous == action:
+                    continue
+                if reject_conflicts:
+                    conflicts.append(repr(identity))
+                    continue
                 existing[positions[identity]] = action
             else:
                 positions[identity] = len(existing)
                 existing.append(action)
             changed += 1
-        return changed
+        return changed, tuple(conflicts)
 
     @classmethod
     def apply_to_config(
@@ -779,7 +791,21 @@ class AdvancedSceneSwitcherImporter:
                         macro,
                     )
                     continue
-                cls._merge_actions(profile, converted)
+                _changed, conflicts = cls._merge_actions(
+                    profile,
+                    converted,
+                    reject_conflicts=True,
+                )
+                if conflicts:
+                    reject(
+                        name,
+                        (
+                            f"{name}: conflit avec des actions SSR existantes "
+                            f"sur {', '.join(conflicts)}"
+                        ),
+                        macro,
+                    )
+                    continue
                 attached += 1
             else:
                 profile_name = cls._unique_name(
