@@ -59,6 +59,10 @@ def _parse_args() -> argparse.Namespace:
         help="Basculer temporairement HDR de l'écran principal puis restaurer.",
     )
     parser.add_argument(
+        "--soundvolumeview-path",
+        help="Chemin explicite vers SoundVolumeView.exe (prioritaire sur la config SSR).",
+    )
+    parser.add_argument(
         "--audio-process",
         help="Processus à router via SoundVolumeView, ex. Dofus.exe.",
     )
@@ -333,7 +337,11 @@ def main() -> int:
         if args.audio_process and args.audio_device:
             host = config.get("host_control")
             host_settings = host if isinstance(host, dict) else {}
-            path = str(host_settings.get("soundvolumeview_path") or "")
+            path = str(
+                args.soundvolumeview_path
+                or host_settings.get("soundvolumeview_path")
+                or ""
+            )
             print(
                 "\nRoutage audio persistant demandé : "
                 f"{args.audio_process} -> {args.audio_device} ({args.audio_roles})."
