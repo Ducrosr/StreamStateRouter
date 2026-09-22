@@ -317,6 +317,41 @@ class DeclarativeExecutorTests(unittest.TestCase):
                     )
                 )
 
+    def test_invalid_volume_blocks_mixed_plan_before_any_write(self):
+        mute = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        volume = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(mute, True),
+                DesiredAssignment.create(volume, 30.0),
+            ]
+        )
+        prepared = _prepared(
+            desired,
+            {
+                mute: ObservedValue.known_value(False),
+                volume: ObservedValue.known_value(-12.0),
+            },
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(
+            any(name.startswith("Set") for name, _data in client.requests)
+        )
+
     def test_input_volume_positive_set_requires_matching_readback(self):
         key = PropertyKey.input_volume_db(
             collection="Lab Collection",
