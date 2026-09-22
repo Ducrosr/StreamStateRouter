@@ -758,6 +758,200 @@ class ImporterTests(unittest.TestCase):
         )
         self.assertEqual(len(config["rules"]), 1)
 
+    def test_advss_imports_control_variable_default_and_avatar_update_sequence(self):
+        asc = {
+            "variables": [
+                {"name": "Mood", "value": "Happy", "defaultValue": ""},
+                {"name": "Game", "defaultValue": ""},
+            ],
+            "macros": [
+                {
+                    "name": "Avatar - Update",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "variable",
+                            "logic": 0,
+                            "variableName": "Mood",
+                            "condition": 5,
+                        },
+                        {
+                            "id": "variable",
+                            "logic": 102,
+                            "variableName": "Game",
+                            "condition": 5,
+                        },
+                    ],
+                    "actions": [
+                        {
+                            "id": "filter",
+                            "source": {"type": 0, "name": "Avatar Dynamic"},
+                            "filter": {
+                                "type": 0,
+                                "name": "Avatar FX - Swap Glitch",
+                            },
+                            "action": 0,
+                        },
+                        {
+                            "id": "wait",
+                            "waitType": 0,
+                            "duration": {
+                                "value": {"value": 0.07, "type": 0},
+                                "unit": 0,
+                            },
+                        },
+                        {
+                            "id": "source",
+                            "source": {"type": 0, "name": "Avatar Dynamic"},
+                            "action": 2,
+                            "inputMethod": 0,
+                            "sourceSetting": {"id": "file", "type": 5},
+                            "manualSettingValue": (
+                                "C:/Avatars/${Mood}_${Game}.png"
+                            ),
+                        },
+                        {
+                            "id": "wait",
+                            "waitType": 0,
+                            "duration": {
+                                "value": {"value": 0.09, "type": 0},
+                                "unit": 0,
+                            },
+                        },
+                        {
+                            "id": "filter",
+                            "source": {"type": 0, "name": "Avatar Dynamic"},
+                            "filter": {
+                                "type": 0,
+                                "name": "Avatar FX - Swap Glitch",
+                            },
+                            "action": 1,
+                        },
+                    ],
+                    "elseActions": [],
+                }
+            ],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 1)
+        self.assertEqual(config["control_variables"], {"Mood": "Happy"})
+        actions = config["profiles"]["game"]["Vanilla"]["actions"]
+        self.assertEqual(
+            [item["type"] for item in actions],
+            [
+                "source_filter_enabled",
+                "wait_ms",
+                "set_input_settings",
+                "wait_ms",
+                "source_filter_enabled",
+            ],
+        )
+        self.assertEqual(actions[1]["params"]["duration_ms"], 70)
+        self.assertEqual(actions[3]["params"]["duration_ms"], 90)
+        self.assertEqual(
+            actions[2]["params"]["settings"]["file"],
+            "C:/Avatars/${Mood}_${Game}.png",
+        )
+
+    def test_advss_negated_known_game_routes_are_absorbed_by_fallback(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "OW",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Overwatch.exe",
+                            "focus": True,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Overwatch",
+                        }
+                    ],
+                    "elseActions": [],
+                },
+                {
+                    "name": "Dofus",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Dofus.exe",
+                            "focus": False,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Dofus",
+                        }
+                    ],
+                    "elseActions": [],
+                },
+                {
+                    "name": "Vanilla fallback",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 1,
+                            "process": "Overwatch.exe",
+                            "focus": True,
+                        },
+                        {
+                            "id": "process",
+                            "logic": 103,
+                            "process": "Dofus.exe",
+                            "focus": False,
+                        },
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Vanilla",
+                        }
+                    ],
+                    "elseActions": [],
+                },
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 3)
+        self.assertFalse(
+            any("Vanilla fallback" in reason for reason in report.skipped),
+            report.skipped,
+        )
+
     def test_advss_process_path_macro_creates_disabled_rule(self):
         asc = {
             "macros": [

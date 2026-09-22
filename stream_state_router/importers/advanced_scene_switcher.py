@@ -159,6 +159,112 @@ def _asc_game_condition(condition: Mapping[str, Any]) -> str:
     return str(condition.get("strValue") or "").strip()
 
 
+_TEMPLATE_VARIABLE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _asc_control_variable_defaults(data: Mapping[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    raw_variables = data.get("variables")
+    if not isinstance(raw_variables, list):
+        return result
+    reserved = {
+        "Game",
+        "OverlayProfile",
+        "CaptureProfile",
+        "AudioProfile",
+        "LayoutProfile",
+    }
+    for item in raw_variables:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or "").strip()
+        if (
+            not name
+            or name in reserved
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
+        ):
+            continue
+        value = item.get("value")
+        if not isinstance(value, str):
+            value = item.get("defaultValue")
+        if isinstance(value, str):
+            result[name] = value
+    return result
+
+
+def _asc_changed_variables(
+    conditions: list[Mapping[str, Any]],
+) -> tuple[str, ...] | None:
+    if not conditions:
+        return None
+    names: list[str] = []
+    for index, condition in enumerate(conditions):
+        if str(condition.get("id") or "").strip() != "variable":
+            return None
+        try:
+            logic = int(condition.get("logic", 0) or 0)
+            kind = int(condition.get("condition", -1))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if kind != 5:  # MacroConditionVariable::VALUE_CHANGED
+            return None
+        expected_logic = 0 if index == 0 else 102  # ROOT_NONE, then OR
+        if logic != expected_logic:
+            return None
+        name = str(condition.get("variableName") or "").strip()
+        if not name:
+            return None
+        names.append(name)
+    return tuple(names)
+
+
+def _asc_wait_ms(action: Mapping[str, Any]) -> int | None:
+    if str(action.get("id") or "").strip() != "wait":
+        return None
+    try:
+        wait_type = int(action.get("waitType", -1))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if wait_type != 0:
+        return None
+    raw = action.get("duration")
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        unit = int(raw.get("unit", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if unit != 0:
+        return None
+    value = raw.get("value")
+    if isinstance(value, Mapping):
+        value = value.get("value")
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(seconds) or not 0.0 <= seconds <= 10.0:
+        return None
+    return int(round(seconds * 1000.0))
+
+
+def _append_exact_sequence(
+    profile: dict[str, Any],
+    actions: list[dict[str, Any]],
+) -> bool:
+    existing = profile.setdefault("actions", [])
+    if not isinstance(existing, list):
+        raise ValueError("Le profil SSR cible contient une liste d'actions invalide.")
+    if not actions:
+        return False
+    width = len(actions)
+    for index in range(0, len(existing) - width + 1):
+        if existing[index : index + width] == actions:
+            return False
+    existing.extend(copy.deepcopy(actions))
+    return True
+
+
 def _coalesce_input_settings_actions(
     macro_name: str,
     actions: list[dict[str, Any]],
@@ -606,10 +712,14 @@ class AdvancedSceneSwitcherImporter:
                     )
                 manual = str(action.get("manualSettingValue") or "")
                 if "${" in manual:
-                    return None, (
-                        f"{macro_name}: propriété source '{setting_id}' contient "
-                        "un template de variable ASC non encore convertible"
+                    rebuilt = _TEMPLATE_VARIABLE_RE.sub(
+                        lambda match: "${" + match.group(1) + "}",
+                        manual,
                     )
+                    if rebuilt != manual:
+                        return None, (
+                            f"{macro_name}: template source ASC invalide"
+                        )
                 try:
                     setting_type = int(setting.get("type", -1))
                 except (TypeError, ValueError, OverflowError):
@@ -645,6 +755,22 @@ class AdvancedSceneSwitcherImporter:
                         "settings": dict(settings),
                         "overlay": True,
                     },
+                },
+                "",
+            )
+
+        if action_id == "wait":
+            duration_ms = _asc_wait_ms(action)
+            if duration_ms is None:
+                return None, (
+                    f"{macro_name}: attente ASC non convertible exactement"
+                )
+            return (
+                {
+                    "type": "wait_ms",
+                    "name": f"Import ASC · {macro_name} · attente",
+                    "enabled": True,
+                    "params": {"duration_ms": duration_ms},
                 },
                 "",
             )
@@ -832,6 +958,14 @@ class AdvancedSceneSwitcherImporter:
             if isinstance(item, Mapping) and not bool(item.get("group", False))
         ] if isinstance(macros_raw, list) else []
 
+        control_variables = config.setdefault("control_variables", {})
+        if not isinstance(control_variables, dict):
+            raise ValueError("config.control_variables doit être un objet.")
+        for variable_name, variable_value in _asc_control_variable_defaults(
+            data
+        ).items():
+            control_variables.setdefault(variable_name, variable_value)
+
         process_game_targets: dict[str, str] = {}
         ambiguous_process_targets: set[str] = set()
         for macro in macros:
@@ -935,6 +1069,143 @@ class AdvancedSceneSwitcherImporter:
                 for item in conditions_raw
                 if isinstance(item, Mapping) and _enabled(item)
             ] if isinstance(conditions_raw, list) else []
+            active_actions_raw = macro.get("actions", [])
+            active_actions_for_special = [
+                item
+                for item in active_actions_raw
+                if isinstance(item, Mapping) and _enabled(item)
+            ] if isinstance(active_actions_raw, list) else []
+
+            changed_variables = _asc_changed_variables(conditions)
+            if changed_variables is not None and set(changed_variables) == {
+                "Mood",
+                "Game",
+            }:
+                converted_sequence: list[dict[str, Any]] = []
+                sequence_reasons: list[str] = []
+                for action in active_actions_for_special:
+                    mapped, action_reason = cls._convert_action(
+                        name,
+                        action,
+                        snapshot=snapshot,
+                    )
+                    if mapped is None:
+                        sequence_reasons.append(action_reason)
+                    else:
+                        converted_sequence.append(mapped)
+                if sequence_reasons:
+                    reject(name, "; ".join(sequence_reasons), macro)
+                    continue
+                if not converted_sequence:
+                    reject(name, f"{name}: aucune action convertible", macro)
+                    continue
+                target_profiles = {
+                    str(fallback.get("Game") or "Vanilla").strip() or "Vanilla",
+                    *(
+                        target
+                        for target in process_game_targets.values()
+                        if str(target).strip()
+                    ),
+                }
+                for profile_name in sorted(target_profiles):
+                    profile = game_profiles.get(profile_name)
+                    if profile is None:
+                        game_profiles[profile_name] = {
+                            "actions": [],
+                            "extends": "",
+                            "conditions": {},
+                        }
+                        existing_profile_names.add(profile_name)
+                        profiles_created += 1
+                        profile = game_profiles[profile_name]
+                    if not isinstance(profile, dict):
+                        reject(
+                            name,
+                            f"{name}: Game profile '{profile_name}' invalide",
+                            macro,
+                        )
+                        break
+                    _append_exact_sequence(profile, converted_sequence)
+                else:
+                    converted_macros += 1
+                    actions_converted += len(converted_sequence)
+                    continue
+                continue
+
+            if len(conditions) == 1:
+                condition = conditions[0]
+                if str(condition.get("id") or "").strip() == "streamdeck":
+                    assignments = [
+                        item
+                        for item in active_actions_for_special
+                        if str(item.get("id") or "").strip() == "variable"
+                        and int(item.get("condition", 0) or 0) == 0
+                    ]
+                    if len(assignments) == 1:
+                        variable_name = str(
+                            assignments[0].get("variableName") or ""
+                        ).strip()
+                        value = str(assignments[0].get("strValue") or "")
+                        if (
+                            variable_name
+                            and variable_name.casefold() != "game"
+                            and variable_name in control_variables
+                        ):
+                            pattern = condition.get("pattern")
+                            data_key = (
+                                str(pattern.get("data") or "").strip()
+                                if isinstance(pattern, Mapping)
+                                else ""
+                            )
+                            reject(
+                                name,
+                                (
+                                    f"{name}: remplacer le bouton Advanced Scene "
+                                    "Switcher par l'action Stream Deck SSR "
+                                    f"Variable de contrôle ({variable_name}={value}"
+                                    + (
+                                        f", ancien data={data_key}"
+                                        if data_key
+                                        else ""
+                                    )
+                                    + ")"
+                                ),
+                                macro,
+                            )
+                            continue
+
+            fallback_target = str(
+                fallback.get("Game") or "Vanilla"
+            ).strip() or "Vanilla"
+            explicit_special_targets = {
+                value
+                for action in active_actions_for_special
+                for value in (_asc_game_assignment(action),)
+                if value
+            }
+            if (
+                len(conditions) >= 1
+                and len(explicit_special_targets) == 1
+                and next(iter(explicit_special_targets)).casefold()
+                == fallback_target.casefold()
+                and all(
+                    str(item.get("id") or "").strip() == "process"
+                    for item in conditions
+                )
+                and all(
+                    int(item.get("logic", -999))
+                    == (1 if index == 0 else 103)
+                    for index, item in enumerate(conditions)
+                )
+                and all(
+                    str(item.get("process") or "").strip().casefold()
+                    in process_game_targets
+                    for item in conditions
+                )
+            ):
+                converted_macros += 1
+                continue
+
             if len(conditions) != 1:
                 reject(
                     name,
