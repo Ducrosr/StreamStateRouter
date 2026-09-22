@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..activation import TriggerTargetIdentity
+from ..importers import AdvancedSceneSwitcherImporter, SceneCollectionImporter
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -63,7 +64,12 @@ from ..services.config import (
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
-from .dialogs import ActionDialog, ModuleLayoutDialog, RuleDialog
+from .dialogs import (
+    ActionDialog,
+    CollectionImportDialog,
+    ModuleLayoutDialog,
+    RuleDialog,
+)
 
 
 DOMAIN_LABELS = {
@@ -343,6 +349,7 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         for text, slot in [
             ("Ajouter une action", self._add_action),
+            ("Importer collection OBS…", self._import_collection_to_profile),
             ("Modifier", self._edit_action),
             ("Dupliquer", self._duplicate_action),
             ("Activer/Désactiver", self._toggle_action),
@@ -1341,6 +1348,88 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._refresh_profile_names()
         self._refresh_override_boxes()
+
+    def _import_collection_to_profile(self) -> None:
+        current = self._current_profile()
+        if not current:
+            QMessageBox.warning(
+                self,
+                "Import collection OBS",
+                "Sélectionnez d'abord un profil cible.",
+            )
+            return
+        domain, profile_name, _profile = current
+        dialog = CollectionImportDialog(
+            self,
+            target_domain=domain,
+            target_profile=profile_name,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        options = dialog.options()
+        previous = copy.deepcopy(self.config)
+        try:
+            snapshot = SceneCollectionImporter(self._client).snapshot()
+            report = SceneCollectionImporter.merge_actions_into_profile(
+                self.config,
+                domain=domain,
+                profile_name=profile_name,
+                snapshot=snapshot,
+                include_input_settings=bool(
+                    options["include_input_settings"]
+                ),
+                include_audio_state=bool(options["include_audio_state"]),
+                include_filters=bool(options["include_filters"]),
+                include_visibility=bool(options["include_visibility"]),
+            )
+
+            asc_report = None
+            asc_path = str(options.get("asc_path") or "").strip()
+            if asc_path:
+                asc_data = AdvancedSceneSwitcherImporter.load(asc_path)
+                asc_report = AdvancedSceneSwitcherImporter.apply_to_config(
+                    asc_data,
+                    self.config,
+                )
+
+            errors = validate_config(self.config)
+            if errors:
+                raise ValueError(
+                    "La configuration importée n'est pas valide :\n- "
+                    + "\n- ".join(errors)
+                )
+        except Exception as exc:
+            self.config = previous
+            self._refresh_rules_table()
+            self._refresh_profile_names()
+            self._refresh_override_boxes()
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                str(exc),
+            )
+            return
+
+        self._mark_dirty()
+        self._refresh_rules_table()
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(profile_name)
+        self._refresh_actions_table()
+        self._refresh_override_boxes()
+
+        summary = report.summary()
+        if asc_report is not None:
+            summary += "\n\nAdvanced Scene Switcher\n" + asc_report.summary()
+        summary += (
+            "\n\nLa configuration est modifiée en mémoire. "
+            "Vérifiez-la puis utilisez « Enregistrer et appliquer »."
+        )
+        QMessageBox.information(
+            self,
+            "Import collection OBS terminé",
+            summary,
+        )
 
     def _add_action(self) -> None:
         current = self._current_profile()
