@@ -493,6 +493,271 @@ class ImporterTests(unittest.TestCase):
             ["set_program_scene", "source_filter_settings"],
         )
 
+    def test_advss_manual_source_settings_and_game_assignment_target_profile(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Overwatch",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Overwatch.exe",
+                            "focus": True,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Overwatch",
+                        },
+                        {
+                            "id": "source",
+                            "source": {"type": 0, "name": "Game Capture"},
+                            "action": 2,
+                            "inputMethod": 0,
+                            "sourceSetting": {"id": "capture_mode", "type": 6},
+                            "manualSettingValue": "window",
+                        },
+                        {
+                            "id": "source",
+                            "source": {"type": 0, "name": "Game Capture"},
+                            "action": 2,
+                            "inputMethod": 0,
+                            "sourceSetting": {"id": "rgb10a2_space", "type": 6},
+                            "manualSettingValue": "2100pq",
+                        },
+                    ],
+                    "elseActions": [],
+                }
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 1)
+        self.assertIn("Overwatch", config["profiles"]["game"])
+        actions = config["profiles"]["game"]["Overwatch"]["actions"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["type"], "set_input_settings")
+        self.assertEqual(
+            actions[0]["params"]["settings"],
+            {"capture_mode": "window", "rgb10a2_space": "2100pq"},
+        )
+        self.assertEqual(config["rules"][0]["state"]["Game"], "Overwatch")
+
+    def test_advss_background_process_becomes_process_running_rule(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Dofus",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Dofus.exe",
+                            "focus": False,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Dofus",
+                        },
+                        {
+                            "id": "scene_visibility",
+                            "sceneSelection": {"type": 0, "name": "In Game"},
+                            "sceneItemSelection": {
+                                "type": 0,
+                                "idxType": 0,
+                                "idx": 0,
+                                "item": "Input Overlay",
+                            },
+                            "action": 0,
+                            "updateTransition": False,
+                            "updateDuration": False,
+                        },
+                    ],
+                    "elseActions": [],
+                }
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 1)
+        self.assertEqual(
+            config["rules"][0]["conditions"],
+            {"process_running": "Dofus.exe"},
+        )
+        self.assertEqual(config["rules"][0]["exe"], "")
+        self.assertEqual(config["rules"][0]["state"]["Game"], "Dofus")
+
+    def test_advss_game_variable_condition_attaches_to_named_profile(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Vanilla state",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "variable",
+                            "logic": 0,
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Vanilla",
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "scene_visibility",
+                            "sceneSelection": {"type": 0, "name": "In Game"},
+                            "sceneItemSelection": {
+                                "type": 0,
+                                "idxType": 0,
+                                "idx": 0,
+                                "item": "Chat",
+                            },
+                            "action": 0,
+                            "updateTransition": False,
+                            "updateDuration": False,
+                        }
+                    ],
+                    "elseActions": [],
+                }
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 1)
+        self.assertEqual(report.rules_created, 0)
+        self.assertEqual(
+            config["profiles"]["game"]["Vanilla"]["actions"][0]["type"],
+            "scene_item_enabled",
+        )
+
+    def test_advss_soundvolumeview_run_is_folded_into_process_game_profile(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Dofus state",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Dofus.exe",
+                            "focus": False,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Dofus",
+                        },
+                        {
+                            "id": "scene_visibility",
+                            "sceneSelection": {"type": 0, "name": "In Game"},
+                            "sceneItemSelection": {
+                                "type": 0,
+                                "idxType": 0,
+                                "idx": 0,
+                                "item": "Input Overlay",
+                            },
+                            "action": 0,
+                            "updateTransition": False,
+                            "updateDuration": False,
+                        },
+                    ],
+                    "elseActions": [],
+                },
+                {
+                    "name": "Audio Dofus",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Dofus.exe",
+                            "focus": True,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "run",
+                            "processConfig": {
+                                "path": r"C:\\Tools\\SoundVolumeView.exe",
+                                "args": [
+                                    {"arg": "/SetAppDefault"},
+                                    {"arg": "Game"},
+                                    {"arg": "all"},
+                                    {"arg": "Dofus.exe"},
+                                ],
+                            },
+                            "wait": False,
+                        }
+                    ],
+                    "elseActions": [],
+                },
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+            "host_control": {
+                "soundvolumeview_path": "",
+                "audio_timeout_seconds": 5.0,
+            },
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 2)
+        actions = config["profiles"]["game"]["Dofus"]["actions"]
+        self.assertEqual(
+            [item["type"] for item in actions],
+            ["scene_item_enabled", "app_audio_output"],
+        )
+        self.assertEqual(
+            config["host_control"]["soundvolumeview_path"],
+            r"C:\\Tools\\SoundVolumeView.exe",
+        )
+        self.assertEqual(len(config["rules"]), 1)
+
     def test_advss_process_path_macro_creates_disabled_rule(self):
         asc = {
             "macros": [

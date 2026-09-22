@@ -635,6 +635,32 @@ class ConfigTests(unittest.TestCase):
             errors = validate_config(data)
             self.assertTrue(any(f".geometry.{key}" in error for error in errors), errors)
 
+    def test_process_running_rule_is_valid_without_foreground_selector(self):
+        data = self.sample()
+        data["profiles"]["game"]["Dofus"] = {"actions": []}
+        data["rules"] = [
+            {
+                "name": "Dofus background",
+                "behavior": "match",
+                "priority": 100,
+                "enabled": True,
+                "exe": "",
+                "path": "",
+                "title_regex": "",
+                "state": {
+                    "Game": "Dofus",
+                    "OverlayProfile": "Vanilla",
+                    "CaptureProfile": "Default",
+                    "AudioProfile": "Default",
+                    "LayoutProfile": "Vanilla",
+                },
+                "conditions": {"process_running": "Dofus.exe"},
+                "apply_delay_ms": 0,
+            }
+        ]
+
+        self.assertEqual(validate_config(data), [])
+
     def test_invalid_rule_regex_is_rejected(self):
         data = self.sample()
         data["rules"][1]["title_regex"] = "([unterminated"

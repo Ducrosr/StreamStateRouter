@@ -127,6 +127,84 @@ def _action_identity(action: Mapping[str, Any]) -> tuple[str, ...]:
     return (kind,)
 
 
+def _asc_game_assignment(action: Mapping[str, Any]) -> str:
+    if str(action.get("id") or "").strip() != "variable":
+        return ""
+    try:
+        action_kind = int(action.get("condition", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if action_kind != 0:
+        return ""
+    if str(action.get("variableName") or "").strip().casefold() != "game":
+        return ""
+    return str(action.get("strValue") or "").strip()
+
+
+def _asc_game_condition(condition: Mapping[str, Any]) -> str:
+    if str(condition.get("id") or "").strip() != "variable":
+        return ""
+    try:
+        logic = int(condition.get("logic", 0) or 0)
+        kind = int(condition.get("condition", -1))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if logic != 0 or kind != 0:
+        return ""
+    if str(condition.get("variableName") or "").strip().casefold() != "game":
+        return ""
+    regex = condition.get("regexConfig")
+    if isinstance(regex, Mapping) and bool(regex.get("enable", False)):
+        return ""
+    return str(condition.get("strValue") or "").strip()
+
+
+def _coalesce_input_settings_actions(
+    macro_name: str,
+    actions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]] | None, str]:
+    merged: list[dict[str, Any]] = []
+    positions: dict[str, int] = {}
+    for action in actions:
+        if str(action.get("type") or "") != "set_input_settings":
+            merged.append(action)
+            continue
+        params = action.get("params")
+        if not isinstance(params, Mapping):
+            return None, f"{macro_name}: set_input_settings importé invalide"
+        input_name = str(params.get("input") or "").strip()
+        settings = params.get("settings")
+        if not input_name or not isinstance(settings, Mapping):
+            return None, f"{macro_name}: settings input importés invalides"
+        key = input_name.casefold()
+        if key not in positions:
+            positions[key] = len(merged)
+            merged.append(copy.deepcopy(action))
+            continue
+        previous = merged[positions[key]]
+        previous_params = previous.get("params")
+        previous_settings = (
+            previous_params.get("settings")
+            if isinstance(previous_params, dict)
+            else None
+        )
+        if not isinstance(previous_settings, dict):
+            return None, f"{macro_name}: fusion settings input impossible"
+        conflicts = [
+            setting
+            for setting, value in settings.items()
+            if setting in previous_settings
+            and previous_settings[setting] != value
+        ]
+        if conflicts:
+            return None, (
+                f"{macro_name}: settings successifs contradictoires pour "
+                f"{input_name}: {', '.join(sorted(map(str, conflicts)))}"
+            )
+        previous_settings.update(copy.deepcopy(dict(settings)))
+    return merged, ""
+
+
 def _extract_advanced_scene_switcher_payload(
     data: Mapping[str, Any],
 ) -> Mapping[str, Any] | None:
@@ -253,11 +331,6 @@ class AdvancedSceneSwitcherImporter:
         condition_id = str(condition.get("id") or "").strip()
 
         if condition_id == "process":
-            if not bool(condition.get("focus", False)):
-                return None, (
-                    f"{macro_name}: condition process sans focus actif non représentable "
-                    "par le routeur foreground SSR"
-                )
             regex = condition.get("regexConfig")
             if isinstance(regex, Mapping) and bool(regex.get("enable", False)):
                 return None, (
@@ -266,6 +339,22 @@ class AdvancedSceneSwitcherImporter:
             process = str(condition.get("process") or "").strip()
             if not process:
                 return None, f"{macro_name}: processus ASC vide"
+
+            focused = bool(condition.get("focus", False))
+            if not focused:
+                if bool(condition.get("checkPath", False)):
+                    return None, (
+                        f"{macro_name}: chemin process sans focus non représenté "
+                        "par process_running"
+                    )
+                return {
+                    "exe": "",
+                    "path": "",
+                    "title_regex": "",
+                    "conditions": {"process_running": process},
+                    "process": process,
+                }, ""
+
             path = ""
             if bool(condition.get("checkPath", False)):
                 path_regex = condition.get("pathRegex")
@@ -283,6 +372,8 @@ class AdvancedSceneSwitcherImporter:
                 "exe": process,
                 "path": path,
                 "title_regex": "",
+                "conditions": {},
+                "process": process,
             }, ""
 
         if condition_id == "window":
@@ -319,6 +410,8 @@ class AdvancedSceneSwitcherImporter:
                 "exe": "",
                 "path": "",
                 "title_regex": title_regex,
+                "conditions": {},
+                "process": "",
             }, ""
 
         return None, (
@@ -486,20 +579,62 @@ class AdvancedSceneSwitcherImporter:
                 return None, (
                     f"{macro_name}: '{source}' n'est pas un input OBS de la collection"
                 )
-            if int(action.get("inputMethod", -1) or 0) != 2:
+
+            input_method = int(action.get("inputMethod", -1) or 0)
+            settings: Mapping[str, Any]
+            if input_method == 2:
+                raw_settings = str(action.get("settings") or "").strip()
+                try:
+                    parsed = json.loads(raw_settings)
+                except json.JSONDecodeError:
+                    return None, f"{macro_name}: JSON settings source ASC invalide"
+                if not isinstance(parsed, Mapping):
+                    return None, (
+                        f"{macro_name}: settings source ASC ne sont pas un objet"
+                    )
+                settings = dict(parsed)
+            elif input_method == 0:
+                setting = action.get("sourceSetting")
+                if not isinstance(setting, Mapping):
+                    return None, (
+                        f"{macro_name}: propriété source ASC manuelle invalide"
+                    )
+                setting_id = str(setting.get("id") or "").strip()
+                if not setting_id:
+                    return None, (
+                        f"{macro_name}: propriété source ASC manuelle sans identifiant"
+                    )
+                manual = str(action.get("manualSettingValue") or "")
+                if "${" in manual:
+                    return None, (
+                        f"{macro_name}: propriété source '{setting_id}' contient "
+                        "un template de variable ASC non encore convertible"
+                    )
+                try:
+                    setting_type = int(setting.get("type", -1))
+                except (TypeError, ValueError, OverflowError):
+                    setting_type = -1
+                if setting_type in {5, 6}:
+                    value: Any = manual
+                elif setting_type == 2:
+                    try:
+                        value = int(manual)
+                    except (TypeError, ValueError, OverflowError):
+                        return None, (
+                            f"{macro_name}: valeur entière invalide pour {setting_id}"
+                        )
+                else:
+                    return None, (
+                        f"{macro_name}: type de propriété source ASC "
+                        f"{setting_type} non convertible en mode manuel"
+                    )
+                settings = {setting_id: value}
+            else:
                 return None, (
-                    f"{macro_name}: settings source ASC non-JSON "
-                    "à migrer manuellement"
+                    f"{macro_name}: méthode settings source ASC "
+                    f"{input_method} non convertible"
                 )
-            raw_settings = str(action.get("settings") or "").strip()
-            try:
-                settings = json.loads(raw_settings)
-            except json.JSONDecodeError:
-                return None, f"{macro_name}: JSON settings source ASC invalide"
-            if not isinstance(settings, Mapping):
-                return None, (
-                    f"{macro_name}: settings source ASC ne sont pas un objet"
-                )
+
             return (
                 {
                     "type": "set_input_settings",
@@ -510,6 +645,51 @@ class AdvancedSceneSwitcherImporter:
                         "settings": dict(settings),
                         "overlay": True,
                     },
+                },
+                "",
+            )
+
+        if action_id == "run":
+            process_config = action.get("processConfig")
+            if not isinstance(process_config, Mapping):
+                return None, f"{macro_name}: configuration run ASC invalide"
+            if bool(action.get("wait", False)):
+                return None, (
+                    f"{macro_name}: run ASC bloquant non convertible"
+                )
+            executable = str(process_config.get("path") or "").strip()
+            executable_name = (
+                executable.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            )
+            args_raw = process_config.get("args")
+            args = [
+                str(item.get("arg") or "")
+                for item in args_raw
+                if isinstance(item, Mapping)
+            ] if isinstance(args_raw, list) else []
+            if (
+                executable_name != "soundvolumeview.exe"
+                or len(args) != 4
+                or args[0].casefold() != "/setappdefault"
+                or args[2].casefold() not in {"0", "1", "2", "all"}
+                or not args[1].strip()
+                or not args[3].strip()
+            ):
+                return None, (
+                    f"{macro_name}: action run générique non convertible "
+                    "(seul SoundVolumeView /SetAppDefault est reconnu)"
+                )
+            return (
+                {
+                    "type": "app_audio_output",
+                    "name": f"Import ASC · {macro_name} · routage audio",
+                    "enabled": True,
+                    "params": {
+                        "device": args[1].strip(),
+                        "roles": args[2].strip().casefold(),
+                        "process": args[3].strip(),
+                    },
+                    "_soundvolumeview_path": executable,
                 },
                 "",
             )
@@ -652,6 +832,45 @@ class AdvancedSceneSwitcherImporter:
             if isinstance(item, Mapping) and not bool(item.get("group", False))
         ] if isinstance(macros_raw, list) else []
 
+        process_game_targets: dict[str, str] = {}
+        ambiguous_process_targets: set[str] = set()
+        for macro in macros:
+            conditions_raw = macro.get("conditions", [])
+            actions_raw = macro.get("actions", [])
+            conditions = [
+                item
+                for item in conditions_raw
+                if isinstance(item, Mapping) and _enabled(item)
+            ] if isinstance(conditions_raw, list) else []
+            actions = [
+                item
+                for item in actions_raw
+                if isinstance(item, Mapping) and _enabled(item)
+            ] if isinstance(actions_raw, list) else []
+            if len(conditions) != 1:
+                continue
+            condition = conditions[0]
+            if str(condition.get("id") or "").strip() != "process":
+                continue
+            process = str(condition.get("process") or "").strip()
+            targets = {
+                value
+                for item in actions
+                for value in (_asc_game_assignment(item),)
+                if value
+            }
+            if not process or len(targets) != 1:
+                continue
+            key = process.casefold()
+            target = next(iter(targets))
+            previous = process_game_targets.get(key)
+            if previous is not None and previous.casefold() != target.casefold():
+                ambiguous_process_targets.add(key)
+                process_game_targets.pop(key, None)
+                continue
+            if key not in ambiguous_process_targets:
+                process_game_targets[key] = target
+
         rules = config.setdefault("rules", [])
         if not isinstance(rules, list):
             raise ValueError("config.rules doit être une liste.")
@@ -724,10 +943,16 @@ class AdvancedSceneSwitcherImporter:
                     macro,
                 )
                 continue
-            selector, reason = cls._trigger_selector(name, conditions[0])
-            if selector is None:
-                reject(name, reason, macro)
-                continue
+
+            direct_profile_target = _asc_game_condition(conditions[0])
+            selector: dict[str, Any] | None
+            if direct_profile_target:
+                selector = None
+            else:
+                selector, reason = cls._trigger_selector(name, conditions[0])
+                if selector is None:
+                    reject(name, reason, macro)
+                    continue
 
             actions_raw = macro.get("actions", [])
             active_actions = [
@@ -735,9 +960,28 @@ class AdvancedSceneSwitcherImporter:
                 for item in actions_raw
                 if isinstance(item, Mapping) and _enabled(item)
             ] if isinstance(actions_raw, list) else []
+            game_targets = {
+                value
+                for action in active_actions
+                for value in (_asc_game_assignment(action),)
+                if value
+            }
+            if len(game_targets) > 1:
+                reject(
+                    name,
+                    f"{name}: plusieurs affectations Game contradictoires",
+                    macro,
+                )
+                continue
+            explicit_game_target = (
+                next(iter(game_targets)) if game_targets else ""
+            )
             converted: list[dict[str, Any]] = []
             reasons: list[str] = []
+            soundvolumeview_paths: set[str] = set()
             for action in active_actions:
+                if _asc_game_assignment(action):
+                    continue
                 mapped, action_reason = cls._convert_action(
                     name,
                     action,
@@ -746,11 +990,71 @@ class AdvancedSceneSwitcherImporter:
                 if mapped is None:
                     reasons.append(action_reason)
                 else:
+                    path = str(
+                        mapped.pop("_soundvolumeview_path", "") or ""
+                    ).strip()
+                    if path:
+                        soundvolumeview_paths.add(path)
                     converted.append(mapped)
             if reasons:
                 reject(name, "; ".join(reasons), macro)
                 continue
-            if not converted:
+            converted, coalesce_reason = _coalesce_input_settings_actions(
+                name,
+                converted,
+            )
+            if converted is None:
+                reject(name, coalesce_reason, macro)
+                continue
+
+            if len(soundvolumeview_paths) > 1:
+                reject(
+                    name,
+                    f"{name}: plusieurs chemins SoundVolumeView contradictoires",
+                    macro,
+                )
+                continue
+            if soundvolumeview_paths:
+                imported_path = next(iter(soundvolumeview_paths))
+                host = config.setdefault("host_control", {})
+                if not isinstance(host, dict):
+                    reject(
+                        name,
+                        f"{name}: host_control SSR invalide",
+                        macro,
+                    )
+                    continue
+                current_path = str(host.get("soundvolumeview_path") or "").strip()
+                if (
+                    current_path
+                    and current_path.casefold() != imported_path.casefold()
+                ):
+                    reject(
+                        name,
+                        f"{name}: chemin SoundVolumeView en conflit avec SSR",
+                        macro,
+                    )
+                    continue
+                host["soundvolumeview_path"] = imported_path
+
+            process_name = (
+                str(selector.get("process") or "").strip()
+                if selector is not None
+                else ""
+            )
+            inferred_game_target = (
+                process_game_targets.get(process_name.casefold(), "")
+                if process_name
+                else ""
+            )
+            profile_target = (
+                direct_profile_target
+                or explicit_game_target
+                or inferred_game_target
+            )
+            if not converted and not (
+                explicit_game_target and selector is not None
+            ):
                 reject(name, f"{name}: aucune action convertible", macro)
                 continue
 
@@ -775,9 +1079,58 @@ class AdvancedSceneSwitcherImporter:
                 )
                 continue
 
+            if profile_target:
+                profile_name = profile_target
+                profile = game_profiles.get(profile_name)
+                if profile is None:
+                    game_profiles[profile_name] = {
+                        "actions": [],
+                        "extends": "",
+                        "conditions": {},
+                    }
+                    existing_profile_names.add(profile_name)
+                    profiles_created += 1
+                    profile = game_profiles[profile_name]
+                if not isinstance(profile, dict):
+                    reject(
+                        name,
+                        f"{name}: Game profile '{profile_name}' invalide",
+                        macro,
+                    )
+                    continue
+            else:
+                profile_name = ""
+
+            if selector is None:
+                assert profile_name
+                _changed, conflicts = cls._merge_actions(
+                    profile,
+                    converted,
+                    reject_conflicts=True,
+                )
+                if conflicts:
+                    reject(
+                        name,
+                        (
+                            f"{name}: conflit avec des actions SSR existantes "
+                            f"sur {', '.join(conflicts)}"
+                        ),
+                        macro,
+                    )
+                    continue
+                converted_macros += 1
+                actions_converted += len(converted)
+                continue
+
             exe = str(selector.get("exe") or "")
             path = str(selector.get("path") or "")
             title_regex = str(selector.get("title_regex") or "")
+            selector_conditions = selector.get("conditions")
+            conditions_mapping = (
+                dict(selector_conditions)
+                if isinstance(selector_conditions, Mapping)
+                else {}
+            )
             matching_rules = [
                 rule
                 for rule in rules
@@ -786,6 +1139,7 @@ class AdvancedSceneSwitcherImporter:
                 and str(rule.get("exe") or "").casefold() == exe.casefold()
                 and str(rule.get("path") or "").casefold() == path.casefold()
                 and str(rule.get("title_regex") or "") == title_regex
+                and dict(rule.get("conditions") or {}) == conditions_mapping
             ]
             if len(matching_rules) > 1:
                 reject(
@@ -795,18 +1149,53 @@ class AdvancedSceneSwitcherImporter:
                 )
                 continue
 
-            if len(matching_rules) == 1:
+            inferred_only = bool(
+                inferred_game_target
+                and not explicit_game_target
+                and not direct_profile_target
+            )
+            if inferred_only and profile_name:
+                _changed, conflicts = cls._merge_actions(
+                    profile,
+                    converted,
+                    reject_conflicts=True,
+                )
+                if conflicts:
+                    reject(
+                        name,
+                        (
+                            f"{name}: conflit avec des actions SSR existantes "
+                            f"sur {', '.join(conflicts)}"
+                        ),
+                        macro,
+                    )
+                    continue
+                attached += 1
+            elif len(matching_rules) == 1:
                 rule = matching_rules[0]
                 state = rule.get("state")
                 if not isinstance(state, Mapping):
                     reject(
                         name,
-                        f"{name}: règle SSR existante {exe} sans état exploitable",
+                        f"{name}: règle SSR existante {exe or conditions_mapping} "
+                        "sans état exploitable",
                         macro,
                     )
                     continue
-                profile_name = str(state.get("Game") or "").strip()
-                profile = game_profiles.get(profile_name)
+                existing_target = str(state.get("Game") or "").strip()
+                if profile_name and existing_target.casefold() != profile_name.casefold():
+                    reject(
+                        name,
+                        (
+                            f"{name}: la règle SSR existante cible Game="
+                            f"{existing_target}, attendu {profile_name}"
+                        ),
+                        macro,
+                    )
+                    continue
+                if not profile_name:
+                    profile_name = existing_target
+                    profile = game_profiles.get(profile_name)
                 if not profile_name or not isinstance(profile, dict):
                     reject(
                         name,
@@ -831,16 +1220,34 @@ class AdvancedSceneSwitcherImporter:
                     continue
                 attached += 1
             else:
-                profile_name = cls._unique_name(
-                    existing_profile_names,
-                    f"ASC · {name}",
-                )
-                game_profiles[profile_name] = {
-                    "actions": converted,
-                    "extends": "",
-                    "conditions": {},
-                }
-                profiles_created += 1
+                if not profile_name:
+                    profile_name = cls._unique_name(
+                        existing_profile_names,
+                        f"ASC · {name}",
+                    )
+                    game_profiles[profile_name] = {
+                        "actions": converted,
+                        "extends": "",
+                        "conditions": {},
+                    }
+                    profile = game_profiles[profile_name]
+                    profiles_created += 1
+                else:
+                    _changed, conflicts = cls._merge_actions(
+                        profile,
+                        converted,
+                        reject_conflicts=True,
+                    )
+                    if conflicts:
+                        reject(
+                            name,
+                            (
+                                f"{name}: conflit avec des actions SSR existantes "
+                                f"sur {', '.join(conflicts)}"
+                            ),
+                            macro,
+                        )
+                        continue
 
                 state = dict(fallback)
                 state["Game"] = profile_name
@@ -859,7 +1266,7 @@ class AdvancedSceneSwitcherImporter:
                         "title_regex": title_regex,
                         "state": state,
                         "apply_delay_ms": 0,
-                        "conditions": {},
+                        "conditions": conditions_mapping,
                     }
                 )
                 rules_created += 1
