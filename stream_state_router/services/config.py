@@ -31,6 +31,7 @@ SUPPORTED_ACTION_TYPES = {
     "set_input_settings",
     "app_audio_output",
     "windows_hdr",
+    "wait_ms",
 }
 LAYOUT_ANCHORS = {
     "top_left",
@@ -803,6 +804,32 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 else:
                     activation_owners[identity] = str(policy_name)
 
+    control_variables = data.get("control_variables", {})
+    if not isinstance(control_variables, Mapping):
+        errors.append("control_variables doit être un objet")
+    else:
+        reserved = {
+            "Game",
+            "OverlayProfile",
+            "CaptureProfile",
+            "AudioProfile",
+            "LayoutProfile",
+        }
+        for name, value in control_variables.items():
+            text_name = str(name or "").strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text_name):
+                errors.append(
+                    f"control_variables contient un nom invalide : {name}"
+                )
+            elif text_name in reserved:
+                errors.append(
+                    f"control_variables.{text_name} est réservé par SSR"
+                )
+            if not isinstance(value, str):
+                errors.append(
+                    f"control_variables.{text_name or name} doit être une chaîne"
+                )
+
     profiles = data.get("profiles")
     if not isinstance(profiles, Mapping):
         errors.append("profiles doit être un objet")
@@ -915,6 +942,17 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     if display not in {"primary", "all"}:
                         errors.append(
                             f"{aprefix}.params.display doit être primary ou all"
+                        )
+                elif action_type == "wait_ms":
+                    raw_duration = params.get("duration_ms")
+                    if (
+                        isinstance(raw_duration, bool)
+                        or not isinstance(raw_duration, (int, float))
+                        or not math.isfinite(float(raw_duration))
+                        or not 0.0 <= float(raw_duration) <= 10000.0
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.duration_ms doit être compris entre 0 et 10000"
                         )
 
     host_control = data.get("host_control", {})

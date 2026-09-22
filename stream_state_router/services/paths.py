@@ -27,6 +27,10 @@ def config_path() -> Path:
     return user_data_dir() / "config.json"
 
 
+def control_state_path() -> Path:
+    return user_data_dir() / "control-state.json"
+
+
 def logs_dir() -> Path:
     path = user_data_dir() / "logs"
     path.mkdir(parents=True, exist_ok=True)

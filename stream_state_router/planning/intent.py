@@ -64,6 +64,11 @@ def desired_assignments_from_actions(
         kind = action.type.strip().casefold()
         params = dict(action.params)
 
+        if kind == "wait_ms":
+            # Temporal sequencing has no stable property representation.
+            # Dispatcher.plan_state marks profiles containing it classic-only.
+            continue
+
         if kind == "set_program_scene":
             scene = str(params.get("scene") or "").strip()
             if not scene:

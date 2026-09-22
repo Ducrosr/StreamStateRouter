@@ -964,6 +964,7 @@ class ActionDialog(QDialog):
         ("Réglages avancés d'une entrée", "set_input_settings"),
         ("Router l'audio Windows d'une application", "app_audio_output"),
         ("Activer/désactiver HDR Windows", "windows_hdr"),
+        ("Attendre (millisecondes)", "wait_ms"),
     ]
 
     def __init__(self, parent=None, action: dict | None = None):
@@ -1100,6 +1101,13 @@ class ActionDialog(QDialog):
                 ],
                 "primary",
             )
+        elif kind == "wait_ms":
+            widget = QSpinBox()
+            widget.setRange(0, 10000)
+            widget.setSuffix(" ms")
+            widget.setValue(int(params.get("duration_ms", 0) or 0))
+            fields["duration_ms"] = widget
+            form.addRow("Durée", widget)
         return page, fields
 
     def _sync_page(self) -> None:
@@ -1124,6 +1132,8 @@ class ActionDialog(QDialog):
                 params[key] = widget.isChecked()
             elif isinstance(widget, QComboBox):
                 params[key] = str(widget.currentData() or "")
+            elif isinstance(widget, QSpinBox):
+                params[key] = widget.value()
             elif isinstance(widget, QPlainTextEdit):
                 text = widget.toPlainText().strip() or "{}"
                 value = json.loads(text)
@@ -1146,6 +1156,7 @@ class ActionDialog(QDialog):
             "set_input_settings": ("input", "settings"),
             "app_audio_output": ("device", "process", "roles"),
             "windows_hdr": ("display",),
+            "wait_ms": ("duration_ms",),
         }[kind]
         for key in required:
             if params.get(key) in (None, "", {}):

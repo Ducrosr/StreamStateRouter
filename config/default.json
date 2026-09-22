@@ -24,6 +24,7 @@
     "soundvolumeview_path": "",
     "audio_timeout_seconds": 5.0
   },
+  "control_variables": {},
   "ui": {
     "close_to_tray": true,
     "start_with_windows": false,
