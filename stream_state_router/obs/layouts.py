@@ -726,7 +726,6 @@ class OBSLayoutManager:
             depth=0,
             prefetched=None,
             container_kind="scene",
-            include_unprefixed=include_unprefixed,
         )
         return tuple(out)
 
@@ -741,7 +740,6 @@ class OBSLayoutManager:
         depth: int,
         prefetched: list[Mapping[str, Any]] | None,
         container_kind: str,
-        include_unprefixed: bool = False,
     ) -> None:
         if depth > 8:
             return
@@ -803,7 +801,6 @@ class OBSLayoutManager:
                         depth=depth + 1,
                         prefetched=children,
                         container_kind="group",
-                        include_unprefixed=include_unprefixed,
                     )
                 except Exception as exc:
                     self._last_discovery_warnings.append(
@@ -821,7 +818,6 @@ class OBSLayoutManager:
                         depth=depth + 1,
                         prefetched=None,
                         container_kind="scene",
-                        include_unprefixed=include_unprefixed,
                     )
                 except Exception as exc:
                     self._last_discovery_warnings.append(
@@ -853,6 +849,7 @@ class OBSLayoutManager:
             depth=0,
             prefetched=None,
             container_kind="scene",
+            include_unprefixed=include_unprefixed,
         )
 
         # Naming convention: ``[Type] Module name``. The text between
@@ -888,6 +885,7 @@ class OBSLayoutManager:
         depth: int,
         prefetched: list[Mapping[str, Any]] | None,
         container_kind: str,
+        include_unprefixed: bool = False,
     ) -> None:
         if depth > 8:
             return
