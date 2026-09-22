@@ -24,6 +24,7 @@ class ForegroundApp:
     exe_name: str
     process_path: str = ""
     window_title: str = ""
+    window_class: str = ""
 
     @property
     def normalized_exe(self) -> str:

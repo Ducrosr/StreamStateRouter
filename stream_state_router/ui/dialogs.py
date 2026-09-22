@@ -1234,6 +1234,11 @@ class ActionDialog(QDialog):
             line("input", "Entrée OBS")
             json_settings("Settings JSON")
             check("overlay", "Fusionner avec les réglages existants", True)
+            line(
+                "follow_foreground_process",
+                "Suivre fenêtre au premier plan",
+                "facultatif, ex. Dofus.exe",
+            )
         elif kind == "app_audio_output":
             line(
                 "device",

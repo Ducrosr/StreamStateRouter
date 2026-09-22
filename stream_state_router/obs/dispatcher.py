@@ -16,7 +16,7 @@ from ..planning import (
     desired_state_from_action_sets,
 )
 from ..router.engine import StateChange
-from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
+from ..router.models import DEFAULT_PROFILE_NAMES, ForegroundApp, StreamState
 from .client import OBSClientManager
 from .layouts import OBSLayoutManager, resolve_layout_profile
 from .models import OBSAction, OBSProfile
@@ -79,6 +79,7 @@ class OBSDispatcher:
         self._context_cache: tuple[float, dict[str, Any]] | None = None
         self._cooperative_yield = None
         self._control_variables: dict[str, str] = {}
+        self._foreground_windows: dict[str, str] = {}
 
     def set_control_variables(
         self,
@@ -91,6 +92,29 @@ class OBSDispatcher:
 
     def control_variables(self) -> dict[str, str]:
         return dict(self._control_variables)
+
+    @staticmethod
+    def _foreground_window_selector(app: ForegroundApp | None) -> str:
+        if app is None:
+            return ""
+        title = str(app.window_title or "").strip()
+        window_class = str(app.window_class or "").strip()
+        exe = str(app.exe_name or "").strip()
+        if not title or not window_class or not exe:
+            return ""
+        return f"{title}:{window_class}:{exe}"
+
+    def update_foreground(self, app: ForegroundApp | None) -> bool:
+        """Remember the latest OBS-compatible window selector per process."""
+        if app is None or not str(app.exe_name or "").strip():
+            return False
+        selector = self._foreground_window_selector(app)
+        if not selector:
+            return False
+        key = str(app.exe_name).strip().casefold()
+        changed = self._foreground_windows.get(key) != selector
+        self._foreground_windows[key] = selector
+        return changed
 
     def _execution_variables(
         self,
@@ -921,6 +945,82 @@ class OBSDispatcher:
             tuple(statuses),
         )
 
+    def refresh_foreground_actions(
+        self,
+        state: StreamState,
+        app: ForegroundApp | None,
+    ) -> DispatchResult:
+        """Refresh only active actions explicitly following this foreground process."""
+        if app is None:
+            return DispatchResult(0, 0, ())
+        exe_key = str(app.exe_name or "").strip().casefold()
+        if not exe_key:
+            return DispatchResult(0, 0, ())
+        self.update_foreground(app)
+
+        executed = 0
+        skipped = 0
+        warnings: list[str] = []
+        changed_domains: list[str] = []
+        statuses: list[DomainDispatchStatus] = []
+        variables = self._execution_variables(state)
+
+        for domain in ACTION_PROFILE_DOMAINS:
+            profile_name = state.profile_name(domain)
+            try:
+                profile = self._resolve_action_profile(domain, profile_name)
+            except Exception as exc:
+                warnings.append(str(exc))
+                continue
+            if profile is None or not self.conditions_match(profile.conditions):
+                continue
+
+            domain_executed = 0
+            domain_failed = ""
+            for action in profile.actions:
+                if not action.enabled:
+                    continue
+                if action.type.strip().casefold() != "set_input_settings":
+                    continue
+                follow = str(
+                    action.params.get("follow_foreground_process") or ""
+                ).strip()
+                if not follow or follow.casefold() != exe_key:
+                    continue
+                try:
+                    self.execute_action(action, variables=variables)
+                except Exception as exc:
+                    domain_failed = str(exc)
+                    warnings.append(
+                        f"{domain}/{profile_name}: {exc}"
+                    )
+                    break
+                executed += 1
+                domain_executed += 1
+
+            if domain_executed:
+                changed_domains.append(domain)
+                statuses.append(
+                    DomainDispatchStatus(
+                        domain=domain,
+                        desired_profile=profile_name,
+                        applied_profile=self._applied_profiles.get(
+                            domain,
+                            profile_name,
+                        ),
+                        status="applied" if not domain_failed else "failed",
+                        message=domain_failed,
+                    )
+                )
+
+        return DispatchResult(
+            executed,
+            skipped,
+            tuple(changed_domains),
+            tuple(warnings),
+            tuple(statuses),
+        )
+
     def has_action_profile(self, domain: str, profile_name: str) -> bool:
         return (
             domain in ACTION_PROFILE_DOMAINS
@@ -1131,11 +1231,21 @@ class OBSDispatcher:
             settings = p.get("settings")
             if not isinstance(settings, Mapping):
                 raise ValueError("set_input_settings requiert params.settings")
+            settings = dict(settings)
+            follow = str(
+                p.get("follow_foreground_process") or ""
+            ).strip()
+            if follow:
+                selector = self._foreground_windows.get(
+                    follow.casefold()
+                )
+                if selector:
+                    settings["window"] = selector
             self.client.send(
                 "SetInputSettings",
                 {
                     "inputName": self._need(p, "input"),
-                    "inputSettings": dict(settings),
+                    "inputSettings": settings,
                     "overlay": bool(p.get("overlay", True)),
                 },
             )

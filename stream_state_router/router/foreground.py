@@ -19,6 +19,8 @@ def _configure_user32(user32) -> None:
     user32.GetWindowTextLengthW.restype = ctypes.c_int
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowTextW.restype = ctypes.c_int
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.restype = ctypes.c_int
 
 
 def _configure_kernel32(kernel32) -> None:
@@ -65,6 +67,7 @@ class WindowsForegroundProvider:
             return None
 
         title = self._window_title(hwnd)
+        window_class = self._window_class(hwnd)
         path = self._process_path(pid.value)
         exe = os.path.basename(path) if path else ""
         return ForegroundApp(
@@ -73,6 +76,7 @@ class WindowsForegroundProvider:
             exe_name=exe,
             process_path=path,
             window_title=title,
+            window_class=window_class,
         )
 
     def _window_title(self, hwnd: int) -> str:
@@ -80,6 +84,18 @@ class WindowsForegroundProvider:
         buffer = ctypes.create_unicode_buffer(max(1, length + 1))
         self._user32.GetWindowTextW(wintypes.HWND(hwnd), buffer, len(buffer))
         return buffer.value
+
+    def _window_class(self, hwnd: int) -> str:
+        buffer = ctypes.create_unicode_buffer(256)
+        copied = int(
+            self._user32.GetClassNameW(
+                wintypes.HWND(hwnd),
+                buffer,
+                len(buffer),
+            )
+            or 0
+        )
+        return buffer.value if copied else ""
 
     def _process_path(self, pid: int) -> str:
         process = self._kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)

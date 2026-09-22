@@ -35,6 +35,7 @@ class WindowsAdapterSignatureTests(unittest.TestCase):
             "GetWindowThreadProcessId",
             "GetWindowTextLengthW",
             "GetWindowTextW",
+            "GetClassNameW",
         )
 
         _configure_user32(dll)
@@ -43,6 +44,8 @@ class WindowsAdapterSignatureTests(unittest.TestCase):
         self.assertIs(dll.GetForegroundWindow.restype, wintypes.HWND)
         self.assertEqual(dll.GetWindowThreadProcessId.argtypes[0], wintypes.HWND)
         self.assertEqual(dll.GetWindowTextW.argtypes[-1], ctypes.c_int)
+        self.assertEqual(dll.GetClassNameW.argtypes[0], wintypes.HWND)
+        self.assertEqual(dll.GetClassNameW.argtypes[-1], ctypes.c_int)
 
     def test_foreground_provider_ignores_its_own_process_before_reading_title(self):
         class FakeUser32:

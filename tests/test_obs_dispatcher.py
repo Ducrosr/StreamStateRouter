@@ -1013,6 +1013,85 @@ class OBSDispatcherTests(unittest.TestCase):
             r"C:\\Avatars\\Happy_Overwatch.png",
         )
 
+    def test_foreground_follow_refreshes_only_matching_process_window(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Dofus Unity": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Capture de jeu",
+                                    "settings": {
+                                        "capture_mode": "window",
+                                        "window": "fallback:UnityWndClass:Dofus.exe",
+                                    },
+                                    "overlay": True,
+                                    "follow_foreground_process": "Dofus.exe",
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        state = StreamState(game="Dofus Unity")
+        first = ForegroundApp(
+            101,
+            1001,
+            "Dofus.exe",
+            r"C:\Games\Dofus.exe",
+            "Dofus - Perso A",
+            "UnityWndClass",
+        )
+        second = ForegroundApp(
+            102,
+            1002,
+            "Dofus.exe",
+            r"C:\Games\Dofus.exe",
+            "Dofus - Perso B",
+            "UnityWndClass",
+        )
+        browser = ForegroundApp(
+            201,
+            2001,
+            "chrome.exe",
+            r"C:\Chrome\chrome.exe",
+            "ChatGPT",
+            "Chrome_WidgetWin_1",
+        )
+
+        dispatcher.update_foreground(first)
+        dispatcher.dispatch_state(state)
+        first_write = next(
+            payload
+            for request, payload in client.calls
+            if request == "SetInputSettings"
+        )
+        self.assertEqual(
+            first_write["inputSettings"]["window"],
+            "Dofus - Perso A:UnityWndClass:Dofus.exe",
+        )
+
+        client.calls.clear()
+        dispatcher.update_foreground(second)
+        refreshed = dispatcher.refresh_foreground_actions(state, second)
+        self.assertEqual(refreshed.executed, 1)
+        self.assertEqual(refreshed.changed_domains, ("game",))
+        self.assertEqual(
+            client.calls[0][1]["inputSettings"]["window"],
+            "Dofus - Perso B:UnityWndClass:Dofus.exe",
+        )
+
+        client.calls.clear()
+        dispatcher.update_foreground(browser)
+        ignored = dispatcher.refresh_foreground_actions(state, browser)
+        self.assertEqual(ignored.executed, 0)
+        self.assertEqual(client.calls, [])
+
     def test_wait_ms_is_classic_only_in_declarative_plan(self):
         profiles = profile_map_from_raw(
             {

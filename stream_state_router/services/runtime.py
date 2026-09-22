@@ -1140,12 +1140,17 @@ class RoutingService:
                             else 0
                         )
                     routing_app = bootstrap_app if bootstrap_routing else app
+                    foreground_selector_changed = False
                     if changed_app:
                         self.logger.info(
                             "Foreground -> %s | %s",
                             app.exe_name if app else "<none>",
                             app.window_title if app else "",
                         )
+                        if hasattr(self.dispatcher, "update_foreground"):
+                            foreground_selector_changed = bool(
+                                self.dispatcher.update_foreground(app)
+                            )
                         if self.on_foreground:
                             self.on_foreground(app)
                     if bootstrap_routing:
@@ -1177,17 +1182,62 @@ class RoutingService:
                             resolved_rule = self.engine.current_rule
                         if change:
                             self._apply_change(change)
-                        elif resolved_rule != previous_rule:
-                            self._emit(
-                                RuntimeEvent(
-                                    "routing_rule",
-                                    f"{resolved_rule}: état logique inchangé",
-                                    payload={
-                                        "rule_name": resolved_rule,
-                                        "reason": "état inchangé",
-                                    },
+                        else:
+                            if (
+                                changed_app
+                                and foreground_selector_changed
+                                and self.engine.current_state is not None
+                                and hasattr(
+                                    self.dispatcher,
+                                    "refresh_foreground_actions",
                                 )
-                            )
+                            ):
+                                refreshed = (
+                                    self.dispatcher.refresh_foreground_actions(
+                                        self.engine.current_state,
+                                        routing_app,
+                                    )
+                                )
+                                if refreshed.executed:
+                                    if self.on_dispatch:
+                                        self.on_dispatch(refreshed)
+                                    self._emit(
+                                        RuntimeEvent(
+                                            "foreground_refresh",
+                                            (
+                                                f"{refreshed.executed} action(s) "
+                                                "OBS dynamique(s) actualisée(s)"
+                                            ),
+                                            payload={
+                                                "exe": (
+                                                    routing_app.exe_name
+                                                    if routing_app
+                                                    else ""
+                                                ),
+                                                "executed": refreshed.executed,
+                                                "domains": list(
+                                                    refreshed.changed_domains
+                                                ),
+                                                "warnings": list(
+                                                    refreshed.warnings
+                                                ),
+                                            },
+                                            success=not bool(
+                                                refreshed.warnings
+                                            ),
+                                        )
+                                    )
+                            if resolved_rule != previous_rule:
+                                self._emit(
+                                    RuntimeEvent(
+                                        "routing_rule",
+                                        f"{resolved_rule}: état logique inchangé",
+                                        payload={
+                                            "rule_name": resolved_rule,
+                                            "reason": "état inchangé",
+                                        },
+                                    )
+                                )
                         if resume_revalidation:
                             with self._lock:
                                 if (
