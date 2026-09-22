@@ -190,6 +190,49 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(exported["api"]["token"], "")
         self.assertEqual(validate_config(exported), [])
 
+    def test_shareable_export_redacts_imported_obs_settings_and_host_path(self):
+        data = self.sample()
+        data["host_control"] = {
+            "soundvolumeview_path": r"C:\\Tools\\SoundVolumeView.exe",
+            "audio_timeout_seconds": 5.0,
+        }
+        data["profiles"]["capture"]["Default"]["actions"] = [
+            {
+                "type": "set_input_settings",
+                "enabled": True,
+                "params": {
+                    "input": "Browser",
+                    "settings": {
+                        "url": "https://example.test/?token=secret",
+                        "cookie": "secret",
+                    },
+                    "overlay": True,
+                },
+            },
+            {
+                "type": "source_filter_settings",
+                "enabled": True,
+                "params": {
+                    "source": "Game",
+                    "filter": "Shader",
+                    "settings": {"api_token": "secret"},
+                    "overlay": True,
+                },
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exported["host_control"]["soundvolumeview_path"], "")
+        actions = exported["profiles"]["capture"]["Default"]["actions"]
+        self.assertEqual(actions[0]["params"]["settings"], {})
+        self.assertEqual(actions[1]["params"]["settings"], {})
+        self.assertFalse(actions[0]["enabled"])
+        self.assertFalse(actions[1]["enabled"])
+
     def test_backup_names_do_not_collide_and_retention_is_bounded(self):
         data = self.sample()
         with tempfile.TemporaryDirectory() as tmp:
