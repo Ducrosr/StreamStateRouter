@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Iterable, Mapping
 
 from ..obs.models import OBSAction
@@ -136,13 +137,27 @@ def desired_assignments_from_actions(
             input_name = str(params.get("input") or "").strip()
             if not input_name:
                 raise ValueError("input_volume_db requires params.input")
+            if "volume_db" not in params:
+                raise ValueError("input_volume_db requires params.volume_db")
+            raw_volume = params.get("volume_db")
+            if (
+                isinstance(raw_volume, bool)
+                or not isinstance(raw_volume, (int, float))
+                or not math.isfinite(float(raw_volume))
+            ):
+                raise ValueError("input_volume_db requires a finite params.volume_db")
+            volume_db = float(raw_volume)
+            if not -100.0 <= volume_db <= 26.0:
+                raise ValueError(
+                    "input_volume_db params.volume_db must be between -100 and 26"
+                )
             assign(
                 DesiredAssignment.create(
                     PropertyKey.input_volume_db(
                         collection=collection,
                         input_name=input_name,
                     ),
-                    float(params.get("volume_db", 0.0)),
+                    volume_db,
                     provenance=provenance,
                 )
             )

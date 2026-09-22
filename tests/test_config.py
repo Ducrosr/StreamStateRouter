@@ -227,7 +227,14 @@ class ConfigTests(unittest.TestCase):
             ]
             self.assertEqual(validate_config(data), [], value)
 
-        for value in (-100.0001, 26.0001, float("nan"), float("inf"), True):
+        for value in (
+            -100.0001,
+            26.0001,
+            float("nan"),
+            float("inf"),
+            True,
+            "-6.0",
+        ):
             data = self.sample()
             data["profiles"]["audio"]["Default"]["actions"] = [
                 {
@@ -240,6 +247,22 @@ class ConfigTests(unittest.TestCase):
                 any(".params.volume_db" in error for error in errors),
                 (value, errors),
             )
+
+    def test_input_volume_db_requires_explicit_volume_value(self):
+        data = self.sample()
+        data["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "input_volume_db",
+                "params": {"input": "Music"},
+            }
+        ]
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(".params.volume_db est obligatoire" in error for error in errors),
+            errors,
+        )
 
     def test_schema_v4_adds_activation_policies(self):
         data = self.sample()

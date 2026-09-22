@@ -215,6 +215,7 @@ class ObservedStateReaderTests(unittest.TestCase):
         for raw, known in (
             (-7.5, True),
             (-7, True),
+            (26.0206, True),
             (True, False),
             ("-7.5", False),
             (float("nan"), False),
@@ -294,10 +295,15 @@ class ObservedStateReaderTests(unittest.TestCase):
             collection="Main",
             input_name="Mic",
         )
+        volume = PropertyKey.input_volume_db(
+            collection="Main",
+            input_name="Mic",
+        )
         desired = DesiredState.build(
             [
                 DesiredAssignment.create(visibility, False),
                 DesiredAssignment.create(mute, True),
+                DesiredAssignment.create(volume, -6.0),
             ]
         )
         base = _catalog()
@@ -315,10 +321,10 @@ class ObservedStateReaderTests(unittest.TestCase):
 
         bindings = build_execution_bindings(catalog, desired)
 
-        self.assertEqual(len(bindings), 2)
+        self.assertEqual(len(bindings), 3)
         self.assertEqual(
             {binding.key for binding in bindings},
-            {visibility, mute},
+            {visibility, mute, volume},
         )
 
     def test_same_filter_is_read_once_for_multiple_properties(self):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import time
 from typing import Any, Mapping
 
@@ -290,7 +291,7 @@ class OBSDispatcher:
             description["value"] = bool(params.get("muted", True))
         elif kind == "input_volume_db":
             description["target"] = str(params.get("input") or "")
-            description["value"] = params.get("volume_db", 0.0)
+            description["value"] = params.get("volume_db")
         elif kind == "set_input_settings":
             # Do not expose arbitrary settings content in diagnostics.
             description["target"] = str(params.get("input") or "")
@@ -911,11 +912,25 @@ class OBSDispatcher:
             )
             return
         if kind == "input_volume_db":
+            if "volume_db" not in p:
+                raise ValueError("Paramètre OBS manquant : volume_db")
+            raw_volume = p.get("volume_db")
+            if (
+                isinstance(raw_volume, bool)
+                or not isinstance(raw_volume, (int, float))
+                or not math.isfinite(float(raw_volume))
+            ):
+                raise ValueError("Paramètre OBS invalide : volume_db")
+            volume_db = float(raw_volume)
+            if not -100.0 <= volume_db <= 26.0:
+                raise ValueError(
+                    "Paramètre OBS hors plage : volume_db doit être entre -100 et 26"
+                )
             self.client.send(
                 "SetInputVolume",
                 {
                     "inputName": self._need(p, "input"),
-                    "inputVolumeDb": float(p.get("volume_db", 0.0)),
+                    "inputVolumeDb": volume_db,
                 },
             )
             return

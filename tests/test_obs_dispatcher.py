@@ -828,6 +828,24 @@ class OBSDispatcherTests(unittest.TestCase):
             "SetInputSettings",
         ])
 
+    def test_input_volume_execution_rejects_missing_or_invalid_target(self):
+        client = FakeClient()
+        dispatcher = OBSDispatcher(client, {})
+
+        for params in (
+            {"input": "Music"},
+            {"input": "Music", "volume_db": True},
+            {"input": "Music", "volume_db": float("nan")},
+            {"input": "Music", "volume_db": 26.1},
+        ):
+            with self.subTest(params=params):
+                with self.assertRaises(ValueError):
+                    dispatcher.execute_action(
+                        OBSAction("input_volume_db", params)
+                    )
+
+        self.assertEqual(client.calls, [])
+
     def test_layout_profile_is_dispatched_as_fifth_state_domain(self):
         client = FakeClient()
         layout = {

@@ -15,6 +15,9 @@ from .models import (
 )
 
 
+INPUT_VOLUME_DB_ABS_TOLERANCE = 1e-4
+
+
 _OPERATION_TYPES = {
     "program_scene": "SetProgramScene",
     "scene_item_visibility": "SetSceneItemVisibility",
@@ -283,7 +286,7 @@ def _values_equal(key: PropertyKey, left: Any, right: Any) -> bool:
                     float(left),
                     float(right),
                     rel_tol=1e-9,
-                    abs_tol=1e-6,
+                    abs_tol=INPUT_VOLUME_DB_ABS_TOLERANCE,
                 )
             except (TypeError, ValueError, OverflowError):
                 return False

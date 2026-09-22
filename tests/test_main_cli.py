@@ -71,8 +71,10 @@ class MainCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         guard.assert_not_called()
-        self.assertIn("Couverture de migration déclarative", output.getvalue())
-        self.assertIn("input_volume_db", output.getvalue())
+        rendered = output.getvalue()
+        self.assertIn("Couverture de migration déclarative", rendered)
+        self.assertIn("exécutables 100.0%", rendered)
+        self.assertNotIn("Actions non exécutables actuellement", rendered)
 
 
 if __name__ == "__main__":

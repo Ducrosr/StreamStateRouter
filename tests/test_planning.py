@@ -410,22 +410,39 @@ class DeclarativePlanningTests(unittest.TestCase):
             self.assertEqual(plan.operations, ())
             self.assertEqual(plan.diagnostics[0].code, "invalid_desired_value")
 
-    def test_numeric_roundoff_is_treated_as_converged(self):
+    def test_obs_float_roundtrip_is_treated_as_converged(self):
         key = PropertyKey.input_volume_db(
             collection="Main",
             input_name="Music",
         )
         desired = DesiredState.build(
-            [DesiredAssignment.create(key, -7.5, provenance="audio")]
+            [DesiredAssignment.create(key, -99.9389, provenance="audio")]
         )
         observed = ObservedState(
-            {key: ObservedValue.known_value(-7.5000001)}
+            {key: ObservedValue.known_value(-99.93891906738281)}
         )
 
         plan = build_execution_plan(desired, observed)
 
         self.assertTrue(plan.converged)
         self.assertEqual(plan.operations, ())
+
+    def test_volume_difference_beyond_float_tolerance_still_plans_write(self):
+        key = PropertyKey.input_volume_db(
+            collection="Main",
+            input_name="Music",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, -99.9389, provenance="audio")]
+        )
+        observed = ObservedState(
+            {key: ObservedValue.known_value(-99.9386)}
+        )
+
+        plan = build_execution_plan(desired, observed)
+
+        self.assertFalse(plan.converged)
+        self.assertEqual(len(plan.operations), 1)
 
     def test_dry_run_redacts_arbitrary_input_setting_values(self):
         key = PropertyKey.input_setting(
