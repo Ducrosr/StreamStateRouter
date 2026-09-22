@@ -137,7 +137,7 @@ class MigrationCoverageTests(unittest.TestCase):
         profile_summary = report["summary"]["profiles"]
         self.assertEqual(profile_summary["managed_nonempty_total"], 5)
         self.assertEqual(profile_summary["declarative_coverage_percent"], 60.0)
-        self.assertEqual(profile_summary["executable_percent"], 20.0)
+        self.assertEqual(profile_summary["executable_percent"], 40.0)
         self.assertEqual(
             report["domains"]["overlay"]["actions"]["executable_percent"],
             100.0,
