@@ -24,6 +24,14 @@ class DeclarativeIntentTests(unittest.TestCase):
                 "source_filter_enabled",
                 {"source": "Avatar", "filter": "Glitch", "enabled": True},
             ),
+            OBSAction(
+                "source_filter_settings",
+                {
+                    "source": "Avatar",
+                    "filter": "Glitch",
+                    "settings": {"strength": 0.8},
+                },
+            ),
             OBSAction("input_mute", {"input": "Mic", "muted": True}),
             OBSAction("input_volume_db", {"input": "Music", "volume_db": -8.0}),
             OBSAction(
@@ -55,13 +63,14 @@ class DeclarativeIntentTests(unittest.TestCase):
                 "program_scene",
                 "scene_item_visibility",
                 "filter_enabled",
+                "filter_setting",
                 "input_mute",
                 "input_volume_db",
                 "input_setting",
                 "input_setting",
             ],
         )
-        self.assertEqual(len(state.assignments), 7)
+        self.assertEqual(len(state.assignments), 8)
         self.assertTrue(
             all(item.provenance == ("game:Overwatch",) for item in state.assignments)
         )
@@ -119,6 +128,44 @@ class DeclarativeIntentTests(unittest.TestCase):
 
         self.assertEqual(len(assignments), 1)
         self.assertEqual(assignments[0].value, "Child")
+
+    def test_filter_settings_overlay_false_is_not_projected(self):
+        action = OBSAction(
+            "source_filter_settings",
+            {
+                "source": "Avatar",
+                "filter": "Glitch",
+                "settings": {"strength": 0.5},
+                "overlay": False,
+            },
+        )
+
+        with self.assertRaisesRegex(UnsupportedIntentAction, "overlay=false"):
+            desired_assignments_from_actions(
+                (action,),
+                provenance="overlay:Replace",
+            )
+
+    def test_host_actions_are_intent_only_without_obs_property(self):
+        assignments = desired_assignments_from_actions(
+            (
+                OBSAction(
+                    "app_audio_output",
+                    {
+                        "device": "Game",
+                        "process": "Overwatch.exe",
+                        "roles": "all",
+                    },
+                ),
+                OBSAction(
+                    "windows_hdr",
+                    {"enabled": True, "display": "primary"},
+                ),
+            ),
+            provenance="capture:HDR",
+        )
+
+        self.assertEqual(assignments, ())
 
     def test_disabled_action_does_not_create_intent(self):
         assignments = desired_assignments_from_actions(
