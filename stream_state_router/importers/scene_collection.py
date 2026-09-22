@@ -308,6 +308,12 @@ class SceneCollectionImporter:
             self._cooperative_yield()
         return self.client.send(request, data)
 
+    @staticmethod
+    def snapshot_from_mapping(
+        raw: Mapping[str, Any],
+    ) -> SceneCollectionSnapshot:
+        return SceneCollectionSnapshot.from_mapping(raw)
+
     def snapshot(self) -> SceneCollectionSnapshot:
         catalog = self.reader.sync()
         warnings = list(catalog.warnings)
