@@ -599,11 +599,52 @@ class SceneCollectionImporter:
         for scene in snapshot.scenes:
             profile_name = f"Import {snapshot.collection} · {scene}".strip()
             try:
-                capture = self.layout_manager.capture_profile_result(scene)
+                capture = self.layout_manager.capture_profile_result(
+                    scene,
+                    include_unprefixed=True,
+                )
             except Exception as exc:
                 skipped.append(f"{scene}: capture layout impossible : {exc}")
                 continue
-            captured[profile_name] = copy.deepcopy(dict(capture.profile))
+
+            profile = copy.deepcopy(dict(capture.profile))
+            modules = (
+                profile.get("modules")
+                if isinstance(profile.get("modules"), dict)
+                else {}
+            )
+            for module_name in list(modules):
+                module = modules.get(module_name)
+                elements = (
+                    module.get("elements")
+                    if isinstance(module, Mapping)
+                    else None
+                )
+                rows = (
+                    [item for item in elements if isinstance(item, Mapping)]
+                    if isinstance(elements, list)
+                    else []
+                )
+                # Layout application currently resolves Scene Items by
+                # container + source name. Multiple occurrences of the same
+                # source in one container are therefore intentionally excluded
+                # from exhaustive import until a durable occurrence binding is
+                # available.
+                identities = {
+                    (
+                        str(item.get("container") or ""),
+                        str(item.get("source") or ""),
+                    )
+                    for item in rows
+                }
+                if len(rows) > 1 and len(identities) == 1:
+                    skipped.append(
+                        f"{scene}: module '{module_name}' ignoré : "
+                        f"{len(rows)} occurrences du même Scene Item sont ambiguës"
+                    )
+                    modules.pop(module_name, None)
+
+            captured[profile_name] = profile
             skipped.extend(
                 f"{scene}: {warning}" for warning in capture.warnings
             )
