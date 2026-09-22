@@ -416,10 +416,10 @@ class DeclarativePlanningTests(unittest.TestCase):
             input_name="Music",
         )
         desired = DesiredState.build(
-            [DesiredAssignment.create(key, -99.25597, provenance="audio")]
+            [DesiredAssignment.create(key, -99.9389, provenance="audio")]
         )
         observed = ObservedState(
-            {key: ObservedValue.known_value(-99.25596618652344)}
+            {key: ObservedValue.known_value(-99.93891906738281)}
         )
 
         plan = build_execution_plan(desired, observed)
@@ -433,10 +433,10 @@ class DeclarativePlanningTests(unittest.TestCase):
             input_name="Music",
         )
         desired = DesiredState.build(
-            [DesiredAssignment.create(key, -99.25597, provenance="audio")]
+            [DesiredAssignment.create(key, -99.9389, provenance="audio")]
         )
         observed = ObservedState(
-            {key: ObservedValue.known_value(-99.25594)}
+            {key: ObservedValue.known_value(-99.9386)}
         )
 
         plan = build_execution_plan(desired, observed)
