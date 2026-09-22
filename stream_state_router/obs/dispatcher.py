@@ -921,6 +921,12 @@ class OBSDispatcher:
             tuple(statuses),
         )
 
+    def has_action_profile(self, domain: str, profile_name: str) -> bool:
+        return (
+            domain in ACTION_PROFILE_DOMAINS
+            and str(profile_name) in self._profiles.get(domain, {})
+        )
+
     def execute_profile(
         self,
         domain: str,

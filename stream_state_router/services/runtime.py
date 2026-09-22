@@ -1997,7 +1997,15 @@ class RoutingService:
                     with self._lock:
                         state = self.engine.current_state
                     profile_result = None
-                    if changed and state is not None:
+                    can_reapply = bool(changed and state is not None)
+                    checker = getattr(
+                        self.dispatcher,
+                        "has_action_profile",
+                        None,
+                    )
+                    if can_reapply and callable(checker):
+                        can_reapply = bool(checker("game", state.game))
+                    if can_reapply and state is not None:
                         profile_result = self.dispatcher.execute_profile(
                             "game",
                             state.game,
@@ -2010,9 +2018,7 @@ class RoutingService:
                         "name": name,
                         "value": value,
                         "variables": snapshot,
-                        "game_profile_reapplied": bool(
-                            changed and state is not None
-                        ),
+                        "game_profile_reapplied": bool(profile_result is not None),
                     }
                 elif command.action == "reapply":
                     with self._lock:
