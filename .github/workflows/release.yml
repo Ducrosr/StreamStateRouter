@@ -74,7 +74,7 @@ jobs:
           npm run typecheck
           npm run build
           npm run validate
-          npm run pack
+          npm run pack -- --version "${{ steps.version.outputs.version }}.0"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build installer
@@ -102,6 +102,7 @@ jobs:
             pyinstaller = (pyinstaller --version 2>&1).ToString().Trim()
             node = (node --version 2>&1).ToString().Trim()
             npm = (npm --version 2>&1).ToString().Trim()
+            streamdeck_plugin_version = "${{ steps.version.outputs.version }}.0"
             python_constraints_sha256 = $PythonConstraintsSha256
             streamdeck_lock_sha256 = $StreamDeckLockSha256
             runner_os = "${{ runner.os }}"
