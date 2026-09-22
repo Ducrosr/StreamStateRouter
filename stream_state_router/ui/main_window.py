@@ -297,9 +297,20 @@ class MainWindow(QMainWindow):
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
-        self.rules_table = QTableWidget(0, 9)
+        self.rules_table = QTableWidget(0, 10)
         self.rules_table.setHorizontalHeaderLabels(
-            ["Actif", "Nom", "Comportement", "Priorité", "Exe", "Chemin", "Titre", "Game", "Profils"]
+            [
+                "Actif",
+                "Nom",
+                "Comportement",
+                "Priorité",
+                "Processus",
+                "Premier plan",
+                "Chemin",
+                "Titre",
+                "Game",
+                "Profils",
+            ]
         )
         self.rules_table.setAlternatingRowColors(True)
         self.rules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1119,6 +1130,32 @@ class MainWindow(QMainWindow):
         self.rules_table.setRowCount(len(rules))
         for row, rule in enumerate(rules):
             state = rule.get("state") if isinstance(rule.get("state"), dict) else {}
+            conditions = (
+                rule.get("conditions")
+                if isinstance(rule.get("conditions"), dict)
+                else {}
+            )
+            foreground_selectors = bool(
+                str(rule.get("exe") or "").strip()
+                or str(rule.get("path") or "").strip()
+                or str(rule.get("title_regex") or "").strip()
+            )
+            process_running = str(
+                conditions.get("process_running") or ""
+            ).strip()
+            process_display = (
+                str(rule.get("exe") or "").strip()
+                or (
+                    process_running
+                    if not foreground_selectors
+                    else ""
+                )
+            )
+            foreground_display = (
+                "Oui"
+                if foreground_selectors
+                else ("Non" if process_running else "—")
+            )
             profiles = (
                 f"{state.get('OverlayProfile', '')} / {state.get('CaptureProfile', '')} / "
                 f"{state.get('AudioProfile', '')} / {state.get('LayoutProfile', '')}"
@@ -1130,7 +1167,8 @@ class MainWindow(QMainWindow):
                 rule.get("name", ""),
                 rule.get("behavior", "match"),
                 str(rule.get("priority", 0)),
-                rule.get("exe", ""),
+                process_display,
+                foreground_display,
                 rule.get("path", ""),
                 rule.get("title_regex", ""),
                 state.get("Game", "") if rule.get("behavior", "match") == "match" else "—",
@@ -1190,8 +1228,17 @@ class MainWindow(QMainWindow):
         if idx is None or not self._service:
             return
         app = self._service.last_app
-        if app is None:
-            QMessageBox.information(self, "Test de règle", "Aucune application au premier plan détectée.")
+        selected = self.config["rules"][idx]
+        requires_foreground = any(
+            str(selected.get(key) or "").strip()
+            for key in ("exe", "path", "title_regex")
+        )
+        if app is None and requires_foreground:
+            QMessageBox.information(
+                self,
+                "Test de règle",
+                "Cette règle exige une application au premier plan.",
+            )
             return
         temp = copy.deepcopy(self.config)
         temp["rules"] = [copy.deepcopy(self.config["rules"][idx])]
@@ -1206,15 +1253,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Test de règle", str(exc))
             return
-        selected = self.config["rules"][idx]
         if resolution.rule_name == selected.get("name"):
+            subject = app.exe_name if app is not None else "les conditions actuelles"
             if resolution.kind.value == "ignore":
-                message = f"La règle correspond à {app.exe_name} et conserverait l’état courant (IGNORE)."
+                message = (
+                    f"La règle correspond à {subject} et conserverait "
+                    "l’état courant (IGNORE)."
+                )
             else:
                 state = resolution.state.as_variables() if resolution.state else {}
-                message = f"La règle correspond à {app.exe_name}.\n\nÉtat : {state}"
+                message = f"La règle correspond à {subject}.\n\nÉtat : {state}"
         else:
-            message = f"La règle ne correspond pas à l’application courante : {app.exe_name}."
+            subject = app.exe_name if app is not None else "les conditions actuelles"
+            message = f"La règle ne correspond pas à {subject}."
         QMessageBox.information(self, "Test de règle", message)
 
     def _delete_rule(self) -> None:

@@ -64,41 +64,65 @@ class RuleDialog(QDialog):
         self.priority.setValue(int(self._source.get("priority", 0)))
         self.enabled = QCheckBox("Règle active")
         self.enabled.setChecked(bool(self._source.get("enabled", True)))
-        self.exe = QLineEdit(str(self._source.get("exe") or ""))
-        self.exe.setPlaceholderText("ex. Overwatch.exe ou *.exe")
-        self.path = QLineEdit(str(self._source.get("path") or ""))
+
+        conditions = (
+            self._source.get("conditions")
+            if isinstance(self._source.get("conditions"), dict)
+            else {}
+        )
+        source_exe = str(self._source.get("exe") or "").strip()
+        source_path = str(self._source.get("path") or "").strip()
+        source_title = str(self._source.get("title_regex") or "").strip()
+        source_running = str(conditions.get("process_running") or "").strip()
+        background_process_rule = bool(
+            source_running
+            and not source_exe
+            and not source_path
+            and not source_title
+        )
+
+        self.exe = QLineEdit(
+            source_running if background_process_rule else source_exe
+        )
+        self.exe.setPlaceholderText("ex. Overwatch.exe ou Dofus.exe")
+        self.require_foreground = QCheckBox("Doit être au premier plan")
+        self.require_foreground.setChecked(not background_process_rule)
+        self.path = QLineEdit(source_path)
         self.path.setPlaceholderText(r"ex. C:\Games\*\game.exe")
-        self.title_regex = QLineEdit(str(self._source.get("title_regex") or ""))
+        self.title_regex = QLineEdit(source_title)
         self.title_regex.setPlaceholderText("Expression régulière facultative")
         self.apply_delay = QSpinBox()
         self.apply_delay.setRange(0, 10000)
         self.apply_delay.setSuffix(" ms")
         self.apply_delay.setValue(int(self._source.get("apply_delay_ms", 0)))
 
-        conditions = self._source.get("conditions") if isinstance(self._source.get("conditions"), dict) else {}
         self.cond_streaming = self._condition_combo(conditions.get("streaming"))
         self.cond_recording = self._condition_combo(conditions.get("recording"))
         self.cond_program_scene = QLineEdit(str(conditions.get("program_scene") or ""))
         self.cond_program_scene.setPlaceholderText("facultatif, ex. In Game")
         self.cond_process_running = QLineEdit(
-            str(conditions.get("process_running") or "")
+            "" if background_process_rule else source_running
         )
         self.cond_process_running.setPlaceholderText(
-            "facultatif, ex. Dofus.exe"
+            "facultatif, ex. Discord.exe"
         )
 
         form.addRow("Nom", self.name)
         form.addRow("Comportement", self.behavior)
         form.addRow("Priorité", self.priority)
         form.addRow("", self.enabled)
-        form.addRow("Exécutable", self.exe)
+        form.addRow("Processus", self.exe)
+        form.addRow("", self.require_foreground)
         form.addRow("Chemin", self.path)
         form.addRow("Titre fenêtre", self.title_regex)
         form.addRow("Délai actions OBS", self.apply_delay)
         form.addRow("Condition : stream actif", self.cond_streaming)
         form.addRow("Condition : enregistrement actif", self.cond_recording)
         form.addRow("Condition : scène programme", self.cond_program_scene)
-        form.addRow("Condition : processus actif", self.cond_process_running)
+        form.addRow(
+            "Condition avancée : autre processus actif",
+            self.cond_process_running,
+        )
 
         title = QLabel("État logique")
         title.setObjectName("Section")
@@ -128,7 +152,9 @@ class RuleDialog(QDialog):
         root.addWidget(hint)
 
         self.behavior.currentIndexChanged.connect(self._sync_behavior)
+        self.require_foreground.toggled.connect(self._sync_process_mode)
         self._sync_behavior()
+        self._sync_process_mode()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save
@@ -161,37 +187,76 @@ class RuleDialog(QDialog):
         for widget in (self.game, self.overlay, self.capture, self.audio, self.layout):
             widget.setEnabled(enabled)
 
+    def _sync_process_mode(self) -> None:
+        foreground = self.require_foreground.isChecked()
+        self.path.setEnabled(foreground)
+        self.title_regex.setEnabled(foreground)
+        self.cond_process_running.setEnabled(foreground)
+        if foreground:
+            self.exe.setToolTip(
+                "Le processus doit correspondre à la fenêtre au premier plan."
+            )
+        else:
+            self.exe.setToolTip(
+                "La règle correspond tant que ce processus est en cours "
+                "d'exécution, quelle que soit la fenêtre au premier plan."
+            )
+
     def _accept_checked(self) -> None:
         if not self.name.text().strip():
             QMessageBox.warning(self, "Règle", "Le nom de la règle est requis.")
             return
-        if not (
-            any(
-                w.text().strip()
-                for w in (self.exe, self.path, self.title_regex)
-            )
+        foreground = self.require_foreground.isChecked()
+        process = self.exe.text().strip()
+        if not foreground:
+            if not process:
+                QMessageBox.warning(
+                    self,
+                    "Règle",
+                    "Indiquez le processus qui doit être en cours d'exécution.",
+                )
+                return
+            if self.cond_process_running.text().strip():
+                QMessageBox.warning(
+                    self,
+                    "Règle",
+                    (
+                        "Une règle en arrière-plan utilise déjà le processus "
+                        "principal comme condition. Réactivez « Doit être au "
+                        "premier plan » pour ajouter un autre processus requis."
+                    ),
+                )
+                return
+        elif not (
+            process
+            or self.path.text().strip()
+            or self.title_regex.text().strip()
             or self.cond_process_running.text().strip()
         ):
             QMessageBox.warning(
                 self,
                 "Règle",
                 (
-                    "Indiquez au moins un sélecteur : exécutable, chemin, "
-                    "titre ou processus actif."
+                    "Indiquez au moins un sélecteur : processus, chemin, "
+                    "titre ou processus actif supplémentaire."
                 ),
             )
             return
         self.accept()
 
     def result_rule(self) -> dict:
+        foreground = self.require_foreground.isChecked()
+        process = self.exe.text().strip()
         raw = {
             "name": self.name.text().strip(),
             "behavior": str(self.behavior.currentData()),
             "priority": self.priority.value(),
             "enabled": self.enabled.isChecked(),
-            "exe": self.exe.text().strip(),
-            "path": self.path.text().strip(),
-            "title_regex": self.title_regex.text().strip(),
+            "exe": process if foreground else "",
+            "path": self.path.text().strip() if foreground else "",
+            "title_regex": (
+                self.title_regex.text().strip() if foreground else ""
+            ),
             "apply_delay_ms": self.apply_delay.value(),
             "conditions": {},
         }
@@ -201,10 +266,12 @@ class RuleDialog(QDialog):
             raw["conditions"]["recording"] = bool(self.cond_recording.currentData())
         if self.cond_program_scene.text().strip():
             raw["conditions"]["program_scene"] = self.cond_program_scene.text().strip()
-        if self.cond_process_running.text().strip():
+        if foreground and self.cond_process_running.text().strip():
             raw["conditions"]["process_running"] = (
                 self.cond_process_running.text().strip()
             )
+        elif not foreground and process:
+            raw["conditions"]["process_running"] = process
         if raw["behavior"] == "match":
             raw["state"] = {
                 "Game": self.game.currentText().strip() or "Vanilla",
