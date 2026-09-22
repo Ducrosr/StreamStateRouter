@@ -122,8 +122,8 @@ class _FakeLayoutManager:
     def __init__(self):
         self.calls = []
 
-    def capture_profile_result(self, scene):
-        self.calls.append(scene)
+    def capture_profile_result(self, scene, *, include_unprefixed=False):
+        self.calls.append((scene, include_unprefixed))
         return SimpleNamespace(
             profile={
                 "scene": scene,
@@ -269,13 +269,54 @@ class ImporterTests(unittest.TestCase):
             skipped=skipped,
         )
 
-        self.assertEqual(manager.calls, ["In Game"])
+        self.assertEqual(manager.calls, [("In Game", True)])
         self.assertEqual(report.added, 1)
         self.assertEqual(report.refreshed, 0)
         self.assertIn(
             "Import Streaming · In Game",
             config["layout_profiles"],
         )
+
+    def test_exhaustive_layout_import_drops_ambiguous_duplicate_occurrences(self):
+        class DuplicateLayoutManager:
+            def capture_profile_result(self, scene, *, include_unprefixed=False):
+                self.include_unprefixed = include_unprefixed
+                return SimpleNamespace(
+                    profile={
+                        "scene": scene,
+                        "modules": {
+                            "Chat": {
+                                "elements": [
+                                    {"container": scene, "source": "Chat"},
+                                    {"container": scene, "source": "Chat"},
+                                ]
+                            },
+                            "Camera": {
+                                "elements": [
+                                    {"container": scene, "source": "Camera"}
+                                ]
+                            },
+                        },
+                    },
+                    warnings=(),
+                )
+
+        manager = DuplicateLayoutManager()
+        importer = SceneCollectionImporter(
+            _ImportClient(),
+            layout_manager=manager,
+        )
+        snapshot = importer.snapshot()
+
+        profiles, skipped = importer.capture_layout_profiles(
+            snapshot=snapshot,
+        )
+
+        profile = profiles["Import Streaming · In Game"]
+        self.assertTrue(manager.include_unprefixed)
+        self.assertNotIn("Chat", profile["modules"])
+        self.assertIn("Camera", profile["modules"])
+        self.assertTrue(any("occurrences" in item for item in skipped), skipped)
 
     def test_advss_collection_file_is_auto_discovered_by_collection_name(self):
         with tempfile.TemporaryDirectory() as tmp:
