@@ -31,6 +31,8 @@ jobs:
             throw "Tag ${{ github.ref_name }} does not match source version v$Version"
           }
           "version=$Version" >> $env:GITHUB_OUTPUT
+      - name: Verify Stream Deck release version
+        run: python scripts/check_versions.py
       - name: Test Python
         run: |
           python -m unittest discover -s tests -v
