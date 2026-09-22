@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self._preview_active = False
         self._routing_incomplete = False
         self._runtime_restart_in_progress = False
+        self._pending_collection_imports: dict[str, dict[str, object]] = {}
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -883,6 +884,15 @@ class MainWindow(QMainWindow):
         if event.kind == "obs_command_result" and event.payload is not None:
             payload = event.payload
             action = str(getattr(payload, "action", "") or "")
+            request_id = str(getattr(payload, "request_id", "") or "")
+            if (
+                action == "collection.import.preview"
+                and request_id in self._pending_collection_imports
+            ):
+                context = self._pending_collection_imports.pop(request_id)
+                self._complete_collection_import(payload, context)
+                self._update_obs_status()
+                return
             if bool(getattr(payload, "success", False)):
                 if action == "layout.preview":
                     self._preview_active = True
@@ -1358,6 +1368,14 @@ class MainWindow(QMainWindow):
                 "Sélectionnez d'abord un profil cible.",
             )
             return
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Import collection OBS",
+                "Le runtime SSR n'est pas disponible.",
+            )
+            return
+
         domain, profile_name, _profile = current
         dialog = CollectionImportDialog(
             self,
@@ -1368,31 +1386,130 @@ class MainWindow(QMainWindow):
             return
 
         options = dialog.options()
-        previous = copy.deepcopy(self.config)
         try:
-            importer = SceneCollectionImporter(self._client)
-            snapshot = importer.snapshot()
+            request_id = self._service.request_collection_import_preview(
+                include_layouts=bool(options.get("include_layouts", False)),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                str(exc),
+            )
+            return
+
+        self._pending_collection_imports[request_id] = {
+            "domain": domain,
+            "profile_name": profile_name,
+            "options": copy.deepcopy(options),
+        }
+        self._log(
+            "Import collection OBS mis en file "
+            f"({request_id[:8]}) vers {domain}/{profile_name}."
+        )
+        self.statusBar().showMessage(
+            "Lecture de la collection OBS en cours…",
+            8000,
+        )
+
+    def _complete_collection_import(
+        self,
+        payload,
+        context: Mapping[str, object],
+    ) -> None:
+        if not bool(getattr(payload, "success", False)):
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                str(
+                    getattr(payload, "error", "")
+                    or "La lecture de la collection OBS a échoué."
+                ),
+            )
+            return
+
+        raw_result = getattr(payload, "result", None)
+        if not isinstance(raw_result, Mapping):
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                "Le runtime a retourné un rapport d'import invalide.",
+            )
+            return
+        raw_snapshot = raw_result.get("snapshot")
+        if not isinstance(raw_snapshot, Mapping):
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                "Le snapshot de collection OBS est absent ou invalide.",
+            )
+            return
+
+        domain = str(context.get("domain") or "")
+        profile_name = str(context.get("profile_name") or "")
+        raw_options = context.get("options")
+        options = (
+            dict(raw_options)
+            if isinstance(raw_options, Mapping)
+            else {}
+        )
+        snapshot = SceneCollectionImporter.snapshot_from_mapping(
+            raw_snapshot
+        )
+
+        previous = copy.deepcopy(self.config)
+        asc_report = None
+        asc_path = ""
+        layout_report = None
+        try:
             report = SceneCollectionImporter.merge_actions_into_profile(
                 self.config,
                 domain=domain,
                 profile_name=profile_name,
                 snapshot=snapshot,
                 include_input_settings=bool(
-                    options["include_input_settings"]
+                    options.get("include_input_settings", True)
                 ),
-                include_audio_state=bool(options["include_audio_state"]),
-                include_filters=bool(options["include_filters"]),
-                include_visibility=bool(options["include_visibility"]),
+                include_audio_state=bool(
+                    options.get("include_audio_state", True)
+                ),
+                include_filters=bool(
+                    options.get("include_filters", True)
+                ),
+                include_visibility=bool(
+                    options.get("include_visibility", False)
+                ),
             )
 
-            layout_report = None
             if bool(options.get("include_layouts", False)):
-                layout_report = importer.import_layout_profiles(
-                    self.config,
-                    snapshot=snapshot,
+                raw_layouts = raw_result.get("layouts")
+                layouts = (
+                    {
+                        str(name): dict(profile)
+                        for name, profile in raw_layouts.items()
+                        if isinstance(profile, Mapping)
+                    }
+                    if isinstance(raw_layouts, Mapping)
+                    else {}
+                )
+                raw_skipped = raw_result.get("layout_skipped")
+                layout_skipped = tuple(
+                    str(item)
+                    for item in (
+                        raw_skipped
+                        if isinstance(raw_skipped, list)
+                        else []
+                    )
+                )
+                layout_report = (
+                    SceneCollectionImporter.apply_layout_profiles(
+                        self.config,
+                        collection=snapshot.collection,
+                        profiles=layouts,
+                        skipped=layout_skipped,
+                    )
                 )
 
-            asc_report = None
             asc_path = str(options.get("asc_path") or "").strip()
             if not asc_path:
                 detected = (
@@ -1406,6 +1523,7 @@ class MainWindow(QMainWindow):
                 asc_report = AdvancedSceneSwitcherImporter.apply_to_config(
                     asc_data,
                     self.config,
+                    snapshot=snapshot,
                 )
 
             errors = validate_config(self.config)
@@ -1418,6 +1536,7 @@ class MainWindow(QMainWindow):
             self.config = previous
             self._refresh_rules_table()
             self._refresh_profile_names()
+            self._refresh_layout_profile_names()
             self._refresh_override_boxes()
             QMessageBox.critical(
                 self,
@@ -1430,6 +1549,10 @@ class MainWindow(QMainWindow):
         self._refresh_rules_table()
         self._refresh_profile_names()
         self._refresh_layout_profile_names()
+        self.profile_domain.setCurrentIndex(
+            max(0, self.profile_domain.findData(domain))
+        )
+        self._refresh_profile_names()
         self.profile_name.setCurrentText(profile_name)
         self._refresh_actions_table()
         self._refresh_override_boxes()
@@ -1438,9 +1561,17 @@ class MainWindow(QMainWindow):
         if layout_report is not None:
             summary += "\n\nLayouts\n" + layout_report.summary()
         if asc_report is not None:
-            summary += "\n\nAdvanced Scene Switcher\n" + asc_report.summary()
+            summary += (
+                "\n\nAdvanced Scene Switcher\n"
+                + asc_report.summary()
+            )
+        elif not asc_path:
+            summary += (
+                "\n\nAdvanced Scene Switcher\n"
+                "Aucun JSON ASC détecté pour cette collection."
+            )
         summary += (
-            "\n\nLa configuration est modifiée en mémoire. "
+            "\n\nLa configuration est modifiée uniquement en mémoire. "
             "Vérifiez-la puis utilisez « Enregistrer et appliquer »."
         )
         QMessageBox.information(
@@ -1448,6 +1579,94 @@ class MainWindow(QMainWindow):
             "Import collection OBS terminé",
             summary,
         )
+
+        if asc_report is not None and asc_report.rejected_raw:
+            self._offer_save_collection_import_report(
+                snapshot=snapshot,
+                domain=domain,
+                profile_name=profile_name,
+                asc_path=asc_path,
+                collection_report=report,
+                layout_report=layout_report,
+                asc_report=asc_report,
+            )
+
+    def _offer_save_collection_import_report(
+        self,
+        *,
+        snapshot,
+        domain: str,
+        profile_name: str,
+        asc_path: str,
+        collection_report,
+        layout_report,
+        asc_report,
+    ) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Macros ASC non converties",
+            (
+                f"{len(asc_report.rejected_raw)} macro(s) Advanced Scene "
+                "Switcher n'ont pas été converties.\n\n"
+                "Leur JSON brut et la raison du refus sont conservés dans "
+                "le rapport. Voulez-vous enregistrer ce rapport maintenant ?\n\n"
+                "Attention : le JSON brut d'une macro peut contenir des "
+                "chemins, URL, tokens ou autres paramètres sensibles."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Enregistrer le rapport d'import",
+            "stream-state-router-import-report.json",
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        payload = {
+            "collection": snapshot.collection,
+            "target": {
+                "domain": domain,
+                "profile": profile_name,
+            },
+            "advanced_scene_switcher_source": asc_path,
+            "collection_import": {
+                "added_actions": collection_report.added_actions,
+                "replaced_actions": collection_report.replaced_actions,
+                "skipped": list(collection_report.skipped),
+            },
+            "layout_import": (
+                {
+                    "added": layout_report.added,
+                    "refreshed": layout_report.refreshed,
+                    "skipped": list(layout_report.skipped),
+                }
+                if layout_report is not None
+                else None
+            ),
+            "advanced_scene_switcher": asc_report.as_mapping(),
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    payload,
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                    allow_nan=False,
+                )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Rapport d'import",
+                str(exc),
+            )
+            return
+        self._log(f"Rapport d'import enregistré : {path}")
 
     def _add_action(self) -> None:
         current = self._current_profile()
