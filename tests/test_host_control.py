@@ -65,6 +65,44 @@ class FakeHDRAPI:
         self.states[path] = bool(enabled)
 
 
+class FakeModernHDRAPI(FakeHDRAPI):
+    def __init__(self):
+        super().__init__()
+        self.hdr_set_calls: list[tuple[object, bool]] = []
+
+    def hdr_info(self, path):
+        return SimpleNamespace(
+            supported=self.supported[path],
+            enabled=self.states[path],
+        )
+
+    def set_hdr(self, path, enabled):
+        self.hdr_set_calls.append((path, bool(enabled)))
+        self.states[path] = bool(enabled)
+
+
+class FakeDelayedHDRAPI(FakeModernHDRAPI):
+    def __init__(self):
+        super().__init__()
+        self.pending = {}
+
+    def set_hdr(self, path, enabled):
+        self.hdr_set_calls.append((path, bool(enabled)))
+        self.pending[path] = [bool(enabled), 2]
+
+    def hdr_info(self, path):
+        pending = self.pending.get(path)
+        if pending is not None:
+            pending[1] -= 1
+            if pending[1] <= 0:
+                self.states[path] = pending[0]
+                self.pending.pop(path, None)
+        return SimpleNamespace(
+            supported=self.supported[path],
+            enabled=self.states[path],
+        )
+
+
 class FakeAudioRouter:
     def __init__(self):
         self.calls = []
@@ -172,6 +210,41 @@ class HostControlTests(unittest.TestCase):
 
         self.assertEqual(changed, 0)
         self.assertEqual(api.set_calls, [])
+
+    def test_hdr_modern_api_uses_dedicated_hdr_state(self):
+        api = FakeModernHDRAPI()
+        controller = WindowsHDRController(api=api)
+
+        changed = controller.set_enabled(True, scope="primary")
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(api.hdr_set_calls, [(api.primary, True)])
+        self.assertEqual(api.set_calls, [])
+        self.assertTrue(api.states[api.primary])
+
+    def test_hdr_acknowledgement_polls_until_state_changes(self):
+        api = FakeDelayedHDRAPI()
+        ticks = [0.0]
+
+        def clock():
+            return ticks[0]
+
+        def sleeper(seconds):
+            ticks[0] += seconds
+
+        controller = WindowsHDRController(
+            api=api,
+            verify_timeout_seconds=1.0,
+            verify_poll_seconds=0.05,
+            clock=clock,
+            sleeper=sleeper,
+        )
+
+        changed = controller.set_enabled(True, scope="primary")
+
+        self.assertEqual(changed, 1)
+        self.assertTrue(api.states[api.primary])
+        self.assertGreater(ticks[0], 0.0)
 
     def test_host_controller_routes_supported_actions(self):
         audio = FakeAudioRouter()

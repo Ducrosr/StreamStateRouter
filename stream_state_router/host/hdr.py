@@ -3,6 +3,8 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import os
+import sys
+import time
 
 
 ERROR_SUCCESS = 0
@@ -10,6 +12,9 @@ QDC_ONLY_ACTIVE_PATHS = 0x00000002
 DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1
 DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9
 DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE = 10
+DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2 = 15
+DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE = 16
+WINDOWS_11_24H2_BUILD = 26100
 MONITOR_DEFAULTTOPRIMARY = 1
 
 
@@ -103,6 +108,31 @@ class DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO(ctypes.Structure):
 
 
 class DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE(ctypes.Structure):
+    _fields_ = [
+        ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
+        ("value", wintypes.UINT),
+    ]
+
+
+class DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2(ctypes.Structure):
+    _fields_ = [
+        ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
+        ("value", wintypes.UINT),
+        ("colorEncoding", wintypes.UINT),
+        ("bitsPerColorChannel", wintypes.UINT),
+        ("activeColorMode", wintypes.UINT),
+    ]
+
+    @property
+    def supported(self) -> bool:
+        return bool(self.value & 0x10)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.value & 0x20)
+
+
+class DISPLAYCONFIG_SET_HDR_STATE(ctypes.Structure):
     _fields_ = [
         ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
         ("value", wintypes.UINT),
@@ -240,6 +270,10 @@ class _DisplayConfigAPI:
             raise ctypes.WinError(ctypes.get_last_error())
         return str(info.szDevice).split("\x00", 1)[0]
 
+    @staticmethod
+    def uses_dedicated_hdr_api() -> bool:
+        return int(sys.getwindowsversion().build) >= WINDOWS_11_24H2_BUILD
+
     def advanced_color_info(
         self,
         path: DISPLAYCONFIG_PATH_INFO,
@@ -256,6 +290,53 @@ class _DisplayConfigAPI:
             "DisplayConfigGetDeviceInfo(GET_ADVANCED_COLOR_INFO)",
         )
         return info
+
+
+    def advanced_color_info_2(
+        self,
+        path: DISPLAYCONFIG_PATH_INFO,
+    ) -> DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2:
+        info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2()
+        info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2
+        info.header.size = ctypes.sizeof(info)
+        info.header.adapterId = path.targetInfo.adapterId
+        info.header.id = path.targetInfo.id
+        self._check(
+            self.user32.DisplayConfigGetDeviceInfo(
+                ctypes.byref(info.header)
+            ),
+            "DisplayConfigGetDeviceInfo(GET_ADVANCED_COLOR_INFO_2)",
+        )
+        return info
+
+    def hdr_info(
+        self,
+        path: DISPLAYCONFIG_PATH_INFO,
+    ):
+        if self.uses_dedicated_hdr_api():
+            return self.advanced_color_info_2(path)
+        return self.advanced_color_info(path)
+
+    def set_hdr(
+        self,
+        path: DISPLAYCONFIG_PATH_INFO,
+        enabled: bool,
+    ) -> None:
+        if not self.uses_dedicated_hdr_api():
+            self.set_advanced_color(path, enabled)
+            return
+        info = DISPLAYCONFIG_SET_HDR_STATE()
+        info.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE
+        info.header.size = ctypes.sizeof(info)
+        info.header.adapterId = path.targetInfo.adapterId
+        info.header.id = path.targetInfo.id
+        info.value = 1 if enabled else 0
+        self._check(
+            self.user32.DisplayConfigSetDeviceInfo(
+                ctypes.byref(info.header)
+            ),
+            "DisplayConfigSetDeviceInfo(SET_HDR_STATE)",
+        )
 
     def set_advanced_color(
         self,
@@ -277,15 +358,60 @@ class _DisplayConfigAPI:
 
 
 class WindowsHDRController:
-    """Enable/disable Windows HDR through the documented DisplayConfig API."""
+    """Enable/disable Windows HDR through the DisplayConfig API."""
 
-    def __init__(self, api: _DisplayConfigAPI | None = None) -> None:
+    def __init__(
+        self,
+        api: _DisplayConfigAPI | None = None,
+        *,
+        verify_timeout_seconds: float = 2.0,
+        verify_poll_seconds: float = 0.05,
+        clock=time.monotonic,
+        sleeper=time.sleep,
+    ) -> None:
         self._api = api
+        self._verify_timeout_seconds = max(
+            0.0,
+            float(verify_timeout_seconds),
+        )
+        self._verify_poll_seconds = max(
+            0.01,
+            float(verify_poll_seconds),
+        )
+        self._clock = clock
+        self._sleeper = sleeper
 
     def _backend(self) -> _DisplayConfigAPI:
         if self._api is None:
             self._api = _DisplayConfigAPI()
         return self._api
+
+
+    @staticmethod
+    def _hdr_info(api, path):
+        getter = getattr(api, "hdr_info", None)
+        if callable(getter):
+            return getter(path)
+        return api.advanced_color_info(path)
+
+    @staticmethod
+    def _set_hdr(api, path, enabled: bool) -> None:
+        setter = getattr(api, "set_hdr", None)
+        if callable(setter):
+            setter(path, enabled)
+            return
+        api.set_advanced_color(path, enabled)
+
+    def _wait_for_state(self, api, path, enabled: bool) -> bool:
+        deadline = self._clock() + self._verify_timeout_seconds
+        while True:
+            current = self._hdr_info(api, path)
+            if bool(current.enabled) == bool(enabled):
+                return True
+            if self._clock() >= deadline:
+                return False
+            self._sleeper(self._verify_poll_seconds)
+
 
     def status(self, *, scope: str = "primary") -> tuple[dict[str, object], ...]:
         wanted_scope = str(scope or "primary").strip().casefold()
@@ -304,7 +430,7 @@ class WindowsHDRController:
             ]
         rows: list[dict[str, object]] = []
         for path in paths:
-            info = api.advanced_color_info(path)
+            info = self._hdr_info(api, path)
             rows.append(
                 {
                     "source": api.source_name(path),
@@ -337,7 +463,7 @@ class WindowsHDRController:
 
         supported: list[DISPLAYCONFIG_PATH_INFO] = []
         for path in paths:
-            info = api.advanced_color_info(path)
+            info = self._hdr_info(api, path)
             if info.supported:
                 supported.append(path)
         if not supported:
@@ -347,12 +473,11 @@ class WindowsHDRController:
 
         changed = 0
         for path in supported:
-            current = api.advanced_color_info(path)
+            current = self._hdr_info(api, path)
             if current.enabled == bool(enabled):
                 continue
-            api.set_advanced_color(path, bool(enabled))
-            verify = api.advanced_color_info(path)
-            if verify.enabled != bool(enabled):
+            self._set_hdr(api, path, bool(enabled))
+            if not self._wait_for_state(api, path, bool(enabled)):
                 raise RuntimeError(
                     "Windows n'a pas acquitté le changement HDR demandé."
                 )
