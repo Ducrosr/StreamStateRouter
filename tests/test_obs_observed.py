@@ -163,7 +163,7 @@ class ObservedStateReaderTests(unittest.TestCase):
             [request for request, _data in client.requests],
         )
 
-    def test_non_boolean_executor_observations_are_unknown(self):
+    def test_invalid_executor_observations_are_unknown(self):
         mute = PropertyKey.input_mute(
             collection="Main",
             input_name="Mic",
@@ -173,10 +173,15 @@ class ObservedStateReaderTests(unittest.TestCase):
             container="In Game",
             source="Chat",
         )
+        volume = PropertyKey.input_volume_db(
+            collection="Main",
+            input_name="Music",
+        )
         desired = DesiredState.build(
             [
                 DesiredAssignment.create(mute, True),
                 DesiredAssignment.create(visibility, False),
+                DesiredAssignment.create(volume, -6.0),
             ]
         )
         client = _ObservedClient()
@@ -189,6 +194,9 @@ class ObservedStateReaderTests(unittest.TestCase):
             if request == "GetSceneItemEnabled":
                 client.requests.append((request, data))
                 return {"sceneItemEnabled": "true"}
+            if request == "GetInputVolume":
+                client.requests.append((request, data))
+                return {"inputVolumeDb": "loud"}
             return original_send(request, data)
 
         client.send = send
@@ -201,6 +209,8 @@ class ObservedStateReaderTests(unittest.TestCase):
             observed.get(visibility).code,
             "scene_item_visibility_unknown",
         )
+        self.assertFalse(observed.get(volume).known)
+        self.assertEqual(observed.get(volume).code, "input_volume_unknown")
 
     def test_execution_bindings_require_scene_and_input_uuids(self):
         visibility = PropertyKey.scene_item_visibility(
@@ -212,10 +222,15 @@ class ObservedStateReaderTests(unittest.TestCase):
             collection="Main",
             input_name="Mic",
         )
+        volume = PropertyKey.input_volume_db(
+            collection="Main",
+            input_name="Mic",
+        )
         desired = DesiredState.build(
             [
                 DesiredAssignment.create(visibility, False),
                 DesiredAssignment.create(mute, True),
+                DesiredAssignment.create(volume, -6.0),
             ]
         )
         base = _catalog()
@@ -233,10 +248,10 @@ class ObservedStateReaderTests(unittest.TestCase):
 
         bindings = build_execution_bindings(catalog, desired)
 
-        self.assertEqual(len(bindings), 2)
+        self.assertEqual(len(bindings), 3)
         self.assertEqual(
             {binding.key for binding in bindings},
-            {visibility, mute},
+            {visibility, mute, volume},
         )
 
     def test_same_filter_is_read_once_for_multiple_properties(self):
