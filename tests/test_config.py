@@ -216,6 +216,31 @@ class ConfigTests(unittest.TestCase):
         self.assertNotEqual(first, config_revision(changed))
         self.assertEqual(len(first), 12)
 
+    def test_input_volume_db_validation_matches_obs_protocol_range(self):
+        for value in (-100.0, 26.0, -12.5):
+            data = self.sample()
+            data["profiles"]["audio"]["Default"]["actions"] = [
+                {
+                    "type": "input_volume_db",
+                    "params": {"input": "Music", "volume_db": value},
+                }
+            ]
+            self.assertEqual(validate_config(data), [], value)
+
+        for value in (-100.0001, 26.0001, float("nan"), float("inf"), True):
+            data = self.sample()
+            data["profiles"]["audio"]["Default"]["actions"] = [
+                {
+                    "type": "input_volume_db",
+                    "params": {"input": "Music", "volume_db": value},
+                }
+            ]
+            errors = validate_config(data)
+            self.assertTrue(
+                any(".params.volume_db" in error for error in errors),
+                (value, errors),
+            )
+
     def test_schema_v4_adds_activation_policies(self):
         data = self.sample()
         data["schema_version"] = 4
