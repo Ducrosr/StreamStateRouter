@@ -73,7 +73,7 @@ class MigrationCoverageTests(unittest.TestCase):
             [
                 DECLARATIVE_EXECUTABLE,
                 DECLARATIVE_EXECUTABLE,
-                DECLARATIVE_PLANNABLE,
+                DECLARATIVE_EXECUTABLE,
                 DECLARATIVE_PLANNABLE,
                 DECLARATIVE_PLANNABLE,
             ],
@@ -81,7 +81,7 @@ class MigrationCoverageTests(unittest.TestCase):
         summary = report.summary()["actions"]
         self.assertEqual(summary["active"], 5)
         self.assertEqual(summary["represented_percent"], 100.0)
-        self.assertEqual(summary["executable_percent"], 40.0)
+        self.assertEqual(summary["executable_percent"], 60.0)
 
     def test_inherited_actions_are_included_in_effective_profile_coverage(self):
         config = {
@@ -119,7 +119,7 @@ class MigrationCoverageTests(unittest.TestCase):
             if item.domain == "audio" and item.profile == "Child"
         )
 
-        self.assertEqual(child.classification, DECLARATIVE_PLANNABLE)
+        self.assertEqual(child.classification, DECLARATIVE_EXECUTABLE)
         self.assertEqual(len(child.actions), 2)
         self.assertEqual(
             [item.action_type for item in child.actions],
@@ -260,12 +260,16 @@ class MigrationCoverageTests(unittest.TestCase):
     def test_future_executor_kinds_change_coverage_without_report_rewrite(self):
         config = {
             "profiles": {
-                "audio": {
-                    "Volume": {
+                "overlay": {
+                    "Filter": {
                         "actions": [
                             {
-                                "type": "input_volume_db",
-                                "params": {"input": "Music", "volume_db": -8.5},
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Avatar",
+                                    "filter": "Glow",
+                                    "enabled": True,
+                                },
                             }
                         ]
                     }
@@ -278,7 +282,7 @@ class MigrationCoverageTests(unittest.TestCase):
             config,
             executable_kinds={
                 *DECLARATIVE_EXECUTOR_KINDS,
-                "input_volume_db",
+                "filter_enabled",
             },
         )
 
