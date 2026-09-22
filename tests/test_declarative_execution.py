@@ -474,6 +474,51 @@ class DeclarativeExecutorTests(unittest.TestCase):
             1,
         )
 
+    def test_input_volume_float_roundtrip_readback_is_acknowledged(self):
+        key = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, -99.9389)]
+        )
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(-12.0)},
+        )
+        client = _ExecutorClient()
+        original_send = client.send
+
+        def send(request, data=None, *, expected_session_generation=None):
+            response = original_send(
+                request,
+                data,
+                expected_session_generation=expected_session_generation,
+            )
+            if request == "SetInputVolume":
+                client.input_volume_db = -99.93891906738281
+            return response
+
+        client.send = send
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertTrue(result.converged)
+        self.assertEqual(result.status, "converged")
+        self.assertEqual(result.steps[-1].status, "applied")
+        self.assertAlmostEqual(
+            result.steps[-1].ack_value,
+            -99.93891906738281,
+        )
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputVolume"),
+            1,
+        )
+
     def test_input_volume_positive_set_requires_matching_readback(self):
         key = PropertyKey.input_volume_db(
             collection="Lab Collection",
