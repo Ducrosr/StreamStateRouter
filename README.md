@@ -324,6 +324,14 @@ Le plugin 2.0 utilise actuellement les paramètres API par défaut `127.0.0.1:87
 
 SSR n'exécute que les dimensions réellement modifiées.
 
+## Dépendances Python
+
+`pyproject.toml` est la source de vérité des dépendances Python du projet.
+Les installations source, la CI et les builds utilisent les extras `desktop`,
+`dev`, `build` ou `all` via `pip install -e`. Les anciens fichiers
+`requirements.txt` / `requirements-dev.txt`, qui dupliquaient ces contraintes
+sans être consommés par les workflows actuels, ont été supprimés.
+
 ## Installation source
 
 Python 3.12+ :
