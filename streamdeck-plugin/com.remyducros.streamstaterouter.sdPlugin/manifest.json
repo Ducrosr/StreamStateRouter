@@ -1,6 +1,6 @@
 {
   "Name": "Stream State Router",
-  "Version": "2.0.2.0",
+  "Version": "2.1.0.0",
   "Author": "Rémy Ducros",
   "UUID": "com.remyducros.streamstaterouter",
   "Description": "Contrôle Stream State Router depuis Stream Deck.",
