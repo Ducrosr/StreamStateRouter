@@ -877,8 +877,8 @@ class CollectionImportDialog(QDialog):
         asc_group = QFormLayout()
         self.asc_path = QLineEdit()
         self.asc_path.setPlaceholderText(
-            "Facultatif : export JSON Advanced Scene Switcher "
-            "ou fichier de collection OBS"
+            "Laisser vide pour détecter automatiquement le fichier "
+            "de la collection OBS courante"
         )
         browse_row = QHBoxLayout()
         browse_row.addWidget(self.asc_path, 1)
