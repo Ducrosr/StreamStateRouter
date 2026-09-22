@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 from stream_state_router.obs.catalog import (
@@ -232,6 +233,95 @@ class DeclarativeExecutorTests(unittest.TestCase):
         )
         self.assertEqual(set_payload["inputUuid"], "mic-1")
         self.assertAlmostEqual(set_payload["inputVolumeDb"], -6.25)
+
+    def test_input_volume_missing_capability_blocks_before_any_write(self):
+        key = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build([DesiredAssignment.create(key, -6.0)])
+        catalog = _catalog()
+        catalog = replace(
+            catalog,
+            available_requests=frozenset(
+                request
+                for request in catalog.available_requests
+                if request != "SetInputVolume"
+            ),
+        )
+        plan = build_execution_plan(
+            desired,
+            ObservedState({key: ObservedValue.known_value(-12.0)}),
+        )
+        prepared = PreparedExecution.create(
+            desired=desired,
+            plan=plan,
+            collection=catalog.collection,
+            session_generation=catalog.session_generation,
+            catalog_epoch=7,
+            config_revision="cfg",
+            dispatch_generation=2,
+            resume_generation=3,
+            bindings=build_execution_bindings(catalog, desired),
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(catalog))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(result.replan_required)
+        self.assertFalse(
+            any(name.startswith("Set") for name, _data in client.requests)
+        )
+
+    def test_mixed_mute_and_volume_plan_converges_serially(self):
+        mute = PropertyKey.input_mute(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        volume = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build(
+            [
+                DesiredAssignment.create(mute, True),
+                DesiredAssignment.create(volume, -6.25),
+            ]
+        )
+        prepared = _prepared(
+            desired,
+            {
+                mute: ObservedValue.known_value(False),
+                volume: ObservedValue.known_value(-12.0),
+            },
+        )
+        client = _ExecutorClient()
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(
+            prepared,
+            validate_target=lambda: (True, ""),
+        )
+
+        self.assertTrue(result.converged)
+        self.assertTrue(client.input_muted)
+        self.assertAlmostEqual(client.input_volume_db, -6.25)
+        self.assertEqual(
+            [
+                name
+                for name, _data in client.requests
+                if name in {"SetInputMute", "SetInputVolume"}
+            ],
+            ["SetInputMute", "SetInputVolume"],
+        )
+        by_key = {step.key: step for step in result.steps}
+        self.assertEqual(by_key[mute].status, "applied")
+        self.assertEqual(by_key[volume].status, "applied")
 
     def test_input_volume_float_roundtrip_tolerance_avoids_noop_write(self):
         key = PropertyKey.input_volume_db(
