@@ -23,6 +23,7 @@ from stream_state_router.obs.dispatcher import (
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
+from stream_state_router.services.declarative_execution import ExecutionStepResult
 from stream_state_router.services.runtime import RoutingService
 
 
@@ -1257,6 +1258,139 @@ class RuntimeTests(unittest.TestCase):
             retry = collector.wait(retry_id)
             self.assertFalse(retry.success)
             self.assertRegex(retry.error, "inconnu|expiré|consommé")
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_commit_boundary_rejects_resume_without_obs_write(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared_result = collector.wait(prepare_id)
+            self.assertTrue(prepared_result.success, prepared_result.error)
+            plan_id = prepared_result.result["plan_id"]
+
+            original_commit = service._commit_prepared_execution_write
+
+            def resume_then_commit(prepared, prepared_state, write):
+                service.pause(False)
+                return original_commit(prepared, prepared_state, write)
+
+            service._commit_prepared_execution_write = resume_then_commit
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+
+            self.assertFalse(executed.success)
+            self.assertEqual(executed.result["status"], "replan_required")
+            self.assertTrue(executed.result["replan_required"])
+            self.assertFalse(client.input_muted)
+            self.assertFalse(
+                any(request == "SetInputMute" for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_unexpected_executor_exception_preserves_partial_result(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared_result = collector.wait(prepare_id)
+            self.assertTrue(prepared_result.success, prepared_result.error)
+            plan_id = prepared_result.result["plan_id"]
+
+            def explode(prepared, **kwargs):
+                progress = kwargs["progress"]
+                key = prepared.bindings[0].key
+                progress(
+                    (
+                        ExecutionStepResult(
+                            key,
+                            "SetInputMute",
+                            True,
+                            True,
+                            True,
+                            True,
+                            "applied",
+                        ),
+                    )
+                )
+                raise RuntimeError("unexpected executor failure")
+
+            service._declarative_executor.execute = explode
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+
+            self.assertFalse(executed.success)
+            self.assertEqual(executed.result["status"], "failed")
+            self.assertTrue(executed.result["replan_required"])
+            self.assertEqual(executed.result["steps"][0]["status"], "applied")
+            self.assertIn(
+                "unexpected executor failure",
+                executed.result["diagnostics"],
+            )
         finally:
             self.assertTrue(service.stop())
 
