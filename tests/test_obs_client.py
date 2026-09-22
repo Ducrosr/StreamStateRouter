@@ -31,6 +31,21 @@ class _FakeReqClient:
         return {"obsVersion": "32.2.2"}
 
 
+class _NotReadyRequestError(Exception):
+    code = 207
+
+
+class _NotReadyReqClient:
+    def __init__(self, **_kwargs):
+        pass
+
+    def send(self, request, data=None, raw=False):
+        raise _NotReadyRequestError(
+            "Request GetVersion returned code 207. "
+            "With message: OBS is not ready to perform the request."
+        )
+
+
 class _GenericRequestFailReqClient:
     def __init__(self, **_kwargs):
         pass
@@ -121,6 +136,25 @@ class OBSClientManagerTests(unittest.TestCase):
 
         self.assertNotIsInstance(captured.exception, OBSResourceNotFoundError)
         self.assertTrue(manager.connected)
+
+    def test_probe_reports_obs_startup_as_transient_not_ready_state(self):
+        fake_obs = SimpleNamespace(ReqClient=_NotReadyReqClient)
+        manager = OBSClientManager(
+            OBSConnectionConfig(enabled=True, reconnect_seconds=3.0)
+        )
+
+        with (
+            patch("stream_state_router.obs.client._obs", fake_obs),
+            patch(
+                "stream_state_router.obs.client._OBS_REQUEST_ERRORS",
+                (_NotReadyRequestError,),
+            ),
+        ):
+            ok, message = manager.probe()
+
+        self.assertFalse(ok)
+        self.assertTrue(manager.connected)
+        self.assertIn("encore en cours d'initialisation", message)
 
     def test_transport_error_marks_connection_unavailable(self):
         fake_obs = SimpleNamespace(ReqClient=_TransportFailReqClient)
