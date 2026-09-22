@@ -283,7 +283,7 @@ def _values_equal(key: PropertyKey, left: Any, right: Any) -> bool:
                     float(left),
                     float(right),
                     rel_tol=1e-9,
-                    abs_tol=1e-5,
+                    abs_tol=1e-4,
                 )
             except (TypeError, ValueError, OverflowError):
                 return False
