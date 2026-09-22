@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Callable, Mapping
 
 from ..planning.models import DesiredState, ObservedState, ObservedValue, PropertyKey
@@ -137,7 +138,11 @@ def observe_desired_state(
             except OBSRequestError:
                 values[key] = ObservedValue.unknown()
             else:
-                scene = str(response.get("currentProgramSceneName") or "").strip()
+                scene = str(
+                    response.get("sceneName")
+                    or response.get("currentProgramSceneName")
+                    or ""
+                ).strip()
                 values[key] = (
                     ObservedValue.known_value(scene)
                     if scene
@@ -293,14 +298,26 @@ def observe_desired_state(
                     {"inputName": key.source},
                 )
             except OBSRequestError:
-                values[key] = ObservedValue.unknown()
+                values[key] = ObservedValue.unknown(
+                    code="input_volume_unknown",
+                    reason="OBS rejected GetInputVolume.",
+                )
             else:
-                if "inputVolumeDb" in response:
-                    values[key] = ObservedValue.known_value(
-                        float(response.get("inputVolumeDb"))
+                raw_volume = response.get("inputVolumeDb")
+                if (
+                    isinstance(raw_volume, bool)
+                    or not isinstance(raw_volume, (int, float))
+                    or not math.isfinite(float(raw_volume))
+                ):
+                    values[key] = ObservedValue.unknown(
+                        code="input_volume_unknown",
+                        reason=(
+                            "OBS omitted inputVolumeDb or returned a non-finite "
+                            "numeric value."
+                        ),
                     )
                 else:
-                    values[key] = ObservedValue.unknown()
+                    values[key] = ObservedValue.known_value(float(raw_volume))
             continue
 
         if key.kind == "input_setting":
