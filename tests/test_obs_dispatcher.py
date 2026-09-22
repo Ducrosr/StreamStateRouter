@@ -9,6 +9,15 @@ from stream_state_router.obs.models import OBSAction
 from stream_state_router.router.models import StreamState
 
 
+class FakeHostController:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, kind, params):
+        self.calls.append((kind, dict(params)))
+        return True
+
+
 class FakeClient:
     def __init__(self):
         self.calls = []
@@ -814,6 +823,7 @@ class OBSDispatcherTests(unittest.TestCase):
         actions = [
             OBSAction("set_program_scene", {"scene": "Game"}),
             OBSAction("source_filter_enabled", {"source": "Game", "filter": "HDR", "enabled": False}),
+            OBSAction("source_filter_settings", {"source": "Game", "filter": "HDR", "settings": {"exposure": 1.0}}),
             OBSAction("input_mute", {"input": "Mic", "muted": True}),
             OBSAction("input_volume_db", {"input": "Music", "volume_db": -12.5}),
             OBSAction("set_input_settings", {"input": "Text", "settings": {"text": "Hello"}, "overlay": True}),
@@ -823,10 +833,86 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertEqual([r for r, _ in client.calls], [
             "SetCurrentProgramScene",
             "SetSourceFilterEnabled",
+            "SetSourceFilterSettings",
             "SetInputMute",
             "SetInputVolume",
             "SetInputSettings",
         ])
+
+    def test_filter_settings_action_uses_obs_request_with_overlay(self):
+        client = FakeClient()
+        dispatcher = OBSDispatcher(client, {})
+
+        dispatcher.execute_action(
+            OBSAction(
+                "source_filter_settings",
+                {
+                    "source": "Game",
+                    "filter": "HDR Tone Map",
+                    "settings": {"exposure": 1.25, "enabled": True},
+                    "overlay": True,
+                },
+            )
+        )
+
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    "SetSourceFilterSettings",
+                    {
+                        "sourceName": "Game",
+                        "filterName": "HDR Tone Map",
+                        "filterSettings": {
+                            "exposure": 1.25,
+                            "enabled": True,
+                        },
+                        "overlay": True,
+                    },
+                )
+            ],
+        )
+
+    def test_host_actions_are_delegated_outside_obs(self):
+        client = FakeClient()
+        host = FakeHostController()
+        dispatcher = OBSDispatcher(client, {}, host_controller=host)
+
+        dispatcher.execute_action(
+            OBSAction(
+                "app_audio_output",
+                {
+                    "device": "Game",
+                    "process": "Dofus.exe",
+                    "roles": "all",
+                },
+            )
+        )
+        dispatcher.execute_action(
+            OBSAction(
+                "windows_hdr",
+                {"enabled": True, "display": "primary"},
+            )
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(
+            host.calls,
+            [
+                (
+                    "app_audio_output",
+                    {
+                        "device": "Game",
+                        "process": "Dofus.exe",
+                        "roles": "all",
+                    },
+                ),
+                (
+                    "windows_hdr",
+                    {"enabled": True, "display": "primary"},
+                ),
+            ],
+        )
 
     def test_input_volume_execution_rejects_missing_or_invalid_target(self):
         client = FakeClient()
