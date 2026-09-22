@@ -233,18 +233,20 @@ class DeclarativeExecutorTests(unittest.TestCase):
         self.assertEqual(set_payload["inputUuid"], "mic-1")
         self.assertAlmostEqual(set_payload["inputVolumeDb"], -6.25)
 
-    def test_input_volume_tolerance_avoids_noop_write(self):
+    def test_input_volume_float_roundtrip_tolerance_avoids_noop_write(self):
         key = PropertyKey.input_volume_db(
             collection="Lab Collection",
             input_name="Mic",
         )
-        desired = DesiredState.build([DesiredAssignment.create(key, -6.0)])
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, -99.25597)]
+        )
         prepared = _prepared(
             desired,
-            {key: ObservedValue.known_value(-6.0000004)},
+            {key: ObservedValue.known_value(-99.25596618652344)},
         )
         client = _ExecutorClient()
-        client.input_volume_db = -6.0000004
+        client.input_volume_db = -99.25596618652344
         executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
 
         result = executor.execute(prepared, validate_target=lambda: (True, ""))
@@ -253,6 +255,30 @@ class DeclarativeExecutorTests(unittest.TestCase):
         self.assertEqual(result.steps[0].status, "already_converged")
         self.assertFalse(
             any(name == "SetInputVolume" for name, _data in client.requests)
+        )
+
+    def test_input_volume_difference_beyond_tolerance_is_written(self):
+        key = PropertyKey.input_volume_db(
+            collection="Lab Collection",
+            input_name="Mic",
+        )
+        desired = DesiredState.build(
+            [DesiredAssignment.create(key, -99.25597)]
+        )
+        prepared = _prepared(
+            desired,
+            {key: ObservedValue.known_value(-99.25594)},
+        )
+        client = _ExecutorClient()
+        client.input_volume_db = -99.25594
+        executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
+
+        result = executor.execute(prepared, validate_target=lambda: (True, ""))
+
+        self.assertTrue(result.converged)
+        self.assertEqual(
+            [name for name, _data in client.requests].count("SetInputVolume"),
+            1,
         )
 
     def test_input_volume_protocol_boundaries_are_executable(self):
