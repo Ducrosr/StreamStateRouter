@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Callable, Mapping
 import uuid
 
@@ -15,8 +16,12 @@ from .declarative import DeclarativePlanningService
 
 
 DECLARATIVE_EXECUTOR_KINDS = frozenset(
-    {"scene_item_visibility", "input_mute"}
+    {"scene_item_visibility", "input_mute", "input_volume_db"}
 )
+
+_INPUT_VOLUME_DB_MIN = -100.0
+_INPUT_VOLUME_DB_MAX = 26.0
+_INPUT_VOLUME_DB_ABS_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +88,7 @@ class ExecutionStepResult:
     write_attempted: bool
     write_accepted: bool | None
     ack_known: bool
-    ack_value: bool | None
+    ack_value: bool | float | None
     status: str
     code: str = ""
 
@@ -149,10 +154,77 @@ def _binding_diagnostic(binding: ExecutionBinding) -> dict[str, object]:
             "occurrences": len(binding.occurrence_fingerprint),
         }
     return {
-        "kind": "input_mute",
+        "kind": binding.key.kind,
         "property": binding.key.as_mapping(),
         "input_uuid": binding.input_uuid,
     }
+
+
+def _normalize_executable_target(
+    key: PropertyKey,
+    value: object,
+) -> bool | float:
+    if key.kind in {"scene_item_visibility", "input_mute"}:
+        if not isinstance(value, bool):
+            raise _ExecutionBlocked(
+                f"{key.kind} executable value must be boolean"
+            )
+        return value
+
+    if key.kind == "input_volume_db":
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise _ExecutionBlocked(
+                "input_volume_db executable value must be a finite number"
+            )
+        normalized = float(value)
+        if not _INPUT_VOLUME_DB_MIN <= normalized <= _INPUT_VOLUME_DB_MAX:
+            raise _ExecutionBlocked(
+                "input_volume_db executable value must be between "
+                f"{_INPUT_VOLUME_DB_MIN:g} and {_INPUT_VOLUME_DB_MAX:g} dB"
+            )
+        return normalized
+
+    raise _ExecutionBlocked(
+        f"property kind {key.kind!r} is outside executor allowlist"
+    )
+
+
+def _executable_values_equal(
+    key: PropertyKey,
+    left: object,
+    right: object,
+) -> bool:
+    if key.kind in {"scene_item_visibility", "input_mute"}:
+        return (
+            isinstance(left, bool)
+            and isinstance(right, bool)
+            and left is right
+        )
+
+    if key.kind == "input_volume_db":
+        if (
+            isinstance(left, bool)
+            or not isinstance(left, (int, float))
+            or isinstance(right, bool)
+            or not isinstance(right, (int, float))
+        ):
+            return False
+        left_value = float(left)
+        right_value = float(right)
+        if not math.isfinite(left_value) or not math.isfinite(right_value):
+            return False
+        return math.isclose(
+            left_value,
+            right_value,
+            rel_tol=1e-9,
+            abs_tol=_INPUT_VOLUME_DB_ABS_TOLERANCE,
+        )
+
+    return False
 
 
 class DeclarativeExecutor:
@@ -204,6 +276,10 @@ class DeclarativeExecutor:
                 )
             elif assignment.key.kind == "input_mute":
                 required.update({"GetInputList", "GetInputMute", "SetInputMute"})
+            elif assignment.key.kind == "input_volume_db":
+                required.update(
+                    {"GetInputList", "GetInputVolume", "SetInputVolume"}
+                )
             else:
                 raise _ExecutionBlocked(
                     f"property kind {assignment.key.kind!r} is outside executor allowlist"
@@ -241,7 +317,7 @@ class DeclarativeExecutor:
         self,
         prepared: PreparedExecution,
         binding: ExecutionBinding,
-    ) -> bool:
+    ) -> bool | float:
         key = binding.key
         if isinstance(binding, SceneItemBinding):
             scenes = self._guarded_send(prepared, "GetSceneList").get("scenes", []) or []
@@ -317,23 +393,53 @@ class DeclarativeExecutor:
         input_uuid = str(matches[0].get("inputUuid") or "").strip()
         if not input_uuid or input_uuid != binding.input_uuid:
             raise _ReplanRequired("input UUID changed")
-        response = self._guarded_send(
-            prepared,
-            "GetInputMute",
-            {"inputUuid": binding.input_uuid},
+        if key.kind == "input_mute":
+            response = self._guarded_send(
+                prepared,
+                "GetInputMute",
+                {"inputUuid": binding.input_uuid},
+            )
+            value = response.get("inputMuted")
+            if not isinstance(value, bool):
+                raise _ExecutionBlocked("OBS returned non-boolean inputMuted")
+            return value
+
+        if key.kind == "input_volume_db":
+            response = self._guarded_send(
+                prepared,
+                "GetInputVolume",
+                {"inputUuid": binding.input_uuid},
+            )
+            raw_value = response.get("inputVolumeDb")
+            if (
+                isinstance(raw_value, bool)
+                or not isinstance(raw_value, (int, float))
+                or not math.isfinite(float(raw_value))
+            ):
+                raise _ExecutionBlocked(
+                    "OBS returned invalid inputVolumeDb"
+                )
+            value = float(raw_value)
+            if not _INPUT_VOLUME_DB_MIN <= value <= _INPUT_VOLUME_DB_MAX:
+                raise _ExecutionBlocked(
+                    "OBS returned inputVolumeDb outside protocol range"
+                )
+            return value
+
+        raise _ExecutionBlocked(
+            f"unsupported input binding kind: {key.kind}"
         )
-        value = response.get("inputMuted")
-        if not isinstance(value, bool):
-            raise _ExecutionBlocked("OBS returned non-boolean inputMuted")
-        return value
 
     def _write_binding(
         self,
         prepared: PreparedExecution,
         binding: ExecutionBinding,
-        target: bool,
+        target: bool | float,
     ) -> None:
+        key = binding.key
         if isinstance(binding, SceneItemBinding):
+            if key.kind != "scene_item_visibility" or not isinstance(target, bool):
+                raise _ExecutionBlocked("invalid scene-item execution target")
             self.client.send(
                 "SetSceneItemEnabled",
                 {
@@ -344,13 +450,38 @@ class DeclarativeExecutor:
                 expected_session_generation=prepared.session_generation,
             )
             return
-        self.client.send(
-            "SetInputMute",
-            {
-                "inputUuid": binding.input_uuid,
-                "inputMuted": target,
-            },
-            expected_session_generation=prepared.session_generation,
+
+        if key.kind == "input_mute":
+            if not isinstance(target, bool):
+                raise _ExecutionBlocked("invalid input mute execution target")
+            self.client.send(
+                "SetInputMute",
+                {
+                    "inputUuid": binding.input_uuid,
+                    "inputMuted": target,
+                },
+                expected_session_generation=prepared.session_generation,
+            )
+            return
+
+        if key.kind == "input_volume_db":
+            if (
+                isinstance(target, bool)
+                or not isinstance(target, (int, float))
+            ):
+                raise _ExecutionBlocked("invalid input volume execution target")
+            self.client.send(
+                "SetInputVolume",
+                {
+                    "inputUuid": binding.input_uuid,
+                    "inputVolumeDb": float(target),
+                },
+                expected_session_generation=prepared.session_generation,
+            )
+            return
+
+        raise _ExecutionBlocked(
+            f"unsupported input binding kind: {key.kind}"
         )
 
     def execute(
@@ -409,20 +540,20 @@ class DeclarativeExecutor:
                 return finish("replan_required", replan_required=True, diagnostic=reason)
 
             bindings = self._binding_map(prepared)
-            candidates: list[tuple[PropertyKey, ExecutionBinding, bool]] = []
+            candidates: list[
+                tuple[PropertyKey, ExecutionBinding, bool | float]
+            ] = []
 
             # Global physical preflight before the first mutation.
             for assignment in prepared.desired.assignments:
                 binding = bindings[assignment.key]
                 current = self._read_binding(prepared, binding)
-                target = assignment.value
-                if not isinstance(target, bool):
-                    return finish(
-                        "blocked",
-                        diagnostic="MVP executable values must be boolean",
-                    )
+                target = _normalize_executable_target(
+                    assignment.key,
+                    assignment.value,
+                )
                 operation = operation_by_key.get(assignment.key)
-                if current is target:
+                if _executable_values_equal(assignment.key, current, target):
                     steps.append(
                         ExecutionStepResult(
                             assignment.key,
@@ -441,7 +572,11 @@ class DeclarativeExecutor:
                         replan_required=True,
                         diagnostic="previously converged property drifted after preparation",
                     )
-                if operation.observed is not current:
+                if not _executable_values_equal(
+                    assignment.key,
+                    operation.observed,
+                    current,
+                ):
                     return finish(
                         "replan_required",
                         replan_required=True,
@@ -468,7 +603,7 @@ class DeclarativeExecutor:
 
                 current = self._read_binding(prepared, binding)
                 operation = operation_by_key[key]
-                if current is target:
+                if _executable_values_equal(key, current, target):
                     steps = [step for step in steps if step.key != key]
                     steps.append(
                         ExecutionStepResult(
@@ -483,7 +618,11 @@ class DeclarativeExecutor:
                     )
                     publish_progress()
                     continue
-                if operation.observed is not current:
+                if not _executable_values_equal(
+                    key,
+                    operation.observed,
+                    current,
+                ):
                     return finish(
                         "replan_required",
                         replan_required=True,
@@ -613,7 +752,7 @@ class DeclarativeExecutor:
                         diagnostic=str(exc),
                     )
 
-                if ack is target:
+                if _executable_values_equal(key, ack, target):
                     replace_step(
                         ExecutionStepResult(
                             key,
