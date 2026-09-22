@@ -3,33 +3,34 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 
 function Invoke-Native {
     param(
-        [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true, Position = 0)][string]$FilePath,
+        [Parameter(Position = 1)][string[]]$ArgumentList = @()
     )
-    & $FilePath @Arguments
+
+    & $FilePath @ArgumentList
     if ($LASTEXITCODE -ne 0) {
-        throw "Commande native échouée ($LASTEXITCODE) : $FilePath $($Arguments -join ' ')"
+        throw "Commande native échouée ($LASTEXITCODE) : $FilePath $($ArgumentList -join ' ')"
     }
 }
 
 if (-not (Test-Path .venv)) {
-    Invoke-Native py -3.12 -m venv .venv
+    Invoke-Native -FilePath "py" -ArgumentList @("-3.12", "-m", "venv", ".venv")
 }
 
 $Python = (Resolve-Path .\.venv\Scripts\python.exe).Path
-Invoke-Native $Python -m pip install --upgrade pip
-Invoke-Native $Python -m pip install -e ".[all]"
+Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "--upgrade", "pip")
+Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "-e", ".[all]")
 
 $Version = (& $Python -c "import stream_state_router; print(stream_state_router.__version__)").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "Impossible de déterminer la version SSR." }
 
 Write-Host "=== Python : tests + lint ===" -ForegroundColor Cyan
-Invoke-Native $Python -m unittest discover -s tests -v
-Invoke-Native $Python -m ruff check .
-Invoke-Native $Python main.py --check-config
+Invoke-Native -FilePath $Python -ArgumentList @("-m", "unittest", "discover", "-s", "tests", "-v")
+Invoke-Native -FilePath $Python -ArgumentList @("-m", "ruff", "check", ".")
+Invoke-Native -FilePath $Python -ArgumentList @("main.py", "--check-config")
 
 Write-Host "=== Application Windows ===" -ForegroundColor Cyan
-Invoke-Native .\.venv\Scripts\pyinstaller.exe --clean --noconfirm StreamStateRouter.spec
+Invoke-Native -FilePath ".\.venv\Scripts\pyinstaller.exe" -ArgumentList @("--clean", "--noconfirm", "StreamStateRouter.spec")
 if (-not (Test-Path .\dist\StreamStateRouter.exe)) { throw "EXE PyInstaller introuvable." }
 
 $Smoke = Start-Process -FilePath .\dist\StreamStateRouter.exe -ArgumentList "--check-config" -Wait -PassThru
@@ -47,11 +48,11 @@ $Npm = Get-Command npm -ErrorAction SilentlyContinue
 if ($Npm) {
     Push-Location .\streamdeck-plugin
     try {
-        Invoke-Native $Npm.Source ci --ignore-scripts --no-audit --no-fund
-        Invoke-Native $Npm.Source run typecheck
-        Invoke-Native $Npm.Source run build
-        Invoke-Native $Npm.Source run validate
-        Invoke-Native $Npm.Source run pack
+        Invoke-Native -FilePath $Npm.Source -ArgumentList @("ci", "--ignore-scripts", "--no-audit", "--no-fund")
+        Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "typecheck")
+        Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "build")
+        Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "validate")
+        Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "pack")
         $Plugin = Get-ChildItem -Filter *.streamDeckPlugin | Select-Object -First 1
         if (-not $Plugin) { throw "Artefact Stream Deck introuvable." }
         Copy-Item $Plugin.FullName (Join-Path $Release $Plugin.Name) -Force
@@ -66,7 +67,7 @@ if ($Npm) {
 Write-Host "=== Installateur ===" -ForegroundColor Cyan
 $Iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 if ($Iscc) {
-    Invoke-Native $Iscc.Source "/DMyAppVersion=$Version" ".\installer\StreamStateRouter.iss"
+    Invoke-Native -FilePath $Iscc.Source -ArgumentList @("/DMyAppVersion=$Version", ".\installer\StreamStateRouter.iss")
     $Installer = Join-Path $Release "Stream-State-Router-v$Version-setup.exe"
     if (-not (Test-Path $Installer)) { throw "Installateur attendu introuvable : $Installer" }
 } else {
