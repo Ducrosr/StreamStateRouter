@@ -4,9 +4,11 @@ import unittest
 
 from stream_state_router.importers import (
     neutralize_referenced_test_layout_profiles,
+    remove_game_profile_input_actions,
     set_capture_profile_for_process,
     set_fallback_capture_profile,
     set_game_profile_input_setting,
+    wire_standard_multiclient_capture_profiles,
     wire_windows_hdr_capture_profiles,
 )
 
@@ -36,6 +38,115 @@ class SystemMigrationTests(unittest.TestCase):
         self.assertEqual(
             sdr["params"],
             {"enabled": False, "display": "primary"},
+        )
+
+    def test_wires_standard_and_multiclient_capture_profiles(self):
+        config = {
+            "profiles": {
+                "capture": {
+                    "HDR": {"actions": []},
+                    "SDR": {"actions": []},
+                }
+            }
+        }
+
+        changed = wire_standard_multiclient_capture_profiles(
+            config,
+            scene="Capture Root",
+            standard_source="Game Capture",
+            multiclient_source="DWM Pool",
+            multiclient_hdr_profile="Dofus HDR",
+            multiclient_sdr_profile="Dofus SDR",
+        )
+
+        self.assertEqual(
+            changed,
+            ("HDR", "SDR", "Dofus HDR", "Dofus SDR"),
+        )
+        capture = config["profiles"]["capture"]
+        for name, hdr_enabled, standard_enabled in (
+            ("HDR", True, True),
+            ("SDR", False, True),
+            ("Dofus HDR", True, False),
+            ("Dofus SDR", False, False),
+        ):
+            actions = capture[name]["actions"]
+            hdr = next(a for a in actions if a["type"] == "windows_hdr")
+            standard = next(
+                a for a in actions
+                if a["type"] == "scene_item_enabled"
+                and a["params"]["source"] == "Game Capture"
+            )
+            multi = next(
+                a for a in actions
+                if a["type"] == "scene_item_enabled"
+                and a["params"]["source"] == "DWM Pool"
+            )
+            self.assertEqual(hdr["params"]["enabled"], hdr_enabled)
+            self.assertEqual(
+                standard["params"]["enabled"],
+                standard_enabled,
+            )
+            self.assertEqual(
+                multi["params"]["enabled"],
+                not standard_enabled,
+            )
+
+        second = wire_standard_multiclient_capture_profiles(
+            config,
+            scene="Capture Root",
+            standard_source="Game Capture",
+            multiclient_source="DWM Pool",
+            multiclient_hdr_profile="Dofus HDR",
+            multiclient_sdr_profile="Dofus SDR",
+        )
+        self.assertEqual(second, ())
+
+    def test_removes_imported_capture_input_actions_only(self):
+        config = {
+            "profiles": {
+                "game": {
+                    "Dofus Unity": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Capture de jeu",
+                                    "settings": {"window": "old"},
+                                },
+                            },
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Avatar Dynamic",
+                                    "settings": {"file": "avatar.png"},
+                                },
+                            },
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Avatar Dynamic",
+                                    "filter": "FX",
+                                },
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+
+        removed = remove_game_profile_input_actions(
+            config,
+            game_profile="Dofus Unity",
+            input_name="Capture de jeu",
+        )
+
+        self.assertEqual(removed, 1)
+        remaining = config["profiles"]["game"]["Dofus Unity"]["actions"]
+        self.assertEqual(len(remaining), 2)
+        self.assertEqual(
+            remaining[0]["params"]["input"],
+            "Avatar Dynamic",
         )
 
     def test_neutralizes_only_referenced_test_layout_profiles(self):

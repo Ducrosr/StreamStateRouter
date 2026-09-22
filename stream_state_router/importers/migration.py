@@ -297,3 +297,184 @@ def set_fallback_capture_profile(
     previous = str(fallback.get("CaptureProfile") or "")
     fallback["CaptureProfile"] = wanted_profile
     return previous
+
+
+def wire_standard_multiclient_capture_profiles(
+    config: dict[str, Any],
+    *,
+    scene: str,
+    standard_source: str,
+    multiclient_source: str,
+    hdr_profile: str = "HDR",
+    sdr_profile: str = "SDR",
+    multiclient_hdr_profile: str = "Multiclient HDR",
+    multiclient_sdr_profile: str = "Multiclient SDR",
+    display: str = "primary",
+) -> tuple[str, ...]:
+    """Wire standard Game Capture and multiclient scene-source capture profiles.
+
+    Standard HDR/SDR profiles show the normal game-capture source and hide the
+    multiclient source. Multiclient HDR/SDR profiles do the inverse. The helper
+    only owns the two visibility actions plus Windows HDR for these profiles;
+    unrelated actions already present in a profile are preserved.
+    """
+    scene_name = str(scene or "").strip()
+    normal_source = str(standard_source or "").strip()
+    multi_source = str(multiclient_source or "").strip()
+    if not scene_name or not normal_source or not multi_source:
+        raise ValueError(
+            "scene, standard_source et multiclient_source sont requis."
+        )
+    if normal_source.casefold() == multi_source.casefold():
+        raise ValueError(
+            "standard_source et multiclient_source doivent être distincts."
+        )
+
+    profiles = config.setdefault("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError("config.profiles doit être un objet.")
+    capture = profiles.setdefault("capture", {})
+    if not isinstance(capture, dict):
+        raise ValueError("config.profiles.capture doit être un objet.")
+
+    desired = (
+        (str(hdr_profile), True, True),
+        (str(sdr_profile), False, True),
+        (str(multiclient_hdr_profile), True, False),
+        (str(multiclient_sdr_profile), False, False),
+    )
+    changed: list[str] = []
+
+    def ensure_action(
+        actions: list[dict[str, Any]],
+        *,
+        kind: str,
+        name: str,
+        params: dict[str, Any],
+        match,
+    ) -> bool:
+        matches = [
+            action
+            for action in actions
+            if isinstance(action, dict)
+            and str(action.get("type") or "").strip().casefold() == kind
+            and match(action)
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Plusieurs actions '{kind}' gèrent la même propriété de capture."
+            )
+        wanted = {
+            "type": kind,
+            "name": name,
+            "enabled": True,
+            "params": params,
+        }
+        if not matches:
+            actions.append(wanted)
+            return True
+        current = matches[0]
+        if current != wanted:
+            current.clear()
+            current.update(wanted)
+            return True
+        return False
+
+    for profile_name, hdr_enabled, standard_enabled in desired:
+        profile = capture.get(profile_name)
+        if profile is None:
+            profile = {"actions": [], "conditions": {}, "extends": ""}
+            capture[profile_name] = profile
+            profile_changed = True
+        elif not isinstance(profile, dict):
+            raise ValueError(
+                f"CaptureProfile '{profile_name}' doit être un objet."
+            )
+        else:
+            profile_changed = False
+        actions = profile.setdefault("actions", [])
+        if not isinstance(actions, list):
+            raise ValueError(
+                f"CaptureProfile '{profile_name}'.actions doit être une liste."
+            )
+        profile.setdefault("conditions", {})
+        profile.setdefault("extends", "")
+
+        if ensure_action(
+            actions,
+            kind="windows_hdr",
+            name="Windows HDR ON" if hdr_enabled else "Windows HDR OFF",
+            params={"enabled": hdr_enabled, "display": str(display)},
+            match=lambda _action: True,
+        ):
+            profile_changed = True
+
+        for source_name, enabled in (
+            (normal_source, standard_enabled),
+            (multi_source, not standard_enabled),
+        ):
+            if ensure_action(
+                actions,
+                kind="scene_item_enabled",
+                name=(
+                    f"Capture standard {'ON' if enabled else 'OFF'}"
+                    if source_name == normal_source
+                    else f"Capture multiclient {'ON' if enabled else 'OFF'}"
+                ),
+                params={
+                    "scene": scene_name,
+                    "source": source_name,
+                    "enabled": enabled,
+                },
+                match=lambda action, source_name=source_name: (
+                    isinstance(action.get("params"), Mapping)
+                    and str(action["params"].get("scene") or "").strip().casefold()
+                    == scene_name.casefold()
+                    and str(action["params"].get("source") or "").strip().casefold()
+                    == source_name.casefold()
+                ),
+            ):
+                profile_changed = True
+
+        if profile_changed:
+            changed.append(profile_name)
+
+    return tuple(changed)
+
+
+def remove_game_profile_input_actions(
+    config: dict[str, Any],
+    *,
+    game_profile: str,
+    input_name: str,
+) -> int:
+    """Remove imported input-setting actions for one Game profile/input."""
+    profiles = config.get("profiles")
+    games = profiles.get("game") if isinstance(profiles, Mapping) else None
+    if not isinstance(games, Mapping):
+        raise ValueError("config.profiles.game doit être un objet.")
+    profile = games.get(str(game_profile))
+    if not isinstance(profile, dict):
+        raise ValueError(f"Game profile '{game_profile}' introuvable.")
+    actions = profile.get("actions")
+    if not isinstance(actions, list):
+        raise ValueError(
+            f"Game profile '{game_profile}'.actions doit être une liste."
+        )
+    wanted = str(input_name or "").strip().casefold()
+    kept: list[Any] = []
+    removed = 0
+    for action in actions:
+        params = action.get("params") if isinstance(action, Mapping) else None
+        if (
+            isinstance(action, Mapping)
+            and str(action.get("type") or "").strip().casefold()
+            == "set_input_settings"
+            and isinstance(params, Mapping)
+            and str(params.get("input") or "").strip().casefold() == wanted
+        ):
+            removed += 1
+            continue
+        kept.append(action)
+    actions[:] = kept
+    return removed

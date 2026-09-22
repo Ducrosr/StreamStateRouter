@@ -24,9 +24,11 @@ from stream_state_router.importers import (
     AdvancedSceneSwitcherImporter,
     SceneCollectionImporter,
     neutralize_referenced_test_layout_profiles,
+    remove_game_profile_input_actions,
     set_capture_profile_for_process,
     set_fallback_capture_profile,
     set_game_profile_input_setting,
+    wire_standard_multiclient_capture_profiles,
     wire_windows_hdr_capture_profiles,
 )
 from stream_state_router.obs.client import OBSClientManager
@@ -122,6 +124,14 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Ajoute Windows HDR ON à CaptureProfile HDR et OFF à SDR "
             "si aucune action contradictoire n'existe."
+        ),
+    )
+    parser.add_argument(
+        "--wire-multiclient-capture-pool",
+        action="store_true",
+        help=(
+            "Configure CaptureProfiles HDR/SDR sur Capture de jeu et crée "
+            "Dofus HDR/Dofus SDR sur la scène [DWM] Dofus Active."
         ),
     )
     parser.add_argument(
@@ -405,9 +415,52 @@ def main() -> int:
                 capture_route_changes: dict[str, list[str]] = {}
                 input_setting_changes: list[dict[str, str]] = []
                 fallback_capture_change: dict[str, str] | None = None
+                multiclient_capture_profiles_changed: tuple[str, ...] = ()
+                multiclient_removed_input_actions: dict[str, int] = {}
+                multiclient_scene_item_present: bool | None = None
                 if args.wire_hdr_profiles:
                     hdr_profiles_changed = wire_windows_hdr_capture_profiles(
                         migration_preview_config
+                    )
+                if args.wire_multiclient_capture_pool:
+                    multiclient_capture_profiles_changed = (
+                        wire_standard_multiclient_capture_profiles(
+                            migration_preview_config,
+                            scene="[Global] Capture de Jeu HDR/SDR",
+                            standard_source="Capture de jeu",
+                            multiclient_source="[DWM] Dofus Active",
+                            hdr_profile="HDR",
+                            sdr_profile="SDR",
+                            multiclient_hdr_profile="Dofus HDR",
+                            multiclient_sdr_profile="Dofus SDR",
+                        )
+                    )
+                    for process, profile in (
+                        ("Dofus.exe", "Dofus HDR"),
+                        ("Dofus Retro.exe", "Dofus SDR"),
+                    ):
+                        changed_rules = set_capture_profile_for_process(
+                            migration_preview_config,
+                            process=process,
+                            capture_profile=profile,
+                        )
+                        capture_route_changes[process] = list(changed_rules)
+                    for game_profile in ("Dofus Unity", "Dofus Retro"):
+                        try:
+                            removed = remove_game_profile_input_actions(
+                                migration_preview_config,
+                                game_profile=game_profile,
+                                input_name="Capture de jeu",
+                            )
+                        except ValueError:
+                            removed = 0
+                        multiclient_removed_input_actions[game_profile] = removed
+                    multiclient_scene_item_present = any(
+                        str(item.scene or "").strip()
+                        == "[Global] Capture de Jeu HDR/SDR"
+                        and str(item.source or "").strip()
+                        == "[DWM] Dofus Active"
+                        for item in snapshot.scene_items
                     )
                 for raw in args.route_capture_profile:
                     process, separator, profile = str(raw).partition("=")
@@ -505,6 +558,18 @@ def main() -> int:
                     "capture_route_changes": capture_route_changes,
                     "input_setting_changes": input_setting_changes,
                     "fallback_capture_change": fallback_capture_change,
+                    "wire_multiclient_capture_pool": bool(
+                        args.wire_multiclient_capture_pool
+                    ),
+                    "multiclient_capture_profiles_changed": list(
+                        multiclient_capture_profiles_changed
+                    ),
+                    "multiclient_removed_input_actions": (
+                        multiclient_removed_input_actions
+                    ),
+                    "multiclient_scene_item_present": (
+                        multiclient_scene_item_present
+                    ),
                 }
                 if args.wire_hdr_profiles:
                     if hdr_profiles_changed:
@@ -515,6 +580,35 @@ def main() -> int:
                     else:
                         print(
                             "CaptureProfiles HDR/SDR déjà correctement câblés."
+                        )
+                if args.wire_multiclient_capture_pool:
+                    print(
+                        "Capture standard par défaut : HDR/SDR -> Capture de jeu."
+                    )
+                    print(
+                        "Exceptions multiclients : "
+                        "Dofus.exe -> Dofus HDR ; "
+                        "Dofus Retro.exe -> Dofus SDR."
+                    )
+                    print(
+                        "Actions Game Capture retirées des profils Dofus : "
+                        + ", ".join(
+                            f"{name}={count}"
+                            for name, count in sorted(
+                                multiclient_removed_input_actions.items()
+                            )
+                        )
+                    )
+                    if multiclient_scene_item_present:
+                        print(
+                            "Pool DWM imbriqué : [DWM] Dofus Active est présent "
+                            "dans [Global] Capture de Jeu HDR/SDR."
+                        )
+                    else:
+                        print(
+                            "ATTENTION : ajouter une fois [DWM] Dofus Active "
+                            "comme source de scène dans "
+                            "[Global] Capture de Jeu HDR/SDR avant application."
                         )
                 if args.enable_converted_rules:
                     print("Nouvelles règles ASC converties : activées.")
