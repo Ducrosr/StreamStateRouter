@@ -18,7 +18,7 @@ if (-not (Test-Path .venv)) {
 
 $Python = (Resolve-Path .\.venv\Scripts\python.exe).Path
 Invoke-Native $Python -m pip install --upgrade pip
-Invoke-Native $Python -m pip install -e ".[all]"
+Invoke-Native $Python -m pip install -c constraints/windows-release.txt -e ".[all]"
 
 $Version = (& $Python -c "import stream_state_router; print(stream_state_router.__version__)").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "Impossible de déterminer la version SSR." }
