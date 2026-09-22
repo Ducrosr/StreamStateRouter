@@ -181,7 +181,10 @@ class DeclarativeExecutor:
         status = self.planning.catalog_status()
         if bool(status.get("stale", False)):
             raise _ReplanRequired("OBS catalog became stale since preparation")
-        collection, generation = self.planning.context_identity()
+        try:
+            collection, generation = self.planning.context_identity()
+        except RuntimeError as exc:
+            raise _ReplanRequired(str(exc)) from exc
         if collection != prepared.collection or generation != prepared.session_generation:
             raise _ReplanRequired("OBS session or Scene Collection changed")
 
@@ -576,6 +579,9 @@ class DeclarativeExecutor:
                 try:
                     self._context_check(prepared)
                     ack = self._read_binding(prepared, binding)
+                    # The readback is only authoritative while the prepared
+                    # OBS session and Scene Collection are still current.
+                    self._context_check(prepared)
                 except _ReplanRequired as exc:
                     replace_step(
                         ExecutionStepResult(
@@ -651,7 +657,14 @@ class DeclarativeExecutor:
 
             final_values: dict[PropertyKey, ObservedValue] = {}
             for assignment in prepared.desired.assignments:
-                current = self._read_binding(prepared, bindings[assignment.key])
+                try:
+                    current = self._read_binding(prepared, bindings[assignment.key])
+                except _ExecutionBlocked as exc:
+                    return finish(
+                        "failed",
+                        replan_required=True,
+                        diagnostic=f"final observation unavailable: {exc}",
+                    )
                 final_values[assignment.key] = ObservedValue.known_value(current)
             final_plan = build_execution_plan(
                 prepared.desired,
