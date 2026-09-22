@@ -800,8 +800,13 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         errors.append(f"{aprefix}.params.muted doit être booléen")
                 elif action_type == "input_volume_db":
                     required_text("input")
-                    if not _valid_number(params.get("volume_db", 0.0)):
+                    raw_volume = params.get("volume_db", 0.0)
+                    if not _valid_number(raw_volume):
                         errors.append(f"{aprefix}.params.volume_db doit être un nombre fini")
+                    elif not -100.0 <= float(raw_volume) <= 26.0:
+                        errors.append(
+                            f"{aprefix}.params.volume_db doit être compris entre -100 et 26 dB"
+                        )
                 elif action_type == "set_input_settings":
                     required_text("input")
                     if not isinstance(params.get("settings"), Mapping):
