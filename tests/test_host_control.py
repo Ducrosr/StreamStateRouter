@@ -133,6 +133,24 @@ class HostControlTests(unittest.TestCase):
 
             self.assertEqual(runner.calls, [])
 
+    def test_hdr_status_reports_primary_display_state(self):
+        api = FakeHDRAPI()
+        controller = WindowsHDRController(api=api)
+
+        status = controller.status(scope="primary")
+
+        self.assertEqual(
+            status,
+            (
+                {
+                    "source": r"\\.\DISPLAY1",
+                    "supported": True,
+                    "enabled": False,
+                    "primary": True,
+                },
+            ),
+        )
+
     def test_hdr_primary_changes_only_primary_display_and_acknowledges(self):
         api = FakeHDRAPI()
         controller = WindowsHDRController(api=api)
