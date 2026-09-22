@@ -431,8 +431,10 @@ Il reste opt-in et ne remplace pas le dispatcher historique :
 - `POST /planner/execute` avec `{"plan_id": "..."}` consomme ce ticket ;
 - `GET /requests/<request_id>` expose le résultat asynchrone et son statut métier.
 
-Le MVP exécute uniquement `SetSceneItemVisibility` pour des conteneurs scène
-identifiés par UUID et `SetInputMute` pour des inputs identifiés par UUID.
+Sur cette branche expérimentale, l'executor couvre `SetSceneItemVisibility`
+pour des conteneurs scène identifiés par UUID, `SetInputMute` et
+`SetInputVolume` pour des inputs identifiés par UUID. Le volume est limité à
+la plage protocolaire `-100 .. +26 dB` et reste soumis au même readback ciblé.
 Toute autre propriété rend le DesiredState non exécutable. Les LayoutProfiles
 restent exclusivement délégués à `OBSLayoutManager`.
 
@@ -487,7 +489,8 @@ La première fondation est volontairement **read-only** :
 
 Le planner reste un composant **pur et read-only**. L'exécution existante du
 dispatcher n'est pas remplacée. Le chemin expérimental décrit ci-dessus prépare
-et acquitte seulement deux propriétés simples via le worker `SSR-Router`, avec
+et acquitte un sous-ensemble volontairement restreint de propriétés simples
+(visibilité, mute, volume d'entrée) via le worker `SSR-Router`, avec
 revalidation de session/collection/identité juste avant chaque mutation et
 relecture physique après chaque `Set*`. Il n'alimente pas `_applied_profiles`,
 n'effectue ni retry de mutation ni rollback, et exige une nouvelle préparation
