@@ -806,7 +806,11 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         )
                     else:
                         raw_volume = params.get("volume_db")
-                        if not _valid_number(raw_volume):
+                        if (
+                            isinstance(raw_volume, bool)
+                            or not isinstance(raw_volume, (int, float))
+                            or not math.isfinite(float(raw_volume))
+                        ):
                             errors.append(
                                 f"{aprefix}.params.volume_db doit être un nombre fini"
                             )
