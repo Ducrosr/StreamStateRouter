@@ -309,7 +309,7 @@ Un plugin Stream Deck natif est fourni dans `streamdeck-plugin/` avec les action
 - Undo layout ;
 - Annuler aperçu.
 
-Le plugin 2.0 utilise actuellement les paramètres API par défaut `127.0.0.1:8765` sans jeton. Si vous modifiez le port ou activez un jeton API, utilisez temporairement les commandes HTTP personnalisées ou conservez les valeurs par défaut jusqu'à l'ajout de paramètres globaux au plugin.
+Le plugin utilise par défaut `127.0.0.1:8765` sans jeton. Si vous modifiez le port SSR ou activez un jeton API, ajoutez l'action **Connexion SSR** dans Stream Deck, renseignez le port et le jeton dans son Property Inspector puis appuyez une fois sur la touche. Ces valeurs sont enregistrées comme paramètres globaux du plugin et sont ensuite réutilisées par toutes les actions SSR.
 
 ## OBS classique
 
@@ -348,6 +348,37 @@ La configuration utilisateur est stockée dans :
 ```
 
 Le pilotage OBS est **désactivé par défaut** afin qu'un premier lancement ne modifie aucune scène.
+
+## Couverture de migration déclarative
+
+SSR peut analyser la configuration courante sans se connecter à OBS afin de mesurer
+la progression de la migration du dispatcher historique vers le modèle déclaratif :
+
+```powershell
+python main.py --coverage-report
+```
+
+Une sortie JSON exploitable par des outils est également disponible :
+
+```powershell
+python main.py --coverage-json
+```
+
+Le rapport distingue notamment :
+
+- `declarative_executable` : propriété représentable et autorisée par l'executor gardé actuel ;
+- `declarative_plannable` : propriété déjà représentable/planifiable mais pas encore exécutable ;
+- `declarative_intent_only` : intention stable mais couverture physique encore incomplète ;
+- `legacy_only` : action qui ne possède pas encore de représentation déclarative sûre ;
+- `delegated` : domaine volontairement conservé par un moteur spécialisé, notamment les LayoutProfiles ;
+- `invalid` / `disabled` : configuration invalide ou action désactivée.
+
+Les profils hérités sont évalués après résolution de l'héritage : une action héritée
+compte donc comme une **action effective** de chaque profil qui l'exécuterait.
+Les valeurs arbitraires de settings ne sont jamais incluses dans le rapport.
+
+Cette commande est strictement read-only : elle ne crée pas de connexion OBS et
+n'effectue aucune mutation.
 
 ## Validation développeur
 
