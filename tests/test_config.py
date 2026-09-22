@@ -115,7 +115,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         self.assertEqual(migrated["router"]["fallback_state"]["LayoutProfile"], "Vanilla")
         self.assertIn("Vanilla", migrated["layout_profiles"])
         self.assertEqual(validate_config(migrated), [])
@@ -170,7 +170,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         modules = migrated["layout_profiles"]["Vanilla"]["modules"]
         self.assertEqual(set(modules), {"[Global] Date", "[Global] Signature"})
         self.assertEqual(modules["[Global] Date"]["module_type"], "Global")
@@ -271,9 +271,98 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         self.assertEqual(migrated["activation_policies"], {})
         self.assertEqual(validate_config(migrated), [])
+
+    def test_schema_v5_adds_host_control_defaults(self):
+        data = self.sample()
+        data["schema_version"] = 5
+        data.pop("host_control", None)
+
+        migrated = migrate_config(data)
+
+        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(
+            migrated["host_control"],
+            {
+                "soundvolumeview_path": "",
+                "audio_timeout_seconds": 5.0,
+            },
+        )
+        self.assertEqual(validate_config(migrated), [])
+
+    def test_host_and_filter_actions_validate(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data["host_control"] = {
+            "soundvolumeview_path": r"C:\\Tools\\SoundVolumeView.exe",
+            "audio_timeout_seconds": 4.0,
+        }
+        data["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "app_audio_output",
+                "params": {
+                    "device": "Game",
+                    "process": "Overwatch.exe",
+                    "roles": "all",
+                },
+            }
+        ]
+        data["profiles"]["capture"]["Default"]["actions"] = [
+            {
+                "type": "windows_hdr",
+                "params": {"enabled": True, "display": "primary"},
+            },
+            {
+                "type": "source_filter_settings",
+                "params": {
+                    "source": "Capture",
+                    "filter": "HDR Tone Map",
+                    "settings": {"exposure": 1.0},
+                    "overlay": True,
+                },
+            },
+        ]
+
+        self.assertEqual(validate_config(data), [])
+
+    def test_invalid_host_actions_are_rejected(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data["host_control"] = {
+            "soundvolumeview_path": 42,
+            "audio_timeout_seconds": 0,
+        }
+        data["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "app_audio_output",
+                "params": {"device": "", "process": "", "roles": "gaming"},
+            },
+            {
+                "type": "windows_hdr",
+                "params": {"enabled": "yes", "display": "secondary"},
+            },
+            {
+                "type": "source_filter_settings",
+                "params": {
+                    "source": "Capture",
+                    "filter": "HDR",
+                    "settings": [],
+                },
+            },
+        ]
+
+        errors = validate_config(data)
+
+        self.assertTrue(any("soundvolumeview_path" in item for item in errors), errors)
+        self.assertTrue(any("audio_timeout_seconds" in item for item in errors), errors)
+        self.assertTrue(any(".params.device est requis" in item for item in errors), errors)
+        self.assertTrue(any(".params.process est requis" in item for item in errors), errors)
+        self.assertTrue(any(".params.roles" in item for item in errors), errors)
+        self.assertTrue(any(".params.enabled doit être booléen" in item for item in errors), errors)
+        self.assertTrue(any(".params.display" in item for item in errors), errors)
+        self.assertTrue(any(".params.settings doit être un objet" in item for item in errors), errors)
 
     def test_random_activation_policy_is_valid_and_buildable(self):
         data = self.sample()
