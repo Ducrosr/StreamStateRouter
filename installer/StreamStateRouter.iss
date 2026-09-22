@@ -21,6 +21,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\release
 OutputBaseFilename=Stream-State-Router-v{#MyAppVersion}-setup
 PrivilegesRequired=lowest
+AppMutex=Local\StreamStateRouter-v1
 
 [Files]
 Source: "..\dist\StreamStateRouter.exe"; DestDir: "{app}"; Flags: ignoreversion
