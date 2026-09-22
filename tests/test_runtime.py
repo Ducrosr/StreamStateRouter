@@ -1001,6 +1001,29 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_unmanaged_default_domains_do_not_trigger_runtime_reconciliation(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(StreamState())
+        dispatcher = OBSDispatcher(CatalogRuntimeClient(), {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+        service._last_obs_connected = True
+
+        with patch.object(
+            dispatcher,
+            "dispatch_state",
+            wraps=dispatcher.dispatch_state,
+        ) as dispatch_state:
+            service._reconcile_desired_state_if_due()
+            service._last_state_reconcile = 0.0
+            service._reconcile_desired_state_if_due()
+
+        self.assertEqual(dispatcher.pending_domains(engine.current_state), ())
+        self.assertEqual(dispatch_state.call_count, 0)
+
     def test_pause_suspends_background_obs_reconciliation(self):
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
         engine.set_manual_override(StreamState(game="Vanilla"))

@@ -15,7 +15,7 @@ from ..activation.models import TriggerPolicyConfig
 from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
-from ..router.models import StreamState
+from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
 from ..router.rules import AppRule, ResolutionKind, RuleSet
 from .paths import backups_dir, config_path, default_config_path
 
@@ -889,13 +889,6 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         "audio": "AudioProfile",
         "layout": "LayoutProfile",
     }
-    default_profile_names = {
-        "game": "Vanilla",
-        "overlay": "Vanilla",
-        "capture": "Default",
-        "audio": "Default",
-        "layout": "Vanilla",
-    }
     profile_sets = {
         domain: set((profiles.get(domain) or {}).keys())
         if isinstance(profiles.get(domain, {}), Mapping)
@@ -919,7 +912,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             # represent (notably the executor lab with no LayoutProfile).
             if (
                 not profile_sets[domain]
-                and value == default_profile_names[domain]
+                and value == DEFAULT_PROFILE_NAMES[domain]
             ):
                 continue
             errors.append(f"{where}.{key} référence un profil inexistant : {value}")
