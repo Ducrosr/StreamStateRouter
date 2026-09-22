@@ -989,6 +989,7 @@ class AdvancedSceneSwitcherImporter:
         config: dict[str, Any],
         *,
         snapshot: SceneCollectionSnapshot | None = None,
+        enable_created_rules: bool = False,
     ) -> AdvancedSceneSwitcherImportReport:
         macros_raw = data.get("macros", [])
         macros = [
@@ -1658,7 +1659,7 @@ class AdvancedSceneSwitcherImporter:
                         "name": rule_name,
                         "behavior": "match",
                         "priority": 50 - index,
-                        "enabled": False,
+                        "enabled": bool(enable_created_rules),
                         "exe": exe,
                         "path": path,
                         "title_regex": title_regex,

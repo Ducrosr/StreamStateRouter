@@ -1146,6 +1146,49 @@ class ImporterTests(unittest.TestCase):
         )
         self.assertNotIn("Dofus", config["profiles"]["game"])
 
+    def test_advss_can_explicitly_enable_created_rule(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Dofus background",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "logic": 0,
+                            "process": "Dofus.exe",
+                            "focus": False,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "variable",
+                            "variableName": "Game",
+                            "condition": 0,
+                            "strValue": "Dofus",
+                        }
+                    ],
+                    "elseActions": [],
+                }
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            asc,
+            config,
+            enable_created_rules=True,
+        )
+
+        self.assertEqual(report.rules_created, 1)
+        self.assertTrue(config["rules"][0]["enabled"])
+
     def test_advss_process_path_macro_creates_disabled_rule(self):
         asc = {
             "macros": [
