@@ -5,6 +5,7 @@ import math
 import time
 from typing import Any, Mapping
 
+from ..host import HostControlController
 from ..planning import (
     DesiredAssignment,
     DesiredOwnershipConflict,
@@ -53,8 +54,10 @@ class OBSDispatcher:
         client: OBSClientManager,
         profiles: Mapping[str, Mapping[str, OBSProfile]] | None = None,
         layout_profiles: Mapping[str, Mapping[str, object]] | None = None,
+        host_controller: HostControlController | None = None,
     ):
         self.client = client
+        self.host_controller = host_controller
         self._profiles = {domain: dict(values) for domain, values in (profiles or {}).items()}
         self._layout_profiles = {
             str(name): dict(value) for name, value in (layout_profiles or {}).items()
@@ -285,6 +288,23 @@ class OBSDispatcher:
             description["target"] = (
                 f"{params.get('source', '')}/{params.get('filter', '')}"
             )
+            description["value"] = bool(params.get("enabled", True))
+        elif kind == "source_filter_settings":
+            description["target"] = (
+                f"{params.get('source', '')}/{params.get('filter', '')}"
+            )
+            settings = params.get("settings")
+            description["setting_keys"] = (
+                sorted(str(key) for key in settings)
+                if isinstance(settings, Mapping)
+                else []
+            )
+        elif kind == "app_audio_output":
+            description["target"] = str(params.get("process") or "")
+            description["device"] = str(params.get("device") or "")
+            description["roles"] = str(params.get("roles") or "all")
+        elif kind == "windows_hdr":
+            description["target"] = str(params.get("display") or "primary")
             description["value"] = bool(params.get("enabled", True))
         elif kind == "input_mute":
             description["target"] = str(params.get("input") or "")
@@ -902,6 +922,28 @@ class OBSDispatcher:
                 },
             )
             return
+        if kind == "source_filter_settings":
+            settings = p.get("settings")
+            if not isinstance(settings, Mapping):
+                raise ValueError("source_filter_settings requiert params.settings")
+            self.client.send(
+                "SetSourceFilterSettings",
+                {
+                    "sourceName": self._need(p, "source"),
+                    "filterName": self._need(p, "filter"),
+                    "filterSettings": dict(settings),
+                    "overlay": bool(p.get("overlay", True)),
+                },
+            )
+            return
+        if kind in {"app_audio_output", "windows_hdr"}:
+            if self.host_controller is None:
+                raise RuntimeError(
+                    "Contrôle Windows indisponible pour cette action."
+                )
+            if not self.host_controller.execute(kind, p):
+                raise ValueError(f"Action Windows inconnue : {action.type}")
+            return
         if kind == "input_mute":
             self.client.send(
                 "SetInputMute",
@@ -947,7 +989,7 @@ class OBSDispatcher:
                 },
             )
             return
-        raise ValueError(f"Type d'action OBS inconnu : {action.type}")
+        raise ValueError(f"Type d'action inconnu : {action.type}")
 
     def _scene_item_id(self, scene: str, source: str) -> int:
         # sceneItemId is ephemeral OBS state. Resolve the logical
