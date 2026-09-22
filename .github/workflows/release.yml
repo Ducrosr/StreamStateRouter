@@ -4,12 +4,21 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'main.py'
+      - 'stream_state_router/**'
+      - 'config/default.json'
+      - 'pyproject.toml'
+      - 'constraints/**'
+      - 'StreamStateRouter.spec'
+      - 'installer/**'
+      - 'scripts/build_windows.ps1'
+      - 'streamdeck-plugin/**'
 
 permissions:
   contents: write
-  id-token: write
-  attestations: write
-  artifact-metadata: write
 
 jobs:
   build-windows:
@@ -44,7 +53,7 @@ jobs:
         run: |
           $Version = (python -c "import stream_state_router; print(stream_state_router.__version__)").Trim()
           if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "Unable to resolve SSR version" }
-          if ("v$Version" -ne "${{ github.ref_name }}") {
+          if ("${{ github.ref_type }}" -eq "tag" -and "v$Version" -ne "${{ github.ref_name }}") {
             throw "Tag ${{ github.ref_name }} does not match source version v$Version"
           }
           "version=$Version" >> $env:GITHUB_OUTPUT
@@ -106,6 +115,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed: $LASTEXITCODE" }
           $Path = ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe"
           if (-not (Test-Path $Path)) { throw "Expected installer missing: $Path" }
+      - name: Smoke test installer
+        shell: pwsh
+        run: |
+          $Installer = ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe"
+          if (-not (Test-Path $Installer)) { throw "Installer missing before smoke test" }
+
+          $InstallDir = Join-Path $env:RUNNER_TEMP "SSR-Installer-Smoke"
+          if (Test-Path $InstallDir) {
+            Remove-Item $InstallDir -Recurse -Force
+          }
+
+          $Install = Start-Process -FilePath $Installer -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/SP-",
+            "/DIR=$InstallDir"
+          ) -Wait -PassThru
+          if ($Install.ExitCode -ne 0) { throw "Installer smoke install failed: $($Install.ExitCode)" }
+
+          $InstalledExe = Join-Path $InstallDir "StreamStateRouter.exe"
+          if (-not (Test-Path $InstalledExe)) { throw "Installed StreamStateRouter.exe missing" }
+          $AppSmoke = Start-Process -FilePath $InstalledExe -ArgumentList "--check-config" -Wait -PassThru
+          if ($AppSmoke.ExitCode -ne 0) { throw "Installed EXE smoke test failed: $($AppSmoke.ExitCode)" }
+
+          $Uninstaller = Join-Path $InstallDir "unins000.exe"
+          if (-not (Test-Path $Uninstaller)) { throw "Inno uninstaller missing after install" }
+          $Uninstall = Start-Process -FilePath $Uninstaller -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART"
+          ) -Wait -PassThru
+          if ($Uninstall.ExitCode -ne 0) { throw "Installer smoke uninstall failed: $($Uninstall.ExitCode)" }
       - name: Record build provenance
         shell: pwsh
         run: |
@@ -119,7 +161,9 @@ jobs:
           $Manifest = [ordered]@{
             version = "${{ steps.version.outputs.version }}"
             commit = "${{ github.sha }}"
-            tag = "${{ github.ref_name }}"
+            tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "" }
+            event = "${{ github.event_name }}"
+            ref = "${{ github.ref }}"
             python = (python --version 2>&1).ToString().Trim()
             pyinstaller = (pyinstaller --version 2>&1).ToString().Trim()
             node = (node --version 2>&1).ToString().Trim()
@@ -179,6 +223,18 @@ jobs:
           $ChecksumPath = ".\release\SHA256SUMS.txt"
           $Lines | Set-Content -Path $ChecksumPath -Encoding utf8
           if (-not (Test-Path $ChecksumPath)) { throw "Checksum manifest missing" }
+      - name: Upload release smoke artifacts
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-smoke-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            release/Stream-State-Router-v${{ steps.version.outputs.version }}-portable.zip
+            release/Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe
+            streamdeck-plugin/*.streamDeckPlugin
+            release/build-manifest.json
+            release/SHA256SUMS.txt
       - name: Verify SHA-256 checksum manifest
         shell: pwsh
         run: |
@@ -224,17 +280,8 @@ jobs:
               throw "Checksum mismatch for $($Artifact.Name)"
             }
           }
-      - name: Attest release artifacts
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-path: |
-            release/Stream-State-Router-v${{ steps.version.outputs.version }}-portable.zip
-            release/Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe
-            streamdeck-plugin/*.streamDeckPlugin
-            release/build-manifest.json
-            release/SHA256SUMS.txt
       - name: Publish GitHub release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
