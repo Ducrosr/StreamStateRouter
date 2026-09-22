@@ -4,7 +4,7 @@ import copy
 import json
 import os
 from typing import Mapping
-from PySide6.QtCore import QObject, Qt, Signal, QTimer
+from PySide6.QtCore import QObject, Qt, Signal, QTimer, QSettings
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMenu,
     QPlainTextEdit,
+    QScrollArea,
 )
 
 from .. import __version__
@@ -108,7 +109,12 @@ class MainWindow(QMainWindow):
     ):
         super().__init__()
         self.setWindowTitle(f"Stream State Router {__version__}")
+        self.setMinimumSize(760, 520)
         self.resize(1180, 760)
+        self._window_settings = QSettings("Ducrosr", "StreamStateRouter")
+        saved_geometry = self._window_settings.value("main_window/geometry")
+        if saved_geometry is not None:
+            self.restoreGeometry(saved_geometry)
         self.config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
         self._applied_revision = ""
@@ -175,12 +181,12 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
-        self.tabs.addTab(self._build_dashboard(), "Dashboard")
-        self.tabs.addTab(self._build_rules_tab(), "Règles")
-        self.tabs.addTab(self._build_profiles_tab(), "Profils")
-        self.tabs.addTab(self._build_layouts_tab(), "Layouts")
-        self.tabs.addTab(self._build_settings_tab(), "Paramètres")
-        self.tabs.addTab(self._build_logs_tab(), "Journal")
+        self.tabs.addTab(self._scrollable_tab(self._build_dashboard()), "Dashboard")
+        self.tabs.addTab(self._scrollable_tab(self._build_rules_tab()), "Règles")
+        self.tabs.addTab(self._scrollable_tab(self._build_profiles_tab()), "Profils")
+        self.tabs.addTab(self._scrollable_tab(self._build_layouts_tab()), "Layouts")
+        self.tabs.addTab(self._scrollable_tab(self._build_settings_tab()), "Paramètres")
+        self.tabs.addTab(self._scrollable_tab(self._build_logs_tab()), "Journal")
 
         footer = QHBoxLayout()
         self.unsaved = QLabel("")
@@ -192,6 +198,26 @@ class MainWindow(QMainWindow):
         self.save_button.clicked.connect(self.save_and_apply)
         footer.addWidget(self.save_button)
         layout.addLayout(footer)
+
+    def _scrollable_tab(self, page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setWidget(page)
+        return scroll
+
+    def _save_window_geometry(self) -> None:
+        self._window_settings.setValue(
+            "main_window/geometry",
+            self.saveGeometry(),
+        )
+        self._window_settings.sync()
 
     def _card(self, title_text: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
@@ -2948,6 +2974,7 @@ class MainWindow(QMainWindow):
         return result
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._save_window_geometry()
         if not self._quitting and self.close_to_tray.isChecked() and self.tray.isVisible():
             event.ignore()
             self.hide()
@@ -2965,6 +2992,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def _quit_app(self) -> None:
+        self._save_window_geometry()
         self._quitting = True
         if self._api:
             self._api.stop()
