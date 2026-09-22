@@ -716,6 +716,154 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(len(report.rejected_raw), 1)
         self.assertIn("transition spécifique", report.rejected_raw[0].reason)
 
+    def test_advss_negated_root_condition_is_rejected(self):
+        macro = {
+            "name": "Not game",
+            "group": False,
+            "conditions": [
+                {
+                    "id": "process",
+                    "logic": 1,
+                    "process": "game.exe",
+                    "focus": True,
+                    "checkPath": False,
+                    "regexConfig": {"enable": False},
+                }
+            ],
+            "actions": [
+                {
+                    "id": "scene_switch",
+                    "action": 0,
+                    "sceneType": 0,
+                    "sceneSelection": {
+                        "type": 0,
+                        "name": "In Game",
+                        "canvasSelection": "Main",
+                    },
+                    "transitionType": 1,
+                }
+            ],
+            "elseActions": [],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            {"macros": [macro]},
+            config,
+        )
+
+        self.assertEqual(report.macros_converted, 0)
+        self.assertEqual(len(report.rejected_raw), 1)
+        self.assertIn("logique de condition", report.rejected_raw[0].reason)
+
+    def test_advss_condition_duration_modifier_is_rejected(self):
+        macro = {
+            "name": "Game for 5 seconds",
+            "group": False,
+            "conditions": [
+                {
+                    "id": "process",
+                    "logic": 0,
+                    "process": "game.exe",
+                    "focus": True,
+                    "checkPath": False,
+                    "regexConfig": {"enable": False},
+                    "durationModifier": {
+                        "time_constraint": 1,
+                        "seconds": {"value": 5.0, "type": 0},
+                    },
+                }
+            ],
+            "actions": [
+                {
+                    "id": "scene_switch",
+                    "action": 0,
+                    "sceneType": 0,
+                    "sceneSelection": {
+                        "type": 0,
+                        "name": "In Game",
+                        "canvasSelection": "Main",
+                    },
+                    "transitionType": 1,
+                }
+            ],
+            "elseActions": [],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            {"macros": [macro]},
+            config,
+        )
+
+        self.assertEqual(report.macros_converted, 0)
+        self.assertEqual(len(report.rejected_raw), 1)
+        self.assertIn("contrainte de durée", report.rejected_raw[0].reason)
+
+    def test_advss_repeated_target_sequence_is_rejected(self):
+        macro = {
+            "name": "Two scene switches",
+            "group": False,
+            "conditions": [
+                {
+                    "id": "process",
+                    "logic": 0,
+                    "process": "game.exe",
+                    "focus": True,
+                    "checkPath": False,
+                    "regexConfig": {"enable": False},
+                }
+            ],
+            "actions": [
+                {
+                    "id": "scene_switch",
+                    "action": 0,
+                    "sceneType": 0,
+                    "sceneSelection": {
+                        "type": 0,
+                        "name": "Loading",
+                        "canvasSelection": "Main",
+                    },
+                    "transitionType": 1,
+                },
+                {
+                    "id": "scene_switch",
+                    "action": 0,
+                    "sceneType": 0,
+                    "sceneSelection": {
+                        "type": 0,
+                        "name": "In Game",
+                        "canvasSelection": "Main",
+                    },
+                    "transitionType": 1,
+                },
+            ],
+            "elseActions": [],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            {"macros": [macro]},
+            config,
+        )
+
+        self.assertEqual(report.macros_converted, 0)
+        self.assertEqual(len(report.rejected_raw), 1)
+        self.assertIn("plusieurs actions successives", report.rejected_raw[0].reason)
+        self.assertEqual(config["rules"], [])
+
     def test_advss_unsupported_macro_is_reported_without_partial_conversion(self):
         asc = {
             "macros": [
