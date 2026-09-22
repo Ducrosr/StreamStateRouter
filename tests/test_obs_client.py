@@ -31,6 +31,21 @@ class _FakeReqClient:
         return {"obsVersion": "32.2.2"}
 
 
+class _NotReadyRequestError(Exception):
+    code = 207
+
+
+class _NotReadyReqClient:
+    def __init__(self, **_kwargs):
+        pass
+
+    def send(self, request, data=None, raw=False):
+        raise _NotReadyRequestError(
+            "Request GetVersion returned code 207. "
+            "With message: OBS is not ready to perform the request."
+        )
+
+
 class _GenericRequestFailReqClient:
     def __init__(self, **_kwargs):
         pass
@@ -47,7 +62,33 @@ class _TransportFailReqClient:
         raise TimeoutError("timed out")
 
 
+class _ClosableReqClient:
+    def __init__(self, **_kwargs):
+        self.disconnected = False
+
+    def send(self, request, data=None, raw=False):
+        return {"obsVersion": "32.2.2"}
+
+    def disconnect(self):
+        self.disconnected = True
+
+
 class OBSClientManagerTests(unittest.TestCase):
+    def test_close_disconnects_owned_req_client_and_marks_manager_disconnected(self):
+        fake_obs = SimpleNamespace(ReqClient=_ClosableReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True))
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            client = manager._client
+            self.assertTrue(manager.connected)
+
+            manager.close()
+
+        self.assertTrue(client.disconnected)
+        self.assertIsNone(manager._client)
+        self.assertFalse(manager.connected)
+
     def test_request_error_keeps_connection_alive_and_does_not_start_backoff(self):
         _FakeReqClient.instances = 0
         fake_obs = SimpleNamespace(ReqClient=_FakeReqClient)
@@ -96,6 +137,25 @@ class OBSClientManagerTests(unittest.TestCase):
         self.assertNotIsInstance(captured.exception, OBSResourceNotFoundError)
         self.assertTrue(manager.connected)
 
+    def test_probe_reports_obs_startup_as_transient_not_ready_state(self):
+        fake_obs = SimpleNamespace(ReqClient=_NotReadyReqClient)
+        manager = OBSClientManager(
+            OBSConnectionConfig(enabled=True, reconnect_seconds=3.0)
+        )
+
+        with (
+            patch("stream_state_router.obs.client._obs", fake_obs),
+            patch(
+                "stream_state_router.obs.client._OBS_REQUEST_ERRORS",
+                (_NotReadyRequestError,),
+            ),
+        ):
+            ok, message = manager.probe()
+
+        self.assertFalse(ok)
+        self.assertTrue(manager.connected)
+        self.assertIn("encore en cours d'initialisation", message)
+
     def test_transport_error_marks_connection_unavailable(self):
         fake_obs = SimpleNamespace(ReqClient=_TransportFailReqClient)
         manager = OBSClientManager(OBSConnectionConfig(enabled=True, reconnect_seconds=3.0))
@@ -107,6 +167,63 @@ class OBSClientManagerTests(unittest.TestCase):
         self.assertFalse(manager.connected)
         self.assertGreater(manager._last_failure, 0.0)
 
+
+    def test_session_generation_changes_across_transport_lifecycle(self):
+        fake_obs = SimpleNamespace(ReqClient=_ClosableReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True))
+
+        self.assertEqual(manager.session_generation, 0)
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            connected_generation = manager.session_generation
+            manager.close()
+
+        self.assertGreater(connected_generation, 0)
+        self.assertGreater(manager.session_generation, connected_generation)
+
+    def test_guarded_send_refuses_changed_session_without_reconnecting(self):
+        _FakeReqClient.instances = 0
+        fake_obs = SimpleNamespace(ReqClient=_FakeReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True))
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            generation = manager.session_generation
+            manager.close()
+            instances_before = _FakeReqClient.instances
+
+            with self.assertRaisesRegex(OBSUnavailableError, "refusing reconnect"):
+                manager.send(
+                    "SetInputMute",
+                    {"inputUuid": "mic-1", "inputMuted": True},
+                    expected_session_generation=generation,
+                )
+
+        self.assertEqual(_FakeReqClient.instances, instances_before)
+
+    def test_legacy_send_keeps_existing_reconnect_behavior(self):
+        _FakeReqClient.instances = 0
+        fake_obs = SimpleNamespace(ReqClient=_FakeReqClient)
+        manager = OBSClientManager(OBSConnectionConfig(enabled=True))
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            manager.close()
+            manager.send("GetVersion")
+
+        self.assertEqual(_FakeReqClient.instances, 2)
+
+    def test_transport_failure_invalidates_session_generation(self):
+        fake_obs = SimpleNamespace(ReqClient=_TransportFailReqClient)
+        manager = OBSClientManager(
+            OBSConnectionConfig(enabled=True, reconnect_seconds=3.0)
+        )
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            with self.assertRaises(OBSUnavailableError):
+                manager.send("GetVersion")
+
+        self.assertGreaterEqual(manager.session_generation, 2)
 
 if __name__ == "__main__":
     unittest.main()

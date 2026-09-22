@@ -57,6 +57,8 @@ class MutableLayoutClient:
         self.calls.append((request, payload))
         if request == "GetVideoSettings":
             return {"baseWidth": self.canvas[0], "baseHeight": self.canvas[1]}
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": "Collection A"}
         if request == "GetSceneList":
             return {"currentProgramSceneName": "In Game", "scenes": [{"sceneName": "In Game"}]}
         if request == "GetSceneItemList":

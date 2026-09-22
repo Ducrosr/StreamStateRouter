@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import unittest
 from ctypes import wintypes
+from unittest.mock import patch
 
 from stream_state_router.router.foreground import (
+    WindowsForegroundProvider,
     _configure_kernel32 as configure_foreground_kernel32,
     _configure_user32,
 )
@@ -40,6 +43,24 @@ class WindowsAdapterSignatureTests(unittest.TestCase):
         self.assertIs(dll.GetForegroundWindow.restype, wintypes.HWND)
         self.assertEqual(dll.GetWindowThreadProcessId.argtypes[0], wintypes.HWND)
         self.assertEqual(dll.GetWindowTextW.argtypes[-1], ctypes.c_int)
+
+    def test_foreground_provider_ignores_its_own_process_before_reading_title(self):
+        class FakeUser32:
+            def GetForegroundWindow(self):
+                return 123
+
+            def GetWindowThreadProcessId(self, _hwnd, pid_ptr):
+                pid_ptr._obj.value = os.getpid()
+                return 1
+
+        provider = WindowsForegroundProvider.__new__(WindowsForegroundProvider)
+        provider._user32 = FakeUser32()
+        provider._kernel32 = object()
+        provider._window_title = lambda _hwnd: self.fail("self title must not be read")
+        provider._process_path = lambda _pid: self.fail("self path must not be read")
+
+        with patch("stream_state_router.router.foreground.os.getpid", return_value=os.getpid()):
+            self.assertIsNone(provider.get())
 
     def test_foreground_kernel32_signatures_are_explicit(self):
         dll = FakeDLL("OpenProcess", "QueryFullProcessImageNameW", "CloseHandle")

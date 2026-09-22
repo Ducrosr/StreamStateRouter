@@ -15,7 +15,7 @@ from ..activation.models import TriggerPolicyConfig
 from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
-from ..router.models import StreamState
+from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
 from ..router.rules import AppRule, ResolutionKind, RuleSet
 from .paths import backups_dir, config_path, default_config_path
 
@@ -773,7 +773,12 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 if "enabled" in action and not isinstance(action.get("enabled"), bool):
                     errors.append(f"{aprefix}.enabled doit être booléen")
 
-                def required_text(key: str) -> None:
+                def required_text(
+                    key: str,
+                    *,
+                    params: Mapping[str, Any] = params,
+                    aprefix: str = aprefix,
+                ) -> None:
                     if not str(params.get(key) or "").strip():
                         errors.append(f"{aprefix}.params.{key} est requis")
 
@@ -795,8 +800,24 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         errors.append(f"{aprefix}.params.muted doit être booléen")
                 elif action_type == "input_volume_db":
                     required_text("input")
-                    if not _valid_number(params.get("volume_db", 0.0)):
-                        errors.append(f"{aprefix}.params.volume_db doit être un nombre fini")
+                    if "volume_db" not in params:
+                        errors.append(
+                            f"{aprefix}.params.volume_db est obligatoire"
+                        )
+                    else:
+                        raw_volume = params.get("volume_db")
+                        if (
+                            isinstance(raw_volume, bool)
+                            or not isinstance(raw_volume, (int, float))
+                            or not math.isfinite(float(raw_volume))
+                        ):
+                            errors.append(
+                                f"{aprefix}.params.volume_db doit être un nombre fini"
+                            )
+                        elif not -100.0 <= float(raw_volume) <= 26.0:
+                            errors.append(
+                                f"{aprefix}.params.volume_db doit être compris entre -100 et 26 dB"
+                            )
                 elif action_type == "set_input_settings":
                     required_text("input")
                     if not isinstance(params.get("settings"), Mapping):
@@ -898,8 +919,19 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         parsed = StreamState.from_mapping(state)
         for domain, key in profile_keys.items():
             value = parsed.profile_name(domain)
-            if value not in profile_sets[domain]:
-                errors.append(f"{where}.{key} référence un profil inexistant : {value}")
+            if value in profile_sets[domain]:
+                continue
+            # OBSDispatcher already treats a completely unconfigured domain
+            # targeting its canonical default as intentionally unmanaged.
+            # Configuration validation must accept the same state or an
+            # otherwise valid read-only/default domain becomes impossible to
+            # represent (notably the executor lab with no LayoutProfile).
+            if (
+                not profile_sets[domain]
+                and value == DEFAULT_PROFILE_NAMES[domain]
+            ):
+                continue
+            errors.append(f"{where}.{key} référence un profil inexistant : {value}")
 
     check_state_refs(fallback, "router.fallback_state")
     for index, raw in enumerate(rules):

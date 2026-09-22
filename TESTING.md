@@ -1,4 +1,4 @@
-# Plan de validation — Stream State Router 2.0.14
+# Plan de validation — Stream State Router 2.1.0
 
 ## 0. Acceptation de la feuille de route Astra
 
@@ -213,3 +213,47 @@ Toute stratégie de nettoyage/migration de ces marqueurs doit être décidée s�
 - [ ] Vérifier 1080p → QHD et retour.
 - [ ] Vérifier scène → groupe → scène imbriquée → PNG.
 - [ ] Vérifier que les correctifs de stabilisation des groupes restent intacts.
+
+
+## 10. Executor déclaratif Lot 2 — campagne OBS dédiée
+
+Campagne réalisée dans la Scene Collection isolée `SSR Executor Lab` sur le
+candidat PR #11. Ces validations complètent les scénarios historiques ci-dessus ;
+elles ne les remplacent pas.
+
+- [x] Synchroniser un catalogue complet et observer les deux propriétés MVP sans mutation.
+- [x] Préparer puis exécuter un état divergent `input_mute + scene_item_visibility` ; chaque écriture doit être suivie d'un readback ciblé et le sweep final doit converger.
+- [x] Préparer/exécuter un état déjà convergé ; aucune écriture OBS ne doit être envoyée.
+- [x] Redémarrer OBS après préparation ; l'ancien ticket doit être refusé et demander un replan.
+- [x] Changer de Scene Collection après préparation ; l'ancien ticket doit être refusé avant mutation.
+- [x] Ajouter une occurrence homonyme d'un Scene Item après préparation ; le fingerprint doit invalider le ticket.
+- [x] Supprimer/recréer le Scene Item sous le même nom ; la nouvelle identité physique doit invalider l'ancien ticket.
+- [x] Supprimer/recréer l'input sous le même nom ; le nouvel UUID doit invalider l'ancien ticket.
+- [x] Rendre une condition OBS de profil fausse après préparation sans changer de session/collection ; exécution refusée, zéro étape mutée.
+- [x] Vérifier que le dispatcher legacy `reapply` fonctionne encore sur les profils configurés.
+- [x] Préparer un ticket puis faire pause → reprise → pause ; l'ancien `plan_id` doit être invalide.
+- [x] Restaurer la configuration production après le Lab et vérifier `main.py --check-config`.
+- [x] Désactiver `SSR_ENABLE_DECLARATIVE_EXECUTION` après la campagne.
+
+Le cas d'un shutdown manuel déclenché exactement entre deux mutations reste
+principalement couvert par les tests automatisés, car le provoquer de manière
+déterministe dans OBS réel est intrinsèquement racy.
+
+## 11. Executor déclaratif Lot 3 — volume d'input
+
+Campagne dédiée au `input_volume_db`, avec validation automatisée et test réel
+sur OBS 32.2.2.
+
+- [x] Exiger `volume_db` explicitement ; absence, booléen, chaîne numérique, NaN/Infinity et hors-plage doivent être refusés.
+- [x] Accepter les cibles `-100 dB` et `+26 dB`.
+- [x] Lier `GetInputVolume` / `SetInputVolume` à l'UUID physique de l'input.
+- [x] Considérer un round-trip float32 OBS comme convergent avec la tolérance partagée `1e-4 dB`.
+- [x] Conserver une observation physique finie légèrement au-dessus de `+26 dB` comme état lisible pouvant reconverger.
+- [x] Vérifier qu'un `SetInputVolume` accepté mais non reflété au readback produit divergence + replan.
+- [x] Vérifier qu'un plan mixte mute + volume s'exécute séquentiellement sur `SSR-Router`.
+- [x] Vérifier qu'un volume invalide bloque un plan mixte avant toute première mutation.
+- [x] Sur OBS réel, résoudre `SSR Executor Mic` par UUID.
+- [x] Sur OBS réel, muter temporairement `0 dB -> -1 dB`, acquitter la valeur puis restaurer exactement `inputVolumeMul=1.0`.
+- [x] Vérifier qu'une source sans audio retourne OBS 604 avant mutation et soit filtrée par le labo durci.
+
+

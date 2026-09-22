@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import logging
 import queue
+import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -23,9 +25,20 @@ from ..activation import (
     TriggerTargetIdentity,
 )
 from ..obs.dispatcher import DispatchResult, OBSDispatcher
+from ..obs.observed import build_execution_bindings
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
+from .declarative import DeclarativePlanningService
+from .declarative_execution import (
+    DECLARATIVE_EXECUTOR_KINDS,
+    DeclarativeExecutor,
+    PreparedExecution,
+)
+
+
+class _RuntimeShutdownRequested(BaseException):
+    """Internal cooperative-cancellation signal for the runtime worker."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +141,11 @@ class RuntimeShutdownResult:
     dispatch_quiescent: bool
     cleanup_complete: bool
     pending_cleanup: tuple[dict[str, object], ...] = ()
+    elapsed_ms: float = 0.0
+    pending_commands: int = 0
+    shutdown_phase: str = ""
+    active_operation: str = ""
+    worker_phase: str = ""
 
     @property
     def success(self) -> bool:
@@ -135,6 +153,30 @@ class RuntimeShutdownResult:
 
     def __bool__(self) -> bool:
         return self.success
+
+    def diagnostic_summary(self) -> str:
+        activation_pending = sum(
+            1
+            for item in self.pending_cleanup
+            if str(item.get("kind") or "activation_hide").casefold() != "layout_fade"
+        )
+        fade_pending = sum(
+            1
+            for item in self.pending_cleanup
+            if str(item.get("kind") or "").casefold() == "layout_fade"
+        )
+        return (
+            f"routing_thread={'stopped' if self.worker_stopped else 'alive'}; "
+            f"obs_dispatch={'quiescent' if self.dispatch_quiescent else 'active'}; "
+            f"cleanup={'complete' if self.cleanup_complete else f'pending({len(self.pending_cleanup)})'}; "
+            f"activation_pending={activation_pending}; "
+            f"fade_pending={fade_pending}; "
+            f"pending_commands={self.pending_commands}; "
+            f"phase={self.shutdown_phase or 'unknown'}; "
+            f"active_operation={self.active_operation or 'none'}; "
+            f"worker_phase={self.worker_phase or 'unknown'}; "
+            f"elapsed_ms={self.elapsed_ms:.1f}"
+        )
 
 
 class RoutingService:
@@ -154,7 +196,11 @@ class RoutingService:
         activation_scheduler: ActivationScheduler | None = None,
         activation_controller: OBSActivationController | None = None,
         pending_activation_cleanup=(),
+        pending_cleanup=(),
         config_revision: str = "",
+        bootstrap_foreground: ForegroundApp | None = None,
+        startup_layout_profile: str = "",
+        declarative_execution_enabled: bool = False,
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
@@ -164,15 +210,38 @@ class RoutingService:
         self.logger = logger or logging.getLogger("stream_state_router")
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
         self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
+        self.declarative_execution_enabled = bool(declarative_execution_enabled)
         policies = dict(activation_policies or {})
+        transferred_cleanup = tuple(pending_activation_cleanup or ()) + tuple(pending_cleanup or ())
+        activation_cleanup: list[Mapping[str, object]] = []
+        fade_cleanup: list[Mapping[str, object]] = []
+        for item in transferred_cleanup:
+            if not isinstance(item, Mapping):
+                continue
+            kind = str(item.get("kind") or "activation_hide").strip().casefold()
+            if kind == "layout_fade":
+                fade_cleanup.append(item)
+            else:
+                # Backward compatibility: pre-v2 cleanup markers did not carry
+                # a kind and always represented activation hides.
+                activation_cleanup.append(item)
+
         self.activation_scheduler = activation_scheduler
         self.activation_controller = activation_controller
         if self.activation_scheduler is None and policies:
             self.activation_scheduler = ActivationScheduler(policies)
-        if self.activation_controller is None and (policies or pending_activation_cleanup):
+        if self.activation_controller is None and (policies or activation_cleanup):
             self.activation_controller = OBSActivationController(dispatcher, policies)
-        if self.activation_controller is not None and pending_activation_cleanup:
-            self.activation_controller.import_pending_hides(pending_activation_cleanup)
+        if self.activation_controller is not None and activation_cleanup:
+            self.activation_controller.import_pending_hides(activation_cleanup)
+
+        layout_manager = getattr(self.dispatcher, "layout_manager", None)
+        if (
+            layout_manager is not None
+            and fade_cleanup
+            and hasattr(layout_manager, "import_pending_fade_cleanup")
+        ):
+            layout_manager.import_pending_fade_cleanup(fade_cleanup)
 
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -180,10 +249,19 @@ class RoutingService:
         self._lock = threading.RLock()
         self._dispatch_lock = threading.RLock()
         self._paused = False
+        self._resume_revalidation_pending = False
+        self._resume_revalidation_generation = 0
         self._last_app: ForegroundApp | None = None
+        # Keep the last real external foreground independently from transient
+        # None values produced while SSR itself owns the foreground window.
+        # A replacement runtime may use it exactly once to reconverge after a
+        # cooperative restart interrupted a long OBS transition.
+        self._last_meaningful_app: ForegroundApp | None = bootstrap_foreground
+        self._bootstrap_foreground: ForegroundApp | None = bootstrap_foreground
         self._dispatch_generation = 0
         self._last_obs_probe = 0.0
         self._last_obs_connected: bool | None = None
+        self._last_obs_session_generation: int | None = None
         self._last_state_reconcile = 0.0
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._routing_diagnostics: deque[RoutingDecisionStatus] = deque(maxlen=100)
@@ -198,8 +276,32 @@ class RoutingService:
         self._runtime_operational = False
         self._stopping = False
         self._shutdown_complete = threading.Event()
+        self._shutdown_phase = "idle"
+        self._active_operation = ""
+        self._active_obs_command: _OBSCommand | None = None
+        self._startup_layout_profile = str(startup_layout_profile or "").strip()
+        self._worker_phase = "idle"
+        self._shutdown_cleanup_active = False
         self._shutdown_result = RuntimeShutdownResult(True, True, True, ())
         self._command_status: dict[str, dict[str, object]] = {}
+        self._prepared_execution: PreparedExecution | None = None
+        self._prepared_execution_state: StreamState | None = None
+        self._active_declarative_partial: tuple[object, ...] = ()
+        client = getattr(self.dispatcher, "client", None)
+        self._declarative_planning = (
+            DeclarativePlanningService(client)
+            if client is not None
+            else None
+        )
+        self._declarative_executor = (
+            DeclarativeExecutor(
+                client,
+                self._declarative_planning,
+                cooperative_yield=self._cooperative_obs_yield,
+            )
+            if client is not None and self._declarative_planning is not None
+            else None
+        )
         self._simulation_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="SSR-Activation-Sim",
@@ -209,9 +311,18 @@ class RoutingService:
         self.on_change: Callable[[StateChange], None] | None = None
         self.on_dispatch: Callable[[DispatchResult], None] | None = None
         self.on_event: Callable[[RuntimeEvent], None] | None = None
-        layout_manager = getattr(self.dispatcher, "layout_manager", None)
-        if layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
+        if hasattr(self.dispatcher, "set_cooperative_yield"):
+            self.dispatcher.set_cooperative_yield(self._cooperative_obs_yield)
+        elif layout_manager is not None and hasattr(layout_manager, "set_cooperative_yield"):
             layout_manager.set_cooperative_yield(self._cooperative_obs_yield)
+        if self._declarative_planning is not None:
+            self._declarative_planning.set_cooperative_yield(
+                self._cooperative_obs_yield
+            )
+        if self.activation_controller is not None and hasattr(
+            self.activation_controller, "set_cooperative_yield"
+        ):
+            self.activation_controller.set_cooperative_yield(self._cooperative_obs_yield)
 
     @property
     def paused(self) -> bool:
@@ -223,6 +334,19 @@ class RoutingService:
         with self._lock:
             return self._last_app
 
+    @property
+    def last_meaningful_app(self) -> ForegroundApp | None:
+        with self._lock:
+            return self._last_meaningful_app
+
+    @property
+    def active_layout_apply_profile(self) -> str:
+        with self._lock:
+            command = self._active_obs_command
+            if command is None or command.action != "layout.apply":
+                return ""
+            return str(command.options.get("name") or "").strip()
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -230,9 +354,30 @@ class RoutingService:
             self._stop.clear()
             self._shutdown_complete.clear()
             self._stopping = False
+            self._shutdown_phase = "running"
+            self._active_operation = ""
+            self._active_obs_command = None
+            self._worker_phase = "starting"
+            self._shutdown_cleanup_active = False
             self._runtime_operational = True
             self._accept_activation_commands = True
             self._accept_obs_commands = True
+            if self._startup_layout_profile:
+                request_id = f"startup-layout-{uuid.uuid4().hex}"
+                self._set_command_status(
+                    request_id,
+                    action="layout.apply",
+                    status="accepted",
+                )
+                self._runtime_commands.put(
+                    _OBSCommand(
+                        request_id=request_id,
+                        generation=self._command_generation,
+                        action="layout.apply",
+                        options={"name": self._startup_layout_profile},
+                    )
+                )
+                self._startup_layout_profile = ""
         self._thread = threading.Thread(target=self._run, name="SSR-Router", daemon=True)
         self._thread.start()
 
@@ -241,12 +386,50 @@ class RoutingService:
         return self._shutdown_result
 
     def pending_cleanup_snapshot(self) -> tuple[dict[str, object], ...]:
+        items: list[dict[str, object]] = []
         controller = self.activation_controller
-        if controller is None:
-            return ()
-        return controller.export_pending_hides()
+        if controller is not None:
+            exporter = getattr(controller, "export_pending_hides", None)
+            if callable(exporter):
+                items.extend(dict(item) for item in exporter())
+
+        layout_manager = getattr(self.dispatcher, "layout_manager", None)
+        if layout_manager is not None:
+            exporter = getattr(layout_manager, "export_pending_fade_cleanup", None)
+            if callable(exporter):
+                items.extend(dict(item) for item in exporter())
+        return tuple(items)
+
+    def _build_shutdown_result(
+        self,
+        *,
+        worker_stopped: bool,
+        dispatch_quiescent: bool,
+        pending_cleanup: tuple[dict[str, object], ...],
+        started_at: float,
+    ) -> RuntimeShutdownResult:
+        with self._lock:
+            phase = self._shutdown_phase
+            active_operation = self._active_operation
+        worker_phase = self._worker_phase
+        result = RuntimeShutdownResult(
+            worker_stopped=worker_stopped,
+            dispatch_quiescent=dispatch_quiescent,
+            cleanup_complete=not pending_cleanup,
+            pending_cleanup=pending_cleanup,
+            elapsed_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+            pending_commands=max(0, self._runtime_commands.qsize()),
+            shutdown_phase=phase,
+            active_operation=active_operation,
+            worker_phase=worker_phase,
+        )
+        self._shutdown_result = result
+        log = self.logger.info if result else self.logger.error
+        log("runtime_stop: %s", result.diagnostic_summary())
+        return result
 
     def stop(self, timeout: float = 5.0) -> RuntimeShutdownResult:
+        started_at = time.monotonic()
         thread = self._thread
         if thread is None or not thread.is_alive():
             with self._lock:
@@ -254,15 +437,15 @@ class RoutingService:
                 self._accept_obs_commands = False
                 self._runtime_operational = False
                 self._stopping = True
+                self._shutdown_phase = "already_stopped"
             quiescent = self._wait_for_dispatch_quiescence(timeout)
             pending = self.pending_cleanup_snapshot()
-            self._shutdown_result = RuntimeShutdownResult(
-                True,
-                quiescent,
-                not pending,
-                pending,
+            return self._build_shutdown_result(
+                worker_stopped=True,
+                dispatch_quiescent=quiescent,
+                pending_cleanup=pending,
+                started_at=started_at,
             )
-            return self._shutdown_result
 
         with self._lock:
             if not self._stopping:
@@ -270,6 +453,7 @@ class RoutingService:
                 self._accept_obs_commands = False
                 self._runtime_operational = False
                 self._stopping = True
+                self._shutdown_phase = "requested"
                 self._dispatch_generation += 1
                 self._pending_dispatch = None
                 self._command_generation += 1
@@ -286,18 +470,22 @@ class RoutingService:
         thread.join(timeout=max(0.0, deadline - time.monotonic()))
         worker_stopped = not thread.is_alive()
         if not worker_stopped:
+            self._log_worker_stack(thread)
             self.logger.error(
                 "Routing service did not stop within %.1f s; refusing replacement runtime",
                 timeout,
             )
+            # The worker being alive is already sufficient to reject a replacement.
+            # Probe the dispatch lock only for an accurate diagnostic instead of
+            # reporting it active unconditionally.
+            quiescent = self._wait_for_dispatch_quiescence(0.0)
             pending = self.pending_cleanup_snapshot()
-            self._shutdown_result = RuntimeShutdownResult(
-                False,
-                False,
-                not pending,
-                pending,
+            return self._build_shutdown_result(
+                worker_stopped=False,
+                dispatch_quiescent=quiescent,
+                pending_cleanup=pending,
+                started_at=started_at,
             )
-            return self._shutdown_result
 
         remaining = max(0.0, deadline - time.monotonic())
         quiescent = self._wait_for_dispatch_quiescence(remaining)
@@ -307,19 +495,62 @@ class RoutingService:
                 "refusing replacement runtime"
             )
         pending = self.pending_cleanup_snapshot()
-        self._shutdown_result = RuntimeShutdownResult(
-            True,
-            quiescent,
-            not pending,
-            pending,
+        return self._build_shutdown_result(
+            worker_stopped=True,
+            dispatch_quiescent=quiescent,
+            pending_cleanup=pending,
+            started_at=started_at,
         )
-        return self._shutdown_result
+
+    def _log_worker_stack(self, thread: threading.Thread) -> None:
+        """Capture the worker stack without requiring cooperation from it."""
+        ident = thread.ident
+        if ident is None:
+            self.logger.error("SSR-Router stack unavailable: thread has no ident")
+            return
+        frame = sys._current_frames().get(ident)
+        if frame is None:
+            self.logger.error("SSR-Router stack unavailable: no current frame")
+            return
+        try:
+            stack = "".join(traceback.format_stack(frame))
+        except Exception as exc:
+            self.logger.error("SSR-Router stack capture failed: %s", exc)
+            return
+        self.logger.error(
+            "SSR-Router stack at stop timeout (phase=%s, active_operation=%s):\n%s",
+            self._worker_phase or "unknown",
+            self._active_operation or "none",
+            stack,
+        )
 
     def pause(self, paused: bool = True) -> None:
+        requested = bool(paused)
         with self._lock:
-            self._paused = bool(paused)
+            was_paused = self._paused
+            self._paused = requested
+            if requested:
+                self._resume_revalidation_pending = False
+            elif was_paused:
+                # Any prepared execution is scoped to the exact paused runtime
+                # generation. Resuming consumes that safety context.
+                self._prepared_execution = None
+                self._prepared_execution_state = None
+                # A pending automatic decision may have expired while routing
+                # was suspended. Force exactly one fresh routing decision before
+                # it can be released so normal debounce state cannot make an old
+                # decision appear current after resume. The generation prevents
+                # an older in-flight observation from acknowledging a newer
+                # pause/resume cycle.
+                self._resume_revalidation_generation += 1
+                self._resume_revalidation_pending = True
         self._wake.set()
-        self._emit(RuntimeEvent("pause", "Routage suspendu" if paused else "Routage repris"))
+        self._emit(
+            RuntimeEvent(
+                "pause",
+                "Routage suspendu" if requested else "Routage repris",
+            )
+        )
 
     def set_manual_override(
         self,
@@ -330,15 +561,25 @@ class RoutingService:
         with self._lock:
             change = self.engine.set_manual_override(state, duration_seconds=duration_seconds)
         if change:
-            self._apply_change(change)
+            self._apply_change(change, origin="manual_override")
         return change
 
     def clear_manual_override(self) -> StateChange | None:
+        context = None
+        if bool(getattr(self.engine, "needs_context", False)):
+            try:
+                context = self.dispatcher.obs_context()
+            except Exception:
+                context = {}
         with self._lock:
             app = self._last_app
-            change = self.engine.clear_manual_override(app)
+            change = self.engine.clear_manual_override(
+                app,
+                context=context,
+                use_context_provider=False,
+            )
         if change:
-            self._apply_change(change)
+            self._apply_change(change, origin="manual_override_clear")
         return change
 
     def force_reapply(self) -> DispatchResult | None:
@@ -441,6 +682,7 @@ class RoutingService:
         target_source: str | None = None,
         options: Mapping[str, object] | None = None,
     ) -> str:
+        request_id = uuid.uuid4().hex
         with self._lock:
             thread = self._thread
             if (
@@ -451,19 +693,20 @@ class RoutingService:
             ):
                 raise RuntimeError("Runtime d'activation indisponible ou en arrêt")
             generation = self._command_generation
-        request_id = uuid.uuid4().hex
-        self._set_command_status(request_id, action=str(action), status="accepted")
-        self._runtime_commands.put(
-            _ActivationCommand(
-                request_id=request_id,
-                generation=generation,
-                action=str(action),
-                policy=str(policy_name),
-                target_identity=target_identity,
-                target_source=target_source,
-                options=dict(options or {}),
+            # Admission and queue insertion are one atomic lifecycle decision:
+            # stop() cannot close admission/increment generation between them.
+            self._set_command_status(request_id, action=str(action), status="accepted")
+            self._runtime_commands.put(
+                _ActivationCommand(
+                    request_id=request_id,
+                    generation=generation,
+                    action=str(action),
+                    policy=str(policy_name),
+                    target_identity=target_identity,
+                    target_source=target_source,
+                    options=dict(options or {}),
+                )
             )
-        )
         self._wake.set()
         return request_id
 
@@ -473,6 +716,7 @@ class RoutingService:
         *,
         options: Mapping[str, object] | None = None,
     ) -> str:
+        request_id = uuid.uuid4().hex
         with self._lock:
             thread = self._thread
             if (
@@ -483,16 +727,15 @@ class RoutingService:
             ):
                 raise RuntimeError("Runtime OBS indisponible ou en arrêt")
             generation = self._command_generation
-        request_id = uuid.uuid4().hex
-        self._set_command_status(request_id, action=str(action), status="accepted")
-        self._runtime_commands.put(
-            _OBSCommand(
-                request_id=request_id,
-                generation=generation,
-                action=str(action),
-                options=dict(options or {}),
+            self._set_command_status(request_id, action=str(action), status="accepted")
+            self._runtime_commands.put(
+                _OBSCommand(
+                    request_id=request_id,
+                    generation=generation,
+                    action=str(action),
+                    options=dict(options or {}),
+                )
             )
-        )
         self._wake.set()
         return request_id
 
@@ -530,6 +773,63 @@ class RoutingService:
         with self._lock:
             row = self._command_status.get(str(request_id))
             return dict(row) if row is not None else None
+
+    def obs_catalog_status(self) -> dict[str, object]:
+        planning = self._declarative_planning
+        if planning is None:
+            return {"available": False, "stale": False}
+        return planning.catalog_status()
+
+    def obs_catalog_snapshot(self) -> dict[str, object]:
+        planning = self._declarative_planning
+        if planning is None:
+            return {"available": False, "stale": False}
+        return planning.catalog_snapshot()
+
+    def request_catalog_sync(self) -> str:
+        return self.submit_obs_command("catalog.sync")
+
+    def request_declarative_plan(
+        self,
+        *,
+        refresh_catalog: bool = True,
+    ) -> str:
+        return self.submit_obs_command(
+            "planner.current",
+            options={"refresh_catalog": bool(refresh_catalog)},
+        )
+
+    def _declarative_execution_admissible_locked(self) -> None:
+        if not self.declarative_execution_enabled:
+            raise RuntimeError("Exécution déclarative expérimentale désactivée")
+        if not self._runtime_operational or self._stopping:
+            raise RuntimeError("Runtime déclaratif indisponible ou en arrêt")
+        if not self._paused:
+            raise RuntimeError("L'exécution déclarative requiert SSR en pause")
+        pending = self._pending_dispatch
+        if pending is not None and self._pending_dispatch_allowed_while_paused(pending):
+            raise RuntimeError(
+                "Une commande explicite est encore en attente d'application"
+            )
+
+    def request_prepare_declarative_execution(self) -> str:
+        with self._lock:
+            self._declarative_execution_admissible_locked()
+        return self.submit_obs_command(
+            "planner.prepare_current",
+            options={"refresh_catalog": True},
+        )
+
+    def request_execute_declarative_plan(self, plan_id: str) -> str:
+        value = str(plan_id or "").strip()
+        if not value:
+            raise ValueError("plan_id requis")
+        with self._lock:
+            self._declarative_execution_admissible_locked()
+        return self.submit_obs_command(
+            "planner.execute",
+            options={"plan_id": value},
+        )
 
     def request_force_reapply(self) -> str:
         return self.submit_obs_command("reapply")
@@ -737,14 +1037,38 @@ class RoutingService:
             while not self._stop.is_set():
                 started = time.monotonic()
                 try:
+                    self._worker_phase = "commands"
                     if self._drain_runtime_commands():
                         break
+                    self._worker_phase = "probe"
                     self._probe_obs_if_due()
+                    with self._lock:
+                        if self._stopping:
+                            continue
+                    self._worker_phase = "foreground"
                     app = self.provider.get()
                     with self._lock:
                         changed_app = app != self._last_app
                         self._last_app = app
+                        if app is not None:
+                            self._last_meaningful_app = app
+                            self._bootstrap_foreground = None
+                        bootstrap_app = self._bootstrap_foreground
+                        bootstrap_routing = app is None and bootstrap_app is not None
+                        if bootstrap_routing:
+                            # Consume the handoff once. A real foreground observed
+                            # later always wins normally.
+                            self._bootstrap_foreground = None
                         paused = self._paused
+                        resume_revalidation = (
+                            self._resume_revalidation_pending and not paused
+                        )
+                        resume_revalidation_generation = (
+                            self._resume_revalidation_generation
+                            if resume_revalidation
+                            else 0
+                        )
+                    routing_app = bootstrap_app if bootstrap_routing else app
                     if changed_app:
                         self.logger.info(
                             "Foreground -> %s | %s",
@@ -753,14 +1077,62 @@ class RoutingService:
                         )
                         if self.on_foreground:
                             self.on_foreground(app)
+                    if bootstrap_routing:
+                        self.logger.info(
+                            "Routing bootstrap -> %s | %s",
+                            routing_app.exe_name if routing_app else "<none>",
+                            routing_app.window_title if routing_app else "",
+                        )
                     if not paused:
+                        routing_context = None
+                        if bool(getattr(self.engine, "needs_context", False)):
+                            self._worker_phase = "routing_context"
+                            try:
+                                routing_context = self.dispatcher.obs_context()
+                            except Exception:
+                                routing_context = {}
+                        self._worker_phase = "observe"
                         with self._lock:
-                            change = self.engine.observe(app)
+                            change = self.engine.observe(
+                                routing_app,
+                                force=bootstrap_routing or resume_revalidation,
+                                context=routing_context,
+                                use_context_provider=False,
+                            )
                         if change:
                             self._apply_change(change)
+                        if resume_revalidation:
+                            with self._lock:
+                                if (
+                                    self._resume_revalidation_pending
+                                    and not self._paused
+                                    and self._resume_revalidation_generation
+                                    == resume_revalidation_generation
+                                ):
+                                    # Acknowledge only the exact resume cycle
+                                    # that this observation revalidated. A newer
+                                    # pause/resume request remains a hard barrier.
+                                    self._resume_revalidation_pending = False
+                    self._worker_phase = "due_dispatch"
                     self._process_due_dispatch()
+                    with self._lock:
+                        if self._stopping:
+                            continue
+                    self._worker_phase = "reconcile"
                     self._reconcile_desired_state_if_due()
+                    with self._lock:
+                        if self._stopping:
+                            continue
+                    self._worker_phase = "activation_tick"
                     self._tick_activation(paused=paused)
+                    self._worker_phase = "idle"
+                except _RuntimeShutdownRequested:
+                    if self._stopping:
+                        self._worker_phase = "shutdown_cleanup"
+                        self._cancel_queued_commands_after_cooperative_shutdown()
+                        self._perform_orderly_shutdown()
+                        break
+                    raise
                 except Exception as exc:
                     self.logger.exception("Routing loop error")
                     self._emit(RuntimeEvent("error", str(exc)))
@@ -769,8 +1141,15 @@ class RoutingService:
                 wait_for = max(0.0, self.poll_seconds - elapsed)
                 with self._lock:
                     pending = self._pending_dispatch
-                if pending is not None:
-                    wait_for = min(wait_for, max(0.0, pending.deadline - time.monotonic()))
+                    pending_blocked = (
+                        pending is not None
+                        and self._pending_dispatch_blocked_locked(pending)
+                    )
+                if pending is not None and not pending_blocked:
+                    wait_for = min(
+                        wait_for,
+                        max(0.0, pending.deadline - time.monotonic()),
+                    )
                 self._wake.wait(wait_for)
                 self._wake.clear()
         finally:
@@ -778,6 +1157,9 @@ class RoutingService:
                 self._runtime_operational = False
                 self._accept_activation_commands = False
                 self._accept_obs_commands = False
+                self._shutdown_phase = "stopped"
+                self._active_operation = ""
+                self._worker_phase = "stopped"
             self._shutdown_complete.set()
             self.logger.info("Routing service stopped")
 
@@ -786,6 +1168,9 @@ class RoutingService:
         config = getattr(client, "config", None)
         if client is None or config is None or not bool(getattr(config, "enabled", False)):
             self._last_obs_connected = None
+            self._last_obs_session_generation = None
+            if self._declarative_planning is not None:
+                self._declarative_planning.invalidate_catalog("OBS disabled")
             return
 
         now = time.monotonic()
@@ -796,15 +1181,34 @@ class RoutingService:
         ok, message = client.probe()
         if ok:
             manager = getattr(self.dispatcher, "layout_manager", None)
-            if self._last_obs_connected is not True:
+            try:
+                session_generation = int(
+                    getattr(client, "session_generation", 0) or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                session_generation = 0
+            session_changed = bool(
+                session_generation
+                and self._last_obs_session_generation is not None
+                and session_generation != self._last_obs_session_generation
+            )
+            new_session = self._last_obs_connected is not True or session_changed
+            if new_session:
                 self.logger.info("OBS connection established: %s", message)
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
+                if self._declarative_planning is not None:
+                    self._declarative_planning.invalidate_catalog(
+                        "OBS session connected or replaced"
+                    )
                 if manager is not None and hasattr(manager, "invalidate_session"):
                     manager.invalidate_session()
                 self._last_state_reconcile = 0.0
                 self._reconcile_activation("connexion OBS")
                 self._emit(RuntimeEvent("obs_connected", message))
+            self._last_obs_session_generation = (
+                session_generation if session_generation else None
+            )
             if manager is not None and hasattr(manager, "retry_pending_fade_cleanup"):
                 cleanup_warnings = manager.retry_pending_fade_cleanup()
                 if cleanup_warnings:
@@ -826,8 +1230,20 @@ class RoutingService:
 
         if self._last_obs_connected is not False:
             self.logger.warning("OBS connection unavailable: %s", message)
+            if self._declarative_planning is not None:
+                self._declarative_planning.invalidate_catalog(
+                    "OBS connection unavailable"
+                )
             self._emit(RuntimeEvent("obs_disconnected", message))
         self._last_obs_connected = False
+        try:
+            failed_generation = int(
+                getattr(client, "session_generation", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            failed_generation = 0
+        if failed_generation:
+            self._last_obs_session_generation = failed_generation
 
     def _reconcile_desired_state_if_due(self) -> None:
         if self._last_obs_connected is False:
@@ -836,7 +1252,12 @@ class RoutingService:
         if self._last_state_reconcile and now - self._last_state_reconcile < self.state_reconcile_seconds:
             return
         with self._lock:
-            if self._stopping or self._pending_dispatch is not None:
+            if (
+                self._stopping
+                or self._paused
+                or self._resume_revalidation_pending
+                or self._pending_dispatch is not None
+            ):
                 return
             state = self.engine.current_state
             generation = self._dispatch_generation
@@ -883,14 +1304,17 @@ class RoutingService:
     def _reconcile_activation(self, reason: str) -> bool:
         scheduler = self.activation_scheduler
         controller = self.activation_controller
-        if scheduler is None or controller is None:
+        if controller is None:
             return True
-        with self._lock:
-            scheduler.reset_all()
-            self._activation_eligibility_cache.clear()
-            self._activation_cleanup_cache.clear()
+        if scheduler is not None:
+            with self._lock:
+                scheduler.reset_all()
+                self._activation_eligibility_cache.clear()
+                self._activation_cleanup_cache.clear()
         try:
             warnings = controller.reconcile()
+            for message in controller.retry_pending_hides(now=time.monotonic()):
+                self._record_activation_diagnostic("*", "nettoyage", message)
         except Exception as exc:
             self.logger.warning("Activation reconciliation failed (%s): %s", reason, exc)
             self._record_activation_diagnostic(
@@ -905,19 +1329,37 @@ class RoutingService:
             self.logger.warning("Activation reconcile: %s", warning)
             self._record_activation_diagnostic("*", "warning", warning)
         pending = controller.pending_hides()
+        current_pending_provider = getattr(
+            controller,
+            "pending_hides_for_current_collection",
+            None,
+        )
+        active_pending = (
+            tuple(current_pending_provider())
+            if callable(current_pending_provider)
+            else tuple(pending)
+        )
         cleanup_counts: dict[str, int] = {}
-        for item in pending:
+        for item in active_pending:
             cleanup_counts[item.policy] = cleanup_counts.get(item.policy, 0) + 1
         with self._lock:
+            self._activation_cleanup_cache.clear()
             self._activation_cleanup_cache.update(cleanup_counts)
-        if warnings or pending:
+        if warnings or active_pending:
             message = (
                 f"Nettoyage activation incomplet — {reason} "
-                f"({len(pending)} masquage(s) en attente)"
+                f"({len(active_pending)} masquage(s) actif(s) en attente)"
             )
             self._record_activation_diagnostic("*", "nettoyage", message)
             self._emit(RuntimeEvent("activation_cleanup_pending", message, success=False))
             return False
+        suspended = max(0, len(pending) - len(active_pending))
+        if suspended:
+            self._record_activation_diagnostic(
+                "*",
+                "nettoyage",
+                f"{suspended} obligation(s) contextualisée(s) suspendue(s) dans une autre Scene Collection",
+            )
 
         message = f"Déclenchements réinitialisés — {reason}"
         self._record_activation_diagnostic("*", "fail-safe", message)
@@ -927,16 +1369,23 @@ class RoutingService:
     def _tick_activation(self, *, paused: bool) -> None:
         scheduler = self.activation_scheduler
         controller = self.activation_controller
-        if scheduler is None or controller is None:
+        if controller is None:
             return
 
-        if controller.scene_collection_changed():
+        collection_changed = controller.scene_collection_changed()
+        if collection_changed and scheduler is not None:
             self._reconcile_activation("changement de Scene Collection")
             return
 
+        # Imported/leftover obligations are recovery work in their own right.
+        # They must continue to progress even when the current configuration no
+        # longer contains an activation scheduler/policy.
         now = time.monotonic()
         for message in controller.retry_pending_hides(now=now):
             self._record_activation_diagnostic("*", "nettoyage", message)
+
+        if scheduler is None:
+            return
 
         def eligibility(name: str, policy: TriggerPolicyConfig) -> bool:
             result = self._effective_activation_eligibility(name, policy)
@@ -991,7 +1440,7 @@ class RoutingService:
             return
 
         try:
-            controller.apply_event(event)
+            applied_collection = controller.apply_event(event)
         except ActivationCollectionChanged as exc:
             self._record_activation_diagnostic(event.policy, "collection", str(exc))
             with self._lock:
@@ -1022,6 +1471,11 @@ class RoutingService:
             return
 
         if event.kind == "show":
+            if applied_collection:
+                setter = getattr(scheduler, "set_active_collection", None)
+                if callable(setter):
+                    with self._lock:
+                        setter(event.policy, str(applied_collection))
             self._record_activation_diagnostic(
                 event.policy,
                 "déclenché",
@@ -1090,8 +1544,34 @@ class RoutingService:
         except Exception as exc:
             return False, f"évaluation impossible : {exc}"
 
+    def _cancel_queued_commands_after_cooperative_shutdown(self) -> None:
+        """Consume the posted shutdown marker after cooperative interruption.
+
+        stop() closes admission and increments the command generation before it
+        posts the shutdown command. A cooperative checkpoint can observe that
+        state and unwind the current OBS operation before the normal queue drain
+        reaches the marker. At that point every remaining non-shutdown command
+        is stale and must be completed as cancelled; the shutdown marker itself
+        is simply consumed so diagnostics do not report a phantom pending
+        command after the worker has already committed to orderly shutdown.
+        """
+        while True:
+            try:
+                command = self._runtime_commands.get_nowait()
+            except queue.Empty:
+                break
+
+            if isinstance(command, _ActivationCommand) and command.action == "shutdown":
+                continue
+
+            error = "Commande annulée par arrêt/reconfiguration du runtime"
+            if isinstance(command, _ActivationCommand):
+                self._emit_activation_result(command, success=False, error=error)
+            else:
+                self._emit_obs_result(command, success=False, error=error)
+
     def _drain_runtime_commands(self, *, allow_obs: bool = True) -> bool:
-        deferred: list[_OBSCommand] = []
+        deferred: list[_ActivationCommand | _OBSCommand] = []
         should_stop = False
         while True:
             try:
@@ -1124,7 +1604,15 @@ class RoutingService:
                 continue
 
             if command.action == "shutdown":
-                self._perform_activation_shutdown()
+                if not allow_obs:
+                    # A cooperative checkpoint may run while a layout command
+                    # owns _dispatch_lock. Defer shutdown until that command has
+                    # unwound so cleanup never re-enters OBS from inside an OBS
+                    # mutation.
+                    deferred.append(command)
+                    should_stop = True
+                    break
+                self._perform_orderly_shutdown()
                 should_stop = True
                 break
             if command.action == "simulate":
@@ -1137,16 +1625,264 @@ class RoutingService:
         return should_stop
 
     def _cooperative_obs_yield(self) -> None:
+        """Pure cancellation checkpoint used inside potentially long OBS work.
+
+        It must never start probes, scheduler ticks, cleanup or other OBS I/O:
+        doing so makes the checkpoint re-entrant and can recursively re-enter the
+        operation that called it. Orderly cleanup is performed only by the outer
+        runtime loop after the interrupted operation has unwound.
+        """
         if self._thread is None or threading.current_thread() is not self._thread:
             return
-        if self._drain_runtime_commands(allow_obs=False):
-            raise RuntimeError("Arrêt du runtime demandé pendant une opération OBS")
-        self._probe_obs_if_due()
-        self._tick_activation(paused=self.paused)
-        if self._stop.is_set():
-            raise RuntimeError("Runtime arrêté pendant une opération OBS")
+        if self._shutdown_cleanup_active:
+            return
+        with self._lock:
+            stopping = self._stopping
+        if stopping or self._stop.is_set():
+            raise _RuntimeShutdownRequested(
+                "Arrêt du runtime demandé pendant une opération OBS"
+            )
+
+    def _resolve_current_declarative_plan(
+        self,
+        state: StreamState,
+        planning: DeclarativePlanningService,
+        *,
+        refresh_catalog: bool,
+    ):
+        last_boundary_error = "OBS planner context changed during resolution"
+        for attempt in range(2):
+            try:
+                boundary_before = planning.context_identity()
+                context = self.dispatcher.obs_context(force_refresh=True)
+                boundary_after_context = planning.context_identity()
+            except RuntimeError:
+                if attempt == 0:
+                    continue
+                raise
+
+            if boundary_before != boundary_after_context:
+                last_boundary_error = (
+                    "OBS planner context changed while reading profile conditions"
+                )
+                planning.invalidate_catalog(last_boundary_error)
+                continue
+
+            intent = self.dispatcher.plan_state(state, context=context)
+            desired = self.dispatcher.resolve_desired_state(
+                state,
+                context=context,
+            )
+            blocked_provenance = {
+                str(row.get("provenance") or ""): str(
+                    row.get("reason") or "conditions bloquées"
+                )
+                for row in intent.get("declarative_blocks", [])
+                if isinstance(row, Mapping)
+                and str(row.get("provenance") or "").strip()
+            }
+
+            try:
+                plan = planning.plan_state(
+                    desired,
+                    refresh_catalog=refresh_catalog,
+                    blocked_provenance=blocked_provenance,
+                )
+            except RuntimeError:
+                try:
+                    boundary_after_failure = planning.context_identity()
+                except RuntimeError:
+                    if attempt == 0:
+                        continue
+                    raise
+                if boundary_after_failure != boundary_after_context and attempt == 0:
+                    last_boundary_error = (
+                        "OBS planner context changed during catalog/observation"
+                    )
+                    planning.invalidate_catalog(last_boundary_error)
+                    continue
+                raise
+
+            boundary_after_plan = planning.context_identity()
+            if boundary_after_plan != boundary_after_context:
+                last_boundary_error = (
+                    "OBS planner context changed before plan publication"
+                )
+                planning.invalidate_catalog(last_boundary_error)
+                continue
+            catalog = planning.catalog
+            if catalog is None:
+                raise RuntimeError("Catalogue OBS indisponible après planification")
+            concrete_desired = desired.bind_collection(catalog.collection)
+            return concrete_desired, plan, intent, boundary_after_plan
+
+        raise RuntimeError(last_boundary_error)
+
+    def _build_current_declarative_plan(
+        self,
+        state: StreamState,
+        planning: DeclarativePlanningService,
+        *,
+        refresh_catalog: bool,
+    ) -> dict[str, object]:
+        desired, plan, intent, _boundary = self._resolve_current_declarative_plan(
+            state,
+            planning,
+            refresh_catalog=refresh_catalog,
+        )
+        return {
+            "available": True,
+            "state": state.as_variables(),
+            "desired": desired.as_mapping(diagnostic=True),
+            "plan": plan.as_mapping(),
+            "declarative_blocks": intent.get("declarative_blocks", []),
+        }
+
+    def _prepare_current_declarative_execution(
+        self,
+        state: StreamState,
+        planning: DeclarativePlanningService,
+    ) -> PreparedExecution:
+        with self._lock:
+            self._declarative_execution_admissible_locked()
+            dispatch_generation = self._dispatch_generation
+            resume_generation = self._resume_revalidation_generation
+
+        desired, plan, intent, boundary = self._resolve_current_declarative_plan(
+            state,
+            planning,
+            refresh_catalog=True,
+        )
+        if plan.blocked:
+            raise RuntimeError("Le plan déclaratif courant est bloqué")
+        if intent.get("declarative_blocks"):
+            raise RuntimeError("Le plan contient des conditions déclaratives bloquées")
+        if any(
+            assignment.key.kind not in DECLARATIVE_EXECUTOR_KINDS
+            for assignment in desired.assignments
+        ):
+            raise RuntimeError(
+                "Le DesiredState contient des propriétés hors allowlist du MVP"
+            )
+        catalog = planning.catalog
+        if catalog is None:
+            raise RuntimeError("Catalogue OBS indisponible")
+        if catalog.warnings or catalog.unreadable_containers:
+            raise RuntimeError("Catalogue OBS partiel : préparation refusée")
+        collection, session_generation = boundary
+        if not session_generation:
+            raise RuntimeError("Génération de session OBS non établie")
+        bindings = build_execution_bindings(catalog, desired)
+        with self._lock:
+            self._declarative_execution_admissible_locked()
+            if self.engine.current_state != state:
+                raise RuntimeError("État logique modifié pendant la préparation")
+            if (
+                self._dispatch_generation != dispatch_generation
+                or self._resume_revalidation_generation != resume_generation
+            ):
+                raise RuntimeError("Génération runtime modifiée pendant la préparation")
+            prepared = PreparedExecution.create(
+                desired=desired,
+                plan=plan,
+                collection=collection,
+                session_generation=session_generation,
+                catalog_epoch=planning.catalog_epoch,
+                config_revision=self.config_revision,
+                dispatch_generation=dispatch_generation,
+                resume_generation=resume_generation,
+                bindings=bindings,
+            )
+            self._prepared_execution = prepared
+            self._prepared_execution_state = state
+        return prepared
+
+    def _validate_prepared_execution_runtime_locked(
+        self,
+        prepared: PreparedExecution,
+        state: StreamState,
+    ) -> tuple[bool, str]:
+        if self._stopping or not self._runtime_operational:
+            return False, "Runtime déclaratif indisponible ou en arrêt"
+        if not self._paused:
+            return False, "SSR a repris depuis la préparation"
+        if self.engine.current_state != state:
+            return False, "L'état logique courant a changé"
+        if self._dispatch_generation != prepared.dispatch_generation:
+            return False, "La génération de décision runtime a changé"
+        if self._resume_revalidation_generation != prepared.resume_generation:
+            return False, "La génération de reprise runtime a changé"
+        if self.config_revision != prepared.config_revision:
+            return False, "La révision de configuration a changé"
+        return True, ""
+
+    def _commit_prepared_execution_write(
+        self,
+        prepared: PreparedExecution,
+        state: StreamState,
+        write: Callable[[], None],
+    ) -> tuple[bool, str]:
+        """Atomically admit one prepared write against local runtime state."""
+
+        with self._lock:
+            valid, reason = self._validate_prepared_execution_runtime_locked(
+                prepared,
+                state,
+            )
+            if not valid:
+                return False, reason
+            # Keep the local runtime state stable until the single OBS Set*
+            # request has either returned or raised. No slow discovery/readback
+            # is performed while this lock is held.
+            write()
+            return True, ""
+
+    def _validate_prepared_execution_target(
+        self,
+        prepared: PreparedExecution,
+        state: StreamState,
+    ) -> tuple[bool, str]:
+        with self._lock:
+            valid, reason = self._validate_prepared_execution_runtime_locked(
+                prepared,
+                state,
+            )
+            if not valid:
+                return False, reason
+        try:
+            boundary_before = self._declarative_planning.context_identity()
+            if boundary_before != (
+                prepared.collection,
+                prepared.session_generation,
+            ):
+                return False, "Le contexte OBS a changé"
+            context = self.dispatcher.obs_context(force_refresh=True)
+            intent = self.dispatcher.plan_state(state, context=context)
+            if intent.get("declarative_blocks"):
+                return False, "Les conditions OBS ne sont plus satisfaites"
+            desired = self.dispatcher.resolve_desired_state(
+                state,
+                context=context,
+            ).bind_collection(prepared.collection)
+            boundary_after = self._declarative_planning.context_identity()
+        except Exception as exc:
+            return False, f"Revalidation de cible impossible : {exc}"
+        if boundary_after != boundary_before:
+            return False, "Le contexte OBS a changé pendant la revalidation"
+        if desired.assignments != prepared.desired.assignments:
+            return False, "La cible déclarative ou son ownership a changé"
+        # Recheck runtime state after all OBS reads. The actual write performs
+        # the same check once more atomically with the Set* request.
+        with self._lock:
+            return self._validate_prepared_execution_runtime_locked(
+                prepared,
+                state,
+            )
 
     def _execute_obs_command(self, command: _OBSCommand) -> None:
+        with self._lock:
+            self._active_operation = command.action
+            self._active_obs_command = command
         try:
             with self._dispatch_lock:
                 if command.action == "reapply":
@@ -1172,6 +1908,95 @@ class RoutingService:
                             started_at=started_at,
                             obs_requests_before=obs_before,
                         )
+                elif command.action == "catalog.sync":
+                    planning = self._declarative_planning
+                    if planning is None:
+                        raise RuntimeError("Catalogue OBS indisponible")
+                    result = planning.sync_catalog().summary()
+                elif command.action == "planner.current":
+                    planning = self._declarative_planning
+                    if planning is None:
+                        raise RuntimeError("Planner déclaratif indisponible")
+                    with self._lock:
+                        state = self.engine.current_state
+                    if state is None:
+                        result = {
+                            "available": False,
+                            "reason": "Aucun état de routage courant",
+                        }
+                    else:
+                        result = self._build_current_declarative_plan(
+                            state,
+                            planning,
+                            refresh_catalog=bool(
+                                command.options.get("refresh_catalog", True)
+                            ),
+                        )
+                elif command.action == "planner.prepare_current":
+                    planning = self._declarative_planning
+                    if planning is None:
+                        raise RuntimeError("Planner déclaratif indisponible")
+                    with self._lock:
+                        state = self.engine.current_state
+                    if state is None:
+                        raise RuntimeError("Aucun état de routage courant")
+                    prepared = self._prepare_current_declarative_execution(
+                        state,
+                        planning,
+                    )
+                    result = prepared.as_mapping()
+                elif command.action == "planner.execute":
+                    executor = self._declarative_executor
+                    if executor is None:
+                        raise RuntimeError("Executor déclaratif indisponible")
+                    requested_plan_id = str(command.options.get("plan_id") or "")
+                    with self._lock:
+                        self._declarative_execution_admissible_locked()
+                        prepared = self._prepared_execution
+                        prepared_state = self._prepared_execution_state
+                        if (
+                            prepared is None
+                            or prepared_state is None
+                            or prepared.plan_id != requested_plan_id
+                        ):
+                            raise RuntimeError(
+                                "plan_id inconnu, expiré ou déjà consommé"
+                            )
+                        # A matching ticket is single-use even when the
+                        # subsequent execution is blocked or fails. A stale or
+                        # forged id must never consume a newer preparation.
+                        self._prepared_execution = None
+                        self._prepared_execution_state = None
+                        self._active_declarative_partial = ()
+                    result = executor.execute(
+                        prepared,
+                        validate_target=lambda: self._validate_prepared_execution_target(
+                            prepared,
+                            prepared_state,
+                        ),
+                        commit_write=lambda write: self._commit_prepared_execution_write(
+                            prepared,
+                            prepared_state,
+                            write,
+                        ),
+                        progress=lambda steps: setattr(
+                            self,
+                            "_active_declarative_partial",
+                            tuple(steps),
+                        ),
+                    )
+                    self._active_declarative_partial = ()
+                    self._emit_obs_result(
+                        command,
+                        success=bool(result.converged),
+                        result=result.as_mapping(),
+                        error=(
+                            ""
+                            if result.converged
+                            else f"Exécution déclarative : {result.status}"
+                        ),
+                    )
+                    return
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
@@ -1208,9 +2033,56 @@ class RoutingService:
                 )
             else:
                 self._emit_obs_result(command, success=True, result=result)
+        except _RuntimeShutdownRequested as exc:
+            self.logger.info("OBS command interrupted [%s]: %s", command.action, exc)
+            partial = None
+            if command.action == "planner.execute" and self._active_declarative_partial:
+                partial = {
+                    "status": "cancelled",
+                    "converged": False,
+                    "replan_required": True,
+                    "steps": [
+                        step.as_mapping()
+                        for step in self._active_declarative_partial
+                        if hasattr(step, "as_mapping")
+                    ],
+                }
+            self._active_declarative_partial = ()
+            self._emit_obs_result(
+                command,
+                success=False,
+                result=partial,
+                error=str(exc),
+            )
+            raise
         except Exception as exc:
             self.logger.error("OBS command failed [%s]: %s", command.action, exc)
-            self._emit_obs_result(command, success=False, error=str(exc))
+            partial = None
+            if command.action == "planner.execute" and self._active_declarative_partial:
+                partial = {
+                    "status": "failed",
+                    "converged": False,
+                    "replan_required": True,
+                    "diagnostics": [str(exc)],
+                    "steps": [
+                        step.as_mapping()
+                        for step in self._active_declarative_partial
+                        if hasattr(step, "as_mapping")
+                    ],
+                }
+            self._active_declarative_partial = ()
+            self._emit_obs_result(
+                command,
+                success=False,
+                result=partial,
+                error=str(exc),
+            )
+        finally:
+            with self._lock:
+                if self._active_obs_command is command:
+                    self._active_obs_command = None
+                if self._active_operation == command.action:
+                    self._active_operation = ""
 
     def _emit_obs_result(
         self,
@@ -1446,21 +2318,150 @@ class RoutingService:
             )
         )
 
+    def _perform_orderly_shutdown(self) -> None:
+        """Run cleanup once and always finish the worker shutdown protocol."""
+        self._shutdown_cleanup_active = True
+        try:
+            self._perform_activation_shutdown()
+        except Exception as exc:
+            # Cleanup failure must preserve the fail-closed lifecycle: do not
+            # resurrect normal work and do not lose an already-consumed shutdown.
+            self.logger.exception("Runtime cleanup failed during shutdown")
+            self._record_activation_diagnostic(
+                "*",
+                "warning",
+                f"nettoyage runtime interrompu : {exc}",
+            )
+        finally:
+            self._finalize_shutdown_signal()
+
+    def _finalize_shutdown_signal(self) -> None:
+        self._worker_phase = "client_close"
+        client = getattr(self.dispatcher, "client", None)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                self.logger.warning("OBS client close failed during shutdown: %s", exc)
+
+        with self._lock:
+            self._shutdown_phase = "simulation_shutdown"
+        try:
+            self._simulation_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        self._stop.set()
+        with self._lock:
+            self._shutdown_phase = "stop_signalled"
+        self._shutdown_cleanup_active = False
+
     def _perform_activation_shutdown(self) -> None:
         self._record_activation_diagnostic("*", "arrêt", "nettoyage runtime en cours")
-        self._reconcile_activation("arrêt du service")
+        scheduler = self.activation_scheduler
         controller = self.activation_controller
+
+        # Full activation reconciliation is deliberately reserved for OBS
+        # connect/reconnect. During orderly stop, capture scheduler-owned visible
+        # state as cleanup obligations before reset_all() destroys that transient
+        # state, then issue only the corresponding hides.
+        hide_events: list[ActivationEvent] = []
+        if scheduler is not None:
+            with self._lock:
+                self._shutdown_phase = "activation_snapshot"
+            states = getattr(scheduler, "states", None)
+            register = getattr(controller, "register_hide_obligation", None)
+            if callable(states) and callable(register):
+                try:
+                    now = time.monotonic()
+                    for policy_name, state in states().items():
+                        phase = str(getattr(getattr(state, "phase", None), "value", ""))
+                        source = str(getattr(state, "active_source", "") or "")
+                        if phase != "visible" or not source:
+                            continue
+                        event = ActivationEvent(
+                            "hide",
+                            str(policy_name),
+                            now,
+                            source=source,
+                            container=str(getattr(state, "active_container", "") or ""),
+                            container_kind=str(
+                                getattr(state, "active_container_kind", "scene") or "scene"
+                            ),
+                            collection=str(getattr(state, "active_collection", "") or ""),
+                            reason="shutdown",
+                        )
+                        register(event)
+                except Exception as exc:
+                    # Do not invent a context if OBS cannot establish one. The
+                    # scheduler event is still retained locally below and its
+                    # normal apply path will either acknowledge or record it.
+                    self.logger.warning(
+                        "Activation cleanup pre-arm failed during shutdown: %s",
+                        exc,
+                    )
+                    self._record_activation_diagnostic(
+                        "*",
+                        "warning",
+                        f"pré-enregistrement cleanup impossible : {exc}",
+                    )
+
+            with self._lock:
+                self._shutdown_phase = "activation_reset"
+            try:
+                hide_events = [
+                    event
+                    for event in scheduler.reset_all()
+                    if getattr(event, "kind", "") == "hide"
+                ]
+            except Exception as exc:
+                self.logger.warning("Activation scheduler reset failed during shutdown: %s", exc)
+                self._record_activation_diagnostic(
+                    "*",
+                    "warning",
+                    f"réinitialisation scheduler impossible : {exc}",
+                )
+            with self._lock:
+                self._activation_eligibility_cache.clear()
+                self._activation_cleanup_cache.clear()
+
+        if controller is not None:
+            for event in hide_events:
+                with self._lock:
+                    self._shutdown_phase = (
+                        f"activation_hide:{getattr(event, 'policy', '*')}/"
+                        f"{getattr(event, 'source', '')}"
+                    )
+                try:
+                    controller.apply_event(event)
+                except Exception as exc:
+                    self.logger.warning("Activation hide during shutdown failed: %s", exc)
+                    self._record_activation_diagnostic(
+                        getattr(event, "policy", "*"),
+                        "nettoyage",
+                        f"masquage de sortie non acquitté : {exc}",
+                    )
+
+        with self._lock:
+            self._shutdown_phase = "activation_pending_cleanup"
+        current_pending = getattr(controller, "pending_hides_for_current_collection", None)
+        pending_for_retry = (
+            current_pending
+            if callable(current_pending)
+            else (lambda: controller.pending_hides() if controller is not None else ())
+        )
         deadline = time.monotonic() + 1.5
         while (
             controller is not None
-            and controller.pending_hides()
+            and pending_for_retry()
             and time.monotonic() < deadline
         ):
             now = time.monotonic()
             for message in controller.retry_pending_hides(now=now):
                 self._record_activation_diagnostic("*", "nettoyage", message)
-            if controller.pending_hides():
+            if pending_for_retry():
                 time.sleep(0.05)
+
         if controller is not None and controller.pending_hides():
             pending_count = len(controller.pending_hides())
             self._record_activation_diagnostic(
@@ -1475,13 +2476,27 @@ class RoutingService:
                     success=False,
                 )
             )
-        try:
-            self._simulation_executor.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
-        self._stop.set()
+    @staticmethod
+    def _pending_dispatch_allowed_while_paused(
+        pending: _PendingDispatch,
+    ) -> bool:
+        return pending.origin in {"manual_override", "manual_override_clear"}
 
-    def _apply_change(self, change: StateChange) -> None:
+    def _pending_dispatch_blocked_locked(
+        self,
+        pending: _PendingDispatch,
+    ) -> bool:
+        return (
+            (self._paused or self._resume_revalidation_pending)
+            and not self._pending_dispatch_allowed_while_paused(pending)
+        )
+
+    def _apply_change(
+        self,
+        change: StateChange,
+        *,
+        origin: str | None = None,
+    ) -> None:
         self.logger.info(
             "State decision [%s] -> %s (OBS delay %d ms)",
             change.rule_name,
@@ -1496,13 +2511,13 @@ class RoutingService:
             self._dispatch_generation += 1
             generation = self._dispatch_generation
             decision_id = uuid.uuid4().hex
-            origin = str(change.reason or "router")
+            dispatch_origin = str(origin or change.reason or "router")
             self._pending_dispatch = _PendingDispatch(
                 deadline=time.monotonic() + max(0, change.apply_delay_ms) / 1000.0,
                 generation=generation,
                 change=change,
                 decision_id=decision_id,
-                origin=origin,
+                origin=dispatch_origin,
             )
 
         if superseded is not None:
@@ -1549,7 +2564,7 @@ class RoutingService:
                 request_id=decision_id,
                 payload={
                     "decision_id": decision_id,
-                    "origin": origin,
+                    "origin": dispatch_origin,
                     "generation": generation,
                     "config_revision": self.config_revision,
                     "rule_name": change.rule_name,
@@ -1571,7 +2586,11 @@ class RoutingService:
     def _process_due_dispatch(self) -> None:
         with self._lock:
             pending = self._pending_dispatch
-            if pending is None or pending.deadline > time.monotonic():
+            if (
+                pending is None
+                or pending.deadline > time.monotonic()
+                or self._pending_dispatch_blocked_locked(pending)
+            ):
                 return
             self._pending_dispatch = None
         self._dispatch_if_current(pending)

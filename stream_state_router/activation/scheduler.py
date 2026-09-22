@@ -68,6 +68,11 @@ class ActivationScheduler:
     def state(self, policy_name: str) -> ActivationRuntimeState:
         return replace(self._state(policy_name))
 
+    def set_active_collection(self, policy_name: str, collection: str) -> None:
+        state = self._state(policy_name)
+        if state.phase is ActivationPhase.VISIBLE:
+            state.active_collection = str(collection or "").strip()
+
     def states(self) -> dict[str, ActivationRuntimeState]:
         return {name: replace(state) for name, state in self._states.items()}
 
@@ -267,6 +272,7 @@ class ActivationScheduler:
                     source=state.active_source,
                     container=state.active_container,
                     container_kind=state.active_container_kind,
+                    collection=state.active_collection,
                     reason="reset",
                 )
             )
@@ -300,6 +306,7 @@ class ActivationScheduler:
                         source=state.active_source,
                         container=state.active_container,
                         container_kind=state.active_container_kind,
+                        collection=state.active_collection,
                         reason="ineligible",
                     )
                 )
@@ -380,6 +387,7 @@ class ActivationScheduler:
         state.active_source = target.source
         state.active_container = target.container
         state.active_container_kind = target.container_kind
+        state.active_collection = ""
         state.visible_until = now + duration
         state.cooldown_until = None
         state.next_roll_at = None
@@ -412,6 +420,7 @@ class ActivationScheduler:
         source = state.active_source
         container = state.active_container
         container_kind = state.active_container_kind
+        collection = state.active_collection
         events = [
             ActivationEvent(
                 "hide",
@@ -420,12 +429,14 @@ class ActivationScheduler:
                 source=source,
                 container=container,
                 container_kind=container_kind,
+                collection=collection,
                 reason=reason,
             )
         ]
         state.active_source = ""
         state.active_container = ""
         state.active_container_kind = "scene"
+        state.active_collection = ""
         state.visible_until = None
         cooldown = self._cooldown(policy)
         if enter_cooldown and cooldown > 0:
@@ -627,3 +638,4 @@ class ActivationScheduler:
         state.active_source = ""
         state.active_container = ""
         state.active_container_kind = "scene"
+        state.active_collection = ""

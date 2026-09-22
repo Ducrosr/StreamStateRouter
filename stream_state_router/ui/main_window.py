@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from PySide6.QtCore import QObject, Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
 )
 
+from .. import __version__
 from ..activation import TriggerTargetIdentity
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
@@ -90,7 +92,7 @@ class MainWindow(QMainWindow):
         runtime_marker=None,
     ):
         super().__init__()
-        self.setWindowTitle("Stream State Router 2.0.13")
+        self.setWindowTitle(f"Stream State Router {__version__}")
         self.resize(1180, 760)
         self.config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
@@ -112,6 +114,7 @@ class MainWindow(QMainWindow):
         self._known_catalog_sources: set[str] = set()
         self._preview_active = False
         self._routing_incomplete = False
+        self._runtime_restart_in_progress = False
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -425,7 +428,7 @@ class MainWindow(QMainWindow):
         self.layout_transition.currentIndexChanged.connect(self._layout_option_changed)
         options.addWidget(self.layout_transition)
         self.layout_transition_ms = QSpinBox()
-        self.layout_transition_ms.setRange(0, 3000)
+        self.layout_transition_ms.setRange(0, 10000)
         self.layout_transition_ms.setSuffix(" ms")
         self.layout_transition_ms.valueChanged.connect(self._layout_option_changed)
         options.addWidget(self.layout_transition_ms)
@@ -670,7 +673,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Configuration enregistrée et appliquée", 4000)
         self._log("Configuration enregistrée et appliquée.")
 
-    def _start_runtime(self) -> None:
+    def _start_runtime(
+        self,
+        *,
+        bootstrap_foreground: ForegroundApp | None = None,
+        startup_layout_profile: str = "",
+        startup_layout_routing_baseline: str = "",
+    ) -> None:
         rules, poll_ms, debounce_ms, fallback_ms = build_ruleset(self.config)
         self._client = OBSClientManager(build_obs_config(self.config))
         self._dispatcher = OBSDispatcher(
@@ -678,6 +687,8 @@ class MainWindow(QMainWindow):
             build_profiles(self.config),
             build_layout_profiles(self.config),
         )
+        if startup_layout_profile:
+            self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
         engine = StateRouterEngine(
             rules,
             debounce_ms=debounce_ms,
@@ -690,8 +701,19 @@ class MainWindow(QMainWindow):
             poll_ms=poll_ms,
             logger=self.logger,
             activation_policies=build_activation_policies(self.config),
-            pending_activation_cleanup=self._pending_cleanup_transfer,
+            pending_cleanup=self._pending_cleanup_transfer,
             config_revision=config_revision(self.config),
+            bootstrap_foreground=bootstrap_foreground,
+            startup_layout_profile=startup_layout_profile,
+            declarative_execution_enabled=(
+                str(
+                    os.environ.get(
+                        "SSR_ENABLE_DECLARATIVE_EXECUTION",
+                        "",
+                    )
+                ).strip().casefold()
+                in {"1", "true", "yes", "on"}
+            ),
         )
         self._pending_cleanup_transfer = ()
         self._service.on_foreground = self.bridge.foreground.emit
@@ -706,28 +728,64 @@ class MainWindow(QMainWindow):
         self._refresh_config_revision_status()
 
     def _restart_runtime(self) -> bool:
-        previous = self._service
-        if previous is not None:
-            result = previous.stop()
-            if not result:
-                self._log(
-                    "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
-                )
-                QMessageBox.critical(
-                    self,
-                    "Runtime",
-                    "Le runtime précédent n'a pas pu être arrêté proprement. "
-                    "Le nouveau runtime n'a pas été démarré.",
-                )
-                return False
-            self._pending_cleanup_transfer = result.pending_cleanup
-            if not result.cleanup_complete:
-                self._log(
-                    f"Transfert de {len(result.pending_cleanup)} obligation(s) de nettoyage OBS "
-                    "au nouveau runtime."
-                )
-        self._start_runtime()
-        return True
+        if self._runtime_restart_in_progress:
+            self._log("Redémarrage runtime déjà en cours : demande ignorée.")
+            return False
+
+        self._runtime_restart_in_progress = True
+        timer = getattr(self, "_module_scan_timer", None)
+        timer_was_active = bool(timer is not None and timer.isActive())
+        if timer_was_active:
+            timer.stop()
+        succeeded = False
+        try:
+            previous = self._service
+            resume_layout_profile = (
+                previous.active_layout_apply_profile if previous is not None else ""
+            )
+            resume_layout_routing_baseline = ""
+            if resume_layout_profile and previous is not None:
+                previous_state = previous.engine.current_state
+                if previous_state is not None:
+                    resume_layout_routing_baseline = previous_state.profile_name("layout")
+            bootstrap_foreground = (
+                None
+                if resume_layout_profile
+                else (previous.last_meaningful_app if previous is not None else None)
+            )
+            if previous is not None:
+                result = previous.stop()
+                diagnostic = result.diagnostic_summary()
+                self._log(f"runtime_stop: {diagnostic}")
+                if not result:
+                    self._log(
+                        "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
+                    )
+                    QMessageBox.critical(
+                        self,
+                        "Runtime",
+                        "Le runtime précédent n'a pas pu être arrêté proprement. "
+                        "Le nouveau runtime n'a pas été démarré.\n\n"
+                        f"Diagnostic : {diagnostic}",
+                    )
+                    return False
+                self._pending_cleanup_transfer = result.pending_cleanup
+                if not result.cleanup_complete:
+                    self._log(
+                        f"Transfert de {len(result.pending_cleanup)} obligation(s) de nettoyage OBS "
+                        "au nouveau runtime."
+                    )
+            self._start_runtime(
+                bootstrap_foreground=bootstrap_foreground,
+                startup_layout_profile=resume_layout_profile,
+                startup_layout_routing_baseline=resume_layout_routing_baseline,
+            )
+            succeeded = True
+            return True
+        finally:
+            self._runtime_restart_in_progress = False
+            if not succeeded and timer_was_active:
+                self._configure_module_scan_timer()
 
     def _on_foreground(self, app: ForegroundApp | None) -> None:
         if app is None:
@@ -1900,6 +1958,7 @@ class MainWindow(QMainWindow):
             activation_candidates=candidates,
             activation_status_provider=self._activation_status,
             activation_command=self._activation_command,
+            visibility_release_command=self._release_runtime_visibility_ownership,
             activation_result_signal=self.bridge.activation_result,
         )
         if dlg.exec() == QDialog.Accepted:
@@ -2139,6 +2198,11 @@ class MainWindow(QMainWindow):
                 "applied": self._applied_revision,
             },
             "routing": service.routing_status() if service else {},
+            "obs_catalog": (
+                service.obs_catalog_status()
+                if service
+                else {"available": False}
+            ),
         }
 
     def _api_request_status(self, request_id: str) -> dict | None:
@@ -2158,6 +2222,25 @@ class MainWindow(QMainWindow):
             self._service.pause(False)
             self._service.clear_manual_override()
             return {"paused": False}
+        if action == "catalog.sync":
+            request_id = self._service.request_catalog_sync()
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "catalog.snapshot":
+            return {"catalog": self._service.obs_catalog_snapshot()}
+        if action == "planner.current":
+            request_id = self._service.request_declarative_plan(
+                refresh_catalog=bool(payload.get("refresh_catalog", True))
+            )
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "planner.prepare_current":
+            request_id = self._service.request_prepare_declarative_execution()
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "planner.execute":
+            plan_id = str(payload.get("plan_id") or "").strip()
+            if not plan_id:
+                raise ValueError("plan_id requis")
+            request_id = self._service.request_execute_declarative_plan(plan_id)
+            return {"request_id": request_id, "status": "accepted"}
         if action == "reapply":
             request_id = self._service.request_force_reapply()
             return {"request_id": request_id, "status": "accepted"}

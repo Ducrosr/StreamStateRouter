@@ -57,6 +57,7 @@ class OBSClientManager:
         self._last_failure = 0.0
         self._connected = False
         self._request_count = 0
+        self._session_generation = 0
         self.last_error = ""
 
     @property
@@ -73,6 +74,13 @@ class OBSClientManager:
         with self._lock:
             return int(self._request_count)
 
+    @property
+    def session_generation(self) -> int:
+        """Monotonic identity of the current OBS transport/session context."""
+
+        with self._lock:
+            return int(self._session_generation)
+
     def configure(self, config: OBSConnectionConfig) -> None:
         with self._lock:
             if config == self._config:
@@ -80,22 +88,69 @@ class OBSClientManager:
             self._config = config
             self._client = None
             self._connected = False
+            self._session_generation += 1
             self.last_error = ""
             self._last_failure = 0.0
+
+    def close(self) -> None:
+        """Close the owned ReqClient after runtime cleanup has finished."""
+        with self._lock:
+            client = self._client
+            self._client = None
+            self._connected = False
+            self._session_generation += 1
+            self.last_error = ""
+        if client is None:
+            return
+        disconnect = getattr(client, "disconnect", None)
+        if callable(disconnect):
+            disconnect()
 
     def probe(self) -> tuple[bool, str]:
         try:
             response = self.send("GetVersion")
             version = str(response.get("obsVersion") or response.get("obs_version") or "?")
             return True, f"OBS WebSocket connecté — OBS {version}"
+        except OBSRequestError as exc:
+            cause = exc.__cause__
+            code = getattr(cause, "code", None)
+            lowered = str(exc).casefold()
+            if code == 207 or "code 207" in lowered or "obs is not ready" in lowered:
+                return (
+                    False,
+                    "OBS WebSocket connecté — OBS est encore en cours d'initialisation",
+                )
+            return False, str(exc)
         except Exception as exc:
             return False, str(exc)
 
-    def send(self, request: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    def send(
+        self,
+        request: str,
+        data: dict[str, Any] | None = None,
+        *,
+        expected_session_generation: int | None = None,
+    ) -> dict[str, Any]:
         if not self._config.enabled:
             raise OBSUnavailableError("L'intégration OBS est désactivée")
         with self._lock:
-            client = self._ensure_client()
+            if expected_session_generation is None:
+                client = self._ensure_client()
+            else:
+                expected = int(expected_session_generation)
+                if expected <= 0:
+                    raise OBSUnavailableError(
+                        "Invalid expected OBS session generation for guarded request"
+                    )
+                if (
+                    self._client is None
+                    or not self._connected
+                    or self._session_generation != expected
+                ):
+                    raise OBSUnavailableError(
+                        "OBS session changed before guarded request; refusing reconnect"
+                    )
+                client = self._client
             self._request_count += 1
             try:
                 if data is None:
@@ -121,6 +176,7 @@ class OBSClientManager:
                 # Transport/session failures really do invalidate the ReqClient.
                 self._client = None
                 self._connected = False
+                self._session_generation += 1
                 self.last_error = str(exc)
                 self._last_failure = time.monotonic()
                 raise OBSUnavailableError(f"OBS WebSocket : {exc}") from exc
@@ -144,6 +200,7 @@ class OBSClientManager:
                 timeout=self._config.timeout_seconds,
             )
             self._connected = True
+            self._session_generation += 1
             return self._client
         except Exception as exc:
             self._last_failure = time.monotonic()

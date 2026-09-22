@@ -71,6 +71,27 @@ class ActivationSchedulerTests(unittest.TestCase):
         self.assertEqual([event.kind for event in events], ["hide"])
         self.assertEqual(scheduler.state("egg").phase, ActivationPhase.ELIGIBLE)
 
+    def test_visible_activation_keeps_scene_collection_until_hide(self):
+        clock = FakeClock()
+        scheduler = ActivationScheduler(
+            {"egg": self.policy()},
+            clock=clock,
+            rng=SequenceRng(0.0, 0.0),
+        )
+        scheduler.tick()
+        clock.value = 10.0
+        show = scheduler.tick()[-1]
+        self.assertEqual(show.kind, "show")
+
+        scheduler.set_active_collection("egg", "Collection A")
+        self.assertEqual(scheduler.state("egg").active_collection, "Collection A")
+
+        clock.value = 15.0
+        hide = scheduler.tick()[0]
+        self.assertEqual(hide.kind, "hide")
+        self.assertEqual(hide.collection, "Collection A")
+        self.assertEqual(scheduler.state("egg").active_collection, "")
+
     def test_zero_weight_target_is_never_randomly_selected(self):
         policy = self.policy(
             targets=(

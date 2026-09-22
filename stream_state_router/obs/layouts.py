@@ -37,6 +37,15 @@ class LayoutApplyResult:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(slots=True)
+class PendingFadeCleanup:
+    source: str
+    collection: str
+    created_at: float
+    attempts: int = 0
+    last_error: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class LayoutDiffItem:
     module: str
@@ -310,33 +319,163 @@ class OBSLayoutManager:
         self._preview_snapshot: LayoutSnapshot | None = None
         self._snapshot_generation = 0
         self._last_discovery_warnings: list[str] = []
-        self._pending_fade_cleanup: set[str] = set()
+        self._pending_fade_cleanup: dict[tuple[str, str], PendingFadeCleanup] = {}
+        self._last_scene_collection = ""
 
     def pending_fade_cleanup(self) -> tuple[str, ...]:
-        return tuple(sorted(self._pending_fade_cleanup, key=str.casefold))
+        """Compatibility view of pending fade sources."""
+        return tuple(
+            sorted(
+                {item.source for item in self._pending_fade_cleanup.values()},
+                key=str.casefold,
+            )
+        )
+
+    def export_pending_fade_cleanup(self) -> tuple[dict[str, object], ...]:
+        return tuple(
+            {
+                "kind": "layout_fade",
+                "source": item.source,
+                "collection": item.collection,
+                "created_at": float(item.created_at),
+                "attempts": int(item.attempts),
+                "last_error": item.last_error,
+            }
+            for item in sorted(
+                self._pending_fade_cleanup.values(),
+                key=lambda value: (value.collection.casefold(), value.source.casefold()),
+            )
+        )
+
+    def import_pending_fade_cleanup(self, raw_items) -> int:
+        imported = 0
+        for raw in raw_items or ():
+            if not isinstance(raw, Mapping):
+                continue
+            if str(raw.get("kind") or "").strip().casefold() != "layout_fade":
+                continue
+            source = str(raw.get("source") or "").strip()
+            collection = str(raw.get("collection") or "").strip()
+            if not source or not collection:
+                continue
+            try:
+                pending = PendingFadeCleanup(
+                    source=source,
+                    collection=collection,
+                    created_at=float(raw.get("created_at", 0.0) or 0.0),
+                    attempts=max(0, int(raw.get("attempts", 0) or 0)),
+                    last_error=str(raw.get("last_error") or ""),
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+            self._pending_fade_cleanup[(collection, source)] = pending
+            imported += 1
+        return imported
 
     def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
-        """Best-effort neutralization of helper fade filters left uncertain."""
+        """Retry only obligations belonging to the active Scene Collection."""
+        if not self._pending_fade_cleanup:
+            return ()
+        try:
+            current = self._scene_collection_name()
+        except Exception as exc:
+            return (f"Scene Collection non lisible pour le cleanup fondu ({exc})",)
+
         warnings: list[str] = []
-        for source in tuple(self._pending_fade_cleanup):
-            try:
-                self._set_source_opacity(source, 1.0)
-            except Exception as exc:
-                warnings.append(f"{source}: neutralisation du fondu impossible ({exc})")
+        for key, pending in tuple(self._pending_fade_cleanup.items()):
+            if pending.collection != current:
                 continue
-            self._pending_fade_cleanup.discard(source)
+            try:
+                self._set_source_opacity(pending.source, 1.0)
+            except Exception as exc:
+                pending.attempts += 1
+                pending.last_error = str(exc)
+                warnings.append(
+                    f"{pending.source}: neutralisation du fondu impossible ({exc})"
+                )
+                continue
+            self._pending_fade_cleanup.pop(key, None)
         return tuple(warnings)
 
-    def _neutralize_fade_sources(self, sources: Iterable[str]) -> tuple[str, ...]:
+    def _fade_collection_context(self, *, probe: bool = False) -> str:
+        if probe:
+            try:
+                current = self._scene_collection_name()
+                if current:
+                    return current
+            except Exception:
+                pass
+        collection = str(self._last_scene_collection or "").strip()
+        if collection:
+            return collection
+        try:
+            return self._scene_collection_name()
+        except Exception:
+            # Unknown context is deliberately non-replayable. It is still
+            # exported for diagnostics/recovery rather than being silently lost.
+            return "<unknown>"
+
+    def _ensure_pending_fade(self, source: str, collection: str) -> PendingFadeCleanup:
+        key = (str(collection), str(source))
+        pending = self._pending_fade_cleanup.get(key)
+        if pending is None:
+            pending = PendingFadeCleanup(
+                source=str(source),
+                collection=str(collection),
+                created_at=time.monotonic(),
+            )
+            self._pending_fade_cleanup[key] = pending
+        return pending
+
+    def _neutralize_fade_sources(
+        self,
+        sources: Iterable[str],
+        *,
+        collection: str | None = None,
+    ) -> tuple[str, ...]:
         warnings: list[str] = []
-        for source in {str(item) for item in sources if str(item)}:
+        collection = str(collection or self._fade_collection_context()).strip()
+        wanted_sources = {str(item) for item in sources if str(item)}
+        if not wanted_sources:
+            return ()
+
+        # Neutralization is a mutation and must obey the same Scene Collection
+        # boundary as deferred retries. If the origin is unknown, or OBS is now
+        # in another collection, keep the obligation but never guess/replay it.
+        for source in wanted_sources:
+            self._ensure_pending_fade(source, collection)
+        if not collection or collection == "<unknown>":
+            return tuple(
+                f"{source}: neutralisation suspendue (Scene Collection d'origine inconnue)"
+                for source in sorted(wanted_sources, key=str.casefold)
+            )
+        try:
+            current = self._scene_collection_name()
+        except Exception as exc:
+            for source in wanted_sources:
+                pending = self._pending_fade_cleanup[(collection, source)]
+                pending.attempts += 1
+                pending.last_error = str(exc)
+            return tuple(
+                f"{source}: neutralisation suspendue (collection OBS non lisible: {exc})"
+                for source in sorted(wanted_sources, key=str.casefold)
+            )
+        if current != collection:
+            return tuple(
+                f"{source}: neutralisation suspendue ({collection} != {current})"
+                for source in sorted(wanted_sources, key=str.casefold)
+            )
+
+        for source in wanted_sources:
+            pending = self._pending_fade_cleanup[(collection, source)]
             try:
                 self._set_source_opacity(source, 1.0)
             except Exception as exc:
-                self._pending_fade_cleanup.add(source)
+                pending.attempts += 1
+                pending.last_error = str(exc)
                 warnings.append(f"{source}: opacité neutre non acquittée ({exc})")
             else:
-                self._pending_fade_cleanup.discard(source)
+                self._pending_fade_cleanup.pop((collection, source), None)
         return tuple(warnings)
 
     def set_cooperative_yield(self, callback) -> None:
@@ -371,7 +510,10 @@ class OBSLayoutManager:
 
     def _scene_collection_name(self) -> str:
         response = self.client.send("GetSceneCollectionList")
-        return str(response.get("currentSceneCollectionName") or "").strip()
+        collection = str(response.get("currentSceneCollectionName") or "").strip()
+        if collection:
+            self._last_scene_collection = collection
+        return collection
 
     def _snapshot_target_count(self, profile: Mapping[str, Any]) -> int:
         return len(self._build_desired_elements(profile)) + len(self._build_support_desired(profile))
@@ -468,6 +610,11 @@ class OBSLayoutManager:
             and str(raw.get("visibility_owner") or "").casefold() == "runtime"
         )
 
+    def runtime_visibility_claims(self) -> frozenset[tuple[str, str]]:
+        """Return current runtime visibility ownership without exposing storage."""
+
+        return frozenset(self._runtime_visibility_owners)
+
     def reset_cache(self) -> None:
         self._scene_item_cache.clear()
 
@@ -545,7 +692,11 @@ class OBSLayoutManager:
         if not current:
             try:
                 current_response = self.client.send("GetCurrentProgramScene")
-                current = str(current_response.get("currentProgramSceneName") or "")
+                current = str(
+                    current_response.get("sceneName")
+                    or current_response.get("currentProgramSceneName")
+                    or ""
+                )
             except Exception:
                 current = ""
         return names, current
@@ -592,6 +743,7 @@ class OBSLayoutManager:
     ) -> None:
         if depth > 8:
             return
+        self._yield_runtime()
         if prefetched is None:
             response = self.client.send("GetSceneItemList", {"sceneName": container})
             items = response.get("sceneItems", []) or []
@@ -599,6 +751,7 @@ class OBSLayoutManager:
             items = prefetched
 
         for raw in items:
+            self._yield_runtime()
             if not isinstance(raw, Mapping):
                 continue
             source = str(raw.get("sourceName") or "").strip()
@@ -728,6 +881,7 @@ class OBSLayoutManager:
     ) -> None:
         if depth > 8:
             return
+        self._yield_runtime()
         if prefetched is None:
             response = self.client.send("GetSceneItemList", {"sceneName": container})
             items = response.get("sceneItems", []) or []
@@ -735,6 +889,7 @@ class OBSLayoutManager:
             items = prefetched
 
         for raw in items:
+            self._yield_runtime()
             if not isinstance(raw, Mapping):
                 continue
             source = str(raw.get("sourceName") or "")
@@ -1422,6 +1577,7 @@ class OBSLayoutManager:
         scene = str(profile.get("scene") or "")
         by_module: dict[str, list[CatalogElement]] = {}
         for item in desired:
+            self._yield_runtime()
             try:
                 current = self._get_current_item(item["container"], item["source"])
             except Exception:
@@ -1605,7 +1761,10 @@ class OBSLayoutManager:
             transition = dict(transition_override)
         mode = str(transition.get("mode") or "instant").casefold()
         duration_ms = max(0, _int(transition.get("duration_ms"), 0))
-        steps = max(1, min(60, _int(transition.get("steps"), 8)))
+        steps = self._effective_transition_steps(
+            duration_ms,
+            _int(transition.get("steps"), 8),
+        )
 
         applied = 0
         skipped = 0
@@ -1633,6 +1792,7 @@ class OBSLayoutManager:
 
         def prepare_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
             nonlocal skipped
+            self._yield_runtime()
             if item.get("skip"):
                 skipped += 1
                 return None
@@ -1767,6 +1927,403 @@ class OBSLayoutManager:
             self._undo_stack = self._undo_stack[-20:]
         return result
 
+    @staticmethod
+    def _effective_transition_steps(duration_ms: int, configured_steps: int) -> int:
+        """Return a smooth but bounded number of animation frames.
+
+        Historical profiles store 8 steps, which is visibly jerky. Treat the
+        stored value as a minimum quality hint and target the OBS render-friendly
+        cadence of about 60 FPS. The 361-point hard cap bounds WebSocket work
+        even for unusually long hand-edited transition durations.
+        """
+        configured = max(1, min(60, int(configured_steps or 1)))
+        if duration_ms <= 0:
+            return configured
+        cadence = int(math.ceil((float(duration_ms) / 1000.0) * 60.0)) + 1
+        return max(configured, min(361, cadence))
+
+    def _transition_progress(self, duration_ms: int, steps: int) -> Iterable[float]:
+        """Yield wall-clock driven animation progress while dropping stale frames.
+
+        A synchronous OBS request can occasionally take longer than one render
+        interval. Replaying every missed frame afterwards creates visible bursts
+        and pauses. Instead, jump directly to the newest frame that should have
+        been visible at the current time while always emitting the exact final
+        state.
+        """
+        if duration_ms <= 0 or steps <= 1:
+            yield 1.0
+            return
+
+        total_seconds = max(0.000001, duration_ms / 1000.0)
+        intervals = max(1, steps - 1)
+        frame_seconds = total_seconds / intervals
+        started = time.monotonic()
+        frame = 1
+        last_progress = 0.0
+
+        while frame <= intervals:
+            deadline = started + frame_seconds * frame
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                self._cooperative_sleep(remaining)
+
+            elapsed = max(0.0, time.monotonic() - started)
+            due_frame = min(
+                intervals,
+                max(frame, int(elapsed / frame_seconds)),
+            )
+            scheduled_progress = due_frame / intervals
+            elapsed_progress = min(1.0, elapsed / total_seconds)
+            progress = min(1.0, max(last_progress, scheduled_progress, elapsed_progress))
+            yield progress
+            last_progress = progress
+            frame = due_frame + 1
+
+    def _animate_opacity_batch(
+        self,
+        states: Mapping[str, tuple[float, float]],
+        *,
+        duration_ms: int,
+        steps: int,
+    ) -> None:
+        if not states:
+            return
+        if duration_ms <= 0 or steps <= 1:
+            for source, (_start, end) in states.items():
+                self._set_source_opacity(source, end)
+            return
+
+        # Emit the exact starting opacity before the first timed frame. The
+        # wall-clock timeline intentionally starts at the first interval (> 0),
+        # so without this write a fade-in after reposition would jump directly
+        # from 0 to 1/60 instead of having an explicit transparent boundary.
+        for source, (start, _end) in states.items():
+            self._yield_runtime()
+            self._set_source_opacity(source, start)
+
+        for t in self._transition_progress(duration_ms, steps):
+            for source, (start, end) in states.items():
+                self._yield_runtime()
+                self._set_source_opacity(source, start + (end - start) * t)
+
+    def _animate_fade_reposition(
+        self,
+        prepared_items: list[dict[str, Any]],
+        *,
+        duration_ms: int,
+        steps: int,
+        warnings: list[str],
+    ) -> None:
+        """Fade visible layout-owned items out, reposition, then fade them in.
+
+        duration_ms is the duration of each fade phase. Geometry mutations are
+        applied only while affected visible items are fully transparent.
+        """
+        fade_collection = self._fade_collection_context(probe=True)
+        fade_out: dict[str, tuple[float, float]] = {}
+        fade_in: dict[str, tuple[float, float]] = {}
+        touched: set[str] = set()
+        fallback: list[dict[str, Any]] = []
+
+        for prepared in prepared_items:
+            self._yield_runtime()
+            source = prepared["source"]
+            target_enabled = prepared["target_enabled"]
+            current_enabled = prepared["current_enabled"]
+
+            # Runtime-owned visibility must not be driven through a temporary
+            # opacity transition by the layout engine.
+            if target_enabled is None:
+                fallback.append(prepared)
+                continue
+            if current_enabled is None:
+                warnings.append(
+                    f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
+                )
+                fallback.append(prepared)
+                continue
+
+            current_visible = bool(current_enabled)
+            target_visible = bool(target_enabled)
+            needs_geometry = bool(
+                prepared["transform_changed"] and prepared["target_transform"]
+            )
+            needs_visibility = bool(prepared["visibility_changed"])
+            if not needs_geometry and not needs_visibility:
+                continue
+
+            if current_visible:
+                touched.add(source)
+                self._ensure_pending_fade(source, fade_collection)
+                self._ensure_fade_filter(source, 1.0)
+                fade_out[source] = (1.0, 0.0)
+            if target_visible:
+                touched.add(source)
+                self._ensure_pending_fade(source, fade_collection)
+                fade_in[source] = (0.0, 1.0)
+
+        try:
+            self._animate_opacity_batch(
+                fade_out, duration_ms=duration_ms, steps=steps
+            )
+
+            for prepared in prepared_items:
+                self._yield_runtime()
+                target = prepared["target_transform"]
+                if prepared["transform_changed"] and target:
+                    self._set_transform(
+                        prepared["container"], prepared["source"], target
+                    )
+
+                target_enabled = prepared["target_enabled"]
+                current_enabled = prepared["current_enabled"]
+                if target_enabled is None or current_enabled is None:
+                    continue
+                if bool(target_enabled) == bool(current_enabled):
+                    continue
+                if bool(target_enabled):
+                    try:
+                        self._set_source_opacity(prepared["source"], 0.0)
+                        self._set_enabled(prepared["container"], prepared["source"], True)
+                    except Exception as exc:
+                        # The opacity mutation may have reached OBS even when its
+                        # response was lost. Keep the pre-armed neutralization
+                        # obligation, skip this source's fade-in, and degrade to a
+                        # warning rather than aborting the whole layout transition.
+                        warnings.append(
+                            f"Fondu d'apparition incertain pour {prepared['source']}: {exc}"
+                        )
+                        fade_in.pop(prepared["source"], None)
+                else:
+                    self._set_enabled(prepared["container"], prepared["source"], False)
+
+            self._animate_opacity_batch(
+                fade_in, duration_ms=duration_ms, steps=steps
+            )
+
+            for prepared in fallback:
+                target_enabled = prepared["target_enabled"]
+                current_enabled = prepared["current_enabled"]
+                if (
+                    target_enabled is not None
+                    and current_enabled is not None
+                    and bool(target_enabled) != bool(current_enabled)
+                ):
+                    self._set_enabled(
+                        prepared["container"],
+                        prepared["source"],
+                        bool(target_enabled),
+                    )
+        except Exception as exc:
+            cleanup_warnings = self._neutralize_fade_sources(
+                touched, collection=fade_collection
+            )
+            warnings.extend(cleanup_warnings)
+            detail = ""
+            if cleanup_warnings:
+                detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
+            raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
+        else:
+            warnings.extend(
+                self._neutralize_fade_sources(touched, collection=fade_collection)
+            )
+
+    @staticmethod
+    def _move_fade_opacity(mode: str, progress: float) -> float:
+        """Opacity curve for a fast 15% edge fade around an invisible move."""
+        t = max(0.0, min(1.0, float(progress)))
+        edge = 0.15
+        reveal = 1.0 - edge
+        if mode == "through":
+            if t <= edge:
+                return 1.0 - (t / edge)
+            if t < reveal:
+                return 0.0
+            return (t - reveal) / edge
+        if mode == "in":
+            if t < reveal:
+                return 0.0
+            return (t - reveal) / edge
+        if mode == "out":
+            if t <= edge:
+                return 1.0 - (t / edge)
+            return 0.0
+        return 1.0
+
+    def _animate_move_fade(
+        self,
+        prepared_items: list[dict[str, Any]],
+        *,
+        duration_ms: int,
+        steps: int,
+        warnings: list[str],
+    ) -> None:
+        """Move continuously while fading according to visibility ownership.
+
+        duration_ms is the total move duration. For items visible before and
+        after the layout change, opacity fades 100% -> 0% during the first 15%,
+        stays fully transparent through the middle 70%, then fades 0% -> 100%
+        during the final 15%. Geometry keeps moving continuously at ~60 Hz.
+        """
+        fade_collection = self._fade_collection_context(probe=True)
+        touched_fades: set[str] = set()
+        fade_modes: dict[int, str] = {}
+        fallback_visibility: set[int] = set()
+
+        for index, prepared in enumerate(prepared_items):
+            self._yield_runtime()
+            source = prepared["source"]
+            target_enabled = prepared["target_enabled"]
+            current_enabled = prepared["current_enabled"]
+
+            # Layout geometry may still move when visibility belongs to another
+            # subsystem, but this transition must not take temporary ownership
+            # of that source opacity.
+            if target_enabled is None:
+                continue
+            if current_enabled is None:
+                warnings.append(
+                    f"Visibilité actuelle inconnue pour {source}; fondu ignoré."
+                )
+                fallback_visibility.add(index)
+                if bool(target_enabled):
+                    self._set_enabled(
+                        prepared["container"], prepared["source"], True
+                    )
+                continue
+
+            current_visible = bool(current_enabled)
+            target_visible = bool(target_enabled)
+            if not current_visible and not target_visible:
+                continue
+
+            touched_fades.add(source)
+            self._ensure_pending_fade(source, fade_collection)
+            try:
+                if current_visible:
+                    self._ensure_fade_filter(source, 1.0)
+                else:
+                    self._set_source_opacity(source, 0.0)
+                    self._set_enabled(
+                        prepared["container"], prepared["source"], True
+                    )
+            except Exception as exc:
+                warnings.append(f"Fondu indisponible pour {source}: {exc}")
+                fallback_visibility.add(index)
+                touched_fades.discard(source)
+                if target_visible:
+                    self._set_enabled(
+                        prepared["container"], prepared["source"], True
+                    )
+                continue
+
+            if current_visible and target_visible:
+                fade_modes[index] = "through"
+            elif target_visible:
+                fade_modes[index] = "in"
+            else:
+                fade_modes[index] = "out"
+
+        total_duration_ms = max(1, duration_ms)
+        move_steps = self._effective_transition_steps(total_duration_ms, steps)
+        # The fade only changes during the first/last 15%. Using the same ~60 Hz
+        # cadence as geometry gives a smooth short fade without doubling traffic
+        # during the transparent middle section because unchanged opacity is not
+        # re-sent.
+        opacity_points = self._effective_transition_steps(total_duration_ms, steps)
+        opacity_interval = 1.0 / max(1, opacity_points - 1)
+        next_opacity_progress = opacity_interval
+        last_opacity: dict[int, float] = {}
+
+        try:
+            for t in self._transition_progress(total_duration_ms, move_steps):
+                for prepared in prepared_items:
+                    self._yield_runtime()
+                    if not prepared["transform_changed"]:
+                        continue
+                    target = prepared["target_transform"]
+                    current = prepared["current_transform"]
+                    if not target:
+                        continue
+                    keys = [
+                        key
+                        for key in target
+                        if isinstance(target.get(key), (int, float))
+                    ]
+                    update = {
+                        key: _float(current.get(key), _float(target.get(key)))
+                        + (
+                            _float(target.get(key))
+                            - _float(current.get(key), _float(target.get(key)))
+                        )
+                        * t
+                        for key in keys
+                    }
+                    if update:
+                        self._set_transform(
+                            prepared["container"], prepared["source"], update
+                        )
+
+                opacity_due = t + 1e-9 >= next_opacity_progress or t >= 1.0
+                if opacity_due or abs(t - 0.5) <= 1e-9:
+                    for index, mode in fade_modes.items():
+                        opacity = self._move_fade_opacity(mode, t)
+                        previous = last_opacity.get(index)
+                        if previous is None or abs(previous - opacity) > 1e-6:
+                            source = prepared_items[index]["source"]
+                            self._set_source_opacity(source, opacity)
+                            last_opacity[index] = opacity
+                    while next_opacity_progress <= t + 1e-9:
+                        next_opacity_progress += opacity_interval
+
+            # Force exact final transforms even if stale-frame dropping skipped
+            # the nominal final geometry update.
+            for prepared in prepared_items:
+                target = prepared["target_transform"]
+                if prepared["transform_changed"] and target:
+                    self._set_transform(
+                        prepared["container"], prepared["source"], target
+                    )
+
+            for index, prepared in enumerate(prepared_items):
+                target_enabled = prepared["target_enabled"]
+                current_enabled = prepared["current_enabled"]
+                if target_enabled is None or current_enabled is None:
+                    continue
+                if index in fade_modes:
+                    if bool(target_enabled):
+                        self._set_source_opacity(prepared["source"], 1.0)
+                    else:
+                        self._set_enabled(
+                            prepared["container"], prepared["source"], False
+                        )
+                        self._set_source_opacity(prepared["source"], 1.0)
+                elif index in fallback_visibility:
+                    if not bool(target_enabled):
+                        self._set_enabled(
+                            prepared["container"], prepared["source"], False
+                        )
+                    elif bool(target_enabled) != bool(current_enabled):
+                        self._set_enabled(
+                            prepared["container"], prepared["source"], True
+                        )
+        except Exception as exc:
+            cleanup_warnings = self._neutralize_fade_sources(
+                touched_fades, collection=fade_collection
+            )
+            warnings.extend(cleanup_warnings)
+            detail = ""
+            if cleanup_warnings:
+                detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
+            raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
+        else:
+            warnings.extend(
+                self._neutralize_fade_sources(
+                    touched_fades, collection=fade_collection
+                )
+            )
+
     def _animate_layout_transition(
         self,
         prepared_items: list[dict[str, Any]],
@@ -1777,13 +2334,34 @@ class OBSLayoutManager:
         warnings: list[str],
     ) -> None:
         """Animate one layout on a single global timeline with bounded fade cleanup."""
-        move = mode in {"move", "move_fade"}
-        fade = mode in {"fade", "move_fade"}
+        if mode == "fade":
+            self._animate_fade_reposition(
+                prepared_items,
+                duration_ms=duration_ms,
+                steps=steps,
+                warnings=warnings,
+            )
+            return
+        if mode == "move_fade":
+            self._animate_move_fade(
+                prepared_items,
+                duration_ms=duration_ms,
+                steps=steps,
+                warnings=warnings,
+            )
+            return
+
+        move = mode == "move"
+        fade = False
+        # Bind all temporary fade obligations in this transition to the Scene
+        # Collection observed immediately before any fade mutation.
+        fade_collection = self._fade_collection_context(probe=True) if fade else ""
         fade_state: dict[int, tuple[float, float]] = {}
         fallback_visibility: set[int] = set()
         touched_fades: set[str] = set()
 
         for index, prepared in enumerate(prepared_items):
+            self._yield_runtime()
             target_enabled = prepared["target_enabled"]
             current_enabled = prepared["current_enabled"]
             source = prepared["source"]
@@ -1800,15 +2378,18 @@ class OBSLayoutManager:
                 continue
 
             if fade:
+                # A filter mutation can succeed in OBS even when the response is
+                # lost. Arm neutralization before the first fade I/O so every
+                # uncertain temporary filter state has durable recovery work.
+                touched_fades.add(source)
+                self._ensure_pending_fade(source, fade_collection)
                 try:
                     if bool(target_enabled):
                         self._set_source_opacity(source, 0.0)
-                        touched_fades.add(source)
                         self._set_enabled(container, source, True)
                         fade_state[index] = (0.0, 1.0)
                     else:
                         self._ensure_fade_filter(source, 1.0)
-                        touched_fades.add(source)
                         fade_state[index] = (1.0, 0.0)
                 except Exception as exc:
                     warnings.append(f"Fondu indisponible pour {source}: {exc}")
@@ -1819,16 +2400,9 @@ class OBSLayoutManager:
                 self._set_enabled(container, source, True)
 
         try:
-            total_seconds = max(0.0, duration_ms / 1000.0)
-            started = time.monotonic()
-            for frame in range(1, steps + 1):
-                if frame > 1 and steps > 1:
-                    deadline = started + total_seconds * ((frame - 1) / (steps - 1))
-                    remaining = deadline - time.monotonic()
-                    if remaining > 0:
-                        self._cooperative_sleep(remaining)
-                t = 1.0 if steps == 1 else (frame - 1) / (steps - 1)
+            for t in self._transition_progress(duration_ms, steps):
                 for index, prepared in enumerate(prepared_items):
+                    self._yield_runtime()
                     if move and prepared["transform_changed"]:
                         target = prepared["target_transform"]
                         current = prepared["current_transform"]
@@ -1890,14 +2464,14 @@ class OBSLayoutManager:
                     elif index in fallback_visibility:
                         self._set_enabled(prepared["container"], prepared["source"], True)
         except Exception as exc:
-            cleanup_warnings = self._neutralize_fade_sources(touched_fades)
+            cleanup_warnings = self._neutralize_fade_sources(touched_fades, collection=fade_collection)
             warnings.extend(cleanup_warnings)
             detail = ""
             if cleanup_warnings:
                 detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
             raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
         else:
-            cleanup_warnings = self._neutralize_fade_sources(touched_fades)
+            cleanup_warnings = self._neutralize_fade_sources(touched_fades, collection=fade_collection)
             warnings.extend(cleanup_warnings)
 
     def _wait_group_resize_settle(self) -> None:
@@ -2179,6 +2753,7 @@ class OBSLayoutManager:
         self._scene_item_cache.pop((container, source), None)
 
     def _get_current_item(self, container: str, source: str) -> dict[str, Any]:
+        self._yield_runtime()
         # Scene-item ids are not a durable identifier for a LayoutProfile. OBS can
         # rebuild/renumber items after structural scene edits (for example when a
         # source is removed). A cached id that was valid during discovery must
@@ -2192,6 +2767,7 @@ class OBSLayoutManager:
                 "GetSceneItemTransform", {"sceneName": container, "sceneItemId": item_id}
             )
         except Exception:
+            self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             item_id = self._scene_item_id(container, source)
             transform_response = self.client.send(
@@ -2199,6 +2775,7 @@ class OBSLayoutManager:
             )
         enabled = None
         enabled_error = ""
+        self._yield_runtime()
         try:
             enabled_response = self.client.send(
                 "GetSceneItemEnabled", {"sceneName": container, "sceneItemId": item_id}
@@ -2217,6 +2794,7 @@ class OBSLayoutManager:
         }
 
     def _set_transform(self, container: str, source: str, transform: Mapping[str, Any]) -> None:
+        self._yield_runtime()
         if not transform:
             return
         item_id = self._scene_item_id(container, source)
@@ -2228,11 +2806,13 @@ class OBSLayoutManager:
         try:
             self.client.send("SetSceneItemTransform", payload)
         except Exception:
+            self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             payload["sceneItemId"] = self._scene_item_id(container, source)
             self.client.send("SetSceneItemTransform", payload)
 
     def _set_enabled(self, container: str, source: str, enabled: bool) -> None:
+        self._yield_runtime()
         item_id = self._scene_item_id(container, source)
         payload = {
             "sceneName": container,
@@ -2242,6 +2822,7 @@ class OBSLayoutManager:
         try:
             self.client.send("SetSceneItemEnabled", payload)
         except Exception:
+            self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             payload["sceneItemId"] = self._scene_item_id(container, source)
             self.client.send("SetSceneItemEnabled", payload)
@@ -2327,9 +2908,10 @@ class OBSLayoutManager:
             value = start + (end - start) * (index / steps)
             self._set_source_opacity(source, value)
             if index != steps:
-                time.sleep(delay)
+                self._cooperative_sleep(delay)
 
     def _fresh_scene_item_id(self, container: str, source: str) -> int:
+        self._yield_runtime()
         self._invalidate_scene_item_id(container, source)
         response = self.client.send(
             "GetSceneItemId",
@@ -2345,6 +2927,7 @@ class OBSLayoutManager:
         return item_id
 
     def _scene_item_id(self, container: str, source: str) -> int:
+        self._yield_runtime()
         key = (container, source)
         cached = self._scene_item_cache.get(key)
         if cached:

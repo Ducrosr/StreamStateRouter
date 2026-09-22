@@ -41,6 +41,7 @@ class PendingHide:
 
 def pending_hide_to_mapping(pending: PendingHide) -> dict[str, object]:
     return {
+        "kind": "activation_hide",
         "policy": pending.policy,
         "collection": pending.collection,
         "target": pending.target.to_mapping(),
@@ -101,7 +102,16 @@ class OBSActivationController:
         self._last_collection_probe = 0.0
         self._scene_collection: str | None = None
         self._pending_hides: dict[tuple[str, str, str, str, str], PendingHide] = {}
+        self._cooperative_yield = None
         self._sync_visibility_owners()
+
+    def set_cooperative_yield(self, callback) -> None:
+        self._cooperative_yield = callback
+
+    def _yield_runtime(self) -> None:
+        callback = self._cooperative_yield
+        if callback is not None:
+            callback()
 
     def configure(self, policies: Mapping[str, TriggerPolicyConfig]) -> None:
         self._policies = dict(policies)
@@ -114,9 +124,11 @@ class OBSActivationController:
             for policy in self._policies.values()
             for target in policy.targets
         }
+        collection = str(self._scene_collection or "").strip()
         owners.update(
             (pending.target.container, pending.target.source)
             for pending in self._pending_hides.values()
+            if not collection or pending.collection == collection
         )
         self.layout_manager.set_runtime_visibility_owners(owners)
 
@@ -136,21 +148,24 @@ class OBSActivationController:
 
     def import_pending_hides(self, raw_items) -> int:
         imported = 0
-        collections: set[str] = set()
         for raw in raw_items or ():
             if not isinstance(raw, Mapping):
+                continue
+            kind = str(raw.get("kind") or "activation_hide").strip().casefold()
+            if kind not in {"activation_hide", "activation"}:
                 continue
             pending = pending_hide_from_mapping(raw)
             if pending is None:
                 continue
+            # Retry deadlines are monotonic-process values. Never trust a
+            # persisted/imported absolute deadline after a runtime/process
+            # replacement; make the contextualized obligation immediately due.
+            pending.next_retry_at = 0.0
             key = self._pending_key(pending.policy, pending.target, pending.collection)
             self._pending_hides[key] = pending
-            collections.add(pending.collection)
             imported += 1
-        if len(collections) == 1 and self._scene_collection is None:
-            # Remember the collection the obligation belongs to. The first real
-            # OBS probe will keep it only if the same collection is active.
-            self._scene_collection = next(iter(collections))
+        # Imported obligations retain their own Scene Collection context. They
+        # must not redefine the collection of the new OBS session.
         self._sync_visibility_owners()
         return imported
 
@@ -165,6 +180,15 @@ class OBSActivationController:
             return values
         wanted = str(policy_name)
         return tuple(item for item in values if item.policy == wanted)
+
+    def pending_hides_for_current_collection(self) -> tuple[PendingHide, ...]:
+        collection = str(self._scene_collection or "").strip()
+        if not collection:
+            return ()
+        return tuple(
+            item for item in self._pending_hides.values()
+            if item.collection == collection
+        )
 
     def policy_cleanup_status(self, policy_name: str) -> tuple[bool, str]:
         collection = self._scene_collection
@@ -247,9 +271,9 @@ class OBSActivationController:
     def is_eligible(self, policy_name: str, policy: TriggerPolicyConfig) -> bool:
         return self.eligibility(policy_name, policy)[0]
 
-    def apply_event(self, event: ActivationEvent) -> None:
+    def apply_event(self, event: ActivationEvent) -> str:
         if event.kind not in {"show", "hide"}:
-            return
+            return ""
         policy = self._policy(event.policy)
         target = self._target_for_event(policy, event)
         if target is None:
@@ -258,17 +282,47 @@ class OBSActivationController:
                 f"{event.container}/{event.source}"
             )
 
-        collection = self._operation_collection()
-
         if event.kind == "hide":
+            # A hide belongs to the Scene Collection in which the temporary
+            # visibility was created. Never reinterpret it against a collection
+            # merely because another hide in the same batch observed a switch.
+            origin_collection = (
+                str(event.collection or "").strip()
+                or str(self._scene_collection or "").strip()
+                or "<unknown>"
+            )
+            self._ensure_pending_hide(event.policy, target, origin_collection)
+            self._yield_runtime()
+            current = self._current_scene_collection()
+            if self._scene_collection != current:
+                self._adopt_collection(current)
+                self.invalidate_cache()
+
+            if origin_collection == "<unknown>":
+                self._ack_pending_hide(event.policy, target, origin_collection)
+                origin_collection = current
+                self._ensure_pending_hide(event.policy, target, origin_collection)
+            elif current != origin_collection:
+                raise ActivationCollectionChanged(
+                    "Masquage suspendu : Scene Collection d'origine "
+                    f"{origin_collection} != collection active {current}"
+                )
+
             status, error = self._mutate_visibility(target, False)
             if status in {"applied", "missing"}:
-                self._clear_pending_hide(event.policy, target, collection)
-                return
-            self._record_pending_hide(event.policy, target, collection, error)
+                self._ack_pending_hide(event.policy, target, origin_collection)
+                return origin_collection
+            self._record_pending_hide_failure(
+                event.policy,
+                target,
+                origin_collection,
+                error,
+            )
             raise ActivationVisibilityUncertain(
                 f"Masquage non acquitté pour {target.container}/{target.source}: {error}"
             )
+
+        collection = self._operation_collection()
 
         blocked, reason = self.policy_cleanup_status(event.policy)
         if blocked:
@@ -278,11 +332,17 @@ class OBSActivationController:
             for candidate in policy.targets:
                 if candidate.identity == target.identity:
                     continue
+                self._ensure_pending_hide(event.policy, candidate, collection)
                 status, error = self._mutate_visibility(candidate, False)
                 if status in {"applied", "missing"}:
-                    self._clear_pending_hide(event.policy, candidate, collection)
+                    self._ack_pending_hide(event.policy, candidate, collection)
                     continue
-                self._record_pending_hide(event.policy, candidate, collection, error)
+                self._record_pending_hide_failure(
+                    event.policy,
+                    candidate,
+                    collection,
+                    error,
+                )
                 raise ActivationVisibilityUncertain(
                     "Activation exclusive bloquée : masquage concurrent non acquitté "
                     f"pour {candidate.container}/{candidate.source}: {error}"
@@ -291,28 +351,41 @@ class OBSActivationController:
             # Force a clean false->true edge for sources whose media/browser
             # animation needs to restart. Failure to acknowledge this hide blocks
             # the show rather than allowing two potentially visible targets.
+            self._ensure_pending_hide(event.policy, target, collection)
             status, error = self._mutate_visibility(target, False)
             if status == "missing":
+                self._ack_pending_hide(event.policy, target, collection)
                 raise ActivationTargetMissing(
                     f"Source absente : {target.container}/{target.source}"
                 )
             if status != "applied":
-                self._record_pending_hide(event.policy, target, collection, error)
+                self._record_pending_hide_failure(
+                    event.policy,
+                    target,
+                    collection,
+                    error,
+                )
                 raise ActivationVisibilityUncertain(
                     f"Pré-masquage non acquitté pour {target.container}/{target.source}: {error}"
                 )
+            self._ack_pending_hide(event.policy, target, collection)
 
+        # Pre-arm a compensating hide before the show. It is explicitly
+        # acknowledged only after OBS confirms the show result (or confirms the
+        # target is absent). An uncertain response therefore leaves a durable
+        # cleanup obligation with the original Scene Collection context.
+        self._ensure_pending_hide(event.policy, target, collection)
         status, error = self._mutate_visibility(target, True)
         if status == "applied":
-            return
+            self._ack_pending_hide(event.policy, target, collection)
+            return collection
         if status == "missing":
+            self._ack_pending_hide(event.policy, target, collection)
             raise ActivationTargetMissing(
                 f"Source absente : {target.container}/{target.source}"
             )
 
-        # A lost/uncertain response after show may mean OBS applied the show.
-        # Compensate by scheduling a hide and block this policy until it is acked.
-        self._record_pending_hide(event.policy, target, collection, error)
+        self._record_pending_hide_failure(event.policy, target, collection, error)
         raise ActivationVisibilityUncertain(
             f"Affichage au résultat incertain pour {target.container}/{target.source}: {error}"
         )
@@ -324,6 +397,7 @@ class OBSActivationController:
         structured in _pending_hides and keep their policies blocked.
         """
         warnings: list[str] = []
+        self._yield_runtime()
         try:
             collection = self._current_scene_collection()
         except Exception as exc:
@@ -342,6 +416,7 @@ class OBSActivationController:
         seen: set[tuple[str, str, str, str]] = set()
         for policy_name, policy in self._policies.items():
             for target in policy.targets:
+                self._yield_runtime()
                 key = (
                     policy_name,
                     target.container,
@@ -351,11 +426,12 @@ class OBSActivationController:
                 if key in seen:
                     continue
                 seen.add(key)
+                self._ensure_pending_hide(policy_name, target, collection_name)
                 status, error = self._mutate_visibility(target, False)
                 if status in {"applied", "missing"}:
-                    self._clear_pending_hide(policy_name, target, collection_name)
+                    self._ack_pending_hide(policy_name, target, collection_name)
                     continue
-                self._record_pending_hide(
+                self._record_pending_hide_failure(
                     policy_name,
                     target,
                     collection_name,
@@ -378,20 +454,29 @@ class OBSActivationController:
         if not due or not bool(getattr(self.client, "connected", False)):
             return ()
 
+        self._yield_runtime()
         try:
             current = self._current_scene_collection()
         except Exception:
             return ()
 
+        messages: list[str] = []
         if self._scene_collection != current:
+            previous = self._scene_collection
             self._adopt_collection(current)
             self.invalidate_cache()
-            return (f"Anciennes opérations abandonnées après changement vers {current}",)
+            if previous:
+                messages.append(
+                    f"Scene Collection modifiée : obligations de {previous} conservées et suspendues"
+                )
 
-        messages: list[str] = []
         for key, pending in tuple(self._pending_hides.items()):
+            # A cleanup obligation is valid only in the collection where the
+            # potentially-visible item/filter was created. Keep, but never
+            # replay, obligations belonging to another collection.
             if pending.collection != current or timestamp < pending.next_retry_at:
                 continue
+            self._yield_runtime()
             status, error = self._mutate_visibility(pending.target, False)
             if status in {"applied", "missing"}:
                 self._pending_hides.pop(key, None)
@@ -419,6 +504,7 @@ class OBSActivationController:
         ):
             return False
         self._last_collection_probe = now
+        self._yield_runtime()
         try:
             current = self._current_scene_collection()
         except Exception:
@@ -450,8 +536,9 @@ class OBSActivationController:
         current = str(collection or "").strip()
         if self._scene_collection == current:
             return
-        # Never replay operations captured for another Scene Collection.
-        self._pending_hides.clear()
+        # Pending hides keep the collection in which they were created. A
+        # collection switch suspends old obligations; it must never erase or
+        # replay them against the new collection.
         self._scene_collection = current
         self._sync_visibility_owners()
 
@@ -479,13 +566,39 @@ class OBSActivationController:
         except Exception as exc:
             return "uncertain", str(exc)
 
-    def _record_pending_hide(
+    def register_hide_obligation(self, event: ActivationEvent) -> None:
+        """Arm a hide obligation without performing the visibility mutation.
+
+        Shutdown uses this before resetting scheduler state so a visible target
+        is already represented as cleanup work before its transient state is
+        discarded.
+        """
+        if event.kind != "hide":
+            return
+        policy = self._policy(event.policy)
+        target = self._target_for_event(policy, event)
+        if target is None:
+            raise RuntimeError(
+                f"Source d'activation introuvable ou ambiguë pour {event.policy}: "
+                f"{event.container}/{event.source}"
+            )
+        # Never perform network I/O while snapshotting shutdown state.
+        # A normally-visible activation already has its originating collection
+        # from apply_event(show). If that context is unexpectedly unavailable,
+        # preserve a non-replayable obligation rather than guessing a collection.
+        collection = (
+            str(event.collection or "").strip()
+            or str(self._scene_collection or "").strip()
+            or "<unknown>"
+        )
+        self._ensure_pending_hide(event.policy, target, collection)
+
+    def _ensure_pending_hide(
         self,
         policy_name: str,
         target: TriggerTargetConfig,
         collection: str,
-        error: str,
-    ) -> None:
+    ) -> PendingHide:
         now = self._clock()
         key = self._pending_key(policy_name, target, collection)
         pending = self._pending_hides.get(key)
@@ -495,8 +608,21 @@ class OBSActivationController:
                 target=target,
                 collection=collection,
                 created_at=now,
+                next_retry_at=now,
             )
             self._pending_hides[key] = pending
+            self._sync_visibility_owners()
+        return pending
+
+    def _record_pending_hide_failure(
+        self,
+        policy_name: str,
+        target: TriggerTargetConfig,
+        collection: str,
+        error: str,
+    ) -> None:
+        now = self._clock()
+        pending = self._ensure_pending_hide(policy_name, target, collection)
         pending.attempts += 1
         pending.last_error = str(error)
         delay = min(
@@ -504,9 +630,8 @@ class OBSActivationController:
             self._retry_base_seconds * (2 ** min(pending.attempts - 1, 8)),
         )
         pending.next_retry_at = now + delay
-        self._sync_visibility_owners()
 
-    def _clear_pending_hide(
+    def _ack_pending_hide(
         self,
         policy_name: str,
         target: TriggerTargetConfig,
@@ -517,6 +642,24 @@ class OBSActivationController:
             None,
         )
         self._sync_visibility_owners()
+
+    # Compatibility for older internal callers/tests.
+    def _record_pending_hide(
+        self,
+        policy_name: str,
+        target: TriggerTargetConfig,
+        collection: str,
+        error: str,
+    ) -> None:
+        self._record_pending_hide_failure(policy_name, target, collection, error)
+
+    def _clear_pending_hide(
+        self,
+        policy_name: str,
+        target: TriggerTargetConfig,
+        collection: str,
+    ) -> None:
+        self._ack_pending_hide(policy_name, target, collection)
 
     @staticmethod
     def _pending_key(

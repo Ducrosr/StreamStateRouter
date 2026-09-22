@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Mapping
+
+
+DEFAULT_PROFILE_NAMES: Mapping[str, str] = MappingProxyType(
+    {
+        "game": "Vanilla",
+        "overlay": "Vanilla",
+        "capture": "Default",
+        "audio": "Default",
+        "layout": "Vanilla",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,11 +36,11 @@ class ForegroundApp:
 
 @dataclass(frozen=True, slots=True)
 class StreamState:
-    game: str = "Vanilla"
-    overlay_profile: str = "Vanilla"
-    capture_profile: str = "Default"
-    audio_profile: str = "Default"
-    layout_profile: str = "Vanilla"
+    game: str = DEFAULT_PROFILE_NAMES["game"]
+    overlay_profile: str = DEFAULT_PROFILE_NAMES["overlay"]
+    capture_profile: str = DEFAULT_PROFILE_NAMES["capture"]
+    audio_profile: str = DEFAULT_PROFILE_NAMES["audio"]
+    layout_profile: str = DEFAULT_PROFILE_NAMES["layout"]
     metadata: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -36,18 +48,47 @@ class StreamState:
         values = values or {}
         metadata = values.get("metadata")
         return cls(
-            game=str(values.get("Game", values.get("game", "Vanilla"))),
+            game=str(
+                values.get(
+                    "Game",
+                    values.get("game", DEFAULT_PROFILE_NAMES["game"]),
+                )
+            ),
             overlay_profile=str(
-                values.get("OverlayProfile", values.get("overlay_profile", "Vanilla"))
+                values.get(
+                    "OverlayProfile",
+                    values.get(
+                        "overlay_profile",
+                        DEFAULT_PROFILE_NAMES["overlay"],
+                    ),
+                )
             ),
             capture_profile=str(
-                values.get("CaptureProfile", values.get("capture_profile", "Default"))
+                values.get(
+                    "CaptureProfile",
+                    values.get(
+                        "capture_profile",
+                        DEFAULT_PROFILE_NAMES["capture"],
+                    ),
+                )
             ),
             audio_profile=str(
-                values.get("AudioProfile", values.get("audio_profile", "Default"))
+                values.get(
+                    "AudioProfile",
+                    values.get(
+                        "audio_profile",
+                        DEFAULT_PROFILE_NAMES["audio"],
+                    ),
+                )
             ),
             layout_profile=str(
-                values.get("LayoutProfile", values.get("layout_profile", "Vanilla"))
+                values.get(
+                    "LayoutProfile",
+                    values.get(
+                        "layout_profile",
+                        DEFAULT_PROFILE_NAMES["layout"],
+                    ),
+                )
             ),
             metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
         )

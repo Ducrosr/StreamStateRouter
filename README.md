@@ -1,4 +1,32 @@
-# Stream State Router 2.0.14
+# Stream State Router 2.1.0
+
+## 2.1.0 — routage déclaratif gardé
+
+La 2.1.0 consolide la fondation déclarative construite au-dessus de l'architecture
+2.0.14. SSR peut désormais préparer, vérifier puis exécuter un état désiré OBS
+sur un périmètre volontairement restreint, sans transformer le planner en macro
+runner générique.
+
+Le chemin exécutable couvre actuellement :
+
+- visibilité d'un Scene Item lié à une identité physique vérifiée ;
+- mute d'un input OBS lié par UUID ;
+- volume d'un input en dB (`input_volume_db`) lié par UUID.
+
+Les écritures déclaratives restent opt-in et gardées : ticket mono-usage,
+génération de session OBS, Scene Collection, catalogue, configuration, état
+logique et identité physique sont revalidés avant mutation. Le dernier contrôle
+runtime est atomique avec le `Set*`, puis chaque écriture est acquittée par une
+relecture ciblée et un sweep final vérifie la convergence complète.
+
+Le volume déclaratif impose une cible finie entre `-100` et `+26 dB`,
+refuse les valeurs implicites ou coercées, et utilise une tolérance commune de
+`1e-4 dB` pour absorber le round-trip float32 natif d'OBS sans masquer une
+divergence réelle.
+
+La chaîne de livraison est également durcie : dépendances Python figées,
+`npm ci`, CodeQL, provenance, SHA-256, smoke du binaire portable et de
+l'installateur, ainsi qu'une version Stream Deck dérivée de la version SSR.
 
 ## 2.0.14 — feuille de route d'architecture Astra
 
@@ -219,7 +247,7 @@ Chaque LayoutProfile peut utiliser :
 - `fade` ;
 - `move_fade`.
 
-La durée est configurable. Le déplacement interpole les transforms. Le fondu utilise temporairement un filtre OBS `[SSR] Layout Fade`, remis à 100 % à la fin.
+La durée est configurable. Le déplacement interpole les transforms sur une timeline fluide pilotée par l'horloge. Le fondu utilise temporairement un filtre OBS `[SSR] Layout Fade`, remis à 100 % à la fin. En mode `move_fade`, `duration_ms` reste la durée totale du déplacement : un élément visible avant et après disparaît pendant les 15 % initiaux, reste transparent pendant les 70 % centraux, puis réapparaît pendant les 15 % finaux (`100 % → 0 %` / invisible / `0 % → 100 %`).
 
 > Le filtre de fondu est un filtre **au niveau de la source OBS**. Si une même source est réutilisée simultanément dans plusieurs scènes, son opacité peut donc être affectée brièvement pendant la transition. Utilisez `instant` ou `move` si ce comportement n'est pas souhaité.
 
@@ -309,7 +337,7 @@ Un plugin Stream Deck natif est fourni dans `streamdeck-plugin/` avec les action
 - Undo layout ;
 - Annuler aperçu.
 
-Le plugin 2.0 utilise actuellement les paramètres API par défaut `127.0.0.1:8765` sans jeton. Si vous modifiez le port ou activez un jeton API, utilisez temporairement les commandes HTTP personnalisées ou conservez les valeurs par défaut jusqu'à l'ajout de paramètres globaux au plugin.
+Le plugin utilise par défaut `127.0.0.1:8765` sans jeton. Si vous modifiez le port SSR ou activez un jeton API, ajoutez l'action **Connexion SSR** dans Stream Deck, renseignez le port et le jeton dans son Property Inspector puis appuyez une fois sur la touche. Ces valeurs sont enregistrées comme paramètres globaux du plugin et sont ensuite réutilisées par toutes les actions SSR.
 
 ## OBS classique
 
@@ -349,6 +377,35 @@ La configuration utilisateur est stockée dans :
 
 Le pilotage OBS est **désactivé par défaut** afin qu'un premier lancement ne modifie aucune scène.
 
+## Couverture de migration déclarative
+
+Le rapport read-only de couverture compare les actions OBS configurées avec les capacités
+déclaratives actuellement disponibles, sans démarrer le runtime ni contacter OBS :
+
+```powershell
+python main.py --declarative-coverage
+```
+
+Pour la sortie JSON complète exploitable par un script :
+
+```powershell
+python main.py --declarative-coverage-json
+```
+
+Le rapport distingue notamment :
+
+- `empty` : profil sans aucune action effective, donc exclu d'une interprétation abusive de la couverture ;
+- `declarative_executable` : propriété déjà autorisée par l'executor gardé ;
+- `declarative_plannable` : intention traduite et planifiable, mais pas encore exécutable ;
+- `declarative_intent_only` : intention représentable dont la politique physique reste incomplète ;
+- `delegated` : propriété volontairement possédée par un sous-système spécialisé, notamment les LayoutProfiles ;
+- `legacy_only` : action encore non représentable comme propriété stable ;
+- `invalid` : action/profil invalide ou héritage incohérent.
+
+Les statistiques d'actions comptent chaque déclaration une seule fois. La classification d'un
+profil tient toutefois compte de ses actions héritées via `extends`. Les valeurs arbitraires de
+`set_input_settings` ne sont jamais incluses dans le rapport.
+
 ## Validation développeur
 
 ```powershell
@@ -374,3 +431,104 @@ La migration depuis Advanced Scene Switcher doit rester progressive. La synchron
 ### Modules OBS imbriqués
 
 SSR distingue maintenant deux espaces de coordonnées : `root_canvas` pour les modules directement présents dans la scène du LayoutProfile, et `container_local` pour les modules situés dans une scène ou un groupe imbriqué. Seuls les modules racine sont adaptés au changement de résolution du canvas ; les descendants conservent leurs transforms locaux et suivent naturellement l’échelle de leur parent.
+
+
+
+### API locale de diagnostic
+
+Les opérations de lecture OBS du nouveau catalogue restent sérialisées sur le
+worker runtime existant. Elles ne créent ni seconde connexion OBS ni writer
+supplémentaire.
+
+`POST /catalog/sync` met en file une synchronisation explicite du catalogue et
+retourne un `request_id`. Le résultat se lit ensuite avec
+`GET /requests/<request_id>`.
+
+`POST /planner/current` met en file un dry-run du state courant. Le corps peut
+contenir `{"refresh_catalog": false}` pour réutiliser le dernier catalogue
+structurel ; par défaut le catalogue est resynchronisé.
+
+Un premier executor déclaratif expérimental est disponible uniquement avec
+`SSR_ENABLE_DECLARATIVE_EXECUTION=1` et lorsque SSR est explicitement en pause.
+Il reste opt-in et ne remplace pas le dispatcher historique :
+
+- `POST /planner/prepare_current` prépare un ticket mono-usage lié à la session
+  OBS, la Scene Collection, l'époque du catalogue et l'état logique courant ;
+- `POST /planner/execute` avec `{"plan_id": "..."}` consomme ce ticket ;
+- `GET /requests/<request_id>` expose le résultat asynchrone et son statut métier.
+
+Le chemin expérimental exécute `SetSceneItemEnabled` pour des conteneurs scène
+identifiés par UUID, ainsi que `SetInputMute` et `SetInputVolume` pour des
+inputs identifiés par UUID. Le volume déclaratif utilise `inputVolumeDb` et
+n'accepte comme cible qu'une valeur finie comprise entre -100 et +26 dB.
+Toute autre propriété rend le DesiredState non exécutable. Les LayoutProfiles
+restent exclusivement délégués à `OBSLayoutManager`.
+
+`GET /status` expose également `obs_catalog`, qui indique si un catalogue a
+déjà été synchronisé, s'il est `stale` / partiel et fournit uniquement son résumé.
+`POST /catalog/snapshot` renvoie le dernier snapshot structurel déjà en cache,
+sans nouvelle lecture OBS et sans settings arbitraires.
+
+Le catalogue est un index de découverte, pas une copie durable de l'état OBS :
+une reconnexion ou un changement de Scene Collection l'invalide, et le planner
+revalide le contexte avant et après ses lectures ciblées. Une occurrence de
+Scene Item dont l'identité ou l'ordre a changé est signalée comme référence
+périmée au lieu d'être silencieusement réaffectée.
+
+Les valeurs arbitraires de `inputSettings` et de settings de filtres sont
+masquées dans les sorties de diagnostic afin d'éviter de republier d'éventuels
+jetons ou URL sensibles.
+
+## Fondation déclarative expérimentale
+
+SSR évolue vers un modèle où la configuration décrit principalement l'état final
+souhaité et où un planner calcule les différences avant toute exécution.
+
+La première fondation est volontairement **read-only** :
+
+- `OBSResourceCatalogReader` synchronise un index léger des scènes, groupes,
+  occurrences de Scene Items, inputs, transitions, dimensions du canvas et
+  requêtes réellement annoncées par la session OBS ;
+- les UUID fournis par OBS sont conservés comme indices de référence, tandis que
+  les `sceneItemId` restent considérés comme éphémères ;
+- les settings d'inputs et de filtres sont lus à la demande plutôt que scannés
+  à chaque tick ;
+- `DesiredState` décrit uniquement les propriétés explicitement gérées par SSR,
+  conserve leur provenance et refuse les valeurs contradictoires ;
+- les intentions sans Scene Collection explicite sont liées au snapshot de
+  collection actif avant le diff ;
+- `observe_desired_state()` relit uniquement les propriétés physiques
+  nécessaires au plan ; le catalogue structurel n'est pas assimilé à l'état
+  physique courant ;
+- `build_execution_plan()` est pur, déterministe et ne réalise aucun I/O ;
+- les références manquantes, capacités indisponibles et ressources déléguées
+  bloquent la propriété concernée avant toute écriture ;
+- une valeur physique inconnue bloque le plan au lieu de produire une écriture
+  aveugle ;
+- `validate_state_coverage()` peut détecter une propriété gérée par un état mais
+  laissée accidentellement indéfinie par un autre état ;
+- `OBSDispatcher.plan_state()` réutilise désormais la résolution existante des
+  profils et héritages pour exposer aussi l'intention déclarative, au lieu de
+  créer une seconde logique de sélection parallèle ;
+- un fingerprint de cible permet d'identifier deux résolutions conduisant au
+  même résultat physique sans inclure la provenance.
+
+Le planner reste un composant **pur et read-only**. L'exécution existante du
+dispatcher n'est pas remplacée. Le chemin expérimental décrit ci-dessus prépare
+et acquitte trois propriétés simples via le worker `SSR-Router` — visibilité,
+mute et volume dB — avec revalidation de session/collection/identité juste avant
+chaque mutation et relecture physique après chaque `Set*`. Il n'alimente pas `_applied_profiles`,
+n'effectue ni retry de mutation ni rollback, et exige une nouvelle préparation
+si ses hypothèses deviennent périmées. Les LayoutProfiles conservent leur moteur
+spécialisé validé.
+
+La pause suspend le routage automatique, la réconciliation périodique et le
+départ d'un dispatch différé encore en attente. Les commandes manuelles
+explicites et les cleanups de sécurité restent sérialisés sur le worker runtime ;
+la pause ne constitue donc pas une promesse « zéro écriture OBS » absolue.
+
+Les scopes d'ownership sont génériques et provider-agnostic. Ils permettent de
+déléguer l'intérieur d'un composant OBS à son propriétaire sans introduire de
+logique Dofus/Shinra dans le cœur du planner. Une future capture dynamique peut
+donc être ajoutée comme extension sans déplacer aujourd'hui le fonctionnement
+validé de DWM dans SSR.

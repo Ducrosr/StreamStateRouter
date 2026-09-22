@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import unittest
@@ -13,18 +14,26 @@ from stream_state_router.activation import (
     TriggerPolicyConfig,
     TriggerTargetConfig,
 )
-from stream_state_router.obs.dispatcher import DispatchResult, DomainDispatchStatus
+from stream_state_router.obs.dispatcher import (
+    DispatchResult,
+    DomainDispatchStatus,
+    OBSDispatcher,
+    profile_map_from_raw,
+)
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
+from stream_state_router.services.declarative_execution import ExecutionStepResult
 from stream_state_router.services.runtime import RoutingService
 
 
 class FakeProvider:
     def __init__(self, app):
         self.app = app
+        self.calls = 0
 
     def get(self):
+        self.calls += 1
         return self.app
 
 
@@ -38,6 +47,16 @@ class FakeDispatcher:
 
     def dispatch_state(self, state, force=False):
         return DispatchResult(0, 0, ("game",))
+
+
+class ThreadRecordingDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.thread_names = []
+
+    def dispatch_change(self, change):
+        self.thread_names.append(threading.current_thread().name)
+        return super().dispatch_change(change)
 
 
 class DiagnosticDispatcher(FakeDispatcher):
@@ -95,10 +114,60 @@ class CommandDispatcher(FakeDispatcher):
     def __init__(self):
         super().__init__()
         self.profile_threads = []
+        self.layout_threads = []
 
     def execute_profile(self, domain, profile_name):
         self.profile_threads.append((domain, profile_name, threading.current_thread().name))
         return DispatchResult(1, 0, (domain,))
+
+    def execute_layout_profile(self, profile_name, preview=False):
+        self.layout_threads.append(
+            (profile_name, bool(preview), threading.current_thread().name)
+        )
+        return SimpleNamespace(warnings=(), missing_sources=())
+
+
+class BlockingLayoutDispatcher(CommandDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.layout_entered = threading.Event()
+        self.release_layout = threading.Event()
+
+    def execute_layout_profile(self, profile_name, preview=False):
+        self.layout_entered.set()
+        if not self.release_layout.wait(2.0):
+            raise RuntimeError("layout barrier timed out")
+        return super().execute_layout_profile(profile_name, preview=preview)
+
+
+class CooperativeLayoutManager:
+    def __init__(self):
+        self._yield = None
+
+    def set_cooperative_yield(self, callback):
+        self._yield = callback
+
+    def checkpoint(self):
+        if self._yield is not None:
+            self._yield()
+
+
+class CooperativeLayoutDispatcher(CommandDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.layout_manager = CooperativeLayoutManager()
+        self.layout_entered = threading.Event()
+        self.in_layout = False
+
+    def execute_layout_profile(self, profile_name, preview=False):
+        self.in_layout = True
+        self.layout_entered.set()
+        try:
+            while True:
+                self.layout_manager.checkpoint()
+                time.sleep(0.01)
+        finally:
+            self.in_layout = False
 
 
 class BlockingDispatcher(FakeDispatcher):
@@ -114,12 +183,57 @@ class BlockingDispatcher(FakeDispatcher):
         return super().dispatch_change(change)
 
 
+class CooperativeBackgroundDispatcher(FakeDispatcher):
+    """Model a long automatic OBS reconciliation, not an explicit command."""
+
+    def __init__(self):
+        super().__init__()
+        self._yield = None
+        self.reconcile_entered = threading.Event()
+        self.reconcile_exited = threading.Event()
+
+    def set_cooperative_yield(self, callback):
+        self._yield = callback
+
+    def pending_domains(self, _state=None):
+        return ("game",)
+
+    def dispatch_state(self, state, force=False):
+        del state, force
+        self.reconcile_entered.set()
+        try:
+            while True:
+                if self._yield is not None:
+                    self._yield()
+                time.sleep(0.01)
+        finally:
+            self.reconcile_exited.set()
+
+
+class NonCooperativeBackgroundDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.reconcile_entered = threading.Event()
+        self.release_reconcile = threading.Event()
+
+    def pending_domains(self, _state=None):
+        return ("game",)
+
+    def dispatch_state(self, state, force=False):
+        del state, force
+        self.reconcile_entered.set()
+        if not self.release_reconcile.wait(2.0):
+            raise RuntimeError("background reconcile barrier timed out")
+        return DispatchResult(0, 0, ("game",))
+
+
 class FakeOBSHeartbeatClient:
     def __init__(self):
         self.config = SimpleNamespace(enabled=True)
         self.connected = False
         self.ok = True
         self.probes = 0
+        self.session_generation = 1
 
     def probe(self):
         self.probes += 1
@@ -131,6 +245,174 @@ class FakeHeartbeatDispatcher(FakeDispatcher):
     def __init__(self):
         super().__init__()
         self.client = FakeOBSHeartbeatClient()
+
+
+class CatalogRuntimeClient:
+    def __init__(self):
+        self.config = SimpleNamespace(enabled=False)
+        self.connected = True
+        self.request_count = 0
+        self.calls = []
+        self.collection = "Main"
+        self.program_scene = "Idle"
+        self.session_generation = 1
+
+    def send(self, request, data=None):
+        self.request_count += 1
+        self.calls.append((request, data))
+        if request == "GetVersion":
+            return {
+                "availableRequests": [
+                    "GetSceneCollectionList",
+                    "GetSceneList",
+                    "GetGroupList",
+                    "GetSceneItemList",
+                    "GetGroupSceneItemList",
+                    "GetInputList",
+                    "GetSceneTransitionList",
+                    "GetVideoSettings",
+                    "GetCurrentProgramScene",
+                ]
+            }
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": self.collection}
+        if request == "GetSceneList":
+            return {
+                "currentProgramSceneName": self.program_scene,
+                "currentProgramSceneUuid": "idle-uuid",
+                "scenes": [
+                    {
+                        "sceneName": "Idle",
+                        "sceneUuid": "idle-uuid",
+                        "sceneIndex": 0,
+                    },
+                    {
+                        "sceneName": "Gameplay",
+                        "sceneUuid": "game-uuid",
+                        "sceneIndex": 1,
+                    },
+                ],
+            }
+        if request == "GetGroupList":
+            return {"groups": []}
+        if request == "GetSceneItemList":
+            return {"sceneItems": []}
+        if request == "GetInputList":
+            return {"inputs": []}
+        if request == "GetSceneTransitionList":
+            return {"transitions": []}
+        if request == "GetVideoSettings":
+            return {"baseWidth": 1920, "baseHeight": 1080}
+        if request == "GetCurrentProgramScene":
+            return {
+                "currentProgramSceneName": self.program_scene,
+                "currentProgramSceneUuid": "idle-uuid",
+            }
+        if request == "GetStreamStatus":
+            return {"outputActive": False}
+        if request == "GetRecordStatus":
+            return {"outputActive": False}
+        raise AssertionError(f"Unexpected catalog runtime request: {request}")
+
+    def probe(self):
+        return True, "connected"
+
+
+class DeclarativeExecutorRuntimeClient:
+    def __init__(self):
+        self.config = SimpleNamespace(enabled=True)
+        self.connected = True
+        self.request_count = 0
+        self.calls = []
+        self.collection = "Lab Collection"
+        self.program_scene = "Lab"
+        self.session_generation = 1
+        self.input_muted = False
+        self.input_volume_db = -12.0
+        self.set_threads = []
+
+    def probe(self):
+        return True, "connected"
+
+    def send(self, request, data=None, *, expected_session_generation=None):
+        if (
+            expected_session_generation is not None
+            and expected_session_generation != self.session_generation
+        ):
+            raise RuntimeError("guarded session mismatch")
+        self.request_count += 1
+        payload = dict(data or {})
+        self.calls.append((request, payload))
+        if request == "GetVersion":
+            return {
+                "availableRequests": [
+                    "GetSceneCollectionList",
+                    "GetSceneList",
+                    "GetGroupList",
+                    "GetSceneItemList",
+                    "GetGroupSceneItemList",
+                    "GetInputList",
+                    "GetSceneTransitionList",
+                    "GetVideoSettings",
+                    "GetCurrentProgramScene",
+                    "GetInputMute",
+                    "SetInputMute",
+                    "GetInputVolume",
+                    "SetInputVolume",
+                ]
+            }
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": self.collection}
+        if request == "GetSceneList":
+            return {
+                "currentProgramSceneName": self.program_scene,
+                "currentProgramSceneUuid": "lab-scene",
+                "scenes": [
+                    {
+                        "sceneName": "Lab",
+                        "sceneUuid": "lab-scene",
+                        "sceneIndex": 0,
+                    }
+                ],
+            }
+        if request == "GetGroupList":
+            return {"groups": []}
+        if request in {"GetSceneItemList", "GetGroupSceneItemList"}:
+            return {"sceneItems": []}
+        if request == "GetInputList":
+            return {
+                "inputs": [
+                    {
+                        "inputName": "Mic",
+                        "inputKind": "wasapi_input_capture",
+                        "inputUuid": "mic-1",
+                    }
+                ]
+            }
+        if request == "GetSceneTransitionList":
+            return {"transitions": []}
+        if request == "GetVideoSettings":
+            return {"baseWidth": 1920, "baseHeight": 1080}
+        if request == "GetCurrentProgramScene":
+            return {
+                "currentProgramSceneName": self.program_scene,
+                "currentProgramSceneUuid": "lab-scene",
+            }
+        if request in {"GetStreamStatus", "GetRecordStatus"}:
+            return {"outputActive": False}
+        if request == "GetInputMute":
+            return {"inputMuted": self.input_muted}
+        if request == "SetInputMute":
+            self.set_threads.append(threading.current_thread().name)
+            self.input_muted = bool(payload["inputMuted"])
+            return {}
+        if request == "GetInputVolume":
+            return {"inputVolumeDb": self.input_volume_db}
+        if request == "SetInputVolume":
+            self.set_threads.append(threading.current_thread().name)
+            self.input_volume_db = float(payload["inputVolumeDb"])
+            return {}
+        raise AssertionError(f"Unexpected executor runtime request: {request}")
 
 
 class FakeActivationScheduler:
@@ -158,14 +440,24 @@ class FakeActivationController:
         self.reconcile_calls = 0
         self.changed = False
         self.events = []
+        self.registered_events = []
         self.thread_names = []
 
     def reconcile(self):
         self.reconcile_calls += 1
         return ()
 
+    def export_pending_hides(self):
+        return ()
+
     def pending_hides(self, _policy_name=None):
         return ()
+
+    def pending_hides_for_current_collection(self):
+        return ()
+
+    def register_hide_obligation(self, event):
+        self.registered_events.append(event)
 
     def policy_cleanup_status(self, _policy_name):
         return False, ""
@@ -187,6 +479,48 @@ class FakeActivationController:
     def apply_event(self, event):
         self.thread_names.append(threading.current_thread().name)
         self.events.append(event)
+
+
+class SlowReconcileController(FakeActivationController):
+    def __init__(self, delay=0.4):
+        super().__init__()
+        self.delay = delay
+
+    def reconcile(self):
+        self.reconcile_calls += 1
+        time.sleep(self.delay)
+        return ()
+
+
+class ActiveShutdownScheduler(FakeActivationScheduler):
+    def reset_all(self):
+        self.reset_all_calls += 1
+        return [
+            ActivationEvent(
+                "hide",
+                "egg",
+                time.monotonic(),
+                source="Cloud",
+                container="[Module] EasterEgg",
+                reason="reset",
+            )
+        ]
+
+
+class ReentrancyDetectingController(FakeActivationController):
+    def __init__(self, dispatcher):
+        super().__init__()
+        self.dispatcher = dispatcher
+        self.reconcile_during_layout = False
+        self.apply_during_layout = False
+
+    def reconcile(self):
+        self.reconcile_during_layout = self.reconcile_during_layout or self.dispatcher.in_layout
+        return super().reconcile()
+
+    def apply_event(self, event):
+        self.apply_during_layout = self.apply_during_layout or self.dispatcher.in_layout
+        return super().apply_event(event)
 
 
 class CleanupBlockingController(FakeActivationController):
@@ -216,6 +550,123 @@ class BlockingActivationController(FakeActivationController):
                 raise RuntimeError("test barrier timed out")
         elif event.kind == "hide":
             self.hide_seen.set()
+
+
+class CollectionReportingController(FakeActivationController):
+    def apply_event(self, event):
+        super().apply_event(event)
+        return "Collection A"
+
+
+class ExplodingCleanupController(FakeActivationController):
+    def pending_hides_for_current_collection(self):
+        raise RuntimeError("cleanup exploded")
+
+
+class CleanupRetryController(FakeActivationController):
+    def __init__(self):
+        super().__init__()
+        self.pending = [SimpleNamespace(policy="legacy")]
+        self.retry_calls = 0
+
+    def pending_hides(self, _policy_name=None):
+        return tuple(self.pending)
+
+    def pending_hides_for_current_collection(self):
+        return tuple(self.pending)
+
+    def retry_pending_hides(self, *, now=None):
+        self.retry_calls += 1
+        self.pending.clear()
+        return ("cleanup ack",)
+
+
+class PrearmShutdownScheduler(FakeActivationScheduler):
+    def __init__(self):
+        super().__init__()
+        self.reset_happened = False
+
+    def states(self):
+        return {
+            "egg": SimpleNamespace(
+                phase=SimpleNamespace(value="visible"),
+                active_source="Cloud",
+                active_container="[Module] EasterEgg",
+                active_container_kind="scene",
+            )
+        }
+
+    def reset_all(self):
+        self.reset_all_calls += 1
+        self.reset_happened = True
+        return [
+            ActivationEvent(
+                "hide",
+                "egg",
+                time.monotonic(),
+                source="Cloud",
+                container="[Module] EasterEgg",
+                container_kind="scene",
+                reason="reset",
+            )
+        ]
+
+
+class PrearmShutdownController(FakeActivationController):
+    def __init__(self, scheduler):
+        super().__init__()
+        self.scheduler = scheduler
+        self.registered_before_reset = False
+
+    def register_hide_obligation(self, event):
+        self.registered_before_reset = not self.scheduler.reset_happened
+        super().register_hide_obligation(event)
+
+
+class CleanupLayoutManager:
+    def __init__(self):
+        self._yield = None
+        self.imported = []
+        self.exported = []
+
+    def set_cooperative_yield(self, callback):
+        self._yield = callback
+
+    def import_pending_fade_cleanup(self, items):
+        self.imported.extend(dict(item) for item in items)
+        self.exported.extend(dict(item) for item in items)
+        return len(self.imported)
+
+    def export_pending_fade_cleanup(self):
+        return tuple(dict(item) for item in self.exported)
+
+
+class CleanupDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.layout_manager = CleanupLayoutManager()
+
+
+class OneShotBlockingQueue:
+    def __init__(self):
+        self.inner = queue.Queue()
+        self.put_entered = threading.Event()
+        self.release_first_put = threading.Event()
+        self._blocked = False
+
+    def put(self, item):
+        if not self._blocked:
+            self._blocked = True
+            self.put_entered.set()
+            if not self.release_first_put.wait(2.0):
+                raise RuntimeError("queue put barrier timed out")
+        self.inner.put(item)
+
+    def get_nowait(self):
+        return self.inner.get_nowait()
+
+    def qsize(self):
+        return self.inner.qsize()
 
 
 class ResultCollector:
@@ -290,6 +741,214 @@ def activation_policy(*, enabled=True, cooldown=20.0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_cooperative_checkpoint_does_not_start_probe_or_activation_tick(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeHeartbeatDispatcher()
+        scheduler = FakeActivationScheduler()
+        controller = FakeActivationController()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service._thread = threading.current_thread()
+
+        service._cooperative_obs_yield()
+
+        self.assertEqual(dispatcher.client.probes, 0)
+        self.assertEqual(scheduler.tick_calls, 0)
+        self.assertEqual(controller.reconcile_calls, 0)
+
+    def test_cleanup_exception_cannot_lose_consumed_shutdown(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        controller = ExplodingCleanupController()
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_controller=controller,
+        )
+        service.start()
+        try:
+            result = service.stop(timeout=1.0)
+            self.assertTrue(result, result.diagnostic_summary())
+            self.assertFalse(service._thread.is_alive())
+            self.assertTrue(service._stop.is_set())
+        finally:
+            service.stop()
+
+    def test_cleanup_retries_without_activation_scheduler(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        controller = CleanupRetryController()
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            provider=FakeProvider(app),
+            activation_scheduler=None,
+            activation_controller=controller,
+        )
+
+        service._tick_activation(paused=False)
+
+        self.assertEqual(controller.retry_calls, 1)
+        self.assertEqual(controller.pending_hides(), ())
+
+    def test_successful_show_binds_scheduler_state_to_acknowledged_collection(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        scheduler = ActivationScheduler({"egg": activation_policy(cooldown=0.0)})
+        controller = CollectionReportingController()
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+
+        show = scheduler.trigger_now(
+            "egg",
+            target_source="Cloud",
+            eligible=True,
+            now=1.0,
+        )[0]
+        service._handle_activation_event(show, now=1.0)
+
+        self.assertEqual(scheduler.state("egg").active_collection, "Collection A")
+        hide = scheduler.stop("egg", now=2.0)[0]
+        self.assertEqual(hide.collection, "Collection A")
+
+    def test_shutdown_prearms_visible_cleanup_before_scheduler_reset(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        scheduler = PrearmShutdownScheduler()
+        controller = PrearmShutdownController(scheduler)
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service.start()
+        try:
+            result = service.stop(timeout=1.0)
+            self.assertTrue(result, result.diagnostic_summary())
+            self.assertTrue(controller.registered_before_reset)
+            self.assertEqual(len(controller.registered_events), 1)
+            self.assertEqual(controller.registered_events[0].source, "Cloud")
+            self.assertEqual(len(controller.events), 1)
+            self.assertEqual(controller.events[0].kind, "hide")
+        finally:
+            service.stop()
+
+    def test_runtime_imports_and_exports_contextual_fade_cleanup(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CleanupDispatcher()
+        fade = {
+            "kind": "layout_fade",
+            "source": "[Webcam] Avatar",
+            "collection": "Collection A",
+            "created_at": 1.0,
+            "attempts": 2,
+            "last_error": "offline",
+        }
+
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            pending_cleanup=(fade,),
+        )
+
+        self.assertEqual(dispatcher.layout_manager.imported, [fade])
+        self.assertEqual(service.pending_cleanup_snapshot(), (fade,))
+
+    def test_shutdown_snapshot_combines_activation_and_fade_obligations(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CleanupDispatcher()
+        controller = FakeActivationController()
+        activation = {
+            "kind": "activation_hide",
+            "policy": "egg",
+            "collection": "Collection A",
+            "target": {"container": "Egg", "source": "Cloud"},
+        }
+        fade = {
+            "kind": "layout_fade",
+            "source": "[Webcam] Avatar",
+            "collection": "Collection A",
+        }
+        controller.export_pending_hides = lambda: (activation,)
+        dispatcher.layout_manager.exported = [fade]
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            activation_controller=controller,
+        )
+
+        snapshot = service.pending_cleanup_snapshot()
+
+        self.assertEqual(snapshot, (activation, fade))
+
+    def test_command_admission_is_atomic_with_shutdown_boundary(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        service = RoutingService(
+            engine,
+            CommandDispatcher(),
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        blocker = OneShotBlockingQueue()
+        service._runtime_commands = blocker
+        request_done = threading.Event()
+        stop_done = threading.Event()
+        stop_result = {}
+
+        def submit():
+            try:
+                service.request_layout("apply", "Test A")
+            finally:
+                request_done.set()
+
+        def stop():
+            stop_result["value"] = service.stop(timeout=1.5)
+            stop_done.set()
+
+        submitter = threading.Thread(target=submit)
+        stopper = threading.Thread(target=stop)
+        try:
+            submitter.start()
+            self.assertTrue(blocker.put_entered.wait(1.0))
+            stopper.start()
+            time.sleep(0.05)
+
+            # submit_obs_command still owns _lock while its accepted command is
+            # inserted, so stop() cannot close admission in the middle.
+            self.assertFalse(service._stopping)
+            self.assertFalse(stop_done.is_set())
+
+            blocker.release_first_put.set()
+            self.assertTrue(request_done.wait(1.0))
+            submitter.join(1.0)
+            stopper.join(2.0)
+            self.assertFalse(stopper.is_alive())
+            self.assertTrue(stop_result["value"], stop_result["value"].diagnostic_summary())
+        finally:
+            blocker.release_first_put.set()
+            service.stop()
+
     def test_live_obs_profile_command_runs_on_runtime_worker(self):
         app = ForegroundApp(1, 1, "terminal.exe")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
@@ -313,6 +972,890 @@ class RuntimeTests(unittest.TestCase):
             )
         finally:
             self.assertTrue(service.stop())
+
+    def test_catalog_sync_runs_on_runtime_worker_and_updates_status(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        client = CatalogRuntimeClient()
+        dispatcher = OBSDispatcher(client, {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_catalog_sync()
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(result.result["collection"], "Main")
+            status = service.obs_catalog_status()
+            self.assertTrue(status["available"])
+            self.assertEqual(status["collection"], "Main")
+            self.assertEqual(status["scenes"], 2)
+
+            before_snapshot = len(client.calls)
+            snapshot = service.obs_catalog_snapshot()
+            self.assertEqual(len(client.calls), before_snapshot)
+            self.assertTrue(snapshot["available"])
+            self.assertEqual(
+                [item["name"] for item in snapshot["scene_refs"]],
+                ["Idle", "Gameplay"],
+            )
+            self.assertTrue(
+                all(request.startswith("Get") for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_unmanaged_default_domains_do_not_trigger_runtime_reconciliation(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(StreamState())
+        dispatcher = OBSDispatcher(CatalogRuntimeClient(), {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+        service._last_obs_connected = True
+
+        with patch.object(
+            dispatcher,
+            "dispatch_state",
+            wraps=dispatcher.dispatch_state,
+        ) as dispatch_state:
+            service._reconcile_desired_state_if_due()
+            service._last_state_reconcile = 0.0
+            service._reconcile_desired_state_if_due()
+
+        self.assertEqual(dispatcher.pending_domains(engine.current_state), ())
+        self.assertEqual(dispatch_state.call_count, 0)
+
+    def test_pause_suspends_background_obs_reconciliation(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(StreamState(game="Vanilla"))
+        client = CatalogRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Vanilla": {
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Gameplay"},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        service.pause(True)
+        service.start()
+        try:
+            time.sleep(0.08)
+            self.assertFalse(
+                any(
+                    request.startswith("Set")
+                    for request, _data in client.calls
+                )
+            )
+            self.assertIn(
+                "game",
+                dispatcher.pending_domains(engine.current_state),
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_current_declarative_plan_runs_on_serialized_runtime_worker(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(StreamState(game="Vanilla"))
+        client = CatalogRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Vanilla": {
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Gameplay"},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        # Normal routing is allowed to write to OBS. Suspend it here so this
+        # test isolates the planner command itself, which must stay read-only.
+        service.pause(True)
+        service.start()
+        try:
+            request_id = service.request_declarative_plan()
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertTrue(result.result["available"])
+            plan = result.result["plan"]
+            self.assertFalse(plan["blocked"])
+            self.assertEqual(len(plan["operations"]), 1)
+            self.assertEqual(
+                plan["operations"][0]["operation"],
+                "SetProgramScene",
+            )
+            self.assertEqual(
+                plan["operations"][0]["target"],
+                "Gameplay",
+            )
+            self.assertEqual(
+                service.engine.current_state.game,
+                "Vanilla",
+            )
+            self.assertFalse(
+                any(request.startswith("Set") for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_planner_does_not_reuse_condition_context_across_obs_session_change(self):
+        state = StreamState(game="Conditional")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = CatalogRuntimeClient()
+        client.config = SimpleNamespace(enabled=True)
+        client.collection = "Main"
+        client.program_scene = "In Game"
+        client.session_generation = 1
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Conditional": {
+                        "conditions": {"program_scene": "In Game"},
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Gameplay"},
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+
+        cached = dispatcher.obs_context()
+        self.assertEqual(cached["program_scene"], "In Game")
+
+        client.collection = "Other"
+        client.program_scene = "Pause"
+        client.session_generation = 3
+
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            request_id = service.request_declarative_plan(refresh_catalog=False)
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertTrue(result.result["available"])
+            self.assertTrue(result.result["plan"]["blocked"])
+            self.assertEqual(result.result["plan"]["operations"], [])
+            self.assertEqual(
+                result.result["declarative_blocks"],
+                [
+                    {
+                        "provenance": "game:Conditional",
+                        "reason": "conditions OBS non satisfaites",
+                    }
+                ],
+            )
+            self.assertEqual(
+                service.obs_catalog_status()["collection"],
+                "Other",
+            )
+            self.assertEqual(
+                service.obs_catalog_status()["session_generation"],
+                3,
+            )
+            self.assertEqual(
+                dispatcher.cached_obs_context()["program_scene"],
+                "Pause",
+            )
+            self.assertFalse(
+                any(request.startswith("Set") for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_declarative_prepare_and_execute_are_serialized_on_ssr_router(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared = collector.wait(prepare_id)
+            self.assertTrue(prepared.success, prepared.error)
+            plan_id = prepared.result["plan_id"]
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+
+            self.assertTrue(executed.success, executed.error)
+            self.assertEqual(executed.result["status"], "converged")
+            self.assertTrue(executed.result["converged"])
+            self.assertTrue(client.input_muted)
+            self.assertEqual(client.set_threads, ["SSR-Router"])
+            self.assertEqual(dispatcher._applied_profiles, {})
+
+            retry_id = service.request_execute_declarative_plan(plan_id)
+            retry = collector.wait(retry_id)
+            self.assertFalse(retry.success)
+            self.assertRegex(retry.error, "inconnu|expiré|consommé")
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_declarative_input_volume_executes_on_ssr_router(self):
+        state = StreamState(audio_profile="Volume")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Volume": {
+                        "actions": [
+                            {
+                                "type": "input_volume_db",
+                                "params": {
+                                    "input": "Mic",
+                                    "volume_db": -6.25,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared = collector.wait(prepare_id)
+            self.assertTrue(prepared.success, prepared.error)
+
+            execute_id = service.request_execute_declarative_plan(
+                prepared.result["plan_id"]
+            )
+            executed = collector.wait(execute_id)
+
+            self.assertTrue(executed.success, executed.error)
+            self.assertEqual(executed.result["status"], "converged")
+            self.assertTrue(executed.result["converged"])
+            self.assertAlmostEqual(client.input_volume_db, -6.25)
+            self.assertEqual(client.set_threads, ["SSR-Router"])
+            self.assertEqual(dispatcher._applied_profiles, {})
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_commit_boundary_rejects_generation_change_without_obs_write(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared_result = collector.wait(prepare_id)
+            self.assertTrue(prepared_result.success, prepared_result.error)
+            plan_id = prepared_result.result["plan_id"]
+
+            original_commit = service._commit_prepared_execution_write
+
+            def invalidate_then_commit(prepared, prepared_state, write):
+                with service._lock:
+                    service._dispatch_generation += 1
+                return original_commit(prepared, prepared_state, write)
+
+            service._commit_prepared_execution_write = invalidate_then_commit
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+
+            self.assertFalse(executed.success)
+            self.assertEqual(executed.result["status"], "replan_required")
+            self.assertTrue(executed.result["replan_required"])
+            self.assertFalse(client.input_muted)
+            self.assertFalse(
+                any(request == "SetInputMute" for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_unexpected_executor_exception_preserves_partial_result(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared_result = collector.wait(prepare_id)
+            self.assertTrue(prepared_result.success, prepared_result.error)
+            plan_id = prepared_result.result["plan_id"]
+
+            def explode(prepared, **kwargs):
+                progress = kwargs["progress"]
+                key = prepared.bindings[0].key
+                progress(
+                    (
+                        ExecutionStepResult(
+                            key,
+                            "SetInputMute",
+                            True,
+                            True,
+                            True,
+                            True,
+                            "applied",
+                        ),
+                    )
+                )
+                raise RuntimeError("unexpected executor failure")
+
+            service._declarative_executor.execute = explode
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+
+            self.assertFalse(executed.success)
+            self.assertEqual(executed.result["status"], "failed")
+            self.assertTrue(executed.result["replan_required"])
+            self.assertEqual(executed.result["steps"][0]["status"], "applied")
+            self.assertIn(
+                "unexpected executor failure",
+                executed.result["diagnostics"],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_stale_plan_id_does_not_consume_current_preparation(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared = collector.wait(prepare_id)
+            self.assertTrue(prepared.success, prepared.error)
+            plan_id = prepared.result["plan_id"]
+
+            wrong_id = service.request_execute_declarative_plan("stale-plan-id")
+            wrong = collector.wait(wrong_id)
+            self.assertFalse(wrong.success)
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+            self.assertTrue(executed.success, executed.error)
+            self.assertTrue(executed.result["converged"])
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_resume_since_prepare_invalidates_declarative_ticket(self):
+        state = StreamState(audio_profile="Mute")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        client = DeclarativeExecutorRuntimeClient()
+        profiles = profile_map_from_raw(
+            {
+                "audio": {
+                    "Mute": {
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            obs_probe_seconds=60.0,
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service._last_obs_probe = time.monotonic()
+        service.start()
+        try:
+            prepare_id = service.request_prepare_declarative_execution()
+            prepared = collector.wait(prepare_id)
+            self.assertTrue(prepared.success, prepared.error)
+            plan_id = prepared.result["plan_id"]
+
+            service.pause(False)
+            service.pause(True)
+
+            execute_id = service.request_execute_declarative_plan(plan_id)
+            executed = collector.wait(execute_id)
+
+            self.assertFalse(executed.success)
+            self.assertRegex(executed.error, "inconnu|expiré|consommé")
+            self.assertFalse(
+                any(request.startswith("Set") for request, _data in client.calls)
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_declarative_execution_requires_flag_and_pause(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        disabled = RoutingService(
+            engine,
+            FakeDispatcher(),
+            provider=FakeProvider(None),
+        )
+        disabled.start()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "désactivée"):
+                disabled.request_prepare_declarative_execution()
+        finally:
+            self.assertTrue(disabled.stop())
+
+        enabled = RoutingService(
+            StateRouterEngine(RuleSet([]), debounce_ms=0),
+            FakeDispatcher(),
+            provider=FakeProvider(None),
+            declarative_execution_enabled=True,
+        )
+        enabled.start()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "pause"):
+                enabled.request_prepare_declarative_execution()
+        finally:
+            self.assertTrue(enabled.stop())
+
+    def test_active_layout_apply_profile_exposes_inflight_manual_target(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CooperativeLayoutDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        try:
+            service.request_layout("apply", "Test B")
+            self.assertTrue(dispatcher.layout_entered.wait(1.0))
+            self.assertEqual(service.active_layout_apply_profile, "Test B")
+
+            shutdown = service.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertEqual(service.active_layout_apply_profile, "")
+        finally:
+            service.stop()
+
+    def test_startup_layout_profile_is_queued_before_first_foreground_cycle(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+            startup_layout_profile="Test B",
+        )
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while not dispatcher.layout_threads and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(
+                dispatcher.layout_threads,
+                [("Test B", False, "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_completed_layout_apply_stops_before_replacement_runtime_starts(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine_a = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher_a = CommandDispatcher()
+        service_a = RoutingService(
+            engine_a,
+            dispatcher_a,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service_a.on_event = collector.callback
+        service_a.start()
+        service_b = None
+        try:
+            request_id = service_a.request_layout("apply", "Test A")
+            command_result = collector.wait(request_id)
+            self.assertTrue(command_result.success, command_result.error)
+            self.assertEqual(
+                dispatcher_a.layout_threads,
+                [("Test A", False, "SSR-Router")],
+            )
+
+            shutdown = service_a.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertIsNotNone(service_a._thread)
+            self.assertFalse(service_a._thread.is_alive())
+
+            engine_b = StateRouterEngine(RuleSet([]), debounce_ms=0)
+            service_b = RoutingService(
+                engine_b,
+                CommandDispatcher(),
+                poll_ms=20,
+                provider=FakeProvider(app),
+            )
+            # Runtime B is started only after A has proved fully stopped.
+            service_b.start()
+            self.assertTrue(service_b._thread.is_alive())
+            self.assertFalse(service_a._thread.is_alive())
+        finally:
+            service_a.stop()
+            if service_b is not None:
+                self.assertTrue(service_b.stop())
+
+    def test_shutdown_interrupts_cooperative_background_reconciliation(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        dispatcher = CooperativeBackgroundDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        try:
+            self.assertTrue(dispatcher.reconcile_entered.wait(1.0))
+
+            started = time.monotonic()
+            shutdown = service.stop(timeout=0.5)
+            elapsed = time.monotonic() - started
+
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertTrue(dispatcher.reconcile_exited.is_set())
+            self.assertFalse(service._thread.is_alive())
+            self.assertEqual(shutdown.pending_commands, 0)
+            self.assertLess(elapsed, 0.5)
+        finally:
+            service.stop()
+
+    def test_stop_timeout_reports_real_dispatch_quiescence(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        engine.set_manual_override(state)
+        dispatcher = NonCooperativeBackgroundDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        service.start()
+        try:
+            self.assertTrue(dispatcher.reconcile_entered.wait(1.0))
+
+            first = service.stop(timeout=0.05)
+
+            self.assertFalse(first)
+            self.assertFalse(first.worker_stopped)
+            self.assertTrue(first.dispatch_quiescent)
+            self.assertIn("obs_dispatch=quiescent", first.diagnostic_summary())
+        finally:
+            dispatcher.release_reconcile.set()
+            self.assertTrue(service.stop(timeout=1.0))
+
+    def test_stop_waits_for_inflight_layout_command_then_stops_cleanly(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = BlockingLayoutDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        stopped = {}
+        try:
+            request_id = service.request_layout("apply", "Test A")
+            self.assertTrue(dispatcher.layout_entered.wait(1.0))
+
+            def stop_service():
+                stopped["value"] = service.stop(timeout=1.0)
+
+            stopper = threading.Thread(target=stop_service)
+            stopper.start()
+            time.sleep(0.05)
+            self.assertTrue(stopper.is_alive())
+
+            # Non-cooperative OBS work already in flight is allowed to finish;
+            # the replacement runtime remains forbidden until it does.
+            dispatcher.release_layout.set()
+            stopper.join(1.0)
+            self.assertFalse(stopper.is_alive())
+            self.assertTrue(stopped["value"], stopped["value"].diagnostic_summary())
+            self.assertFalse(service._thread.is_alive())
+
+            command_result = collector.wait(request_id)
+            self.assertTrue(command_result.success, command_result.error)
+        finally:
+            dispatcher.release_layout.set()
+            service.stop()
+
+    def test_cooperative_layout_shutdown_unwinds_before_activation_cleanup(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CooperativeLayoutDispatcher()
+        scheduler = ActiveShutdownScheduler()
+        controller = ReentrancyDetectingController(dispatcher)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_layout("apply", "Test A")
+            self.assertTrue(dispatcher.layout_entered.wait(1.0))
+
+            shutdown = service.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertFalse(service._thread.is_alive())
+
+            command_result = collector.wait(request_id)
+            self.assertFalse(command_result.success)
+            self.assertIn("Arrêt du runtime demandé", command_result.error)
+            self.assertFalse(controller.reconcile_during_layout)
+            self.assertFalse(controller.apply_during_layout)
+            self.assertEqual(len(controller.events), 1)
+            self.assertEqual(controller.events[0].kind, "hide")
+        finally:
+            service.stop()
+
+    def test_shutdown_hides_scheduler_owned_visible_activation(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        scheduler = ActiveShutdownScheduler()
+        controller = FakeActivationController()
+        service = RoutingService(
+            engine,
+            FakeDispatcher(),
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service.start()
+        try:
+            shutdown = service.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertEqual(scheduler.reset_all_calls, 1)
+            self.assertEqual(len(controller.events), 1)
+            self.assertEqual(controller.events[0].kind, "hide")
+            self.assertEqual(controller.events[0].source, "Cloud")
+            self.assertEqual(controller.reconcile_calls, 0)
+        finally:
+            service.stop()
+
+    def test_shutdown_does_not_run_full_activation_reconcile(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        scheduler = FakeActivationScheduler()
+        controller = SlowReconcileController(delay=0.4)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            activation_scheduler=scheduler,
+            activation_controller=controller,
+        )
+        service.start()
+        try:
+            # The old shutdown path called controller.reconcile() here. That
+            # operation can hide every configured target with synchronous OBS
+            # requests and could outlive the whole stop budget.
+            shutdown = service.stop(timeout=0.2)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertEqual(controller.reconcile_calls, 0)
+            self.assertFalse(service._thread.is_alive())
+        finally:
+            service.stop()
 
     def test_delayed_dispatch_uses_runtime_deadline_not_timer_thread(self):
         app = ForegroundApp(1, 1, "game.exe")
@@ -355,6 +1898,71 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(dispatcher.changes[0].current.game, "Game")
         finally:
             self.assertTrue(service.stop())
+
+    def test_restart_bootstrap_reuses_last_meaningful_foreground_when_ssr_is_active(self):
+        app = ForegroundApp(1, 1, "game.exe", window_title="Gameplay")
+        wanted = StreamState(game="Game")
+
+        provider_a = FakeProvider(app)
+        engine_a = StateRouterEngine(
+            RuleSet([AppRule("Game", wanted, exe="game.exe")]),
+            debounce_ms=0,
+        )
+        service_a = RoutingService(
+            engine_a,
+            FakeDispatcher(),
+            poll_ms=20,
+            provider=provider_a,
+        )
+        service_a.start()
+        service_b = None
+        try:
+            deadline = time.monotonic() + 1.0
+            while service_a.last_meaningful_app != app and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(service_a.last_meaningful_app, app)
+
+            # SSR becomes foreground: WindowsForegroundProvider intentionally
+            # reports None for our own process, but the last external app must
+            # remain available for a safe runtime handoff.
+            provider_a.app = None
+            service_a._wake.set()
+            deadline = time.monotonic() + 1.0
+            while service_a.last_app is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertIsNone(service_a.last_app)
+            self.assertEqual(service_a.last_meaningful_app, app)
+
+            shutdown = service_a.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
+            self.assertFalse(service_a._thread.is_alive())
+
+            dispatcher_b = FakeDispatcher()
+            engine_b = StateRouterEngine(
+                RuleSet([AppRule("Game", wanted, exe="game.exe")]),
+                debounce_ms=500,
+            )
+            service_b = RoutingService(
+                engine_b,
+                dispatcher_b,
+                poll_ms=20,
+                provider=FakeProvider(None),
+                bootstrap_foreground=service_a.last_meaningful_app,
+            )
+            routed = threading.Event()
+            service_b.on_change = lambda _change: routed.set()
+            service_b.start()
+
+            # Bootstrap is forced: it must not wait for the normal debounce even
+            # though SSR remains the foreground application.
+            self.assertTrue(routed.wait(1.0))
+            self.assertEqual(engine_b.current_state, wanted)
+            self.assertEqual(len(dispatcher_b.changes), 1)
+            self.assertEqual(dispatcher_b.changes[0].current, wanted)
+        finally:
+            service_a.stop()
+            if service_b is not None:
+                self.assertTrue(service_b.stop())
 
     def test_explain_decision_is_read_only_and_matches_router_resolution(self):
         app = ForegroundApp(1, 1, "game.exe", window_title="Gameplay")
@@ -516,6 +2124,29 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(routed.wait(1.0))
         finally:
             self.assertTrue(service.stop())
+
+    def test_obs_session_generation_change_invalidates_catalog_while_connected(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeHeartbeatDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+        invalidations = []
+        service._declarative_planning.invalidate_catalog = invalidations.append
+
+        service._probe_obs_if_due()
+        invalidations.clear()
+
+        dispatcher.client.session_generation += 1
+        service._last_obs_probe = 0.0
+        service._probe_obs_if_due()
+
+        self.assertEqual(
+            invalidations,
+            ["OBS session connected or replaced"],
+        )
 
     def test_obs_reconnect_reconciles_activation_fail_safe(self):
         app = ForegroundApp(1, 1, "terminal.exe")
@@ -967,6 +2598,361 @@ class RuntimeTests(unittest.TestCase):
             service.stop()
 
 
+
+    def test_pause_holds_due_delayed_dispatch_until_resume(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        state,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(app),
+        )
+        decision_seen = threading.Event()
+        dispatch_seen = threading.Event()
+        service.on_change = lambda _change: decision_seen.set()
+        service.on_dispatch = lambda _result: dispatch_seen.set()
+        service.start()
+        try:
+            self.assertTrue(decision_seen.wait(1.0))
+            service.pause(True)
+            time.sleep(0.2)
+
+            self.assertEqual(dispatcher.changes, [])
+            self.assertFalse(dispatch_seen.is_set())
+
+            service.pause(False)
+            self.assertTrue(dispatch_seen.wait(1.0))
+            self.assertEqual(len(dispatcher.changes), 1)
+            self.assertEqual(dispatcher.changes[0].current, state)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_resume_reobserves_before_applying_stale_delayed_decision(self):
+        game_app = ForegroundApp(1, 1, "game.exe")
+        other_app = ForegroundApp(2, 2, "other.exe")
+        game_state = StreamState(game="Game")
+        other_state = StreamState(game="Other")
+        provider = FakeProvider(game_app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        game_state,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    ),
+                    AppRule(
+                        "Other",
+                        other_state,
+                        exe="other.exe",
+                        apply_delay_ms=0,
+                    ),
+                ]
+            ),
+            debounce_ms=150,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=provider,
+        )
+        first_decision = threading.Event()
+        dispatch_seen = threading.Event()
+        service.on_change = lambda _change: first_decision.set()
+        service.on_dispatch = lambda _result: dispatch_seen.set()
+        service.start()
+        try:
+            self.assertTrue(first_decision.wait(1.0))
+            service.pause(True)
+            provider.app = other_app
+            service._wake.set()
+            time.sleep(0.2)
+            self.assertEqual(dispatcher.changes, [])
+
+            service.pause(False)
+            self.assertTrue(dispatch_seen.wait(1.0))
+            self.assertEqual(len(dispatcher.changes), 1)
+            self.assertEqual(dispatcher.changes[0].current, other_state)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_resume_between_pause_snapshot_and_due_dispatch_revalidates_first(self):
+        game_app = ForegroundApp(1, 1, "game.exe")
+        other_app = ForegroundApp(2, 2, "other.exe")
+        game_state = StreamState(game="Game")
+        other_state = StreamState(game="Other")
+        provider = FakeProvider(game_app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        game_state,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    ),
+                    AppRule(
+                        "Other",
+                        other_state,
+                        exe="other.exe",
+                        apply_delay_ms=0,
+                    ),
+                ]
+            ),
+            debounce_ms=150,
+        )
+        dispatcher = ThreadRecordingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=provider,
+        )
+        first_decision = threading.Event()
+        paused_snapshot_reached = threading.Event()
+        release_worker = threading.Event()
+        other_dispatched = threading.Event()
+
+        def on_change(change):
+            if change.current == game_state:
+                first_decision.set()
+
+        def on_foreground(app):
+            if app == other_app:
+                paused_snapshot_reached.set()
+                if not release_worker.wait(1.0):
+                    raise RuntimeError("resume race barrier timed out")
+
+        def on_dispatch(_result):
+            if dispatcher.changes and dispatcher.changes[-1].current == other_state:
+                other_dispatched.set()
+
+        service.on_change = on_change
+        service.on_foreground = on_foreground
+        service.on_dispatch = on_dispatch
+        service.start()
+        try:
+            self.assertTrue(first_decision.wait(1.0))
+            service.pause(True)
+            provider.app = other_app
+            service._wake.set()
+
+            self.assertTrue(paused_snapshot_reached.wait(1.0))
+            time.sleep(0.2)
+
+            # Resume exactly after the worker captured paused=True and before
+            # it can reach _process_due_dispatch(). The stale Game decision is
+            # already due at this point.
+            service.pause(False)
+            release_worker.set()
+
+            self.assertTrue(other_dispatched.wait(1.0))
+            time.sleep(0.05)
+            self.assertEqual(
+                [item.current for item in dispatcher.changes],
+                [other_state],
+            )
+            self.assertEqual(dispatcher.thread_names, ["SSR-Router"])
+        finally:
+            release_worker.set()
+            self.assertTrue(service.stop())
+
+    def test_paused_expired_automatic_dispatch_does_not_busy_spin(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        state = StreamState(game="Game")
+        provider = FakeProvider(app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Game",
+                        state,
+                        exe="game.exe",
+                        apply_delay_ms=50,
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = FakeDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=provider,
+        )
+        decision_seen = threading.Event()
+        service.on_change = lambda _change: decision_seen.set()
+        service.start()
+        try:
+            self.assertTrue(decision_seen.wait(1.0))
+            service.pause(True)
+            time.sleep(0.08)
+
+            calls_before = provider.calls
+            time.sleep(0.08)
+            calls_after = provider.calls
+
+            self.assertEqual(dispatcher.changes, [])
+            self.assertLess(calls_after - calls_before, 20)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_manual_override_runs_on_worker_while_paused_and_supersedes_automatic(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        automatic = StreamState(game="Automatic")
+        manual = StreamState(game="Manual")
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Automatic",
+                        automatic,
+                        exe="game.exe",
+                        apply_delay_ms=150,
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = ThreadRecordingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(app),
+        )
+        first_decision = threading.Event()
+        manual_dispatched = threading.Event()
+
+        def on_change(change):
+            if change.current == automatic:
+                first_decision.set()
+
+        def on_dispatch(_result):
+            if dispatcher.changes and dispatcher.changes[-1].current == manual:
+                manual_dispatched.set()
+
+        service.on_change = on_change
+        service.on_dispatch = on_dispatch
+        service.start()
+        try:
+            self.assertTrue(first_decision.wait(1.0))
+            service.pause(True)
+
+            change = service.set_manual_override(manual)
+            self.assertIsNotNone(change)
+            self.assertTrue(manual_dispatched.wait(1.0))
+
+            time.sleep(0.2)
+            self.assertEqual(
+                [item.current for item in dispatcher.changes],
+                [manual],
+            )
+            self.assertEqual(dispatcher.thread_names, ["SSR-Router"])
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_clear_manual_override_runs_on_worker_while_paused(self):
+        automatic_app = ForegroundApp(1, 1, "automatic.exe")
+        automatic = StreamState(game="Automatic")
+        manual = StreamState(game="Manual")
+        provider = FakeProvider(automatic_app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "Automatic",
+                        automatic,
+                        exe="automatic.exe",
+                    )
+                ]
+            ),
+            debounce_ms=150,
+        )
+        dispatcher = ThreadRecordingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=provider,
+        )
+        service.pause(True)
+        service.start()
+        try:
+            service.set_manual_override(manual)
+            deadline = time.monotonic() + 1.0
+            while (
+                (not dispatcher.changes or dispatcher.changes[-1].current != manual)
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertTrue(dispatcher.changes)
+            self.assertEqual(dispatcher.changes[-1].current, manual)
+
+            change = service.clear_manual_override()
+            self.assertIsNotNone(change)
+
+            deadline = time.monotonic() + 1.0
+            while (
+                dispatcher.changes[-1].current != automatic
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            self.assertEqual(
+                [item.current for item in dispatcher.changes],
+                [manual, automatic],
+            )
+            self.assertEqual(
+                dispatcher.thread_names,
+                ["SSR-Router", "SSR-Router"],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_explicit_profile_command_still_runs_while_paused(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service.start()
+        try:
+            request_id = service.request_profile("game", "Vanilla")
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(
+                dispatcher.profile_threads,
+                [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
 
 if __name__ == "__main__":
     unittest.main()

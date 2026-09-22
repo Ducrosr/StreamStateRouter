@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from stream_state_router.obs.layouts import OBSLayoutManager, split_module_source
+from stream_state_router.obs.client import OBSResourceNotFoundError
+from stream_state_router.obs.layouts import (
+    OBSLayoutManager,
+    compact_layout_overrides,
+    split_module_source,
+)
 
 
 class FakeLayoutClient:
@@ -82,6 +87,52 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(split_module_source("[Webcam] Cadre"), ("Webcam", "Cadre"))
         self.assertIsNone(split_module_source("Webcam Cadre"))
         self.assertIsNone(split_module_source("[Webcam]"))
+
+    def test_list_scenes_accepts_modern_current_program_scene_fallback(self):
+        class ModernFallbackClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                if request == "GetSceneList":
+                    self.calls.append((request, dict(data or {})))
+                    return {
+                        "currentProgramSceneName": "",
+                        "scenes": [
+                            {"sceneName": "Gameplay"},
+                            {"sceneName": "Pause"},
+                        ],
+                    }
+                if request == "GetCurrentProgramScene":
+                    self.calls.append((request, dict(data or {})))
+                    return {
+                        "sceneName": "Pause",
+                        "sceneUuid": "pause-uuid",
+                    }
+                return super().send(request, data)
+
+        client = ModernFallbackClient()
+        manager = OBSLayoutManager(client)
+
+        names, current = manager.list_scenes()
+
+        self.assertEqual(names, ["Gameplay", "Pause"])
+        self.assertEqual(current, "Pause")
+        self.assertIn(
+            ("GetCurrentProgramScene", {}),
+            client.calls,
+        )
+
+    def test_topology_scan_honors_cooperative_shutdown_before_obs_io(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+
+        def stop_now():
+            raise RuntimeError("shutdown requested")
+
+        manager.set_cooperative_yield(stop_now)
+
+        with self.assertRaisesRegex(RuntimeError, "shutdown requested"):
+            manager.scan_scene_topology("Gameplay")
+
+        self.assertEqual(client.calls, [])
 
     def test_lightweight_topology_scan_does_not_read_transforms(self):
         client = FakeLayoutClient()
@@ -176,6 +227,15 @@ class LayoutTests(unittest.TestCase):
         class PartialClient(FakeLayoutClient):
             def send(self, request, data=None):
                 payload = dict(data or {})
+                if request == "GetSceneList":
+                    return {
+                        "currentProgramSceneName": "Gameplay",
+                        "scenes": [
+                            {"sceneName": "Gameplay"},
+                            {"sceneName": "Pause"},
+                            {"sceneName": "[Webcam] Cadre"},
+                        ],
+                    }
                 if request == "GetSceneItemList" and payload.get("sceneName") == "[Webcam] Cadre":
                     raise RuntimeError("nested read failed")
                 return super().send(request, data)
@@ -250,14 +310,15 @@ class LayoutTests(unittest.TestCase):
 
         self.assertEqual(result.elements_applied, 2)
         transform_calls = [payload for request, payload in client.calls if request == "SetSceneItemTransform"]
-        self.assertEqual(len(transform_calls), 2)
+        # The unchanged Avatar is processed but intentionally receives no OBS
+        # mutation; no-op writes are suppressed.
+        self.assertEqual(len(transform_calls), 1)
         by_id = {call["sceneItemId"]: call["sceneItemTransform"] for call in transform_calls}
+        self.assertEqual(set(by_id), {1})
         self.assertEqual(by_id[1]["positionX"], 200.0)
         self.assertEqual(by_id[1]["positionY"], 300.0)
         self.assertEqual(by_id[1]["scaleX"], 2.0)
         self.assertEqual(by_id[1]["scaleY"], 2.0)
-        self.assertEqual(by_id[2]["positionX"], 300.0)
-        self.assertEqual(by_id[2]["positionY"], 200.0)
 
 
     def test_apply_refreshes_stale_scene_item_ids_after_one_source_is_deleted(self):
@@ -386,7 +447,7 @@ class LayoutTests(unittest.TestCase):
         client = PersistentFailureClient()
         manager = OBSLayoutManager(client)
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(OBSResourceNotFoundError):
             manager._set_source_opacity("[Webcam] Avatar", 0.5)
 
         self.assertEqual(client.settings_attempts, 2)
@@ -418,6 +479,276 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(manager.retry_pending_fade_cleanup(), ())
         self.assertEqual(manager.pending_fade_cleanup(), ())
 
+    def test_fade_cleanup_is_prearmed_before_first_opacity_io(self):
+        from stream_state_router.obs.client import OBSUnavailableError
+
+        class FirstFadeWriteUncertainClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.calls.append((request, dict(data or {})))
+                    raise OBSUnavailableError("response lost")
+                return super().send(request, data)
+
+        client = FirstFadeWriteUncertainClient()
+        client.scene_collection = "Collection A"
+        manager = OBSLayoutManager(client)
+        warnings = []
+        prepared = [{
+            "target_enabled": True,
+            "current_enabled": False,
+            "visibility_changed": True,
+            "source": "[Webcam] Avatar",
+            "container": "Gameplay",
+            "transform_changed": False,
+            "target_transform": {},
+            "current_transform": {},
+        }]
+
+        manager._animate_layout_transition(
+            prepared,
+            mode="fade",
+            duration_ms=1,
+            steps=1,
+            warnings=warnings,
+        )
+
+        exported = manager.export_pending_fade_cleanup()
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["source"], "[Webcam] Avatar")
+        self.assertEqual(exported[0]["collection"], "Collection A")
+        self.assertTrue(warnings)
+
+    def test_immediate_fade_cleanup_never_writes_in_foreign_collection(self):
+        client = FakeLayoutClient()
+        client.scene_collection = "Collection B"
+        manager = OBSLayoutManager(client)
+        client.calls.clear()
+
+        warnings = manager._neutralize_fade_sources(
+            ["[Webcam] Avatar"],
+            collection="Collection A",
+        )
+
+        self.assertTrue(warnings)
+        self.assertFalse(
+            any(request == "SetSourceFilterSettings" for request, _ in client.calls)
+        )
+        exported = manager.export_pending_fade_cleanup()
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["collection"], "Collection A")
+
+    def test_fade_cleanup_export_import_preserves_collection_context(self):
+        from stream_state_router.obs.client import OBSUnavailableError
+
+        class FadeCleanupClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.fail_cleanup = True
+
+            def send(self, request, data=None):
+                if request == "SetSourceFilterSettings":
+                    self.calls.append((request, dict(data or {})))
+                    if self.fail_cleanup:
+                        raise OBSUnavailableError("offline")
+                    return {}
+                return super().send(request, data)
+
+        client_a = FadeCleanupClient()
+        client_a.scene_collection = "Collection A"
+        manager_a = OBSLayoutManager(client_a)
+        self.assertTrue(manager_a._neutralize_fade_sources(["[Webcam] Avatar"]))
+        exported = manager_a.export_pending_fade_cleanup()
+
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["kind"], "layout_fade")
+        self.assertEqual(exported[0]["collection"], "Collection A")
+
+        client_b = FadeCleanupClient()
+        client_b.fail_cleanup = False
+        client_b.scene_collection = "Collection B"
+        manager_b = OBSLayoutManager(client_b)
+        self.assertEqual(manager_b.import_pending_fade_cleanup(exported), 1)
+        client_b.calls.clear()
+
+        self.assertEqual(manager_b.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager_b.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertFalse(
+            any(request == "SetSourceFilterSettings" for request, _ in client_b.calls)
+        )
+
+        client_b.scene_collection = "Collection A"
+        self.assertEqual(manager_b.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager_b.pending_fade_cleanup(), ())
+        self.assertTrue(
+            any(request == "SetSourceFilterSettings" for request, _ in client_b.calls)
+        )
+
+    def test_fade_transition_context_probe_overrides_stale_collection(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        manager._last_scene_collection = "Collection A"
+        client.scene_collection = "Collection B"
+
+        self.assertEqual(
+            manager._fade_collection_context(probe=True),
+            "Collection B",
+        )
+
+    def test_transition_steps_raise_historical_eight_steps_to_smooth_cadence(self):
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 8), 61)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(2000, 8), 121)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(3000, 8), 181)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(6000, 8), 361)
+        self.assertEqual(OBSLayoutManager._effective_transition_steps(1000, 45), 61)
+
+    def test_transition_timeline_skips_frames_that_are_already_stale(self):
+        manager = OBSLayoutManager(FakeLayoutClient())
+        with (
+            patch.object(manager, "_cooperative_sleep", return_value=None),
+            patch(
+                "stream_state_router.obs.layouts.time.monotonic",
+                side_effect=[0.0, 0.0, 0.5, 0.5, 1.0],
+            ),
+        ):
+            progress = list(manager._transition_progress(1000, 61))
+
+        self.assertEqual(len(progress), 2)
+        self.assertAlmostEqual(progress[0], 0.5, places=6)
+        self.assertAlmostEqual(progress[1], 1.0, places=6)
+
+    def test_fade_repositions_visible_item_only_while_fully_transparent(self):
+        class FadeClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.filters = set()
+
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSourceFilterList":
+                    self.calls.append((request, payload))
+                    source = str(payload.get("sourceName") or "")
+                    filters = []
+                    if source in self.filters:
+                        filters.append({"filterName": "[SSR] Layout Fade"})
+                    return {"filters": filters}
+                if request == "CreateSourceFilter":
+                    self.calls.append((request, payload))
+                    self.filters.add(str(payload.get("sourceName") or ""))
+                    return {}
+                if request in {"SetSourceFilterEnabled", "SetSourceFilterSettings"}:
+                    self.calls.append((request, payload))
+                    return {}
+                return super().send(request, data)
+
+        client = FadeClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["transition"] = {"mode": "fade", "duration_ms": 1000, "steps": 8}
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+        client.calls.clear()
+
+        with patch("stream_state_router.obs.layouts.time.sleep"):
+            result = manager.apply_profile(profile, record_undo=False)
+
+        self.assertEqual(result.missing_sources, ())
+        transform_index = next(
+            index
+            for index, (request, payload) in enumerate(client.calls)
+            if request == "SetSceneItemTransform" and int(payload["sceneItemId"]) == 1
+        )
+        opacity_writes = [
+            (index, float(payload["filterSettings"]["opacity"]))
+            for index, (request, payload) in enumerate(client.calls)
+            if request == "SetSourceFilterSettings"
+            and payload.get("sourceName") == "[Webcam] Cadre"
+        ]
+        self.assertTrue(opacity_writes)
+        before = [value for index, value in opacity_writes if index < transform_index]
+        after = [value for index, value in opacity_writes if index > transform_index]
+        self.assertTrue(before)
+        self.assertTrue(after)
+        self.assertAlmostEqual(before[-1], 0.0, places=6)
+        self.assertAlmostEqual(after[0], 0.0, places=6)
+        self.assertAlmostEqual(after[-1], 1.0, places=6)
+    def test_move_fade_uses_fast_edge_fades_and_invisible_middle(self):
+        class MoveFadeClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.filters = set()
+
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSourceFilterList":
+                    self.calls.append((request, payload))
+                    source = str(payload.get("sourceName") or "")
+                    filters = []
+                    if source in self.filters:
+                        filters.append({"filterName": "[SSR] Layout Fade"})
+                    return {"filters": filters}
+                if request == "CreateSourceFilter":
+                    self.calls.append((request, payload))
+                    self.filters.add(str(payload.get("sourceName") or ""))
+                    return {}
+                if request in {"SetSourceFilterEnabled", "SetSourceFilterSettings"}:
+                    self.calls.append((request, payload))
+                    return {}
+                return super().send(request, data)
+
+        client = MoveFadeClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        profile["transition"] = {"mode": "move_fade", "duration_ms": 1000, "steps": 8}
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+        client.calls.clear()
+
+        with patch.object(
+            manager,
+            "_transition_progress",
+            return_value=iter((0.075, 0.15, 0.50, 0.85, 0.925, 1.0)),
+        ):
+            result = manager.apply_profile(profile, record_undo=False)
+
+        self.assertEqual(result.missing_sources, ())
+        positions = [
+            float(payload["sceneItemTransform"]["positionX"])
+            for request, payload in client.calls
+            if request == "SetSceneItemTransform" and int(payload["sceneItemId"]) == 1
+        ]
+        self.assertEqual(
+            positions[:6],
+            [130.0, 160.0, 300.0, 440.0, 470.0, 500.0],
+        )
+
+        opacities = [
+            float(payload["filterSettings"]["opacity"])
+            for request, payload in client.calls
+            if request == "SetSourceFilterSettings"
+            and payload.get("sourceName") == "[Webcam] Cadre"
+        ]
+        self.assertGreaterEqual(len(opacities), 4)
+        self.assertAlmostEqual(opacities[0], 0.5, places=6)
+        self.assertAlmostEqual(opacities[1], 0.0, places=6)
+        self.assertAlmostEqual(opacities[2], 0.5, places=6)
+        self.assertAlmostEqual(opacities[3], 1.0, places=6)
+
+    def test_move_fade_opacity_curve_uses_fifteen_percent_edges(self):
+        curve = OBSLayoutManager._move_fade_opacity
+
+        self.assertAlmostEqual(curve("through", 0.0), 1.0, places=6)
+        self.assertAlmostEqual(curve("through", 0.075), 0.5, places=6)
+        self.assertAlmostEqual(curve("through", 0.15), 0.0, places=6)
+        self.assertAlmostEqual(curve("through", 0.50), 0.0, places=6)
+        self.assertAlmostEqual(curve("through", 0.85), 0.0, places=6)
+        self.assertAlmostEqual(curve("through", 0.925), 0.5, places=6)
+        self.assertAlmostEqual(curve("through", 1.0), 1.0, places=6)
+
+        self.assertAlmostEqual(curve("in", 0.85), 0.0, places=6)
+        self.assertAlmostEqual(curve("in", 0.925), 0.5, places=6)
+        self.assertAlmostEqual(curve("in", 1.0), 1.0, places=6)
+
+        self.assertAlmostEqual(curve("out", 0.075), 0.5, places=6)
+        self.assertAlmostEqual(curve("out", 0.15), 0.0, places=6)
+        self.assertAlmostEqual(curve("out", 1.0), 0.0, places=6)
     def test_move_transition_uses_one_global_timeline_for_all_sources(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
@@ -431,19 +762,20 @@ class LayoutTests(unittest.TestCase):
             result = manager.apply_profile(profile, record_undo=False)
 
         self.assertEqual(result.elements_applied, 2)
-        # Eight animation frames share one clock. The old implementation slept
-        # seven times per source (14 sleeps for two items, ~4 s instead of 2 s).
-        self.assertEqual(sleep_mock.call_count, 7)
+        # A two-second transition targets ~60 FPS (120 intervals). All sources
+        # still share the same wall-clock timeline.
+        self.assertEqual(sleep_mock.call_count, 120)
         transform_calls = [
             payload for request, payload in client.calls if request == "SetSceneItemTransform"
         ]
-        self.assertEqual(len(transform_calls), 16)
+        self.assertEqual(len(transform_calls), 240)
 
     def test_excluded_module_element_is_left_untouched(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
         profile = manager.capture_profile("Gameplay")
         profile["modules"]["[Webcam] Avatar"]["elements"][0]["included"] = False
+        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] += 50.0
         client.calls.clear()
 
         result = manager.apply_profile(profile)
@@ -464,6 +796,7 @@ class LayoutTests(unittest.TestCase):
         profile = manager.capture_profile("Gameplay")
         profile["modules"]["[Webcam] Avatar"]["visible"] = True
         profile["modules"]["[Webcam] Avatar"]["elements"][0]["enabled"] = True
+        profile["modules"]["[Webcam] Avatar"]["geometry"]["x"] += 25.0
 
         manager.set_runtime_visibility_owners({("Gameplay", "[Webcam] Avatar")})
         client.calls.clear()
@@ -563,8 +896,8 @@ class LayoutTests(unittest.TestCase):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
         profile = manager.capture_profile("Gameplay")
-        element = profile["modules"]["[Webcam] Cadre"]["elements"][0]
-        element["transform"]["scaleX"] = float(element["transform"].get("scaleX", 1.0)) + 0.1
+        module = profile["modules"]["[Webcam] Cadre"]
+        module["geometry"]["width"] = float(module["geometry"]["width"]) + 2.0
 
         diffs = manager.diff_profile(profile)
 

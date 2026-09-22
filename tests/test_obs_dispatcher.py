@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from stream_state_router.obs.dispatcher import OBSDispatcher, profile_map_from_raw
 from stream_state_router.router.engine import StateChange
@@ -13,6 +14,7 @@ class FakeClient:
         self.calls = []
         self.scene_item_ids = [42]
         self.streaming = False
+        self.config = SimpleNamespace(enabled=True)
 
     def send(self, request, data=None):
         self.calls.append((request, data))
@@ -30,6 +32,24 @@ class FakeClient:
 
 
 class OBSDispatcherTests(unittest.TestCase):
+    def test_obs_context_checks_shutdown_between_requests(self):
+        client = FakeClient()
+        client.config = SimpleNamespace(enabled=True)
+        dispatcher = OBSDispatcher(client, {})
+        checkpoints = []
+
+        def checkpoint():
+            checkpoints.append(len(client.calls))
+            if len(checkpoints) == 2:
+                raise RuntimeError("shutdown requested")
+
+        dispatcher.set_cooperative_yield(checkpoint)
+
+        with self.assertRaisesRegex(RuntimeError, "shutdown requested"):
+            dispatcher.obs_context()
+
+        self.assertEqual([request for request, _ in client.calls], ["GetStreamStatus"])
+
     def test_only_changed_profile_domains_are_dispatched(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
@@ -50,6 +70,26 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertEqual(first.executed, 2)
         self.assertEqual(second.executed, 0)
         self.assertEqual(len(client.calls), 3)  # scene change + lookup + scene item enabled
+
+    def test_obs_context_prefers_modern_program_scene_field(self):
+        client = FakeClient()
+        original_send = client.send
+
+        def send(request, data=None):
+            if request == "GetCurrentProgramScene":
+                client.calls.append((request, data))
+                return {
+                    "sceneName": "Modern",
+                    "currentProgramSceneName": "Legacy",
+                }
+            return original_send(request, data)
+
+        client.send = send
+        dispatcher = OBSDispatcher(client, {})
+
+        context = dispatcher.obs_context(force_refresh=True)
+
+        self.assertEqual(context["program_scene"], "Modern")
 
     def test_scene_item_id_is_resolved_fresh_for_each_visibility_action(self):
         client = FakeClient()
@@ -122,6 +162,116 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertNotIn("game", dispatcher.pending_domains(state))
         self.assertTrue(any(s.status == "applied" for s in second.domain_statuses))
 
+    def test_manual_layout_hold_survives_session_invalidation(self):
+        client = FakeClient()
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            {
+                "A": {"scene": "OW", "modules": {}},
+                "B": {"scene": "OW", "modules": {}},
+            },
+        )
+        state_a = StreamState(layout_profile="A")
+        state_b = StreamState(layout_profile="B")
+
+        dispatcher.set_manual_layout_hold("A")
+        dispatcher.invalidate_applied_state()
+
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+        self.assertIn("layout", dispatcher.pending_domains(state_b))
+
+        plan = dispatcher.plan_state(
+            state_a,
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "OW",
+            },
+        )
+        layout = next(row for row in plan["domains"] if row["domain"] == "layout")
+        self.assertFalse(layout["needs_apply"])
+        self.assertEqual(layout["status"], "held")
+        self.assertIn(
+            {
+                "provenance": "layout:A",
+                "reason": "LayoutProfile maintenu manuellement",
+            },
+            plan["declarative_blocks"],
+        )
+
+    def test_manual_layout_hold_releases_when_routing_wants_another_layout(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+        state_a = StreamState(layout_profile="A")
+        state_b = StreamState(layout_profile="B")
+
+        dispatcher.set_manual_layout_hold("A")
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+
+        # Only a genuine router state change releases the manual divergence;
+        # periodic reconciliation of the same state must never do so.
+        dispatcher.dispatch_change(
+            StateChange(
+                previous=state_a,
+                current=state_b,
+                reason="foreground",
+                rule_name="B",
+                app=None,
+            )
+        )
+
+        self.assertIn("layout", dispatcher.pending_domains(state_a))
+
+    def test_manual_layout_hold_with_unknown_baseline_adopts_first_routed_layout(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+        state_a = StreamState(layout_profile="A")
+
+        dispatcher.set_manual_layout_hold("")
+        dispatcher.invalidate_applied_state()
+
+        # Reconciliation alone cannot release an unknown-baseline manual hold.
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+        dispatcher.dispatch_state(state_a)
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+
+        # The first real routing decision establishes A as the baseline while
+        # keeping the explicit manual layout visible.
+        dispatcher.dispatch_change(
+            StateChange(
+                previous=None,
+                current=state_a,
+                reason="foreground",
+                rule_name="A",
+                app=None,
+            )
+        )
+        self.assertEqual(dispatcher._manual_layout_routing_baseline, "A")
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+
+    def test_explicit_layout_apply_records_current_routing_baseline(self):
+        dispatcher = OBSDispatcher(
+            FakeClient(),
+            {},
+            {
+                "A": {"scene": "OW", "modules": {}},
+                "B": {"scene": "OW", "modules": {}},
+            },
+        )
+        state_a = StreamState(layout_profile="A")
+        dispatcher._desired_state = state_a
+        dispatcher._layout_manager.apply_profile = lambda _profile: SimpleNamespace(
+            elements_applied=1,
+            elements_skipped=0,
+            warnings=(),
+            missing_sources=(),
+        )
+
+        dispatcher.execute_layout_profile("B")
+        dispatcher.invalidate_applied_state()
+
+        self.assertNotIn("layout", dispatcher.pending_domains(state_a))
+
     def test_read_only_plan_reuses_inheritance_and_performs_no_obs_calls(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
@@ -163,6 +313,461 @@ class OBSDispatcherTests(unittest.TestCase):
             ["input_mute", "set_program_scene"],
         )
 
+    def test_read_only_plan_exposes_declarative_intent_from_same_resolution(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Base": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Capture",
+                                    "settings": {"rgb10a2_space": "srgb"},
+                                },
+                            }
+                        ]
+                    },
+                    "Overwatch": {
+                        "extends": "Base",
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Input Overlay",
+                                    "enabled": True,
+                                },
+                            }
+                        ],
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            profiles,
+            {"OW": {"scene": "In Game", "modules": {}}},
+        )
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Overwatch", layout_profile="OW"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(plan["declarative_blocks"], [])
+        properties = plan["declarative_desired"]["properties"]
+        identities = {
+            (
+                row["property"]["kind"],
+                row["property"]["source"],
+                row["property"]["setting"],
+            )
+            for row in properties
+        }
+        self.assertIn(("input_setting", "Capture", "rgb10a2_space"), identities)
+        self.assertIn(("scene_item_visibility", "Input Overlay", ""), identities)
+        self.assertIn(("layout_profile", "", ""), identities)
+
+    def test_read_only_plan_reports_cross_domain_declarative_conflict(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "A": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Chat",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                },
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Chat",
+                                    "enabled": False,
+                                },
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+
+        plan = dispatcher.plan_state(
+            StreamState(game="A", overlay_profile="B"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
+        self.assertEqual(plan["declarative_desired"], {"properties": []})
+
+    def test_resolve_desired_state_raises_same_cross_domain_conflict(self):
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "A": {
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Avatar",
+                                    "filter": "Glitch",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                },
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Avatar",
+                                    "filter": "Glitch",
+                                    "enabled": False,
+                                },
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+
+        with self.assertRaisesRegex(ValueError, "multiple owners"):
+            dispatcher.resolve_desired_state(
+                StreamState(game="A", overlay_profile="B"),
+                context={
+                    "obs_enabled": True,
+                    "streaming": False,
+                    "recording": False,
+                    "program_scene": "In Game",
+                },
+            )
+
+    def test_layout_visibility_ownership_conflicts_with_action_profile(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Chat",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        layout = {
+            "scene": "In Game",
+            "modules": {
+                "Chat": {
+                    "managed": True,
+                    "locked": False,
+                    "elements": [
+                        {
+                            "source": "Chat",
+                            "container": "In Game",
+                            "included": True,
+                            "locked": False,
+                            "follow_visibility": True,
+                            "visibility_owner": "",
+                        }
+                    ],
+                }
+            },
+        }
+        dispatcher = OBSDispatcher(client, profiles, {"Layout": layout})
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="B", layout_profile="Layout"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
+        self.assertIn("layout:Layout", plan["declarative_error"]["message"])
+        self.assertIn("overlay:B", plan["declarative_error"]["message"])
+
+    def test_runtime_owned_layout_visibility_is_reserved_against_action_profile(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Alert",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        layout = {
+            "scene": "In Game",
+            "modules": {
+                "Alert": {
+                    "managed": True,
+                    "locked": False,
+                    "elements": [
+                        {
+                            "source": "Alert",
+                            "container": "In Game",
+                            "included": True,
+                            "locked": False,
+                            "follow_visibility": False,
+                            "visibility_owner": "runtime",
+                        }
+                    ],
+                }
+            },
+        }
+        dispatcher = OBSDispatcher(client, profiles, {"Layout": layout})
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="B", layout_profile="Layout"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
+        self.assertIn("runtime:visibility", plan["declarative_error"]["message"])
+        self.assertIn("overlay:B", plan["declarative_error"]["message"])
+
+    def test_runtime_owner_table_conflicts_without_persisted_marker(self):
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "scene_item_enabled",
+                                "params": {
+                                    "scene": "In Game",
+                                    "source": "Alert",
+                                    "enabled": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+        dispatcher.layout_manager.set_runtime_visibility_owners(
+            [("In Game", "Alert")]
+        )
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="B"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(
+            plan["declarative_error"]["code"],
+            "property_ownership_conflict",
+        )
+        self.assertIn("runtime:visibility", plan["declarative_error"]["message"])
+
+    def test_false_condition_blocks_even_when_profile_was_already_applied(self):
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "B": {
+                        "conditions": {"streaming": True},
+                        "actions": [
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+        dispatcher._applied_profiles["overlay"] = "B"
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="B"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(plan["domains"][1]["status"], "blocked")
+        self.assertEqual(
+            plan["declarative_blocks"],
+            [
+                {
+                    "provenance": "overlay:B",
+                    "reason": "conditions OBS non satisfaites",
+                }
+            ],
+        )
+
+    def test_unconfigured_default_domains_are_unmanaged_not_missing(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+
+        plan = dispatcher.plan_state(
+            StreamState(),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertEqual(plan["declarative_blocks"], [])
+        self.assertTrue(
+            all(row["status"] == "unmanaged" for row in plan["domains"])
+        )
+
+    def test_unconfigured_default_domains_are_not_pending(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+
+        self.assertEqual(dispatcher.pending_domains(StreamState()), ())
+
+    def test_force_reapply_reports_unmanaged_defaults_without_obs_writes(self):
+        client = FakeClient()
+        dispatcher = OBSDispatcher(client, {})
+
+        result = dispatcher.dispatch_state(StreamState(), force=True)
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(result.executed, 0)
+        self.assertEqual(result.skipped, 5)
+        self.assertEqual(
+            [item.status for item in result.domain_statuses],
+            ["unmanaged"] * 5,
+        )
+        self.assertEqual(result.warnings, ())
+
+    def test_non_default_missing_profile_remains_pending_and_missing(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+        state = StreamState(overlay_profile="Missing")
+
+        self.assertIn("overlay", dispatcher.pending_domains(state))
+
+        result = dispatcher.dispatch_state(state)
+        overlay = next(
+            item
+            for item in result.domain_statuses
+            if item.domain == "overlay"
+        )
+
+        self.assertEqual(overlay.status, "missing")
+        self.assertIn("overlay", dispatcher.pending_domains(state))
+
+    def test_populated_domain_does_not_implicitly_unmanage_default_name(self):
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "Other": {"actions": []},
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+        state = StreamState()
+
+        self.assertIn("overlay", dispatcher.pending_domains(state))
+
+        result = dispatcher.dispatch_state(state)
+        overlay = next(
+            item
+            for item in result.domain_statuses
+            if item.domain == "overlay"
+        )
+
+        self.assertEqual(overlay.status, "missing")
+
+    def test_missing_profile_is_reported_as_declarative_block(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+
+        plan = dispatcher.plan_state(
+            StreamState(overlay_profile="Missing"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        self.assertIn(
+            {
+                "provenance": "overlay:Missing",
+                "reason": "Profil OBS introuvable",
+            },
+            plan["declarative_blocks"],
+        )
+
     def test_read_only_plan_reports_blocked_conditions_without_mutation(self):
         client = FakeClient()
         profiles = profile_map_from_raw(
@@ -185,6 +790,23 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertEqual(client.calls, [])
         game = next(row for row in plan["domains"] if row["domain"] == "game")
         self.assertEqual(game["status"], "blocked")
+        self.assertEqual(
+            plan["declarative_blocks"],
+            [
+                {
+                    "provenance": "game:Live",
+                    "reason": "conditions OBS non satisfaites",
+                }
+            ],
+        )
+        properties = plan["declarative_desired"]["properties"]
+        self.assertTrue(
+            any(
+                row["property"]["kind"] == "program_scene"
+                and row["value"] == "Live"
+                for row in properties
+            )
+        )
 
     def test_supported_action_shapes(self):
         client = FakeClient()
@@ -205,6 +827,24 @@ class OBSDispatcherTests(unittest.TestCase):
             "SetInputVolume",
             "SetInputSettings",
         ])
+
+    def test_input_volume_execution_rejects_missing_or_invalid_target(self):
+        client = FakeClient()
+        dispatcher = OBSDispatcher(client, {})
+
+        for params in (
+            {"input": "Music"},
+            {"input": "Music", "volume_db": True},
+            {"input": "Music", "volume_db": float("nan")},
+            {"input": "Music", "volume_db": 26.1},
+        ):
+            with self.subTest(params=params):
+                with self.assertRaises(ValueError):
+                    dispatcher.execute_action(
+                        OBSAction("input_volume_db", params)
+                    )
+
+        self.assertEqual(client.calls, [])
 
     def test_layout_profile_is_dispatched_as_fifth_state_domain(self):
         client = FakeClient()

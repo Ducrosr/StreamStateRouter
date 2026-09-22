@@ -7,6 +7,7 @@ from unittest.mock import patch
 from pathlib import Path
 import copy
 
+from stream_state_router.router.models import DEFAULT_PROFILE_NAMES, StreamState
 from stream_state_router.services.config import (
     build_activation_policies,
     build_ruleset,
@@ -31,6 +32,7 @@ class ConfigTests(unittest.TestCase):
                 "fallback_state": {"Game": "Vanilla", "LayoutProfile": "Vanilla"},
             },
             "obs": {"enabled": False, "host": "127.0.0.1", "port": 4455},
+            "api": {"enabled": True, "host": "127.0.0.1", "port": 8765, "token": ""},
             "rules": [
                 {"name": "Launcher", "behavior": "ignore", "exe": "launcher.exe"},
                 {
@@ -51,6 +53,42 @@ class ConfigTests(unittest.TestCase):
 
     def test_valid_config_passes(self):
         self.assertEqual(validate_config(self.sample()), [])
+
+    def test_stream_state_defaults_match_canonical_profile_names(self):
+        state = StreamState()
+
+        self.assertEqual(
+            {
+                domain: state.profile_name(domain)
+                for domain in DEFAULT_PROFILE_NAMES
+            },
+            dict(DEFAULT_PROFILE_NAMES),
+        )
+
+    def test_empty_default_domains_are_valid_as_unmanaged(self):
+        data = self.sample()
+        data["rules"] = []
+        data["profiles"]["game"] = {}
+        data["profiles"]["capture"] = {}
+        data["layout_profiles"] = {}
+
+        self.assertEqual(validate_config(data), [])
+
+    def test_empty_domain_still_rejects_non_default_reference(self):
+        data = self.sample()
+        data["profiles"]["game"] = {}
+        data["router"]["fallback_state"]["Game"] = "Custom"
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(
+                "router.fallback_state.Game référence un profil inexistant : Custom"
+                in error
+                for error in errors
+            ),
+            errors,
+        )
 
     def test_invalid_duplicate_rule_is_reported(self):
         data = self.sample()
@@ -177,6 +215,54 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotEqual(first, config_revision(changed))
         self.assertEqual(len(first), 12)
+
+    def test_input_volume_db_validation_matches_obs_protocol_range(self):
+        for value in (-100.0, 26.0, -12.5):
+            data = self.sample()
+            data["profiles"]["audio"]["Default"]["actions"] = [
+                {
+                    "type": "input_volume_db",
+                    "params": {"input": "Music", "volume_db": value},
+                }
+            ]
+            self.assertEqual(validate_config(data), [], value)
+
+        for value in (
+            -100.0001,
+            26.0001,
+            float("nan"),
+            float("inf"),
+            True,
+            "-6.0",
+        ):
+            data = self.sample()
+            data["profiles"]["audio"]["Default"]["actions"] = [
+                {
+                    "type": "input_volume_db",
+                    "params": {"input": "Music", "volume_db": value},
+                }
+            ]
+            errors = validate_config(data)
+            self.assertTrue(
+                any(".params.volume_db" in error for error in errors),
+                (value, errors),
+            )
+
+    def test_input_volume_db_requires_explicit_volume_value(self):
+        data = self.sample()
+        data["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "input_volume_db",
+                "params": {"input": "Music"},
+            }
+        ]
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(".params.volume_db est obligatoire" in error for error in errors),
+            errors,
+        )
 
     def test_schema_v4_adds_activation_policies(self):
         data = self.sample()

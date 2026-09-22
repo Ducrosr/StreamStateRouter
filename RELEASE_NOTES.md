@@ -1,47 +1,93 @@
-# Stream State Router 2.0.14
+# Stream State Router 2.1.0
 
-## Feuille de route d'architecture Astra
+## Routage déclaratif gardé
 
-La 2.0.14 applique les propositions du rapport d'architecture dans l'ordre recommandé :
+La 2.1.0 introduit le premier chemin d'exécution déclarative de SSR, construit
+sur la séparation état désiré / état observé / état acquitté.
 
-1. A2 — IDs frais pour les actions OBS classiques ;
-2. A6 — récupération du fondu bornée ;
-3. A7 — validation stricte et homogène ;
-4. A8 — signatures Win32 explicites ;
-5. A16 — chaîne de build/release fiabilisée ;
-6. A3 — orchestration sérialisée des mutations OBS ;
-7. A1 — séparation état désiré / état acquitté ;
-8. A4 — obligations de nettoyage durables ;
-9. A5 — preview/undo récupérables ;
-10. A9 — identité exacte et propriété de visibilité ;
-11. A10 — capture complète des LayoutProfiles ;
-12. A11 — diagnostics alignés sur l'application réelle ;
-13. A13 — brouillon / enregistré / appliqué ;
-14. A14 — acquittement API et Stream Deck ;
-15. A15 — sauvegardes/export robustes ;
-16. A17 — diagnostic transversal ;
-17. A12 — réduction des scans et écritures no-op ;
-18. A18 — explication de décision sans effet de bord.
+Le périmètre exécutable reste volontairement limité à trois propriétés :
 
-## Principales garanties
+- visibilité de Scene Items ;
+- mute d'inputs ;
+- volume d'inputs en dB.
 
-- Aucun `sceneItemId` OBS n'est traité comme identité durable dans les chemins corrigés.
-- Une mutation OBS différée ne peut plus faire confondre état demandé et état réellement appliqué.
-- Les opérations live concurrentes sont sérialisées au niveau runtime au lieu de modifier OBS depuis plusieurs chemins indépendants.
-- Les erreurs de nettoyage restent visibles et retentables au lieu d'être oubliées.
-- Les LayoutProfiles et la visibilité runtime restent séparés.
-- Preview et Undo sont liés au contexte OBS dans lequel leur snapshot a été créé.
-- Les diagnostics indiquent désormais une application partielle au lieu de présenter un succès global trompeur.
-- L'explication de routage réutilise les résolveurs métier et n'envoie aucune mutation à OBS.
+Le planner reste pur et les LayoutProfiles restent délégués à
+`OBSLayoutManager`. Les filtres, settings arbitraires, changements de scène
+programme et autres opérations complexes ne sont pas promus dans l'executor.
 
-## Build et release
+## Garanties d'exécution
 
-La version du paquet est désormais dérivée de `stream_state_router.__version__`. Le workflow de release vérifie la concordance tag/version, les codes de sortie et les artefacts attendus, exécute un smoke test du binaire PyInstaller et construit l'installateur avec la même version.
+Chaque préparation est liée au contexte OBS et runtime qui l'a produite :
+
+- session WebSocket et génération de session ;
+- Scene Collection active ;
+- epoch du catalogue ;
+- révision de configuration ;
+- génération runtime / pause-reprise ;
+- état logique courant ;
+- identité physique de la cible.
+
+Les écritures refusent les reconnects implicites. Une dernière relecture
+physique suit la revalidation lente, puis le runtime réalise son dernier contrôle
+local atomiquement avec le `Set*`. L'executor n'effectue ni retry de mutation,
+ni rollback spéculatif, ni replan récursif.
+
+Après chaque écriture, SSR effectue un readback ciblé. Un sweep final réobserve
+tout le DesiredState. Les résultats partiels distinguent explicitement les steps
+`applied`, `not_run`, `unacknowledged` et divergents.
+
+## Volume d'input
+
+`input_volume_db` utilise l'UUID stable de l'input et les requêtes
+`GetInputVolume` / `SetInputVolume`.
+
+- la cible est obligatoire ;
+- les booléens et chaînes numériques sont refusés ;
+- seules les valeurs finies entre `-100` et `+26 dB` sont écrites ;
+- une observation physique finie n'est pas artificiellement clampée ;
+- planner et executor partagent une tolérance de `1e-4 dB`, adaptée au
+  round-trip float32 d'OBS.
+
+## Durcissement et distribution
+
+La pile 2.1.0 intègre également :
+
+- réconciliation cohérente des profils canoniques non gérés ;
+- dépendances Python de release figées et vérifiées exactement ;
+- `pip check` et installation isolée en CI ;
+- lockfile npm et `npm ci` ;
+- CodeQL Python, JavaScript/TypeScript et GitHub Actions ;
+- provenance de build et hash des locks/dépendances ;
+- manifeste SHA-256 strictement revérifié ;
+- smoke du binaire PyInstaller ;
+- construction Inno Setup suivie d'une installation, exécution et
+  désinstallation silencieuses ;
+- version du package Stream Deck dérivée de la version SSR au build.
 
 ## Validation
 
-Les modifications incluent des tests de régression dédiés à chaque étape, dont A → B différé → C, ciblage après réutilisation d'un `sceneItemId`, fondu en erreur persistante, contexte Preview/Undo, capture/héritage, diagnostics, scans mutualisés et explication sans mutation.
+Avant consolidation, le head Lot 3 `cc54631f50c7b1d473799b8c9075c007e0432fdd`
+a validé :
 
-La validation automatique complète de cette branche doit encore être exécutée dans un environnement Windows disposant des dépendances. Les GitHub-hosted runners de ce dépôt ont récemment échoué avant toute étape de job ; un tel échec d'infrastructure ne doit pas être interprété comme un échec de la suite Python.
+- 383 tests, 1 ignoré ;
+- Ruff ;
+- smoke configuration et couverture déclarative ;
+- Stream Deck typecheck/build/validation ;
+- CodeQL complet.
 
-Une validation avec la vraie collection OBS reste requise avant de qualifier la 2.0.14 de validée en production.
+Le smoke de release dédié #113 a validé le portable, le ZIP, le package
+Stream Deck, l'installateur, install/run/uninstall, provenance et SHA-256.
+Artefact :
+
+`release-smoke-6d8f84578928b5e2cf0568e640f29e088d6ddde7`
+
+SHA-256 :
+
+`b0cc9133aaaae92ea66600edc3629834f8e29d60e6e3308bcf2156fbf8741d3d`
+
+Une validation réelle sur OBS 32.2.2 a ensuite confirmé la résolution par UUID,
+la mutation de volume `0 dB -> -1 dB`, le readback convergent puis la
+restauration exacte à `0 dB / inputVolumeMul=1.0`.
+
+Le candidat consolidé 2.1.0 doit repasser les mêmes gates depuis sa vue finale
+avant création d'un tag ou d'une GitHub Release.
