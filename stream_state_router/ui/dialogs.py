@@ -869,10 +869,15 @@ class CollectionImportDialog(QDialog):
             "Importer la visibilité des Scene Items non ambigus"
         )
         self.visibility.setChecked(False)
+        self.layouts = QCheckBox(
+            "Importer/rafraîchir un LayoutProfile pour chaque scène OBS"
+        )
+        self.layouts.setChecked(True)
         root.addWidget(self.input_settings)
         root.addWidget(self.audio_state)
         root.addWidget(self.filters)
         root.addWidget(self.visibility)
+        root.addWidget(self.layouts)
 
         asc_group = QFormLayout()
         self.asc_path = QLineEdit()
@@ -923,6 +928,7 @@ class CollectionImportDialog(QDialog):
             "include_audio_state": self.audio_state.isChecked(),
             "include_filters": self.filters.isChecked(),
             "include_visibility": self.visibility.isChecked(),
+            "include_layouts": self.layouts.isChecked(),
             "asc_path": self.asc_path.text().strip(),
         }
 
