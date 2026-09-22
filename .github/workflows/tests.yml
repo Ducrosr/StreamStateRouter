@@ -12,6 +12,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Create isolated Python environment
+        shell: pwsh
+        run: |
+          python -m venv .tests-venv
+          $Scripts = (Resolve-Path ".\.tests-venv\Scripts").Path
+          $Scripts | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Pin pip
         run: python -m pip install --disable-pip-version-check "pip==26.2.1"
       - name: Install frozen Python dependency closure
