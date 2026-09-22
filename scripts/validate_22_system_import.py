@@ -257,6 +257,17 @@ def main() -> int:
                 snapshot=snapshot,
             )
             errors = validate_config(preview_config)
+            imported_controls = preview_config.get(
+                "control_variables",
+                {},
+            )
+            if not isinstance(imported_controls, dict):
+                imported_controls = {}
+            streamdeck_rebinds = [
+                item
+                for item in asc_report.skipped
+                if "Stream Deck SSR" in item
+            ]
             report["checks"]["advanced_scene_switcher_preview"] = {
                 "ok": not errors,
                 "path": str(detected),
@@ -266,6 +277,8 @@ def main() -> int:
                 "rules_created": asc_report.rules_created,
                 "profiles_created": asc_report.profiles_created,
                 "attached_to_existing_rules": asc_report.attached_to_existing_rules,
+                "control_variables": dict(imported_controls),
+                "streamdeck_rebinds_required": len(streamdeck_rebinds),
                 "skipped": list(asc_report.skipped),
                 "rejected_raw_count": len(asc_report.rejected_raw),
                 "rejected_raw": [
@@ -278,8 +291,19 @@ def main() -> int:
                 f"{asc_report.macros_converted}/{asc_report.macros_total} macro(s) "
                 "convertible(s) sur une copie de la config."
             )
+            if imported_controls:
+                controls_text = ", ".join(
+                    f"{key}={value}"
+                    for key, value in sorted(imported_controls.items())
+                )
+                print(f"Variables de contrôle importées : {controls_text}")
+            if streamdeck_rebinds:
+                print(
+                    "Boutons Stream Deck à reconfigurer dans le plugin SSR : "
+                    f"{len(streamdeck_rebinds)}."
+                )
             if asc_report.skipped:
-                print("Rejets ASC :")
+                print("Éléments ASC non automatisés :")
                 for item in asc_report.skipped:
                     print(f"  - {item}")
             if errors:
