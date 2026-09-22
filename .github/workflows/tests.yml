@@ -84,3 +84,31 @@ jobs:
         run: npm run build
       - name: Validate plugin
         run: npm run validate
+      - name: Pack version override smoke test
+        shell: pwsh
+        run: |
+          $Manifest = "com.remyducros.streamstaterouter.sdPlugin/manifest.json"
+          $ManifestPath = (Resolve-Path $Manifest).Path
+          $Before = [System.IO.File]::ReadAllBytes($ManifestPath)
+          $BeforeHash = (Get-FileHash -Algorithm SHA256 $ManifestPath).Hash
+          try {
+            npm run pack -- --version "9.9.9.9"
+            if ($LASTEXITCODE -ne 0) { throw "Versioned Stream Deck pack failed" }
+
+            $Stamped = (Get-Content $Manifest -Raw | ConvertFrom-Json).Version
+            if ($Stamped -ne "9.9.9.9") {
+              throw "Stream Deck CLI did not apply version override: $Stamped"
+            }
+
+            $Plugin = Get-ChildItem *.streamDeckPlugin -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $Plugin) { throw "Versioned Stream Deck package missing" }
+          }
+          finally {
+            [System.IO.File]::WriteAllBytes($ManifestPath, $Before)
+          }
+
+          $AfterHash = (Get-FileHash -Algorithm SHA256 $ManifestPath).Hash
+          if ($AfterHash -ne $BeforeHash) {
+            throw "Tracked Stream Deck manifest was not restored byte-for-byte"
+          }
