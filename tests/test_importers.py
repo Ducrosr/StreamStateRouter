@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 from stream_state_router.importers import (
     AdvancedSceneSwitcherImporter,
     SceneCollectionImporter,
+    SceneCollectionSnapshot,
 )
 from stream_state_router.obs.client import OBSRequestError
 
@@ -116,6 +118,29 @@ class _ImportClient:
         raise AssertionError(f"Unexpected request: {request} {data!r}")
 
 
+class _FakeLayoutManager:
+    def __init__(self):
+        self.calls = []
+
+    def capture_profile_result(self, scene):
+        self.calls.append(scene)
+        return SimpleNamespace(
+            profile={
+                "scene": scene,
+                "modules": {},
+                "extends": "",
+                "coordinate_mode": "normalized",
+                "conditions": {},
+                "transition": {
+                    "mode": "instant",
+                    "duration_ms": 0,
+                    "steps": 8,
+                },
+            },
+            warnings=(),
+        )
+
+
 class _NonAudioImportClient(_ImportClient):
     def send(self, request, data=None):
         if request in {"GetInputMute", "GetInputVolume"}:
@@ -207,6 +232,50 @@ class ImporterTests(unittest.TestCase):
         ]
         self.assertEqual(len(enabled_actions), 1)
         self.assertTrue(enabled_actions[0]["params"]["enabled"])
+
+    def test_scene_collection_snapshot_round_trips_through_mapping(self):
+        snapshot = SceneCollectionImporter(_ImportClient()).snapshot()
+
+        restored = SceneCollectionSnapshot.from_mapping(
+            snapshot.as_mapping()
+        )
+
+        self.assertEqual(restored, snapshot)
+        self.assertEqual(
+            restored.input_names,
+            frozenset({"Game Capture"}),
+        )
+        self.assertEqual(
+            restored.scene_item_count("In Game", "Game Capture"),
+            1,
+        )
+
+    def test_layout_capture_and_apply_are_separate_phases(self):
+        manager = _FakeLayoutManager()
+        importer = SceneCollectionImporter(
+            _ImportClient(),
+            layout_manager=manager,
+        )
+        snapshot = importer.snapshot()
+
+        profiles, skipped = importer.capture_layout_profiles(
+            snapshot=snapshot
+        )
+        config = {"layout_profiles": {}}
+        report = SceneCollectionImporter.apply_layout_profiles(
+            config,
+            collection=snapshot.collection,
+            profiles=profiles,
+            skipped=skipped,
+        )
+
+        self.assertEqual(manager.calls, ["In Game"])
+        self.assertEqual(report.added, 1)
+        self.assertEqual(report.refreshed, 0)
+        self.assertIn(
+            "Import Streaming · In Game",
+            config["layout_profiles"],
+        )
 
     def test_advss_collection_file_is_auto_discovered_by_collection_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -497,6 +566,155 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(report.macros_converted, 0)
         self.assertTrue(any("transition" in item for item in report.skipped))
         self.assertEqual(config["rules"], [])
+
+    def test_advss_ambiguous_live_visibility_is_rejected_with_raw_json(self):
+        base_snapshot = SceneCollectionImporter(_ImportClient()).snapshot()
+        raw_snapshot = base_snapshot.as_mapping()
+        duplicate = dict(raw_snapshot["scene_items"][0])
+        duplicate["occurrence"] = 1
+        raw_snapshot["scene_items"].append(duplicate)
+        snapshot = SceneCollectionSnapshot.from_mapping(raw_snapshot)
+        macro = {
+            "name": "Ambiguous Chat",
+            "group": False,
+            "conditions": [
+                {
+                    "id": "process",
+                    "process": "game.exe",
+                    "focus": True,
+                    "checkPath": False,
+                    "regexConfig": {"enable": False},
+                }
+            ],
+            "actions": [
+                {
+                    "id": "scene_visibility",
+                    "action": 0,
+                    "sceneSelection": {
+                        "type": 0,
+                        "name": "In Game",
+                    },
+                    "sceneItemSelection": {
+                        "type": 0,
+                        "idxType": 0,
+                        "idx": 0,
+                        "item": "Game Capture",
+                    },
+                    "updateTransition": False,
+                    "updateDuration": False,
+                }
+            ],
+            "elseActions": [],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            {"macros": [macro]},
+            config,
+            snapshot=snapshot,
+        )
+
+        self.assertEqual(report.macros_converted, 0)
+        self.assertEqual(len(report.rejected_raw), 1)
+        self.assertIn("2 occurrence", report.rejected_raw[0].reason)
+        self.assertEqual(report.rejected_raw[0].raw["name"], "Ambiguous Chat")
+        self.assertEqual(
+            report.as_mapping()["rejected_raw"][0]["raw"]["name"],
+            "Ambiguous Chat",
+        )
+        self.assertEqual(config["rules"], [])
+
+    def test_advss_source_settings_require_live_obs_input(self):
+        snapshot = SceneCollectionImporter(_ImportClient()).snapshot()
+        macro = {
+            "name": "Unknown input",
+            "group": False,
+            "conditions": [
+                {
+                    "id": "process",
+                    "process": "game.exe",
+                    "focus": True,
+                    "checkPath": False,
+                    "regexConfig": {"enable": False},
+                }
+            ],
+            "actions": [
+                {
+                    "id": "source",
+                    "action": 2,
+                    "source": {"type": 0, "name": "Not An Input"},
+                    "inputMethod": 2,
+                    "settings": json.dumps({"window": "x"}),
+                }
+            ],
+            "elseActions": [],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            {"macros": [macro]},
+            config,
+            snapshot=snapshot,
+        )
+
+        self.assertEqual(report.macros_converted, 0)
+        self.assertEqual(len(report.rejected_raw), 1)
+        self.assertIn(
+            "n'est pas un input OBS",
+            report.rejected_raw[0].reason,
+        )
+
+    def test_advss_custom_scene_transition_is_rejected(self):
+        macro = {
+            "name": "Forced transition",
+            "group": False,
+            "conditions": [
+                {
+                    "id": "process",
+                    "process": "game.exe",
+                    "focus": True,
+                    "checkPath": False,
+                    "regexConfig": {"enable": False},
+                }
+            ],
+            "actions": [
+                {
+                    "id": "scene_switch",
+                    "action": 0,
+                    "sceneType": 0,
+                    "sceneSelection": {
+                        "type": 0,
+                        "name": "In Game",
+                        "canvasSelection": "Main",
+                    },
+                    "transitionType": 0,
+                    "transition": "Fade",
+                }
+            ],
+            "elseActions": [],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            {"macros": [macro]},
+            config,
+        )
+
+        self.assertEqual(report.macros_converted, 0)
+        self.assertEqual(len(report.rejected_raw), 1)
+        self.assertIn("transition spécifique", report.rejected_raw[0].reason)
 
     def test_advss_unsupported_macro_is_reported_without_partial_conversion(self):
         asc = {
