@@ -249,6 +249,20 @@ class DeclarativeIntentTests(unittest.TestCase):
         self.assertIn("layout:Gameplay", str(captured.exception))
         self.assertIn("overlay:Base", str(captured.exception))
 
+    def test_input_volume_intent_requires_explicit_valid_target(self):
+        for params in (
+            {"input": "Music"},
+            {"input": "Music", "volume_db": True},
+            {"input": "Music", "volume_db": float("nan")},
+            {"input": "Music", "volume_db": 26.1},
+        ):
+            with self.subTest(params=params):
+                with self.assertRaises(ValueError):
+                    desired_assignments_from_actions(
+                        [OBSAction("input_volume_db", params)],
+                        provenance="audio:Volume",
+                    )
+
     def test_unknown_action_is_not_interpreted_as_macro(self):
         with self.assertRaises(UnsupportedIntentAction):
             desired_assignments_from_actions(
