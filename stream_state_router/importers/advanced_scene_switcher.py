@@ -763,7 +763,7 @@ class AdvancedSceneSwitcherImporter:
             duration_ms = _asc_wait_ms(action)
             if duration_ms is None:
                 return None, (
-                    f"{macro_name}: attente ASC non convertible exactement"
+                    f"{macro_name}: action wait ASC non convertible exactement"
                 )
             return (
                 {
