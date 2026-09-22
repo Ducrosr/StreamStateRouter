@@ -6,6 +6,7 @@ from ctypes import wintypes
 
 
 ERROR_ALREADY_EXISTS = 183
+SINGLE_INSTANCE_MUTEX = "Local\\StreamStateRouter-v1"
 
 
 def _configure_kernel32(kernel32) -> None:
@@ -16,7 +17,7 @@ def _configure_kernel32(kernel32) -> None:
 
 
 class SingleInstanceGuard:
-    def __init__(self, name: str = "Local\\StreamStateRouter-v1"):
+    def __init__(self, name: str = SINGLE_INSTANCE_MUTEX):
         self._handle = None
         self.already_running = False
         if os.name != "nt":
