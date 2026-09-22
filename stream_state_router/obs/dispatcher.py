@@ -13,7 +13,7 @@ from ..planning import (
     desired_state_from_action_sets,
 )
 from ..router.engine import StateChange
-from ..router.models import StreamState
+from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
 from .client import OBSClientManager
 from .layouts import OBSLayoutManager, resolve_layout_profile
 from .models import OBSAction, OBSProfile
@@ -22,15 +22,6 @@ from .models import OBSAction, OBSProfile
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
 STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
-_DEFAULT_PROFILE_NAMES = {
-    "game": "Vanilla",
-    "overlay": "Vanilla",
-    "capture": "Default",
-    "audio": "Default",
-    "layout": "Vanilla",
-}
-
-
 @dataclass(frozen=True, slots=True)
 class DomainDispatchStatus:
     domain: str
@@ -163,6 +154,17 @@ class OBSDispatcher:
         # can release the manual hold and apply the new automatic target.
         return state.profile_name("layout") == baseline
 
+    def _is_unmanaged_default(self, domain: str, profile_name: str) -> bool:
+        """Return whether the domain intentionally has no OBS profile owner."""
+
+        if str(profile_name) != DEFAULT_PROFILE_NAMES.get(domain, ""):
+            return False
+        if domain == "layout":
+            return not self._layout_profiles
+        if domain in ACTION_PROFILE_DOMAINS:
+            return not self._profiles.get(domain, {})
+        return False
+
     def pending_domains(self, state: StreamState | None = None) -> tuple[str, ...]:
         wanted = state or self._desired_state
         if wanted is None:
@@ -171,6 +173,7 @@ class OBSDispatcher:
             domain
             for domain in STATE_DOMAINS
             if not (domain == "layout" and self._layout_is_manually_held_for(wanted))
+            and not self._is_unmanaged_default(domain, wanted.profile_name(domain))
             and self._applied_profiles.get(domain) != wanted.profile_name(domain)
         )
 
@@ -402,7 +405,11 @@ class OBSDispatcher:
             desired = state.profile_name(domain)
             applied = self._applied_profiles.get(domain, "")
             held = domain == "layout" and self._layout_is_manually_held_for(state)
-            needs_apply = not held and applied != desired
+            needs_apply = (
+                not held
+                and not self._is_unmanaged_default(domain, desired)
+                and applied != desired
+            )
             row: dict[str, object] = {
                 "domain": domain,
                 "desired_profile": desired,
@@ -421,10 +428,7 @@ class OBSDispatcher:
                         }
                     )
                 if desired not in self._layout_profiles:
-                    if (
-                        not self._layout_profiles
-                        and desired == _DEFAULT_PROFILE_NAMES[domain]
-                    ):
+                    if self._is_unmanaged_default(domain, desired):
                         row.update(
                             status="unmanaged",
                             message="Aucun LayoutProfile configuré pour ce domaine",
@@ -515,11 +519,7 @@ class OBSDispatcher:
                 domains.append(row)
                 continue
             if profile is None:
-                domain_profiles = self._profiles.get(domain, {})
-                if (
-                    not domain_profiles
-                    and desired == _DEFAULT_PROFILE_NAMES[domain]
-                ):
+                if self._is_unmanaged_default(domain, desired):
                     row.update(
                         status="unmanaged",
                         message="Aucun profil OBS configuré pour ce domaine",
@@ -654,7 +654,17 @@ class OBSDispatcher:
             domain
             for domain in STATE_DOMAINS
             if not (domain == "layout" and self._layout_is_manually_held_for(state))
-            and (force or self._applied_profiles.get(domain) != state.profile_name(domain))
+            and (
+                force
+                or (
+                    not self._is_unmanaged_default(
+                        domain,
+                        state.profile_name(domain),
+                    )
+                    and self._applied_profiles.get(domain)
+                    != state.profile_name(domain)
+                )
+            )
         ]
 
         executed = 0
@@ -676,6 +686,19 @@ class OBSDispatcher:
         for domain in changed:
             self._yield_runtime()
             profile_name = state.profile_name(domain)
+            if self._is_unmanaged_default(domain, profile_name):
+                skipped += 1
+                status(
+                    domain,
+                    profile_name,
+                    "unmanaged",
+                    (
+                        "Aucun LayoutProfile configuré pour ce domaine"
+                        if domain == "layout"
+                        else "Aucun profil OBS configuré pour ce domaine"
+                    ),
+                )
+                continue
             if domain == "layout":
                 if profile_name not in self._layout_profiles:
                     skipped += 1

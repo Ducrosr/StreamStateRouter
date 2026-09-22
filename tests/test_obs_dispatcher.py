@@ -669,6 +669,64 @@ class OBSDispatcherTests(unittest.TestCase):
             all(row["status"] == "unmanaged" for row in plan["domains"])
         )
 
+    def test_unconfigured_default_domains_are_not_pending(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+
+        self.assertEqual(dispatcher.pending_domains(StreamState()), ())
+
+    def test_force_reapply_reports_unmanaged_defaults_without_obs_writes(self):
+        client = FakeClient()
+        dispatcher = OBSDispatcher(client, {})
+
+        result = dispatcher.dispatch_state(StreamState(), force=True)
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(result.executed, 0)
+        self.assertEqual(result.skipped, 5)
+        self.assertEqual(
+            [item.status for item in result.domain_statuses],
+            ["unmanaged"] * 5,
+        )
+        self.assertEqual(result.warnings, ())
+
+    def test_non_default_missing_profile_remains_pending_and_missing(self):
+        dispatcher = OBSDispatcher(FakeClient(), {})
+        state = StreamState(overlay_profile="Missing")
+
+        self.assertIn("overlay", dispatcher.pending_domains(state))
+
+        result = dispatcher.dispatch_state(state)
+        overlay = next(
+            item
+            for item in result.domain_statuses
+            if item.domain == "overlay"
+        )
+
+        self.assertEqual(overlay.status, "missing")
+        self.assertIn("overlay", dispatcher.pending_domains(state))
+
+    def test_populated_domain_does_not_implicitly_unmanage_default_name(self):
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "Other": {"actions": []},
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+        state = StreamState()
+
+        self.assertIn("overlay", dispatcher.pending_domains(state))
+
+        result = dispatcher.dispatch_state(state)
+        overlay = next(
+            item
+            for item in result.domain_statuses
+            if item.domain == "overlay"
+        )
+
+        self.assertEqual(overlay.status, "missing")
+
     def test_missing_profile_is_reported_as_declarative_block(self):
         dispatcher = OBSDispatcher(FakeClient(), {})
 

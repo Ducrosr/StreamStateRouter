@@ -7,6 +7,7 @@ from unittest.mock import patch
 from pathlib import Path
 import copy
 
+from stream_state_router.router.models import DEFAULT_PROFILE_NAMES, StreamState
 from stream_state_router.services.config import (
     build_activation_policies,
     build_ruleset,
@@ -52,6 +53,17 @@ class ConfigTests(unittest.TestCase):
 
     def test_valid_config_passes(self):
         self.assertEqual(validate_config(self.sample()), [])
+
+    def test_stream_state_defaults_match_canonical_profile_names(self):
+        state = StreamState()
+
+        self.assertEqual(
+            {
+                domain: state.profile_name(domain)
+                for domain in DEFAULT_PROFILE_NAMES
+            },
+            dict(DEFAULT_PROFILE_NAMES),
+        )
 
     def test_empty_default_domains_are_valid_as_unmanaged(self):
         data = self.sample()
