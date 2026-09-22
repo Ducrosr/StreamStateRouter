@@ -1,6 +1,7 @@
 from .advanced_scene_switcher import (
     AdvancedSceneSwitcherImportReport,
     AdvancedSceneSwitcherImporter,
+    RejectedAdvancedSceneSwitcherMacro,
 )
 from .scene_collection import (
     CollectionImportReport,
@@ -12,6 +13,7 @@ from .scene_collection import (
 __all__ = [
     "AdvancedSceneSwitcherImportReport",
     "AdvancedSceneSwitcherImporter",
+    "RejectedAdvancedSceneSwitcherMacro",
     "CollectionImportReport",
     "LayoutImportReport",
     "SceneCollectionImporter",
