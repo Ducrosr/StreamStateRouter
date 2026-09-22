@@ -23,6 +23,7 @@ from stream_state_router.host import (
 from stream_state_router.importers import (
     AdvancedSceneSwitcherImporter,
     SceneCollectionImporter,
+    neutralize_referenced_test_layout_profiles,
     wire_windows_hdr_capture_profiles,
 )
 from stream_state_router.obs.client import OBSClientManager
@@ -118,6 +119,19 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Ajoute Windows HDR ON à CaptureProfile HDR et OFF à Default "
             "si aucune action contradictoire n'existe."
+        ),
+    )
+    parser.add_argument(
+        "--enable-converted-rules",
+        action="store_true",
+        help="Active explicitement les nouvelles règles ASC créées par la migration.",
+    )
+    parser.add_argument(
+        "--neutralize-test-layouts",
+        action="store_true",
+        help=(
+            "Transforme en no-op les LayoutProfiles référencés dont la scène "
+            "pointe encore vers [Module] TEST SSR."
         ),
     )
     return parser.parse_args()
@@ -351,11 +365,21 @@ def main() -> int:
                     asc_data,
                     migration_preview_config,
                     snapshot=snapshot,
+                    enable_created_rules=bool(
+                        args.enable_converted_rules
+                    ),
                 )
                 hdr_profiles_changed: tuple[str, ...] = ()
+                test_layouts_neutralized: tuple[str, ...] = ()
                 if args.wire_hdr_profiles:
                     hdr_profiles_changed = wire_windows_hdr_capture_profiles(
                         migration_preview_config
+                    )
+                if args.neutralize_test_layouts:
+                    test_layouts_neutralized = (
+                        neutralize_referenced_test_layout_profiles(
+                            migration_preview_config
+                        )
                     )
                 migration_errors = validate_config(migration_preview_config)
                 if migration_errors:
@@ -386,6 +410,15 @@ def main() -> int:
                     "includes_global_snapshot_merge": False,
                     "wire_hdr_profiles": bool(args.wire_hdr_profiles),
                     "hdr_profiles_changed": list(hdr_profiles_changed),
+                    "enable_converted_rules": bool(
+                        args.enable_converted_rules
+                    ),
+                    "neutralize_test_layouts": bool(
+                        args.neutralize_test_layouts
+                    ),
+                    "test_layouts_neutralized": list(
+                        test_layouts_neutralized
+                    ),
                 }
                 if args.wire_hdr_profiles:
                     if hdr_profiles_changed:
@@ -397,6 +430,17 @@ def main() -> int:
                         print(
                             "CaptureProfiles HDR déjà correctement câblés."
                         )
+                if args.enable_converted_rules:
+                    print("Nouvelles règles ASC converties : activées.")
+                if args.neutralize_test_layouts:
+                    print(
+                        "LayoutProfiles de test neutralisés : "
+                        + (
+                            ", ".join(test_layouts_neutralized)
+                            if test_layouts_neutralized
+                            else "aucun"
+                        )
+                    )
                 print(
                     "Prévisualisation migration logique écrite : "
                     f"{args.export_migration_preview}"
