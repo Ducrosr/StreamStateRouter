@@ -162,7 +162,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs, 1)
         self.tabs.addTab(self._build_dashboard(), "Dashboard")
         self.tabs.addTab(self._build_rules_tab(), "Règles")
-        self.tabs.addTab(self._build_profiles_tab(), "Profils OBS")
+        self.tabs.addTab(self._build_profiles_tab(), "Profils")
         self.tabs.addTab(self._build_layouts_tab(), "Layouts")
         self.tabs.addTab(self._build_settings_tab(), "Paramètres")
         self.tabs.addTab(self._build_logs_tab(), "Journal")
