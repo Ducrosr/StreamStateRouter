@@ -7,6 +7,7 @@ import copy
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 import sys
 from typing import Any
@@ -181,7 +182,18 @@ def main() -> int:
             raise RuntimeError(diagnostic)
 
         importer = SceneCollectionImporter(client)
-        snapshot = importer.snapshot()
+        # obsws-python logs every rejected request with logger.exception().
+        # GetInputMute/GetInputVolume legitimately return 604 for non-audio
+        # inputs during exhaustive discovery; SSR handles those responses as
+        # capability probes. Keep the lab readable while preserving the actual
+        # SSR warnings/failures and restore the SDK logger immediately after.
+        sdk_logger = logging.getLogger("obsws_python.reqs")
+        previous_sdk_level = sdk_logger.level
+        sdk_logger.setLevel(logging.CRITICAL)
+        try:
+            snapshot = importer.snapshot()
+        finally:
+            sdk_logger.setLevel(previous_sdk_level)
         report["checks"]["collection_snapshot"] = {
             "ok": True,
             "collection": snapshot.collection,
@@ -256,6 +268,9 @@ def main() -> int:
                 "attached_to_existing_rules": asc_report.attached_to_existing_rules,
                 "skipped": list(asc_report.skipped),
                 "rejected_raw_count": len(asc_report.rejected_raw),
+                "rejected_raw": [
+                    item.as_mapping() for item in asc_report.rejected_raw
+                ],
                 "validation_errors": errors,
             }
             print(
@@ -263,6 +278,10 @@ def main() -> int:
                 f"{asc_report.macros_converted}/{asc_report.macros_total} macro(s) "
                 "convertible(s) sur une copie de la config."
             )
+            if asc_report.skipped:
+                print("Rejets ASC :")
+                for item in asc_report.skipped:
+                    print(f"  - {item}")
             if errors:
                 raise RuntimeError(
                     "La prévisualisation ASC produit une configuration invalide : "
