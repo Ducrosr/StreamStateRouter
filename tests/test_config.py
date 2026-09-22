@@ -24,7 +24,7 @@ from stream_state_router.services.config import (
 class ConfigTests(unittest.TestCase):
     def sample(self):
         return {
-            "schema_version": 5,
+            "schema_version": 6,
             "router": {
                 "poll_ms": 50,
                 "debounce_ms": 150,
