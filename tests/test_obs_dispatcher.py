@@ -71,6 +71,26 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertEqual(second.executed, 0)
         self.assertEqual(len(client.calls), 3)  # scene change + lookup + scene item enabled
 
+    def test_obs_context_prefers_modern_program_scene_field(self):
+        client = FakeClient()
+        original_send = client.send
+
+        def send(request, data=None):
+            if request == "GetCurrentProgramScene":
+                client.calls.append((request, data))
+                return {
+                    "sceneName": "Modern",
+                    "currentProgramSceneName": "Legacy",
+                }
+            return original_send(request, data)
+
+        client.send = send
+        dispatcher = OBSDispatcher(client, {})
+
+        context = dispatcher.obs_context(force_refresh=True)
+
+        self.assertEqual(context["program_scene"], "Modern")
+
     def test_scene_item_id_is_resolved_fresh_for_each_visibility_action(self):
         client = FakeClient()
         client.scene_item_ids = [42, 99]
