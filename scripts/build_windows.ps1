@@ -56,10 +56,38 @@ if ($Npm) {
         Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "typecheck")
         Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "build")
         Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "validate")
-        Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "pack")
-        $Plugin = Get-ChildItem -Filter *.streamDeckPlugin | Select-Object -First 1
-        if (-not $Plugin) { throw "Artefact Stream Deck introuvable." }
-        Copy-Item $Plugin.FullName (Join-Path $Release $Plugin.Name) -Force
+
+        $PluginVersion = "$Version.0"
+        $PluginManifestPath = (
+            Resolve-Path ".\com.remyducros.streamstaterouter.sdPlugin\manifest.json"
+        ).Path
+        $PluginManifestBytes = [System.IO.File]::ReadAllBytes($PluginManifestPath)
+        try {
+            Invoke-Native -FilePath $Npm.Source -ArgumentList @(
+                "run",
+                "pack",
+                "--",
+                "--version",
+                $PluginVersion
+            )
+
+            $StampedVersion = (
+                Get-Content $PluginManifestPath -Raw | ConvertFrom-Json
+            ).Version
+            if ($StampedVersion -ne $PluginVersion) {
+                throw "Version Stream Deck inattendue après packaging : $StampedVersion"
+            }
+
+            $Plugin = Get-ChildItem -Filter *.streamDeckPlugin | Select-Object -First 1
+            if (-not $Plugin) { throw "Artefact Stream Deck introuvable." }
+            Copy-Item $Plugin.FullName (Join-Path $Release $Plugin.Name) -Force
+        }
+        finally {
+            [System.IO.File]::WriteAllBytes(
+                $PluginManifestPath,
+                $PluginManifestBytes
+            )
+        }
     }
     finally {
         Pop-Location
@@ -84,6 +112,7 @@ $PythonVersion = (& $Python --version 2>&1).ToString().Trim()
 $PyInstallerVersion = (& .\.venv\Scripts\pyinstaller.exe --version 2>&1).ToString().Trim()
 $NodeVersion = if (Get-Command node -ErrorAction SilentlyContinue) { (& node --version 2>&1).ToString().Trim() } else { "not-installed" }
 $NpmVersion = if (Get-Command npm -ErrorAction SilentlyContinue) { (& npm --version 2>&1).ToString().Trim() } else { "not-installed" }
+$StreamDeckPluginVersion = if ($Npm) { "$Version.0" } else { "not-built" }
 $PythonConstraintsSha256 = (Get-FileHash -Algorithm SHA256 -Path ".\constraints\windows-release.txt").Hash.ToLowerInvariant()
 $StreamDeckLockSha256 = (Get-FileHash -Algorithm SHA256 -Path ".\streamdeck-plugin\package-lock.json").Hash.ToLowerInvariant()
 $Manifest = [ordered]@{
@@ -93,6 +122,7 @@ $Manifest = [ordered]@{
     pyinstaller = $PyInstallerVersion
     node = $NodeVersion
     npm = $NpmVersion
+    streamdeck_plugin_version = $StreamDeckPluginVersion
     python_constraints_sha256 = $PythonConstraintsSha256
     streamdeck_lock_sha256 = $StreamDeckLockSha256
 }
