@@ -538,11 +538,16 @@ class DeclarativeExecutor:
                     )
                 self._context_check(prepared)
 
-                def perform_write() -> None:
+                def perform_write(
+                    key=key,
+                    operation_name=operation.operation,
+                    binding=binding,
+                    target=target,
+                ) -> None:
                     replace_step(
                         ExecutionStepResult(
                             key,
-                            operation.operation,
+                            operation_name,
                             True,
                             None,
                             False,
