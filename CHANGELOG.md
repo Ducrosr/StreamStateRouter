@@ -1,5 +1,20 @@
 # Historique
 
+## 2.1.0 — routage déclaratif gardé et distribution durcie
+
+- Ajout du planner/observateur/catalogue déclaratifs avec DesiredState et diagnostics de migration.
+- Executor opt-in sérialisé sur `SSR-Router`, ticket mono-usage et garde-fous de contexte.
+- Exécution déclarative limitée à la visibilité de Scene Items, au mute et au volume d'inputs.
+- Dernier contrôle runtime atomique avec le `Set*`, readback ciblé et sweep final de convergence.
+- Binding physique par UUID pour les inputs et fingerprint d'occurrences pour les Scene Items.
+- `input_volume_db` strict : cible explicite finie, plage `[-100,+26]`, tolérance float32 partagée `1e-4 dB`.
+- Réconciliation des domaines par défaut non gérés harmonisée entre planner et dispatcher legacy.
+- Préservation des résultats partiels et `replan_required` après interruption, dérive de contexte ou observation invalide.
+- Dépendances Python de release figées, `npm ci`, CodeQL, provenance et vérification SHA-256 stricte.
+- Smoke complet portable + installateur avec install/run/uninstall.
+- Version du package Stream Deck alignée sur la version SSR.
+- Validation réelle OBS 32.2.2 du chemin volume par UUID, mutation `0 -> -1 dB`, readback puis restauration exacte.
+
 ## 2.0.14 — feuille de route d'architecture Astra
 
 - **A2 — IDs OBS frais** : les actions classiques de visibilité résolvent désormais le `sceneItemId` à chaque mutation au lieu de conserver un cache durable susceptible de cibler un autre item après une modification structurelle d'OBS.
