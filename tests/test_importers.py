@@ -9,6 +9,7 @@ from stream_state_router.importers import (
     AdvancedSceneSwitcherImporter,
     SceneCollectionImporter,
 )
+from stream_state_router.obs.client import OBSRequestError
 
 
 class _ImportClient:
@@ -115,6 +116,16 @@ class _ImportClient:
         raise AssertionError(f"Unexpected request: {request} {data!r}")
 
 
+class _NonAudioImportClient(_ImportClient):
+    def send(self, request, data=None):
+        if request in {"GetInputMute", "GetInputVolume"}:
+            raise OBSRequestError(
+                request,
+                "Request returned code 604. The specified input does not support audio.",
+            )
+        return super().send(request, data)
+
+
 class ImporterTests(unittest.TestCase):
     def test_scene_collection_snapshot_projects_stable_actions(self):
         importer = SceneCollectionImporter(_ImportClient())
@@ -141,6 +152,18 @@ class ImporterTests(unittest.TestCase):
                 "source_filter_settings",
                 "scene_item_enabled",
             ],
+        )
+
+    def test_scene_collection_ignores_expected_non_audio_604(self):
+        importer = SceneCollectionImporter(_NonAudioImportClient())
+
+        snapshot = importer.snapshot()
+
+        self.assertIsNone(snapshot.inputs[0].muted)
+        self.assertIsNone(snapshot.inputs[0].volume_db)
+        self.assertFalse(
+            any("604" in warning for warning in snapshot.warnings),
+            snapshot.warnings,
         )
 
     def test_scene_collection_merge_replaces_same_target_instead_of_duplicating(self):
