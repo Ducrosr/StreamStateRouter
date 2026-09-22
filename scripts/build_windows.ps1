@@ -56,7 +56,18 @@ if ($Npm) {
         Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "typecheck")
         Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "build")
         Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "validate")
-        Invoke-Native -FilePath $Npm.Source -ArgumentList @("run", "pack")
+
+        $PluginManifestPath = ".\com.remyducros.streamstaterouter.sdPlugin\manifest.json"
+        $PluginManifest = Get-Content $PluginManifestPath -Raw
+        try {
+            Invoke-Native -FilePath $Npm.Source -ArgumentList @(
+                "run", "pack", "--", "--version", "$Version.0"
+            )
+        }
+        finally {
+            Set-Content -Path $PluginManifestPath -Value $PluginManifest -Encoding UTF8 -NoNewline
+        }
+
         $Plugin = Get-ChildItem -Filter *.streamDeckPlugin | Select-Object -First 1
         if (-not $Plugin) { throw "Artefact Stream Deck introuvable." }
         Copy-Item $Plugin.FullName (Join-Path $Release $Plugin.Name) -Force
@@ -93,6 +104,7 @@ $Manifest = [ordered]@{
     pyinstaller = $PyInstallerVersion
     node = $NodeVersion
     npm = $NpmVersion
+    streamdeck_plugin_version = "$Version.0"
     python_constraints_sha256 = $PythonConstraintsSha256
     streamdeck_lock_sha256 = $StreamDeckLockSha256
 }
