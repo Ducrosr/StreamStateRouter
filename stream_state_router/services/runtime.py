@@ -24,6 +24,7 @@ from ..activation import (
     TriggerPolicyConfig,
     TriggerTargetIdentity,
 )
+from ..importing import OBSCollectionImporter
 from ..obs.dispatcher import DispatchResult, OBSDispatcher
 from ..obs.observed import build_execution_bindings
 from ..router.engine import StateChange, StateRouterEngine
@@ -788,6 +789,24 @@ class RoutingService:
 
     def request_catalog_sync(self) -> str:
         return self.submit_obs_command("catalog.sync")
+
+    def request_collection_import_preview(
+        self,
+        *,
+        asc_payload: Mapping[str, object] | None = None,
+        asc_source: str = "",
+        auto_detect_asc: bool = True,
+    ) -> str:
+        options: dict[str, object] = {
+            "auto_detect_asc": bool(auto_detect_asc),
+            "asc_source": str(asc_source or ""),
+        }
+        if asc_payload is not None:
+            options["asc_payload"] = copy.deepcopy(dict(asc_payload))
+        return self.submit_obs_command(
+            "collection.import.preview",
+            options=options,
+        )
 
     def request_declarative_plan(
         self,
@@ -1885,7 +1904,32 @@ class RoutingService:
             self._active_obs_command = command
         try:
             with self._dispatch_lock:
-                if command.action == "reapply":
+                if command.action == "collection.import.preview":
+                    raw_payload = command.options.get("asc_payload")
+                    asc_payload = (
+                        dict(raw_payload)
+                        if isinstance(raw_payload, Mapping)
+                        else None
+                    )
+                    importer = OBSCollectionImporter(
+                        self.dispatcher.client,
+                        layout_manager=getattr(
+                            self.dispatcher,
+                            "layout_manager",
+                            None,
+                        ),
+                        cooperative_yield=self._cooperative_obs_yield,
+                    )
+                    result = importer.preview(
+                        asc_payload=asc_payload,
+                        asc_source=str(
+                            command.options.get("asc_source") or ""
+                        ),
+                        auto_detect_asc=bool(
+                            command.options.get("auto_detect_asc", True)
+                        ),
+                    ).as_mapping()
+                elif command.action == "reapply":
                     with self._lock:
                         state = self.engine.current_state
                         rule_name = self.engine.current_rule
