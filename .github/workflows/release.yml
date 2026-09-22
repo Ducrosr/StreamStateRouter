@@ -150,6 +150,51 @@ jobs:
           $ChecksumPath = ".\release\SHA256SUMS.txt"
           $Lines | Set-Content -Path $ChecksumPath -Encoding utf8
           if (-not (Test-Path $ChecksumPath)) { throw "Checksum manifest missing" }
+      - name: Verify SHA-256 checksum manifest
+        shell: pwsh
+        run: |
+          $ChecksumPath = ".\release\SHA256SUMS.txt"
+          if (-not (Test-Path $ChecksumPath)) { throw "Checksum manifest missing" }
+
+          $Plugin = Get-ChildItem .\streamdeck-plugin\*.streamDeckPlugin -ErrorAction Stop | Select-Object -First 1
+          $Artifacts = @(
+            (Get-Item ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-portable.zip")
+            (Get-Item ".\release\Stream-State-Router-v${{ steps.version.outputs.version }}-setup.exe")
+            (Get-Item ".\release\build-manifest.json")
+            $Plugin
+          ) | Sort-Object Name
+
+          $Rows = @(Get-Content $ChecksumPath)
+          if ($Rows.Count -ne $Artifacts.Count) {
+            throw "Checksum manifest row count mismatch: $($Rows.Count) != $($Artifacts.Count)"
+          }
+
+          $ParsedNames = @()
+          $Hashes = @{}
+          foreach ($Row in $Rows) {
+            if ($Row -notmatch "^([0-9a-f]{64})  (.+)$") {
+              throw "Invalid checksum row: $Row"
+            }
+            $Hash = $Matches[1]
+            $Name = $Matches[2]
+            if ($Hashes.ContainsKey($Name)) {
+              throw "Duplicate checksum entry: $Name"
+            }
+            $Hashes[$Name] = $Hash
+            $ParsedNames += $Name
+          }
+
+          $ExpectedNames = @($Artifacts | ForEach-Object { $_.Name })
+          if (($ParsedNames -join "|") -ne ($ExpectedNames -join "|")) {
+            throw "Checksum manifest filename/order mismatch"
+          }
+
+          foreach ($Artifact in $Artifacts) {
+            $ExpectedHash = (Get-FileHash -Algorithm SHA256 -Path $Artifact.FullName).Hash.ToLowerInvariant()
+            if ($Hashes[$Artifact.Name] -ne $ExpectedHash) {
+              throw "Checksum mismatch for $($Artifact.Name)"
+            }
+          }
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
