@@ -1,0 +1,65 @@
+name: Release Smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-release-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Prepare Python environment
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to create .venv"
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to install Inno Setup"
+          }
+
+      - name: Build complete Windows distribution
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
+
+      - name: Verify release smoke artifacts
+        shell: pwsh
+        run: |
+          $ExpectedPatterns = @(
+            ".\release\Stream-State-Router-v*-portable.zip",
+            ".\release\Stream-State-Router-v*-setup.exe",
+            ".\release\*.streamDeckPlugin",
+            ".\release\build-manifest.json"
+          )
+
+          foreach ($Pattern in $ExpectedPatterns) {
+            if (-not (Get-ChildItem $Pattern -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+              throw "Release smoke artifact missing: $Pattern"
+            }
+          }
+
+      - name: Upload release smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssr-release-smoke-${{ github.sha }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
