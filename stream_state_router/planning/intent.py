@@ -117,6 +117,45 @@ def desired_assignments_from_actions(
             )
             continue
 
+        if kind == "source_filter_settings":
+            source = str(params.get("source") or "").strip()
+            filter_name = str(params.get("filter") or "").strip()
+            settings = params.get("settings")
+            if not source or not filter_name:
+                raise ValueError(
+                    "source_filter_settings requires params.source and params.filter"
+                )
+            if not isinstance(settings, Mapping):
+                raise ValueError(
+                    "source_filter_settings requires params.settings"
+                )
+            if params.get("overlay") is False:
+                raise UnsupportedIntentAction(
+                    "source_filter_settings with overlay=false cannot be represented "
+                    "as independent stable setting assignments"
+                )
+            for setting in sorted(settings, key=str):
+                assign(
+                    DesiredAssignment.create(
+                        PropertyKey.filter_setting(
+                            collection=collection,
+                            source=source,
+                            filter_name=filter_name,
+                            setting=str(setting),
+                        ),
+                        settings[setting],
+                        provenance=provenance,
+                    )
+                )
+            continue
+
+        if kind in {"app_audio_output", "windows_hdr"}:
+            # Host actions are intentionally executed by the classic guarded
+            # profile path for now. Returning no managed property keeps them
+            # visible as intent-only in migration coverage without pretending
+            # that OBS observation can acknowledge Windows host state.
+            continue
+
         if kind == "input_mute":
             input_name = str(params.get("input") or "").strip()
             if not input_name:
