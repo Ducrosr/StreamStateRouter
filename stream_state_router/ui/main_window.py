@@ -1370,7 +1370,8 @@ class MainWindow(QMainWindow):
         options = dialog.options()
         previous = copy.deepcopy(self.config)
         try:
-            snapshot = SceneCollectionImporter(self._client).snapshot()
+            importer = SceneCollectionImporter(self._client)
+            snapshot = importer.snapshot()
             report = SceneCollectionImporter.merge_actions_into_profile(
                 self.config,
                 domain=domain,
@@ -1383,6 +1384,13 @@ class MainWindow(QMainWindow):
                 include_filters=bool(options["include_filters"]),
                 include_visibility=bool(options["include_visibility"]),
             )
+
+            layout_report = None
+            if bool(options.get("include_layouts", False)):
+                layout_report = importer.import_layout_profiles(
+                    self.config,
+                    snapshot=snapshot,
+                )
 
             asc_report = None
             asc_path = str(options.get("asc_path") or "").strip()
@@ -1421,11 +1429,14 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._refresh_rules_table()
         self._refresh_profile_names()
+        self._refresh_layout_profile_names()
         self.profile_name.setCurrentText(profile_name)
         self._refresh_actions_table()
         self._refresh_override_boxes()
 
         summary = report.summary()
+        if layout_report is not None:
+            summary += "\n\nLayouts\n" + layout_report.summary()
         if asc_report is not None:
             summary += "\n\nAdvanced Scene Switcher\n" + asc_report.summary()
         summary += (
