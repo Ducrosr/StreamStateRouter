@@ -361,6 +361,9 @@ class DeclarativeExecutor:
         prepared: PreparedExecution,
         *,
         validate_target: Callable[[], tuple[bool, str]],
+        commit_write: (
+            Callable[[Callable[[], None]], tuple[bool, str]] | None
+        ) = None,
         progress: Callable[[tuple[ExecutionStepResult, ...]], None] | None = None,
     ) -> ExecutionResult:
         steps: list[ExecutionStepResult] = []
@@ -493,13 +496,16 @@ class DeclarativeExecutor:
                         diagnostic="physical value changed immediately before mutation",
                     )
 
-                # Last admission check immediately before the mutation.  This is
-                # deliberately repeated after the fresh physical read so a
-                # resume/override that raced with preflight cannot authorize a
-                # write from the old target.
-                # Revalidate the executor-owned context first, then let
-                # the runtime callback perform its own fresh condition/target
-                # resolution and final runtime-generation check.
+                # Final admission is deliberately split in two layers:
+                # 1) the potentially slow target/context revalidation;
+                # 2) a fresh physical binding read followed by a runtime-owned
+                #    atomic local-state admission + Set* commit.
+                #
+                # No cooperative checkpoint is allowed between the final
+                # physical/context checks and the commit callback.  The runtime
+                # callback owns the last local pause/state/generation check and
+                # invokes the actual write while holding its lock.
+                self._yield()
                 self._context_check(prepared)
                 valid, reason = validate_target()
                 if not valid:
@@ -509,24 +515,67 @@ class DeclarativeExecutor:
                         diagnostic=reason,
                     )
 
-                # Pure cooperative checkpoint immediately before the write.
-                # Once the request is handed to obs-websocket it cannot be
-                # rolled back or safely retried by this executor.
-                self._yield()
-                replace_step(
-                    ExecutionStepResult(
-                        key,
-                        operation.operation,
-                        True,
-                        None,
-                        False,
-                        None,
-                        "unacknowledged",
-                        "write_inflight",
+                current = self._read_binding(prepared, binding)
+                if current is target:
+                    replace_step(
+                        ExecutionStepResult(
+                            key,
+                            operation.operation,
+                            False,
+                            None,
+                            True,
+                            current,
+                            "already_converged",
+                        )
                     )
-                )
-                try:
+                    continue
+                if operation.observed is not current:
+                    return finish(
+                        "replan_required",
+                        replan_required=True,
+                        diagnostic=(
+                            "physical value or identity changed during final "
+                            "target revalidation"
+                        ),
+                    )
+                self._context_check(prepared)
+
+                def perform_write(
+                    key=key,
+                    operation_name=operation.operation,
+                    binding=binding,
+                    target=target,
+                ) -> None:
+                    replace_step(
+                        ExecutionStepResult(
+                            key,
+                            operation_name,
+                            True,
+                            None,
+                            False,
+                            None,
+                            "unacknowledged",
+                            "write_inflight",
+                        )
+                    )
                     self._write_binding(prepared, binding, target)
+
+                try:
+                    if commit_write is None:
+                        perform_write()
+                        admitted = True
+                        admission_reason = ""
+                    else:
+                        admitted, admission_reason = commit_write(perform_write)
+                    if not admitted:
+                        return finish(
+                            "replan_required",
+                            replan_required=True,
+                            diagnostic=(
+                                admission_reason
+                                or "runtime target changed before mutation commit"
+                            ),
+                        )
                 except OBSUnavailableError as exc:
                     replace_step(
                         ExecutionStepResult(
@@ -694,7 +743,12 @@ class DeclarativeExecutor:
         except _ReplanRequired as exc:
             return finish("replan_required", replan_required=True, diagnostic=str(exc))
         except _ExecutionBlocked as exc:
-            return finish("blocked", diagnostic=str(exc))
+            partial_mutation = any(step.write_attempted for step in steps)
+            return finish(
+                "failed" if partial_mutation else "blocked",
+                replan_required=partial_mutation,
+                diagnostic=str(exc),
+            )
         except OBSUnavailableError as exc:
             return finish("failed", replan_required=True, diagnostic=str(exc))
         except OBSRequestError as exc:
