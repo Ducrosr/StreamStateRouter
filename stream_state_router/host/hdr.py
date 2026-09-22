@@ -287,6 +287,37 @@ class WindowsHDRController:
             self._api = _DisplayConfigAPI()
         return self._api
 
+    def status(self, *, scope: str = "primary") -> tuple[dict[str, object], ...]:
+        wanted_scope = str(scope or "primary").strip().casefold()
+        if wanted_scope not in {"primary", "all"}:
+            raise ValueError("scope HDR doit être primary ou all")
+
+        api = self._backend()
+        paths = list(api.active_paths())
+        primary = ""
+        if wanted_scope == "primary":
+            primary = api.primary_device_name().casefold()
+            paths = [
+                path
+                for path in paths
+                if api.source_name(path).casefold() == primary
+            ]
+        rows: list[dict[str, object]] = []
+        for path in paths:
+            info = api.advanced_color_info(path)
+            rows.append(
+                {
+                    "source": api.source_name(path),
+                    "supported": bool(info.supported),
+                    "enabled": bool(info.enabled),
+                    "primary": bool(
+                        primary
+                        and api.source_name(path).casefold() == primary
+                    ),
+                }
+            )
+        return tuple(rows)
+
     def set_enabled(self, enabled: bool, *, scope: str = "primary") -> int:
         wanted_scope = str(scope or "primary").strip().casefold()
         if wanted_scope not in {"primary", "all"}:
