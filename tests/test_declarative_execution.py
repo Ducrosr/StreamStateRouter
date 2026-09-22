@@ -329,14 +329,14 @@ class DeclarativeExecutorTests(unittest.TestCase):
             input_name="Mic",
         )
         desired = DesiredState.build(
-            [DesiredAssignment.create(key, -99.25597)]
+            [DesiredAssignment.create(key, -99.9389)]
         )
         prepared = _prepared(
             desired,
-            {key: ObservedValue.known_value(-99.25596618652344)},
+            {key: ObservedValue.known_value(-99.93891906738281)},
         )
         client = _ExecutorClient()
-        client.input_volume_db = -99.25596618652344
+        client.input_volume_db = -99.93891906738281
         executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
 
         result = executor.execute(prepared, validate_target=lambda: (True, ""))
@@ -353,14 +353,14 @@ class DeclarativeExecutorTests(unittest.TestCase):
             input_name="Mic",
         )
         desired = DesiredState.build(
-            [DesiredAssignment.create(key, -99.25597)]
+            [DesiredAssignment.create(key, -99.9389)]
         )
         prepared = _prepared(
             desired,
-            {key: ObservedValue.known_value(-99.25594)},
+            {key: ObservedValue.known_value(-99.9386)},
         )
         client = _ExecutorClient()
-        client.input_volume_db = -99.25594
+        client.input_volume_db = -99.9386
         executor = DeclarativeExecutor(client, _PlanningStub(_catalog()))
 
         result = executor.execute(prepared, validate_target=lambda: (True, ""))
