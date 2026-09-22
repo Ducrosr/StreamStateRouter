@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -832,6 +833,97 @@ class ModuleLayoutDialog(QDialog):
             "exclusive": self.activation_exclusive.isChecked(),
             "avoid_immediate_repeat": self.activation_repeat.isChecked(),
             "targets": targets,
+        }
+
+
+class CollectionImportDialog(QDialog):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        target_domain: str,
+        target_profile: str,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Importer la collection OBS")
+        self.resize(650, 420)
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "La collection OBS courante sera lue sans mutation. "
+            f"Les actions compatibles seront ajoutées au profil "
+            f"{target_domain}/{target_profile}. Les doublons de cible sont remplacés."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        self.input_settings = QCheckBox("Importer les réglages des inputs OBS")
+        self.input_settings.setChecked(True)
+        self.audio_state = QCheckBox("Importer mute et volume des inputs")
+        self.audio_state.setChecked(True)
+        self.filters = QCheckBox(
+            "Importer état et paramètres des filtres OBS"
+        )
+        self.filters.setChecked(True)
+        self.visibility = QCheckBox(
+            "Importer la visibilité des Scene Items non ambigus"
+        )
+        self.visibility.setChecked(False)
+        root.addWidget(self.input_settings)
+        root.addWidget(self.audio_state)
+        root.addWidget(self.filters)
+        root.addWidget(self.visibility)
+
+        asc_group = QFormLayout()
+        self.asc_path = QLineEdit()
+        self.asc_path.setPlaceholderText(
+            "Facultatif : export JSON Advanced Scene Switcher "
+            "ou fichier de collection OBS"
+        )
+        browse_row = QHBoxLayout()
+        browse_row.addWidget(self.asc_path, 1)
+        browse = QPushButton("Parcourir…")
+        browse.clicked.connect(self._browse_asc)
+        browse_row.addWidget(browse)
+        asc_group.addRow("Advanced Scene Switcher", browse_row)
+        root.addLayout(asc_group)
+
+        note = QLabel(
+            "Les macros ASC ne sont converties que si leur sémantique est "
+            "reproductible exactement par SSR. Les autres restent listées "
+            "dans le rapport d'import et ne sont jamais approximées."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        root.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Importer")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _browse_asc(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner un export Advanced Scene Switcher",
+            self.asc_path.text().strip() or "",
+            "JSON (*.json);;Texte (*.txt);;Tous les fichiers (*)",
+        )
+        if selected:
+            self.asc_path.setText(selected)
+
+    def options(self) -> dict[str, object]:
+        return {
+            "include_input_settings": self.input_settings.isChecked(),
+            "include_audio_state": self.audio_state.isChecked(),
+            "include_filters": self.filters.isChecked(),
+            "include_visibility": self.visibility.isChecked(),
+            "asc_path": self.asc_path.text().strip(),
         }
 
 
