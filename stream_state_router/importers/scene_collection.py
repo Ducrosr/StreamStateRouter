@@ -89,6 +89,11 @@ class LayoutImportReport:
         return "\n".join(lines)
 
 
+def _non_audio_request_error(exc: OBSRequestError) -> bool:
+    text = str(exc).casefold()
+    return "code 604" in text or "does not support audio" in text
+
+
 def _action_identity(action: Mapping[str, Any]) -> tuple[str, ...]:
     kind = str(action.get("type") or "")
     params = action.get("params")
@@ -159,9 +164,10 @@ class SceneCollectionImporter:
                 if isinstance(response.get("inputMuted"), bool):
                     muted = bool(response["inputMuted"])
             except OBSRequestError as exc:
-                warnings.append(
-                    f"Input '{input_ref.name}' mute unreadable: {exc}"
-                )
+                if not _non_audio_request_error(exc):
+                    warnings.append(
+                        f"Input '{input_ref.name}' mute unreadable: {exc}"
+                    )
 
             volume_db: float | None = None
             try:
@@ -179,9 +185,10 @@ class SceneCollectionImporter:
                 ):
                     volume_db = float(raw)
             except OBSRequestError as exc:
-                warnings.append(
-                    f"Input '{input_ref.name}' volume unreadable: {exc}"
-                )
+                if not _non_audio_request_error(exc):
+                    warnings.append(
+                        f"Input '{input_ref.name}' volume unreadable: {exc}"
+                    )
 
             inputs.append(
                 ImportedInput(
