@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from ..obs.catalog import OBSResourceCatalogReader
 from ..obs.client import OBSClientManager, OBSRequestError
+from ..obs.layouts import OBSLayoutManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +43,7 @@ class SceneCollectionSnapshot:
     inputs: tuple[ImportedInput, ...]
     filters: tuple[ImportedFilter, ...]
     scene_items: tuple[ImportedSceneItem, ...]
+    scenes: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
 
@@ -61,6 +63,25 @@ class CollectionImportReport:
             f"Actions ajoutées : {self.added_actions}",
             f"Actions remplacées : {self.replaced_actions}",
             f"Éléments ignorés : {len(self.skipped)}",
+        ]
+        if self.skipped:
+            lines.append("")
+            lines.extend(f"- {item}" for item in self.skipped)
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutImportReport:
+    collection: str
+    added: int
+    refreshed: int
+    skipped: tuple[str, ...]
+
+    def summary(self) -> str:
+        lines = [
+            f"LayoutProfiles ajoutés : {self.added}",
+            f"LayoutProfiles rafraîchis : {self.refreshed}",
+            f"Layouts ignorés : {len(self.skipped)}",
         ]
         if self.skipped:
             lines.append("")
@@ -99,9 +120,15 @@ class SceneCollectionImporter:
     actions without inventing ambiguous scene-item identities.
     """
 
-    def __init__(self, client: OBSClientManager) -> None:
+    def __init__(
+        self,
+        client: OBSClientManager,
+        *,
+        layout_manager: OBSLayoutManager | None = None,
+    ) -> None:
         self.client = client
         self.reader = OBSResourceCatalogReader(client)
+        self.layout_manager = layout_manager or OBSLayoutManager(client)
 
     def snapshot(self) -> SceneCollectionSnapshot:
         catalog = self.reader.sync()
@@ -237,6 +264,7 @@ class SceneCollectionImporter:
                 )
             ),
             scene_items=scene_items,
+            scenes=tuple(scene.name for scene in catalog.scenes),
             warnings=tuple(warnings),
         )
 
@@ -370,6 +398,43 @@ class SceneCollectionImporter:
                 )
 
         return actions, skipped
+
+    def import_layout_profiles(
+        self,
+        config: dict[str, Any],
+        *,
+        snapshot: SceneCollectionSnapshot,
+    ) -> LayoutImportReport:
+        layout_profiles = config.setdefault("layout_profiles", {})
+        if not isinstance(layout_profiles, dict):
+            raise ValueError("config.layout_profiles doit être un objet.")
+
+        added = 0
+        refreshed = 0
+        skipped: list[str] = []
+        for scene in snapshot.scenes:
+            profile_name = f"Import {snapshot.collection} · {scene}".strip()
+            try:
+                capture = self.layout_manager.capture_profile_result(scene)
+            except Exception as exc:
+                skipped.append(f"{scene}: capture layout impossible : {exc}")
+                continue
+
+            if profile_name in layout_profiles:
+                refreshed += 1
+            else:
+                added += 1
+            layout_profiles[profile_name] = dict(capture.profile)
+            skipped.extend(
+                f"{scene}: {warning}" for warning in capture.warnings
+            )
+
+        return LayoutImportReport(
+            collection=snapshot.collection,
+            added=added,
+            refreshed=refreshed,
+            skipped=tuple(skipped),
+        )
 
     @staticmethod
     def merge_actions_into_profile(
