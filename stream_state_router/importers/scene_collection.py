@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 import math
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ..obs.catalog import OBSResourceCatalogReader
 from ..obs.client import OBSClientManager, OBSRequestError
@@ -18,6 +19,44 @@ class ImportedInput:
     muted: bool | None
     volume_db: float | None
 
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "uuid": self.uuid,
+            "settings": copy.deepcopy(dict(self.settings)),
+            "muted": self.muted,
+            "volume_db": self.volume_db,
+        }
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "ImportedInput":
+        settings = raw.get("settings")
+        return cls(
+            name=str(raw.get("name") or ""),
+            kind=str(raw.get("kind") or ""),
+            uuid=str(raw.get("uuid") or ""),
+            settings=(
+                copy.deepcopy(dict(settings))
+                if isinstance(settings, Mapping)
+                else {}
+            ),
+            muted=(
+                bool(raw.get("muted"))
+                if isinstance(raw.get("muted"), bool)
+                else None
+            ),
+            volume_db=(
+                float(raw["volume_db"])
+                if (
+                    not isinstance(raw.get("volume_db"), bool)
+                    and isinstance(raw.get("volume_db"), (int, float))
+                    and math.isfinite(float(raw["volume_db"]))
+                )
+                else None
+            ),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ImportedFilter:
@@ -27,6 +66,34 @@ class ImportedFilter:
     enabled: bool | None
     settings: Mapping[str, Any]
 
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "name": self.name,
+            "kind": self.kind,
+            "enabled": self.enabled,
+            "settings": copy.deepcopy(dict(self.settings)),
+        }
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "ImportedFilter":
+        settings = raw.get("settings")
+        return cls(
+            source=str(raw.get("source") or ""),
+            name=str(raw.get("name") or ""),
+            kind=str(raw.get("kind") or ""),
+            enabled=(
+                bool(raw.get("enabled"))
+                if isinstance(raw.get("enabled"), bool)
+                else None
+            ),
+            settings=(
+                copy.deepcopy(dict(settings))
+                if isinstance(settings, Mapping)
+                else {}
+            ),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ImportedSceneItem:
@@ -34,6 +101,31 @@ class ImportedSceneItem:
     source: str
     occurrence: int
     enabled: bool | None
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "scene": self.scene,
+            "source": self.source,
+            "occurrence": self.occurrence,
+            "enabled": self.enabled,
+        }
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "ImportedSceneItem":
+        try:
+            occurrence = int(raw.get("occurrence", 0))
+        except (TypeError, ValueError, OverflowError):
+            occurrence = 0
+        return cls(
+            scene=str(raw.get("scene") or ""),
+            source=str(raw.get("source") or ""),
+            occurrence=occurrence,
+            enabled=(
+                bool(raw.get("enabled"))
+                if isinstance(raw.get("enabled"), bool)
+                else None
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +137,67 @@ class SceneCollectionSnapshot:
     scene_items: tuple[ImportedSceneItem, ...]
     scenes: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+
+    @property
+    def input_names(self) -> frozenset[str]:
+        return frozenset(item.name for item in self.inputs)
+
+    def scene_item_count(self, scene: str, source: str) -> int:
+        return sum(
+            1
+            for item in self.scene_items
+            if item.scene == scene and item.source == source
+        )
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "collection": self.collection,
+            "current_program_scene": self.current_program_scene,
+            "inputs": [item.as_mapping() for item in self.inputs],
+            "filters": [item.as_mapping() for item in self.filters],
+            "scene_items": [item.as_mapping() for item in self.scene_items],
+            "scenes": list(self.scenes),
+            "warnings": list(self.warnings),
+        }
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "SceneCollectionSnapshot":
+        def rows(name: str) -> list[Mapping[str, Any]]:
+            value = raw.get(name)
+            return [
+                item
+                for item in value
+                if isinstance(item, Mapping)
+            ] if isinstance(value, list) else []
+
+        return cls(
+            collection=str(raw.get("collection") or ""),
+            current_program_scene=str(
+                raw.get("current_program_scene") or ""
+            ),
+            inputs=tuple(
+                ImportedInput.from_mapping(item)
+                for item in rows("inputs")
+            ),
+            filters=tuple(
+                ImportedFilter.from_mapping(item)
+                for item in rows("filters")
+            ),
+            scene_items=tuple(
+                ImportedSceneItem.from_mapping(item)
+                for item in rows("scene_items")
+            ),
+            scenes=tuple(
+                str(item)
+                for item in (raw.get("scenes") or [])
+                if str(item).strip()
+            ),
+            warnings=tuple(
+                str(item)
+                for item in (raw.get("warnings") or [])
+                if str(item).strip()
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,11 +271,12 @@ def _action_identity(action: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 class SceneCollectionImporter:
-    """Snapshot the current OBS collection and project stable state into SSR.
+    """Read current OBS state and project only stable, representable state.
 
-    Layout geometry remains owned by the existing LayoutProfile capture path.
-    This importer focuses on settings/state that can be represented by profile
-    actions without inventing ambiguous scene-item identities.
+    OBS I/O and configuration mutation are deliberately separate.  The runtime
+    worker can call snapshot()/capture_layout_profiles(), serialize the result,
+    then Qt can merge the returned data into a draft configuration without
+    issuing any OBS request.
     """
 
     def __init__(
@@ -130,10 +284,29 @@ class SceneCollectionImporter:
         client: OBSClientManager,
         *,
         layout_manager: OBSLayoutManager | None = None,
+        cooperative_yield: Callable[[], None] | None = None,
     ) -> None:
         self.client = client
-        self.reader = OBSResourceCatalogReader(client)
+        self._cooperative_yield = cooperative_yield
+        self.reader = OBSResourceCatalogReader(
+            client,
+            cooperative_yield=cooperative_yield,
+        )
         self.layout_manager = layout_manager or OBSLayoutManager(client)
+        if (
+            cooperative_yield is not None
+            and hasattr(self.layout_manager, "set_cooperative_yield")
+        ):
+            self.layout_manager.set_cooperative_yield(cooperative_yield)
+
+    def _send(
+        self,
+        request: str,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if self._cooperative_yield is not None:
+            self._cooperative_yield()
+        return self.client.send(request, data)
 
     def snapshot(self) -> SceneCollectionSnapshot:
         catalog = self.reader.sync()
@@ -155,7 +328,7 @@ class SceneCollectionImporter:
 
             muted: bool | None = None
             try:
-                response = self.client.send(
+                response = self._send(
                     "GetInputMute",
                     {"inputUuid": input_ref.uuid}
                     if input_ref.uuid
@@ -171,7 +344,7 @@ class SceneCollectionImporter:
 
             volume_db: float | None = None
             try:
-                response = self.client.send(
+                response = self._send(
                     "GetInputVolume",
                     {"inputUuid": input_ref.uuid}
                     if input_ref.uuid
@@ -374,13 +547,17 @@ class SceneCollectionImporter:
             for item in snapshot.scene_items:
                 identity = (item.scene, item.source)
                 counts[identity] = counts.get(identity, 0) + 1
+            emitted_ambiguous: set[tuple[str, str]] = set()
             for item in snapshot.scene_items:
                 identity = (item.scene, item.source)
                 if counts[identity] != 1:
-                    skipped.append(
-                        "Visibilité ambiguë ignorée : "
-                        f"{item.scene}/{item.source} apparaît {counts[identity]} fois"
-                    )
+                    if identity not in emitted_ambiguous:
+                        skipped.append(
+                            "Visibilité ambiguë ignorée : "
+                            f"{item.scene}/{item.source} apparaît "
+                            f"{counts[identity]} fois"
+                        )
+                        emitted_ambiguous.add(identity)
                     continue
                 if item.enabled is None:
                     skipped.append(
@@ -406,18 +583,12 @@ class SceneCollectionImporter:
 
         return actions, skipped
 
-    def import_layout_profiles(
+    def capture_layout_profiles(
         self,
-        config: dict[str, Any],
         *,
         snapshot: SceneCollectionSnapshot,
-    ) -> LayoutImportReport:
-        layout_profiles = config.setdefault("layout_profiles", {})
-        if not isinstance(layout_profiles, dict):
-            raise ValueError("config.layout_profiles doit être un objet.")
-
-        added = 0
-        refreshed = 0
+    ) -> tuple[dict[str, dict[str, Any]], tuple[str, ...]]:
+        captured: dict[str, dict[str, Any]] = {}
         skipped: list[str] = []
         for scene in snapshot.scenes:
             profile_name = f"Import {snapshot.collection} · {scene}".strip()
@@ -426,21 +597,52 @@ class SceneCollectionImporter:
             except Exception as exc:
                 skipped.append(f"{scene}: capture layout impossible : {exc}")
                 continue
+            captured[profile_name] = copy.deepcopy(dict(capture.profile))
+            skipped.extend(
+                f"{scene}: {warning}" for warning in capture.warnings
+            )
+        return captured, tuple(skipped)
 
+    @staticmethod
+    def apply_layout_profiles(
+        config: dict[str, Any],
+        *,
+        collection: str,
+        profiles: Mapping[str, Mapping[str, Any]],
+        skipped: tuple[str, ...] = (),
+    ) -> LayoutImportReport:
+        layout_profiles = config.setdefault("layout_profiles", {})
+        if not isinstance(layout_profiles, dict):
+            raise ValueError("config.layout_profiles doit être un objet.")
+
+        added = 0
+        refreshed = 0
+        for profile_name, profile in profiles.items():
             if profile_name in layout_profiles:
                 refreshed += 1
             else:
                 added += 1
-            layout_profiles[profile_name] = dict(capture.profile)
-            skipped.extend(
-                f"{scene}: {warning}" for warning in capture.warnings
-            )
+            layout_profiles[str(profile_name)] = copy.deepcopy(dict(profile))
 
         return LayoutImportReport(
-            collection=snapshot.collection,
+            collection=str(collection or ""),
             added=added,
             refreshed=refreshed,
-            skipped=tuple(skipped),
+            skipped=tuple(str(item) for item in skipped),
+        )
+
+    def import_layout_profiles(
+        self,
+        config: dict[str, Any],
+        *,
+        snapshot: SceneCollectionSnapshot,
+    ) -> LayoutImportReport:
+        profiles, skipped = self.capture_layout_profiles(snapshot=snapshot)
+        return self.apply_layout_profiles(
+            config,
+            collection=snapshot.collection,
+            profiles=profiles,
+            skipped=skipped,
         )
 
     @staticmethod
