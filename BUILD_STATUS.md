@@ -1,95 +1,119 @@
-# Build / validation status — 2.0.14
+# Build / validation status — 2.1.0 candidate
 
-## Base actuelle
+## Consolidation
 
-- Socle architectural historique : **2.0.14**.
-- Fondation déclarative canonique : `7d1e41424d0ff64b84f061fda590648578cd1fde`.
-- Candidat Lot 2 : PR **#11** — `feat/declarative-executor-mvp`.
-- Head validé : `8655cedeaa383945b4a91714ff8f20ee6bad3d59`.
-- La PR #11 reste volontairement en **draft** dans l'attente de la relecture Astra.
+- Target: `main`.
+- Release candidate PR: **#119** — `release/2.1.0-candidate`.
+- Validated source stack:
+  - #11 — Lot 2 guarded declarative executor;
+  - #97 — post-Astra hardening/integration;
+  - #111 — Lot 3 `input_volume_db`;
+  - #113 — full non-publishing release smoke;
+  - #116 — reversible real OBS volume lab.
+- The Lot 3 source head is 276 commits ahead of `main` and 0 behind.
 
-## Lot 2 — executor déclaratif gardé
+## Declarative execution
 
-Le candidat ajoute un premier chemin d'exécution déclarative opt-in, sérialisé sur le worker `SSR-Router`, limité à :
+Executable properties:
 
-- visibilité de Scene Items ;
-- mute d'inputs.
+- Scene Item visibility;
+- input mute;
+- input volume in dB.
 
-Le planner reste read-only, les LayoutProfiles restent délégués à `OBSLayoutManager`, et l'executor ne met pas à jour le bookkeeping legacy `_applied_profiles`.
+The path is opt-in and serialized on `SSR-Router`. Preparation/execution use a
+single-use ticket and validate session, Scene Collection, catalog epoch,
+configuration revision, runtime generation, logical target and physical identity.
 
-Les tickets d'exécution sont liés au contexte OBS préparé et sont invalidés lorsqu'une hypothèse de sécurité change (session, Scene Collection, catalogue, configuration, état logique ou identité physique).
+The final local runtime admission is atomic with the single OBS `Set*` request.
+Writes are followed by targeted acknowledgement and a final convergence sweep.
+No mutation retry or speculative rollback is performed.
 
-## Validation locale
+## Volume model
 
-Le dernier gate Python/runtime avant les deux commits finaux limités au plugin Stream Deck a donné :
+`input_volume_db`:
 
-- **329 tests réussis** ;
-- **1 test ignoré** ;
-- Ruff : **OK** ;
-- configuration Lab : **valide**.
+- requires an explicit finite `int|float` target;
+- rejects booleans, strings, NaN and infinities;
+- writes only `[-100,+26] dB`;
+- observes finite physical values without silent clamp/coercion;
+- uses shared `INPUT_VOLUME_DB_ABS_TOLERANCE = 1e-4 dB`.
 
-Sur le head actuel, le gate Stream Deck local a donné :
+## Validated baseline before consolidation
 
-- installation npm : **OK**, 0 vulnérabilité signalée ;
-- typecheck : **OK** ;
-- build : **OK** ;
-- validation du plugin Elgato : **OK**.
+Lot 3 head `cc54631f50c7b1d473799b8c9075c007e0432fdd`:
 
-Après la campagne Lab :
+- **383 tests passed, 1 skipped**;
+- Ruff: PASS;
+- config smoke: PASS;
+- declarative coverage text/JSON: PASS;
+- PowerShell syntax: PASS;
+- Stream Deck typecheck/build/validation: PASS;
+- CodeQL Python: PASS;
+- CodeQL JavaScript/TypeScript: PASS;
+- CodeQL Actions: PASS.
 
-- la configuration de production a été restaurée depuis la sauvegarde pré-Lab ;
-- `main.py --check-config` la valide ;
-- `SSR_ENABLE_DECLARATIVE_EXECUTION` a été retiré de l'environnement ;
-- le worktree local était propre.
+## Packaging validation
 
-## GitHub Actions
+Release smoke #113 validated:
 
-Après passage du dépôt en public, le provisioning des runners GitHub-hosted fonctionne normalement.
+- frozen Python dependency closure;
+- `pip check`;
+- portable PyInstaller EXE;
+- portable EXE `--check-config`;
+- ZIP;
+- Stream Deck package;
+- Inno Setup installer;
+- silent install;
+- installed EXE `--check-config`;
+- silent uninstall;
+- build provenance;
+- artifact verification;
+- SHA-256 generation and strict re-hash.
 
-Le workflow **Tests** du head `8655cedeaa383945b4a91714ff8f20ee6bad3d59` est entièrement vert :
+Artifact:
 
-### Windows
+`release-smoke-6d8f84578928b5e2cf0568e640f29e088d6ddde7`
 
-- checkout/setup : **OK** ;
-- installation Python : **OK** ;
-- tests unitaires : **OK** ;
-- Ruff : **OK** ;
-- smoke test configuration : **OK**.
+Digest:
 
-### Stream Deck
+`sha256:b0cc9133aaaae92ea66600edc3629834f8e29d60e6e3308bcf2156fbf8741d3d`
 
-- checkout/setup : **OK** ;
-- installation npm : **OK** ;
-- typecheck : **OK** ;
-- build : **OK** ;
-- validation du plugin : **OK**.
+## Real OBS 32.2.2 validation
 
-Les anciens échecs `runner_id = 0` / `steps = null` étaient donc liés au provisioning/infrastructure et non à un échec du code.
+The real-machine Lot 3 lab confirmed:
 
-## Validation réelle OBS — Lot 2
+- Input UUID discovery;
+- `GetInputVolume`;
+- guarded declarative `SetInputVolume`;
+- targeted readback;
+- final convergence;
+- exact restoration through the original `inputVolumeMul`.
 
-Une Scene Collection dédiée `SSR Executor Lab` a été utilisée pour tester le nouvel executor sans perturber la configuration de production.
+Measured sequence on `SSR Executor Mic`:
 
-Scénarios validés :
+- initial: `0.000000 dB / mul=1.000000000`;
+- temporary target: `-1.000000 dB`;
+- converged readback: `-1.000000 dB`;
+- restored: `0.000000 dB / mul=1.000000000`.
 
-- découverte/catalogue complet et observation des cibles ;
-- mutation nominale de deux propriétés avec readback ciblé et convergence finale ;
-- chemin déjà convergé sans écriture ;
-- ticket périmé après redémarrage OBS ;
-- changement de Scene Collection ;
-- changement de cardinalité/ordre d'occurrences d'un Scene Item ;
-- suppression/recréation d'un Scene Item sous le même nom avec nouvelle identité physique ;
-- suppression/recréation d'un input sous le même nom avec nouvel UUID ;
-- conditions OBS devenues fausses après préparation ;
-- compatibilité du chemin legacy `reapply` ;
-- invalidation d'un ticket après pause → reprise.
+## 2.1.0 release-candidate changes
 
-Dans les scénarios de contexte ou d'identité périmés, l'exécution a été refusée avant mutation et a demandé un replan.
+The consolidation branch additionally:
 
-## Ce qui reste avant fusion du Lot 2
+- bumps SSR to `2.1.0`;
+- aligns Stream Deck source metadata to `2.1.0.0`;
+- derives the packaged Stream Deck version from SSR at build time;
+- adds a version-override package smoke test;
+- guards Python/npm/manifest version consistency in unit tests;
+- refreshes README, release notes and this status document.
 
-- relecture architecture/code ciblée par Astra ;
-- correction et revalidation uniquement si cette revue identifie un blocker réel ;
-- fusion de la PR #11 seulement après approbation.
+## Remaining gates
 
-Les validations ci-dessus concernent le Lot 2 et ne signifient pas que chaque scénario manuel historique de `TESTING.md` a été rejoué pour cette passe.
+Before a tag or GitHub Release:
+
+1. complete Tests + CodeQL on PR #119;
+2. run the full non-publishing Release workflow from the exact #119 head;
+3. inspect the final diff to `main`;
+4. only then decide whether to merge #119 and tag `v2.1.0`.
+
+No release has been published.
