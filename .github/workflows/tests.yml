@@ -39,3 +39,17 @@ jobs:
         run: npm run build
       - name: Validate plugin
         run: npm run validate
+      - name: Pack version override smoke test
+        shell: pwsh
+        run: |
+          $Manifest = "com.remyducros.streamstaterouter.sdPlugin/manifest.json"
+          $Before = Get-Content $Manifest -Raw
+          try {
+            npm run pack -- --version "9.9.9.9"
+            if ($LASTEXITCODE -ne 0) { throw "Versioned Stream Deck pack failed" }
+            $Plugin = Get-ChildItem *.streamDeckPlugin -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $Plugin) { throw "Versioned Stream Deck package missing" }
+          }
+          finally {
+            Set-Content -Path $Manifest -Value $Before -Encoding utf8 -NoNewline
+          }
