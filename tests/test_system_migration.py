@@ -17,6 +17,7 @@ class SystemMigrationTests(unittest.TestCase):
                 "capture": {
                     "HDR": {"actions": []},
                     "SDR": {"actions": []},
+                    "Default": {"actions": []},
                 }
             }
         }
