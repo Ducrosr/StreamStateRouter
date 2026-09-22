@@ -1167,14 +1167,27 @@ class RoutingService:
                             )
                         self._worker_phase = "observe"
                         with self._lock:
+                            previous_rule = self.engine.current_rule
                             change = self.engine.observe(
                                 routing_app,
                                 force=bootstrap_routing or resume_revalidation,
                                 context=routing_context,
                                 use_context_provider=False,
                             )
+                            resolved_rule = self.engine.current_rule
                         if change:
                             self._apply_change(change)
+                        elif resolved_rule != previous_rule:
+                            self._emit(
+                                RuntimeEvent(
+                                    "routing_rule",
+                                    f"{resolved_rule}: état logique inchangé",
+                                    payload={
+                                        "rule_name": resolved_rule,
+                                        "reason": "état inchangé",
+                                    },
+                                )
+                            )
                         if resume_revalidation:
                             with self._lock:
                                 if (

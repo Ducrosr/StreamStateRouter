@@ -923,6 +923,13 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         self._log(f"{event.kind}: {event.message}")
+        if event.kind == "routing_rule" and isinstance(event.payload, dict):
+            rule_name = str(event.payload.get("rule_name") or "—")
+            reason = str(event.payload.get("reason") or "état inchangé")
+            self.rule_label.setText(
+                f"Règle : {rule_name} · raison : {reason}"
+            )
+            return
         if event.kind == "activation_command_result" and event.payload is not None:
             self.bridge.activation_result.emit(event.payload)
             return
