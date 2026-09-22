@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -96,6 +97,39 @@ class AdvancedSceneSwitcherImporter:
         if isinstance(nested, Mapping):
             return copy.deepcopy(dict(nested))
         return copy.deepcopy(dict(data))
+
+    @staticmethod
+    def find_scene_collection_file(
+        collection_name: str,
+        *,
+        scenes_dir: str | Path | None = None,
+    ) -> Path | None:
+        wanted = str(collection_name or "").strip()
+        if not wanted:
+            return None
+        if scenes_dir is None:
+            appdata = os.environ.get("APPDATA", "").strip()
+            if not appdata:
+                return None
+            root = Path(appdata) / "obs-studio" / "basic" / "scenes"
+        else:
+            root = Path(scenes_dir)
+        if not root.is_dir():
+            return None
+
+        for candidate in sorted(root.glob("*.json"), key=lambda item: item.name.casefold()):
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeError):
+                continue
+            if not isinstance(raw, Mapping):
+                continue
+            if str(raw.get("name") or "").strip() != wanted:
+                continue
+            nested = raw.get("advanced-scene-switcher")
+            if isinstance(nested, Mapping):
+                return candidate
+        return None
 
     @staticmethod
     def _process_selector(
