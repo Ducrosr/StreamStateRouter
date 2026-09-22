@@ -17,6 +17,13 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "typescript"
+        versions:
+          - ">= 6"
+      - dependency-name: "@types/node"
+        versions:
+          - ">= 25"
     groups:
       streamdeck-minor-patch:
         update-types:
