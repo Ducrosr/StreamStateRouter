@@ -526,7 +526,13 @@ def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
     if not isinstance(raw, Mapping):
         errors.append(f"{prefix} doit être un objet")
         return
-    allowed = {"streaming", "recording", "program_scene", "obs_enabled"}
+    allowed = {
+        "streaming",
+        "recording",
+        "program_scene",
+        "obs_enabled",
+        "process_running",
+    }
     unknown = set(raw) - allowed
     if unknown:
         errors.append(f"{prefix} contient des conditions inconnues : {', '.join(sorted(unknown))}")
@@ -535,6 +541,12 @@ def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
             errors.append(f"{prefix}.{key} doit être booléen")
     if "program_scene" in raw and not isinstance(raw.get("program_scene"), str):
         errors.append(f"{prefix}.program_scene doit être une chaîne")
+    if "process_running" in raw:
+        value = raw.get("process_running")
+        if not isinstance(value, str) or not value.strip():
+            errors.append(
+                f"{prefix}.process_running doit être une chaîne non vide"
+            )
 
 
 def _check_inheritance_cycles(mapping: Mapping[str, Any], prefix: str, errors: list[str]) -> None:
@@ -611,8 +623,21 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         behavior = str(raw.get("behavior", "match")).casefold()
         if behavior not in {"match", "ignore"}:
             errors.append(f"{prefix}.behavior doit être match ou ignore")
-        if not any(str(raw.get(key) or "").strip() for key in ("exe", "path", "title_regex")):
-            errors.append(f"{prefix} doit définir exe, path ou title_regex")
+        conditions_raw = raw.get("conditions", {})
+        has_process_selector = (
+            isinstance(conditions_raw, Mapping)
+            and bool(str(conditions_raw.get("process_running") or "").strip())
+        )
+        if (
+            not any(
+                str(raw.get(key) or "").strip()
+                for key in ("exe", "path", "title_regex")
+            )
+            and not has_process_selector
+        ):
+            errors.append(
+                f"{prefix} doit définir exe, path, title_regex ou process_running"
+            )
         title_regex = str(raw.get("title_regex") or "").strip()
         if title_regex:
             try:

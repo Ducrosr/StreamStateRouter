@@ -97,6 +97,71 @@ class RuleSetTests(unittest.TestCase):
         self.assertFalse(explanation.checks[0].matched)
         self.assertIn("streaming=False", explanation.checks[0].reason)
 
+    def test_process_running_condition_can_match_without_foreground_selector(self):
+        rule = AppRule(
+            "dofus-running",
+            StreamState(game="Dofus"),
+            priority=100,
+            conditions={"process_running": "Dofus.exe"},
+        )
+        rules = RuleSet([rule], fallback=StreamState(game="Vanilla"))
+
+        result = rules.resolve(
+            ForegroundApp(1, 2, "explorer.exe"),
+            {"running_processes": ("dofus.exe", "explorer.exe")},
+        )
+
+        self.assertEqual(result.kind, ResolutionKind.MATCH)
+        self.assertEqual(result.rule_name, "dofus-running")
+        self.assertEqual(result.state.game, "Dofus")
+
+    def test_foreground_rule_can_outrank_background_process_rule(self):
+        rules = RuleSet(
+            [
+                AppRule(
+                    "overwatch",
+                    StreamState(game="Overwatch"),
+                    priority=200,
+                    exe="Overwatch.exe",
+                ),
+                AppRule(
+                    "dofus-running",
+                    StreamState(game="Dofus"),
+                    priority=100,
+                    conditions={"process_running": "Dofus.exe"},
+                ),
+            ],
+            fallback=StreamState(game="Vanilla"),
+        )
+
+        result = rules.resolve(
+            ForegroundApp(1, 2, "Overwatch.exe"),
+            {"running_processes": ("dofus.exe", "overwatch.exe")},
+        )
+
+        self.assertEqual(result.rule_name, "overwatch")
+        self.assertEqual(result.state.game, "Overwatch")
+
+    def test_process_running_rule_can_match_when_foreground_is_temporarily_missing(self):
+        rules = RuleSet(
+            [
+                AppRule(
+                    "dofus-running",
+                    StreamState(game="Dofus"),
+                    priority=100,
+                    conditions={"process_running": "Dofus.exe"},
+                )
+            ]
+        )
+
+        result = rules.resolve(
+            None,
+            {"running_processes": ("dofus.exe",)},
+        )
+
+        self.assertEqual(result.kind, ResolutionKind.MATCH)
+        self.assertEqual(result.state.game, "Dofus")
+
     def test_no_foreground_is_ignored_to_avoid_transient_fallback(self):
         result = RuleSet([]).resolve(None)
         self.assertEqual(result.kind, ResolutionKind.IGNORE)

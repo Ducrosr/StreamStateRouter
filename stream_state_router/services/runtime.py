@@ -30,6 +30,7 @@ from ..obs.observed import build_execution_bindings
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
+from ..router.processes import WindowsRunningProcessProvider
 from .declarative import DeclarativePlanningService
 from .declarative_execution import (
     DECLARATIVE_EXECUTOR_KINDS,
@@ -202,12 +203,22 @@ class RoutingService:
         bootstrap_foreground: ForegroundApp | None = None,
         startup_layout_profile: str = "",
         declarative_execution_enabled: bool = False,
+        process_provider=None,
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
         self.config_revision = str(config_revision or "")
         self.poll_seconds = max(0.02, poll_ms / 1000.0)
         self.provider = provider or WindowsForegroundProvider()
+        self.process_provider = process_provider
+        if (
+            self.process_provider is None
+            and bool(getattr(self.engine, "needs_process_context", False))
+        ):
+            try:
+                self.process_provider = WindowsRunningProcessProvider()
+            except RuntimeError:
+                self.process_provider = None
         self.logger = logger or logging.getLogger("stream_state_router")
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
         self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
@@ -324,6 +335,24 @@ class RoutingService:
             self.activation_controller, "set_cooperative_yield"
         ):
             self.activation_controller.set_cooperative_yield(self._cooperative_obs_yield)
+
+    def _with_process_context(
+        self,
+        context: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        result = dict(context or {})
+        if not bool(getattr(self.engine, "needs_process_context", False)):
+            return result
+        provider = self.process_provider
+        if provider is None:
+            result["running_processes"] = None
+            return result
+        try:
+            result["running_processes"] = tuple(sorted(provider.names()))
+        except Exception as exc:
+            self.logger.warning("process_context: %s", exc)
+            result["running_processes"] = None
+        return result
 
     @property
     def paused(self) -> bool:
@@ -572,6 +601,7 @@ class RoutingService:
                 context = self.dispatcher.obs_context()
             except Exception:
                 context = {}
+            context = self._with_process_context(context)
         with self._lock:
             app = self._last_app
             change = self.engine.clear_manual_override(
@@ -869,6 +899,7 @@ class RoutingService:
             context = self.dispatcher.cached_obs_context()
         else:
             context = {}
+        context = self._with_process_context(context)
         routing = self.engine.explain(target_app, context=context)
         kind = str(routing.get("kind") or "")
         effective_raw = routing.get("effective_state")
@@ -1102,6 +1133,9 @@ class RoutingService:
                                 routing_context = self.dispatcher.obs_context()
                             except Exception:
                                 routing_context = {}
+                            routing_context = self._with_process_context(
+                                routing_context
+                            )
                         self._worker_phase = "observe"
                         with self._lock:
                             change = self.engine.observe(

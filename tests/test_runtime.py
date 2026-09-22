@@ -27,6 +27,16 @@ from stream_state_router.services.declarative_execution import ExecutionStepResu
 from stream_state_router.services.runtime import RoutingService
 
 
+class FakeProcessProvider:
+    def __init__(self, names=()):
+        self._names = frozenset(str(item).casefold() for item in names)
+        self.calls = 0
+
+    def names(self):
+        self.calls += 1
+        return self._names
+
+
 class FakeProvider:
     def __init__(self, app):
         self.app = app
@@ -741,6 +751,40 @@ def activation_policy(*, enabled=True, cooldown=20.0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_process_context_routes_background_process_without_foreground_match(self):
+        app = ForegroundApp(1, 1, "explorer.exe")
+        rules = RuleSet(
+            [
+                AppRule(
+                    "dofus-running",
+                    StreamState(game="Dofus"),
+                    priority=100,
+                    conditions={"process_running": "Dofus.exe"},
+                )
+            ],
+            fallback=StreamState(game="Vanilla"),
+        )
+        engine = StateRouterEngine(rules, debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        processes = FakeProcessProvider(("Dofus.exe",))
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            process_provider=processes,
+        )
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while not dispatcher.changes and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(dispatcher.changes)
+            self.assertEqual(dispatcher.changes[-1].current.game, "Dofus")
+            self.assertGreater(processes.calls, 0)
+        finally:
+            service.stop()
+
     def test_cooperative_checkpoint_does_not_start_probe_or_activation_tick(self):
         app = ForegroundApp(1, 1, "terminal.exe")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)

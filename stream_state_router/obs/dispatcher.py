@@ -260,6 +260,21 @@ class OBSDispatcher:
         if str(conditions.get("program_scene") or "").strip():
             if str(context.get("program_scene") or "") != str(conditions.get("program_scene") or ""):
                 return False
+        wanted_process = str(conditions.get("process_running") or "").strip()
+        if wanted_process:
+            running = context.get("running_processes")
+            if running is None or isinstance(running, (str, bytes)):
+                return False
+            try:
+                names = {
+                    str(item).strip().casefold()
+                    for item in running
+                    if str(item).strip()
+                }
+            except TypeError:
+                return False
+            if wanted_process.casefold() not in names:
+                return False
         if bool(conditions.get("obs_enabled", False)) and not bool(context.get("obs_enabled")):
             return False
         return True

@@ -57,6 +57,10 @@ class StateRouterEngine:
         return bool(self._rules.needs_context)
 
     @property
+    def needs_process_context(self) -> bool:
+        return bool(self._rules.needs_process_context)
+
+    @property
     def current_state(self) -> StreamState | None:
         return self._current_state
 
