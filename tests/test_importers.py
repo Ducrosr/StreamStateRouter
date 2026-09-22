@@ -317,6 +317,164 @@ class ImporterTests(unittest.TestCase):
             ["set_program_scene", "source_filter_settings"],
         )
 
+    def test_advss_process_path_macro_creates_disabled_rule(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Exact path",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "process": "game.exe",
+                            "focus": True,
+                            "checkPath": True,
+                            "processPath": r"C:\\Games\\game.exe",
+                            "regexConfig": {"enable": False},
+                            "pathRegex": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "scene_switch",
+                            "action": 0,
+                            "sceneSelection": {"type": 0, "name": "Gameplay"},
+                            "sceneType": 0,
+                        }
+                    ],
+                    "elseActions": [],
+                }
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 1)
+        self.assertEqual(report.rules_created, 1)
+        self.assertFalse(config["rules"][0]["enabled"])
+        self.assertEqual(config["rules"][0]["exe"], "game.exe")
+        self.assertEqual(
+            config["rules"][0]["path"],
+            r"C:\\Games\\game.exe",
+        )
+
+    def test_advss_window_macro_and_audio_actions_are_converted(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Window Audio",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "window",
+                            "focus": True,
+                            "checkTitle": True,
+                            "window": "Overwatch.*",
+                            "windowRegexConfig": {
+                                "enable": True,
+                                "partial": True,
+                                "options": 1,
+                            },
+                            "fullscreen": False,
+                            "maximized": False,
+                            "windowFocusChanged": False,
+                            "checkWindowText": False,
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "audio",
+                            "action": 0,
+                            "audioSource": {"type": 0, "name": "Game Audio"},
+                        },
+                        {
+                            "id": "audio",
+                            "action": 2,
+                            "audioSource": {"type": 0, "name": "Game Audio"},
+                            "fade": False,
+                            "useDb": True,
+                            "volumeDB": {"type": 0, "value": -8.5},
+                        },
+                    ],
+                    "elseActions": [],
+                }
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 1)
+        self.assertEqual(report.actions_converted, 2)
+        self.assertEqual(report.rules_created, 1)
+        rule = config["rules"][0]
+        self.assertEqual(rule["title_regex"], "(?i)Overwatch.*")
+        self.assertFalse(rule["enabled"])
+        profile = config["profiles"]["game"][rule["state"]["Game"]]
+        self.assertEqual(
+            [item["type"] for item in profile["actions"]],
+            ["input_mute", "input_volume_db"],
+        )
+        self.assertEqual(
+            profile["actions"][1]["params"]["volume_db"],
+            -8.5,
+        )
+
+    def test_advss_visibility_with_custom_transition_is_rejected_atomically(self):
+        asc = {
+            "macros": [
+                {
+                    "name": "Transition",
+                    "group": False,
+                    "conditions": [
+                        {
+                            "id": "process",
+                            "process": "game.exe",
+                            "focus": True,
+                            "checkPath": False,
+                            "regexConfig": {"enable": False},
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "id": "scene_visibility",
+                            "action": 0,
+                            "sceneSelection": {"type": 0, "name": "Gameplay"},
+                            "sceneItemSelection": {
+                                "type": 0,
+                                "idxType": 0,
+                                "idx": 0,
+                                "item": "Chat",
+                            },
+                            "updateTransition": True,
+                            "updateDuration": False,
+                        }
+                    ],
+                    "elseActions": [],
+                }
+            ]
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(asc, config)
+
+        self.assertEqual(report.macros_converted, 0)
+        self.assertTrue(any("transition" in item for item in report.skipped))
+        self.assertEqual(config["rules"], [])
+
     def test_advss_unsupported_macro_is_reported_without_partial_conversion(self):
         asc = {
             "macros": [
