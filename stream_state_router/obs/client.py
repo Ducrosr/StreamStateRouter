@@ -111,6 +111,16 @@ class OBSClientManager:
             response = self.send("GetVersion")
             version = str(response.get("obsVersion") or response.get("obs_version") or "?")
             return True, f"OBS WebSocket connecté — OBS {version}"
+        except OBSRequestError as exc:
+            cause = exc.__cause__
+            code = getattr(cause, "code", None)
+            lowered = str(exc).casefold()
+            if code == 207 or "code 207" in lowered or "obs is not ready" in lowered:
+                return (
+                    False,
+                    "OBS WebSocket connecté — OBS est encore en cours d'initialisation",
+                )
+            return False, str(exc)
         except Exception as exc:
             return False, str(exc)
 
