@@ -849,6 +849,134 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(len(report.rejected_raw), 1)
         self.assertIn("contrainte de durée", report.rejected_raw[0].reason)
 
+    def test_advss_audio_identities_include_input_name(self):
+        macro = {
+            "name": "Mute two inputs",
+            "group": False,
+            "conditions": [
+                {
+                    "id": "process",
+                    "logic": 0,
+                    "process": "game.exe",
+                    "focus": True,
+                    "checkPath": False,
+                    "regexConfig": {"enable": False},
+                }
+            ],
+            "actions": [
+                {
+                    "id": "audio",
+                    "action": 0,
+                    "audioSource": {"type": 0, "name": "Game"},
+                },
+                {
+                    "id": "audio",
+                    "action": 0,
+                    "audioSource": {"type": 0, "name": "Voice"},
+                },
+            ],
+            "elseActions": [],
+        }
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [],
+            "profiles": {"game": {"Vanilla": {"actions": []}}},
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            {"macros": [macro]},
+            config,
+        )
+
+        self.assertEqual(report.macros_converted, 1)
+        self.assertEqual(report.actions_converted, 2)
+        created = [
+            profile
+            for name, profile in config["profiles"]["game"].items()
+            if name != "Vanilla"
+        ]
+        self.assertEqual(len(created), 1)
+        inputs = {
+            action["params"]["input"]
+            for action in created[0]["actions"]
+            if action["type"] == "input_mute"
+        }
+        self.assertEqual(inputs, {"Game", "Voice"})
+
+    def test_advss_existing_profile_conflict_is_atomic(self):
+        macro = {
+            "name": "Existing route",
+            "group": False,
+            "conditions": [
+                {
+                    "id": "process",
+                    "logic": 0,
+                    "process": "game.exe",
+                    "focus": True,
+                    "checkPath": False,
+                    "regexConfig": {"enable": False},
+                }
+            ],
+            "actions": [
+                {
+                    "id": "filter",
+                    "action": 0,
+                    "source": {"type": 0, "name": "Capture"},
+                    "filter": {"type": 0, "name": "HDR"},
+                },
+                {
+                    "id": "scene_switch",
+                    "action": 0,
+                    "sceneType": 0,
+                    "sceneSelection": {
+                        "type": 0,
+                        "name": "New Scene",
+                        "canvasSelection": "Main",
+                    },
+                    "transitionType": 1,
+                },
+            ],
+            "elseActions": [],
+        }
+        existing_actions = [
+            {
+                "type": "set_program_scene",
+                "name": "Existing scene",
+                "enabled": True,
+                "params": {"scene": "Old Scene"},
+            }
+        ]
+        config = {
+            "router": {"fallback_state": {"Game": "Vanilla"}},
+            "rules": [
+                {
+                    "name": "Existing",
+                    "behavior": "match",
+                    "enabled": True,
+                    "exe": "game.exe",
+                    "path": "",
+                    "title_regex": "",
+                    "state": {"Game": "Game"},
+                }
+            ],
+            "profiles": {
+                "game": {
+                    "Vanilla": {"actions": []},
+                    "Game": {"actions": copy.deepcopy(existing_actions)},
+                }
+            },
+        }
+
+        report = AdvancedSceneSwitcherImporter.apply_to_config(
+            {"macros": [macro]},
+            config,
+        )
+
+        self.assertEqual(report.macros_converted, 0)
+        self.assertEqual(config["profiles"]["game"]["Game"]["actions"], existing_actions)
+        self.assertEqual(len(report.rejected_raw), 1)
+        self.assertIn("conflit avec des actions SSR existantes", report.rejected_raw[0].reason)
+
     def test_advss_repeated_target_sequence_is_rejected(self):
         macro = {
             "name": "Two scene switches",
