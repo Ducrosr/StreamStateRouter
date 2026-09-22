@@ -5,6 +5,13 @@ managed properties and computes dry-run execution plans from frozen inputs.
 """
 
 from .coverage import CoverageIssue, validate_state_coverage
+from .migration_coverage import (
+    ActionCoverage,
+    MigrationCoverageReport,
+    ProfileCoverage,
+    build_migration_coverage,
+    render_migration_coverage,
+)
 from .intent import (
     DesiredOwnershipConflict,
     UnsupportedIntentAction,
@@ -29,7 +36,10 @@ from .planner import (
 )
 
 __all__ = [
+    "ActionCoverage",
     "CoverageIssue",
+    "MigrationCoverageReport",
+    "ProfileCoverage",
     "DesiredAssignment",
     "DesiredOwnershipConflict",
     "UnsupportedIntentAction",
@@ -45,6 +55,8 @@ __all__ = [
     "PlanOperation",
     "PropertyKey",
     "build_execution_plan",
+    "build_migration_coverage",
     "validate_state_coverage",
     "render_execution_plan",
+    "render_migration_coverage",
 ]

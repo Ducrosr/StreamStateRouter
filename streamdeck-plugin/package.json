@@ -10,7 +10,8 @@
     "pack": "streamdeck pack com.remyducros.streamstaterouter.sdPlugin --no-update-check --force"
   },
   "dependencies": {
-    "@elgato/streamdeck": "2.0.0"
+    "@elgato/streamdeck": "2.0.0",
+    "@elgato/utils": "0.4.5"
   },
   "devDependencies": {
     "@elgato/cli": "1.7.1",
