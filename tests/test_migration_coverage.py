@@ -216,7 +216,12 @@ class MigrationCoverageTests(unittest.TestCase):
         self.assertEqual(report.profiles[0].classification, DECLARATIVE_EXECUTABLE)
         self.assertEqual(report.profiles[0].actions[0].classification, DISABLED)
         self.assertEqual(report.summary()["actions"]["active"], 0)
-        self.assertEqual(report.summary()["actions"]["executable_percent"], 100.0)
+        self.assertIsNone(report.summary()["actions"]["executable_percent"])
+        self.assertIsNone(report.summary()["actions"]["represented_percent"])
+        self.assertIn(
+            "Aucune action OBS active à mesurer",
+            render_migration_coverage(report),
+        )
 
     def test_layout_profiles_are_delegated_not_failed(self):
         config = {
@@ -253,7 +258,9 @@ class MigrationCoverageTests(unittest.TestCase):
         mapping = report.as_mapping()
         self.assertIn("summary", mapping)
         self.assertIn("profiles", mapping)
-        self.assertGreaterEqual(mapping["summary"]["actions"]["active"], 0)
+        self.assertEqual(mapping["summary"]["actions"]["active"], 0)
+        self.assertIsNone(mapping["summary"]["actions"]["represented_percent"])
+        self.assertIsNone(mapping["summary"]["actions"]["executable_percent"])
         self.assertNotIn("password", json.dumps(mapping, ensure_ascii=False))
         self.assertNotIn("token", json.dumps(mapping, ensure_ascii=False))
 
