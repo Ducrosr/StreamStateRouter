@@ -12,15 +12,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install
-        run: python -m pip install -e ".[all]"
-      - name: Bootstrap resolved Python dependencies
-        shell: pwsh
-        run: |
-          python -m venv .lock-venv
-          .\.lock-venv\Scripts\python.exe -m pip install --disable-pip-version-check "setuptools>=75" wheel
-          .\.lock-venv\Scripts\python.exe -m pip install --disable-pip-version-check -e ".[all]"
-          .\.lock-venv\Scripts\python.exe -m pip freeze --exclude-editable
+      - name: Pin pip
+        run: python -m pip install --disable-pip-version-check "pip==26.2.1"
+      - name: Install locked Python dependencies
+        run: python -m pip install --disable-pip-version-check -r constraints/windows-py312.txt
+      - name: Install project from locked environment
+        run: python -m pip install --disable-pip-version-check --no-index --no-build-isolation -e ".[all]"
+      - name: Verify Python dependency consistency
+        run: python -m pip check
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Ruff
