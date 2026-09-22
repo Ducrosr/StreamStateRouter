@@ -69,6 +69,7 @@ from ..services.startup import is_startup_enabled, set_startup_enabled
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
+    CollectionLogicImportDialog,
     ModuleLayoutDialog,
     RuleDialog,
 )
@@ -353,6 +354,7 @@ class MainWindow(QMainWindow):
         for text, slot in [
             ("Ajouter une action", self._add_action),
             ("Importer collection OBS…", self._import_collection_to_profile),
+            ("Migrer logique collection / ASC…", self._migrate_collection_logic),
             ("Modifier", self._edit_action),
             ("Dupliquer", self._duplicate_action),
             ("Activer/Désactiver", self._toggle_action),
@@ -1415,6 +1417,7 @@ class MainWindow(QMainWindow):
             return
 
         self._pending_collection_imports[request_id] = {
+            "mode": "snapshot_profile",
             "domain": domain,
             "profile_name": profile_name,
             "options": copy.deepcopy(options),
@@ -1425,6 +1428,47 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(
             "Lecture de la collection OBS en cours…",
+            8000,
+        )
+
+    def _migrate_collection_logic(self) -> None:
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Migration collection OBS",
+                "Le runtime SSR n'est pas disponible.",
+            )
+            return
+
+        dialog = CollectionLogicImportDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        options = dialog.options()
+        try:
+            request_id = self._service.request_collection_import_preview(
+                include_layouts=bool(options.get("include_layouts", True)),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Migration collection OBS",
+                str(exc),
+            )
+            return
+
+        self._pending_collection_imports[request_id] = {
+            "mode": "logic_migration",
+            "domain": "",
+            "profile_name": "",
+            "options": copy.deepcopy(options),
+        }
+        self._log(
+            "Prévisualisation migration logique OBS/ASC mise en file "
+            f"({request_id[:8]})."
+        )
+        self.statusBar().showMessage(
+            "Lecture de la collection OBS pour migration logique…",
             8000,
         )
 
@@ -1461,6 +1505,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        mode = str(context.get("mode") or "snapshot_profile")
         domain = str(context.get("domain") or "")
         profile_name = str(context.get("profile_name") or "")
         raw_options = context.get("options")
@@ -1478,24 +1523,26 @@ class MainWindow(QMainWindow):
         asc_path = ""
         layout_report = None
         try:
-            report = SceneCollectionImporter.merge_actions_into_profile(
-                self.config,
-                domain=domain,
-                profile_name=profile_name,
-                snapshot=snapshot,
-                include_input_settings=bool(
-                    options.get("include_input_settings", True)
-                ),
-                include_audio_state=bool(
-                    options.get("include_audio_state", True)
-                ),
-                include_filters=bool(
-                    options.get("include_filters", True)
-                ),
-                include_visibility=bool(
-                    options.get("include_visibility", False)
-                ),
-            )
+            report = None
+            if mode == "snapshot_profile":
+                report = SceneCollectionImporter.merge_actions_into_profile(
+                    self.config,
+                    domain=domain,
+                    profile_name=profile_name,
+                    snapshot=snapshot,
+                    include_input_settings=bool(
+                        options.get("include_input_settings", True)
+                    ),
+                    include_audio_state=bool(
+                        options.get("include_audio_state", True)
+                    ),
+                    include_filters=bool(
+                        options.get("include_filters", True)
+                    ),
+                    include_visibility=bool(
+                        options.get("include_visibility", False)
+                    ),
+                )
 
             if bool(options.get("include_layouts", False)):
                 raw_layouts = raw_result.get("layouts")
@@ -1565,15 +1612,23 @@ class MainWindow(QMainWindow):
         self._refresh_rules_table()
         self._refresh_profile_names()
         self._refresh_layout_profile_names()
-        self.profile_domain.setCurrentIndex(
-            max(0, self.profile_domain.findData(domain))
-        )
-        self._refresh_profile_names()
-        self.profile_name.setCurrentText(profile_name)
-        self._refresh_actions_table()
+        if mode == "snapshot_profile":
+            self.profile_domain.setCurrentIndex(
+                max(0, self.profile_domain.findData(domain))
+            )
+            self._refresh_profile_names()
+            self.profile_name.setCurrentText(profile_name)
+            self._refresh_actions_table()
         self._refresh_override_boxes()
 
-        summary = report.summary()
+        summary = (
+            report.summary()
+            if report is not None
+            else (
+                "Migration logique de collection : aucun snapshot OBS global "
+                "n'a été fusionné dans un profil unique."
+            )
+        )
         if layout_report is not None:
             summary += "\n\nLayouts\n" + layout_report.summary()
         if asc_report is not None:
@@ -1650,11 +1705,15 @@ class MainWindow(QMainWindow):
                 "profile": profile_name,
             },
             "advanced_scene_switcher_source": asc_path,
-            "collection_import": {
-                "added_actions": collection_report.added_actions,
-                "replaced_actions": collection_report.replaced_actions,
-                "skipped": list(collection_report.skipped),
-            },
+            "collection_import": (
+                {
+                    "added_actions": collection_report.added_actions,
+                    "replaced_actions": collection_report.replaced_actions,
+                    "skipped": list(collection_report.skipped),
+                }
+                if collection_report is not None
+                else None
+            ),
             "layout_import": (
                 {
                     "added": layout_report.added,

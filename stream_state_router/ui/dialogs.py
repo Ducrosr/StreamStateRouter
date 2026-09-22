@@ -953,6 +953,80 @@ class CollectionImportDialog(QDialog):
         }
 
 
+class CollectionLogicImportDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Migrer la logique de la collection OBS")
+        self.resize(650, 340)
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "Ce mode ne copie pas l'état complet d'OBS dans un profil unique. "
+            "Il migre uniquement les comportements attribuables sans ambiguïté "
+            "à des profils/règles SSR (Advanced Scene Switcher) et, si demandé, "
+            "les LayoutProfiles de la collection."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        self.layouts = QCheckBox(
+            "Importer/rafraîchir un LayoutProfile pour chaque scène OBS"
+        )
+        self.layouts.setChecked(True)
+        root.addWidget(self.layouts)
+
+        asc_group = QFormLayout()
+        self.asc_path = QLineEdit()
+        self.asc_path.setPlaceholderText(
+            "Laisser vide pour détecter automatiquement le fichier "
+            "de la collection OBS courante"
+        )
+        browse_row = QHBoxLayout()
+        browse_row.addWidget(self.asc_path, 1)
+        browse = QPushButton("Parcourir…")
+        browse.clicked.connect(self._browse_asc)
+        browse_row.addWidget(browse)
+        asc_group.addRow("Advanced Scene Switcher", browse_row)
+        root.addLayout(asc_group)
+
+        note = QLabel(
+            "Les inputs, volumes, filtres et visibilités non rattachés à une "
+            "macro restent inchangés. Pour capturer un état OBS global dans un "
+            "profil précis, utilisez « Importer collection OBS… »."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        root.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Prévisualiser la migration"
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _browse_asc(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner un export Advanced Scene Switcher",
+            self.asc_path.text().strip() or "",
+            "JSON (*.json);;Texte (*.txt);;Tous les fichiers (*)",
+        )
+        if selected:
+            self.asc_path.setText(selected)
+
+    def options(self) -> dict[str, object]:
+        return {
+            "include_layouts": self.layouts.isChecked(),
+            "asc_path": self.asc_path.text().strip(),
+        }
+
+
 class ActionDialog(QDialog):
     ACTION_TYPES = [
         ("Changer de scène programme", "set_program_scene"),

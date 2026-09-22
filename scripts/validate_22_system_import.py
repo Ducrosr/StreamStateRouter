@@ -95,6 +95,14 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         help="Rapport JSON de sortie.",
     )
+    parser.add_argument(
+        "--export-migration-preview",
+        type=Path,
+        help=(
+            "Écrit une copie de config avec migration logique ASC + layouts, "
+            "sans modifier la configuration SSR active."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -241,6 +249,7 @@ def main() -> int:
                 "invalide : " + " | ".join(layout_errors)
             )
 
+        migration_preview_config: dict[str, Any] | None = None
         detected = (
             args.asc_path
             if args.asc_path is not None
@@ -311,12 +320,60 @@ def main() -> int:
                     "La prévisualisation ASC produit une configuration invalide : "
                     + " | ".join(errors)
                 )
+
+            if args.export_migration_preview is not None:
+                migration_preview_config = copy.deepcopy(config)
+                SceneCollectionImporter.apply_layout_profiles(
+                    migration_preview_config,
+                    collection=snapshot.collection,
+                    profiles=layouts,
+                    skipped=layout_skipped,
+                )
+                AdvancedSceneSwitcherImporter.apply_to_config(
+                    asc_data,
+                    migration_preview_config,
+                    snapshot=snapshot,
+                )
+                migration_errors = validate_config(migration_preview_config)
+                if migration_errors:
+                    raise RuntimeError(
+                        "La migration logique exportée serait invalide : "
+                        + " | ".join(migration_errors)
+                    )
+                args.export_migration_preview.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                args.export_migration_preview.write_text(
+                    json.dumps(
+                        migration_preview_config,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+                report["checks"]["migration_preview_export"] = {
+                    "ok": True,
+                    "path": str(args.export_migration_preview),
+                    "mode": "logic_migration",
+                    "includes_layouts": True,
+                    "includes_global_snapshot_merge": False,
+                }
+                print(
+                    "Prévisualisation migration logique écrite : "
+                    f"{args.export_migration_preview}"
+                )
         else:
             report["checks"]["advanced_scene_switcher_preview"] = {
                 "ok": True,
                 "detected": False,
             }
             print("Aucun bloc Advanced Scene Switcher détecté dans la collection.")
+            if args.export_migration_preview is not None:
+                raise RuntimeError(
+                    "Impossible d'exporter la migration logique sans bloc ASC."
+                )
 
         if args.test_filter:
             selected = _select_filter(
