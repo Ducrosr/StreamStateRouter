@@ -382,6 +382,34 @@ class DeclarativePlanningTests(unittest.TestCase):
         self.assertEqual(plan.diff[0].status, "unknown")
         self.assertEqual(plan.diagnostics[0].code, "observed_value_unknown")
 
+    def test_input_volume_db_protocol_range_is_enforced(self):
+        key = PropertyKey.input_volume_db(
+            collection="Main",
+            input_name="Music",
+        )
+
+        for value in (-100.0, 26.0, -12.5):
+            desired = DesiredState.build(
+                [DesiredAssignment.create(key, value, provenance="audio")]
+            )
+            observed = ObservedState(
+                {key: ObservedValue.known_value(value)}
+            )
+            plan = build_execution_plan(desired, observed)
+            self.assertTrue(plan.converged, value)
+
+        for value in (-100.0001, 26.0001):
+            desired = DesiredState.build(
+                [DesiredAssignment.create(key, value, provenance="audio")]
+            )
+            observed = ObservedState(
+                {key: ObservedValue.known_value(-12.0)}
+            )
+            plan = build_execution_plan(desired, observed)
+            self.assertTrue(plan.blocked, value)
+            self.assertEqual(plan.operations, ())
+            self.assertEqual(plan.diagnostics[0].code, "invalid_desired_value")
+
     def test_numeric_roundoff_is_treated_as_converged(self):
         key = PropertyKey.input_volume_db(
             collection="Main",
