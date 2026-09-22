@@ -309,7 +309,7 @@ Un plugin Stream Deck natif est fourni dans `streamdeck-plugin/` avec les action
 - Undo layout ;
 - Annuler aperçu.
 
-Le plugin 2.0 utilise actuellement les paramètres API par défaut `127.0.0.1:8765` sans jeton. Si vous modifiez le port ou activez un jeton API, utilisez temporairement les commandes HTTP personnalisées ou conservez les valeurs par défaut jusqu'à l'ajout de paramètres globaux au plugin.
+Le plugin utilise par défaut `127.0.0.1:8765` sans jeton. Si vous modifiez le port SSR ou activez un jeton API, ajoutez l'action **Connexion SSR** dans Stream Deck, renseignez le port et le jeton dans son Property Inspector puis appuyez une fois sur la touche. Ces valeurs sont enregistrées comme paramètres globaux du plugin et sont ensuite réutilisées par toutes les actions SSR.
 
 ## OBS classique
 
