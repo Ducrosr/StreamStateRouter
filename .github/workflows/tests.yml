@@ -21,11 +21,11 @@ jobs:
       - name: Config smoke test
         run: python main.py --check-config
       - name: Declarative coverage smoke test
-        run: python main.py --coverage-report
+        run: python main.py --declarative-coverage
       - name: Declarative coverage JSON smoke test
         shell: pwsh
         run: |
-          python main.py --coverage-json | python -m json.tool | Out-Null
+          python main.py --declarative-coverage-json | python -m json.tool | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Invalid coverage JSON output" }
       - name: PowerShell syntax
         shell: pwsh
