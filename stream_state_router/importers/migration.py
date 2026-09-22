@@ -7,7 +7,7 @@ def wire_windows_hdr_capture_profiles(
     config: dict[str, Any],
     *,
     hdr_profile: str = "HDR",
-    sdr_profile: str = "Default",
+    sdr_profile: str = "SDR",
     display: str = "primary",
 ) -> tuple[str, ...]:
     """Wire named capture profiles to explicit Windows HDR on/off actions."""

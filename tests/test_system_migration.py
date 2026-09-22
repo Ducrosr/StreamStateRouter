@@ -9,21 +9,22 @@ from stream_state_router.importers import (
 
 
 class SystemMigrationTests(unittest.TestCase):
-    def test_wires_empty_hdr_and_default_capture_profiles(self):
+    def test_wires_hdr_and_sdr_without_mutating_default(self):
         config = {
             "profiles": {
                 "capture": {
                     "HDR": {"actions": []},
-                    "Default": {"actions": []},
+                    "SDR": {"actions": []},
                 }
             }
         }
 
         changed = wire_windows_hdr_capture_profiles(config)
 
-        self.assertEqual(changed, ("HDR", "Default"))
+        self.assertEqual(changed, ("HDR", "SDR"))
         hdr = config["profiles"]["capture"]["HDR"]["actions"][0]
-        sdr = config["profiles"]["capture"]["Default"]["actions"][0]
+        sdr = config["profiles"]["capture"]["SDR"]["actions"][0]
+        self.assertEqual(config["profiles"]["capture"]["Default"]["actions"], [])
         self.assertEqual(
             hdr["params"],
             {"enabled": True, "display": "primary"},

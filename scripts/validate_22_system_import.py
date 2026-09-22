@@ -117,7 +117,7 @@ def _parse_args() -> argparse.Namespace:
         "--wire-hdr-profiles",
         action="store_true",
         help=(
-            "Ajoute Windows HDR ON à CaptureProfile HDR et OFF à Default "
+            "Ajoute Windows HDR ON à CaptureProfile HDR et OFF à SDR "
             "si aucune action contradictoire n'existe."
         ),
     )
@@ -428,7 +428,7 @@ def main() -> int:
                         )
                     else:
                         print(
-                            "CaptureProfiles HDR déjà correctement câblés."
+                            "CaptureProfiles HDR/SDR déjà correctement câblés."
                         )
                 if args.enable_converted_rules:
                     print("Nouvelles règles ASC converties : activées.")

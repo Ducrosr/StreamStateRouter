@@ -976,7 +976,7 @@ class CollectionLogicImportDialog(QDialog):
         root.addWidget(self.layouts)
 
         self.hdr_profiles = QCheckBox(
-            "Configurer CaptureProfile HDR → Windows HDR ON et Default → OFF"
+            "Configurer CaptureProfile HDR → Windows HDR ON et SDR → OFF"
         )
         self.hdr_profiles.setChecked(False)
         root.addWidget(self.hdr_profiles)
