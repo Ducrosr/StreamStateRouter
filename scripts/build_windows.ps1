@@ -24,6 +24,9 @@ Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "-e", ".
 $Version = (& $Python -c "import stream_state_router; print(stream_state_router.__version__)").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "Impossible de déterminer la version SSR." }
 
+Write-Host "=== Versions ===" -ForegroundColor Cyan
+Invoke-Native -FilePath $Python -ArgumentList @("scripts/check_versions.py")
+
 Write-Host "=== Python : tests + lint ===" -ForegroundColor Cyan
 Invoke-Native -FilePath $Python -ArgumentList @("-m", "unittest", "discover", "-s", "tests", "-v")
 Invoke-Native -FilePath $Python -ArgumentList @("-m", "ruff", "check", ".")
