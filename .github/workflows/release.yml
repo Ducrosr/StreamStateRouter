@@ -81,6 +81,13 @@ jobs:
       - name: Record build provenance
         shell: pwsh
         run: |
+          $PythonConstraintsSha256 = (
+            Get-FileHash -Algorithm SHA256 -Path ".\constraints\windows-release.txt"
+          ).Hash.ToLowerInvariant()
+          $StreamDeckLockSha256 = (
+            Get-FileHash -Algorithm SHA256 -Path ".\streamdeck-plugin\package-lock.json"
+          ).Hash.ToLowerInvariant()
+
           $Manifest = [ordered]@{
             version = "${{ steps.version.outputs.version }}"
             commit = "${{ github.sha }}"
@@ -89,6 +96,8 @@ jobs:
             pyinstaller = (pyinstaller --version 2>&1).ToString().Trim()
             node = (node --version 2>&1).ToString().Trim()
             npm = (npm --version 2>&1).ToString().Trim()
+            python_constraints_sha256 = $PythonConstraintsSha256
+            streamdeck_lock_sha256 = $StreamDeckLockSha256
             runner_os = "${{ runner.os }}"
             runner_arch = "${{ runner.arch }}"
           }
@@ -106,6 +115,20 @@ jobs:
           }
           $Plugin = Get-ChildItem .\streamdeck-plugin\*.streamDeckPlugin -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $Plugin) { throw "Stream Deck plugin artifact missing" }
+
+          $Manifest = Get-Content ".\release\build-manifest.json" -Raw | ConvertFrom-Json
+          $ExpectedPythonConstraints = (
+            Get-FileHash -Algorithm SHA256 -Path ".\constraints\windows-release.txt"
+          ).Hash.ToLowerInvariant()
+          $ExpectedStreamDeckLock = (
+            Get-FileHash -Algorithm SHA256 -Path ".\streamdeck-plugin\package-lock.json"
+          ).Hash.ToLowerInvariant()
+          if ($Manifest.python_constraints_sha256 -ne $ExpectedPythonConstraints) {
+            throw "build-manifest Python constraints hash mismatch"
+          }
+          if ($Manifest.streamdeck_lock_sha256 -ne $ExpectedStreamDeckLock) {
+            throw "build-manifest Stream Deck lock hash mismatch"
+          }
       - name: Generate SHA-256 checksums
         shell: pwsh
         run: |
