@@ -596,23 +596,30 @@ class AdvancedSceneSwitcherImporter:
             for index, item in enumerate(existing)
             if isinstance(item, Mapping)
         }
+        if reject_conflicts:
+            conflicts = tuple(
+                repr(identity)
+                for action in actions
+                for identity in (_action_identity(action),)
+                if identity in positions
+                and existing[positions[identity]] != action
+            )
+            if conflicts:
+                return 0, conflicts
+
         changed = 0
-        conflicts: list[str] = []
         for action in actions:
             identity = _action_identity(action)
             if identity in positions:
                 previous = existing[positions[identity]]
                 if previous == action:
                     continue
-                if reject_conflicts:
-                    conflicts.append(repr(identity))
-                    continue
                 existing[positions[identity]] = action
             else:
                 positions[identity] = len(existing)
                 existing.append(action)
             changed += 1
-        return changed, tuple(conflicts)
+        return changed, ()
 
     @classmethod
     def apply_to_config(
