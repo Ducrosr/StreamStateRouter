@@ -19,7 +19,8 @@ if (-not (Test-Path .venv)) {
 
 $Python = (Resolve-Path .\.venv\Scripts\python.exe).Path
 Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "-c", "constraints/windows-release.txt", "-e", ".[all]")\nInvoke-Native -FilePath $Python -ArgumentList @("scripts/verify_constraints.py", "constraints/windows-release.txt")
+Invoke-Native -FilePath $Python -ArgumentList @("-m", "pip", "install", "-c", "constraints/windows-release.txt", "-e", ".[all]")
+Invoke-Native -FilePath $Python -ArgumentList @("scripts/verify_constraints.py", "constraints/windows-release.txt")
 
 $Version = (& $Python -c "import stream_state_router; print(stream_state_router.__version__)").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "Impossible de déterminer la version SSR." }
@@ -80,6 +81,8 @@ $PythonVersion = (& $Python --version 2>&1).ToString().Trim()
 $PyInstallerVersion = (& .\.venv\Scripts\pyinstaller.exe --version 2>&1).ToString().Trim()
 $NodeVersion = if (Get-Command node -ErrorAction SilentlyContinue) { (& node --version 2>&1).ToString().Trim() } else { "not-installed" }
 $NpmVersion = if (Get-Command npm -ErrorAction SilentlyContinue) { (& npm --version 2>&1).ToString().Trim() } else { "not-installed" }
+$PythonConstraintsSha256 = (Get-FileHash -Algorithm SHA256 -Path ".\constraints\windows-release.txt").Hash.ToLowerInvariant()
+$StreamDeckLockSha256 = (Get-FileHash -Algorithm SHA256 -Path ".\streamdeck-plugin\package-lock.json").Hash.ToLowerInvariant()
 $Manifest = [ordered]@{
     version = $Version
     commit = $Commit
@@ -87,6 +90,8 @@ $Manifest = [ordered]@{
     pyinstaller = $PyInstallerVersion
     node = $NodeVersion
     npm = $NpmVersion
+    python_constraints_sha256 = $PythonConstraintsSha256
+    streamdeck_lock_sha256 = $StreamDeckLockSha256
 }
 $Manifest | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $Release "build-manifest.json")
 
