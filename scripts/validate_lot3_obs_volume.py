@@ -197,8 +197,16 @@ def _choose_target(original_db: float, requested: float | None) -> float:
         if not math.isfinite(requested) or not -100.0 <= requested <= 26.0:
             raise ValueError("--target-db doit être un nombre fini entre -100 et +26 dB.")
         target = float(requested)
+    elif original_db > 27.0 or original_db < -101.0:
+        raise RuntimeError(
+            "Le volume physique actuel est à plus de 1 dB de la plage "
+            "écrivable [-100,+26]. Choisir un autre input ou fournir "
+            "explicitement --target-db après vérification manuelle."
+        )
     elif original_db > 26.0:
         target = 26.0
+    elif original_db < -100.0:
+        target = -100.0
     elif original_db - 1.0 >= -100.0:
         target = max(-100.0, min(26.0, original_db - 1.0))
     else:
@@ -259,6 +267,7 @@ def main() -> int:
     original_mul: float | None = None
     original_db: float | None = None
     input_ref: dict[str, str] | None = None
+    mutation_submitted = False
     mutated = False
 
     try:
@@ -374,6 +383,7 @@ def main() -> int:
         if not plan_id:
             raise RuntimeError("La préparation SSR n'a pas retourné de plan_id.")
 
+        mutation_submitted = True
         execute_id = service.request_execute_declarative_plan(plan_id)
         executed_payload = collector.wait(execute_id, timeout=max(1.0, args.timeout))
         executed = _result_mapping(executed_payload)
@@ -446,7 +456,8 @@ def main() -> int:
                 report["runtime_stop"] = {"ok": False, "error": str(exc)}
 
         if (
-            client is not None
+            mutation_submitted
+            and client is not None
             and input_ref is not None
             and original_mul is not None
         ):
