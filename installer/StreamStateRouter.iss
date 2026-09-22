@@ -10,6 +10,7 @@ AppId={{AE0F8714-BF63-468B-A58D-08F6D36B582A}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+AppMutex=Local\StreamStateRouter-v1
 DefaultDirName={autopf}\Stream State Router
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
