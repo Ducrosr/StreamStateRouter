@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from typing import Mapping
 from PySide6.QtCore import QObject, Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
