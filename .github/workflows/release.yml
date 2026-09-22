@@ -25,10 +25,16 @@ jobs:
           python -m venv .release-venv
           $Scripts = (Resolve-Path ".\.release-venv\Scripts").Path
           $Scripts | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Install Python
-        run: python -m pip install -c constraints/windows-release.txt -e ".[all]"
+      - name: Pin pip
+        run: python -m pip install --disable-pip-version-check "pip==26.2.1"
+      - name: Install frozen Python dependency closure
+        run: python -m pip install --disable-pip-version-check -r constraints/windows-release.txt
+      - name: Install SSR from frozen closure
+        run: python -m pip install --disable-pip-version-check --no-index --no-build-isolation -e ".[all]"
       - name: Verify Python dependency snapshot
         run: python scripts/verify_constraints.py constraints/windows-release.txt
+      - name: Check Python dependency consistency
+        run: python -m pip check
       - name: Resolve and verify version
         id: version
         shell: pwsh
