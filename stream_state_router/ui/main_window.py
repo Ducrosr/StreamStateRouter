@@ -1146,7 +1146,11 @@ class MainWindow(QMainWindow):
         temp["rules"] = [copy.deepcopy(self.config["rules"][idx])]
         try:
             rules, _poll, _debounce, _fallback = build_ruleset(temp)
-            context = self._dispatcher.obs_context() if self._dispatcher else {}
+            context = (
+                self._service.routing_context_snapshot()
+                if self._service
+                else {}
+            )
             resolution = rules.resolve(app, context)
         except Exception as exc:
             QMessageBox.critical(self, "Test de règle", str(exc))

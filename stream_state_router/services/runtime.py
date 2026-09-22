@@ -354,6 +354,16 @@ class RoutingService:
             result["running_processes"] = None
         return result
 
+    def routing_context_snapshot(self) -> dict[str, object]:
+        """Build the live rule context on the runtime worker-safe providers."""
+        context: dict[str, object] = {}
+        if bool(getattr(self.engine, "needs_context", False)):
+            try:
+                context.update(self.dispatcher.obs_context())
+            except Exception:
+                pass
+        return self._with_process_context(context)
+
     @property
     def paused(self) -> bool:
         with self._lock:

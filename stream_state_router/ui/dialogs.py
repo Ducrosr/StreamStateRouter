@@ -80,6 +80,12 @@ class RuleDialog(QDialog):
         self.cond_recording = self._condition_combo(conditions.get("recording"))
         self.cond_program_scene = QLineEdit(str(conditions.get("program_scene") or ""))
         self.cond_program_scene.setPlaceholderText("facultatif, ex. In Game")
+        self.cond_process_running = QLineEdit(
+            str(conditions.get("process_running") or "")
+        )
+        self.cond_process_running.setPlaceholderText(
+            "facultatif, ex. Dofus.exe"
+        )
 
         form.addRow("Nom", self.name)
         form.addRow("Comportement", self.behavior)
@@ -92,6 +98,7 @@ class RuleDialog(QDialog):
         form.addRow("Condition : stream actif", self.cond_streaming)
         form.addRow("Condition : enregistrement actif", self.cond_recording)
         form.addRow("Condition : scène programme", self.cond_program_scene)
+        form.addRow("Condition : processus actif", self.cond_process_running)
 
         title = QLabel("État logique")
         title.setObjectName("Section")
@@ -158,11 +165,20 @@ class RuleDialog(QDialog):
         if not self.name.text().strip():
             QMessageBox.warning(self, "Règle", "Le nom de la règle est requis.")
             return
-        if not any(w.text().strip() for w in (self.exe, self.path, self.title_regex)):
+        if not (
+            any(
+                w.text().strip()
+                for w in (self.exe, self.path, self.title_regex)
+            )
+            or self.cond_process_running.text().strip()
+        ):
             QMessageBox.warning(
                 self,
                 "Règle",
-                "Indiquez au moins un sélecteur : exécutable, chemin ou titre.",
+                (
+                    "Indiquez au moins un sélecteur : exécutable, chemin, "
+                    "titre ou processus actif."
+                ),
             )
             return
         self.accept()
@@ -185,6 +201,10 @@ class RuleDialog(QDialog):
             raw["conditions"]["recording"] = bool(self.cond_recording.currentData())
         if self.cond_program_scene.text().strip():
             raw["conditions"]["program_scene"] = self.cond_program_scene.text().strip()
+        if self.cond_process_running.text().strip():
+            raw["conditions"]["process_running"] = (
+                self.cond_process_running.text().strip()
+            )
         if raw["behavior"] == "match":
             raw["state"] = {
                 "Game": self.game.currentText().strip() or "Vanilla",
