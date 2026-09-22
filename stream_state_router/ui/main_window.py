@@ -1669,7 +1669,7 @@ class MainWindow(QMainWindow):
                 )
             else:
                 summary += (
-                    "\n\nHDR Windows\nLes CaptureProfiles HDR/Default "
+                    "\n\nHDR Windows\nLes CaptureProfiles HDR/SDR "
                     "étaient déjà correctement câblés."
                 )
         if bool(options.get("enable_converted_rules", False)):
