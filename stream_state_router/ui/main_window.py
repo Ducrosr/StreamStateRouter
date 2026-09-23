@@ -81,7 +81,6 @@ from ..services.config_insights import (
     build_config_change_review,
     build_effective_dependency_tree,
     build_effective_provenance,
-    configured_action_types,
     detach_profile_inheritance,
     live_output_active,
     profile_content_entries,
@@ -94,6 +93,7 @@ from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
+from ..services.system_check import probe_host_capabilities
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
@@ -497,82 +497,9 @@ class MainWindow(QMainWindow):
         client = self._client
         self._collect_settings()
 
-        action_types = configured_action_types(self.config)
-        audio_probe: dict[str, object] = {}
-        hdr_probe: dict[str, object] = {}
-        controller = None
-        if (
-            "app_audio_output" in action_types
-            or "windows_hdr" in action_types
-        ):
-            try:
-                controller = build_host_controller(self.config)
-            except Exception as exc:
-                detail = str(exc)
-                if "app_audio_output" in action_types:
-                    audio_probe = {
-                        "status": "error",
-                        "detail": detail,
-                    }
-                if "windows_hdr" in action_types:
-                    hdr_probe = {
-                        "status": "error",
-                        "detail": detail,
-                    }
-
-        if "app_audio_output" in action_types and controller is not None:
-            try:
-                executable = controller.audio_router.resolve_executable()
-                audio_probe = {
-                    "status": "ready",
-                    "detail": f"SoundVolumeView disponible : {executable}",
-                }
-            except Exception as exc:
-                audio_probe = {
-                    "status": "error",
-                    "detail": str(exc),
-                    "action": (
-                        "Configurez SoundVolumeView dans Paramètres > "
-                        "Contrôle Windows."
-                    ),
-                }
-
-        if "windows_hdr" in action_types and controller is not None:
-            try:
-                rows = controller.hdr_controller.status(scope="primary")
-                supported = [
-                    row for row in rows
-                    if bool(row.get("supported", False))
-                ]
-                if supported:
-                    enabled = any(
-                        bool(row.get("enabled", False))
-                        for row in supported
-                    )
-                    hdr_probe = {
-                        "status": "ready",
-                        "detail": (
-                            "HDR pris en charge sur l’écran principal · "
-                            + ("actuellement activé" if enabled else "actuellement désactivé")
-                        ),
-                    }
-                else:
-                    hdr_probe = {
-                        "status": "error",
-                        "detail": (
-                            "Aucun écran principal compatible HDR n’a été "
-                            "détecté par l’API Windows."
-                        ),
-                    }
-            except Exception as exc:
-                hdr_probe = {
-                    "status": "error",
-                    "detail": str(exc),
-                    "action": (
-                        "Vérifiez la prise en charge HDR de Windows et de "
-                        "l’écran ciblé."
-                    ),
-                }
+        audio_probe, hdr_probe = probe_host_capabilities(
+            self.config
+        )
 
         catalog_status = (
             service.obs_catalog_status()
