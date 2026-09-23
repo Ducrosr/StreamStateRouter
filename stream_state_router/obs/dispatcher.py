@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import math
 import re
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..host import HostControlController
 from ..planning import (
@@ -46,6 +48,24 @@ class DispatchResult:
     domain_statuses: tuple[DomainDispatchStatus, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class LauncherPreparedAction:
+    domain: str
+    source_rule: str
+    action: OBSAction
+    target_key: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LauncherPreparationPlan:
+    signature: str
+    actions: tuple[LauncherPreparedAction, ...]
+    domains: tuple[str, ...]
+    override_keys: tuple[str, ...]
+    sources: tuple[str, ...]
+    conflicts: tuple[str, ...] = ()
+
+
 class OBSDispatcher:
     """Translate logical stream states into explicit obs-websocket actions.
 
@@ -80,6 +100,7 @@ class OBSDispatcher:
         self._cooperative_yield = None
         self._control_variables: dict[str, str] = {}
         self._foreground_windows: dict[str, str] = {}
+        self._launcher_override_keys: set[str] = set()
 
     def set_control_variables(
         self,
@@ -184,6 +205,7 @@ class OBSDispatcher:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.clear()
+        self._launcher_override_keys.clear()
         self._layout_manager.reset_cache()
         self._context_cache = None
 
@@ -201,6 +223,7 @@ class OBSDispatcher:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.clear()
+        self._launcher_override_keys.clear()
         self._manual_layout_hold_active = False
         self._manual_layout_routing_baseline = ""
         self._layout_manager.reset_cache()
@@ -794,6 +817,252 @@ class OBSDispatcher:
                 self.clear_manual_layout_hold()
         return self.dispatch_state(change.current)
 
+    @staticmethod
+    def _launcher_target_key(kind: str, params: Mapping[str, Any]) -> str:
+        kind = str(kind or "").strip().casefold()
+        if kind == "set_program_scene":
+            return "program_scene"
+        if kind == "scene_item_enabled":
+            return (
+                "scene_item_enabled:"
+                f"{str(params.get('scene') or '').casefold()}:"
+                f"{str(params.get('source') or '').casefold()}"
+            )
+        if kind in {"source_filter_enabled", "source_filter_settings"}:
+            return (
+                f"{kind}:"
+                f"{str(params.get('source') or '').casefold()}:"
+                f"{str(params.get('filter') or '').casefold()}"
+            )
+        if kind in {"input_mute", "input_volume_db", "set_input_settings"}:
+            return f"{kind}:{str(params.get('input') or '').casefold()}"
+        if kind == "app_audio_output":
+            return (
+                "app_audio_output:"
+                f"{str(params.get('process') or '').casefold()}"
+            )
+        if kind == "windows_hdr":
+            return "windows_hdr"
+        return ""
+
+    @staticmethod
+    def _launcher_effect_signature(kind: str, params: Mapping[str, Any]) -> str:
+        return json.dumps(
+            {
+                "type": str(kind or "").strip().casefold(),
+                "params": dict(params),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def build_launcher_preparation(
+        self,
+        candidates: Sequence[tuple[str, StreamState]],
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> LauncherPreparationPlan:
+        """Merge explicitly marked pre-launch actions from launcher candidates."""
+        frozen_context = (
+            dict(context)
+            if context is not None
+            else self.cached_obs_context()
+        )
+        prepared: list[LauncherPreparedAction] = []
+        seen_targets: dict[str, tuple[str, str]] = {}
+        seen_free: set[str] = set()
+        conflicts: list[str] = []
+        domains: list[str] = []
+        sources: list[str] = []
+
+        for source_rule, state in candidates:
+            source_rule = str(source_rule or "").strip() or "<règle>"
+            if source_rule not in sources:
+                sources.append(source_rule)
+            variables = self._execution_variables(state)
+            for domain in ACTION_PROFILE_DOMAINS:
+                profile_name = state.profile_name(domain)
+                try:
+                    profile = self._resolve_action_profile(domain, profile_name)
+                except Exception as exc:
+                    conflicts.append(
+                        f"{source_rule}: {domain}/{profile_name}: {exc}"
+                    )
+                    continue
+                if profile is None:
+                    continue
+                if not self.conditions_match_context(
+                    profile.conditions,
+                    frozen_context,
+                ):
+                    continue
+                for action in profile.actions:
+                    if (
+                        not action.enabled
+                        or not action.preapply_on_launcher
+                    ):
+                        continue
+                    rendered_params = self._render_value(
+                        dict(action.params),
+                        variables,
+                    )
+                    rendered = OBSAction(
+                        type=action.type,
+                        params=rendered_params,
+                        enabled=True,
+                        name=action.name,
+                        preapply_on_launcher=False,
+                    )
+                    target_key = self._launcher_target_key(
+                        rendered.type,
+                        rendered.params,
+                    )
+                    effect = self._launcher_effect_signature(
+                        rendered.type,
+                        rendered.params,
+                    )
+                    if target_key:
+                        previous = seen_targets.get(target_key)
+                        if previous is not None:
+                            previous_effect, previous_rule = previous
+                            if previous_effect != effect:
+                                conflicts.append(
+                                    (
+                                        f"{target_key}: préparation incompatible "
+                                        f"entre « {previous_rule} » et "
+                                        f"« {source_rule} »"
+                                    )
+                                )
+                            continue
+                        seen_targets[target_key] = (effect, source_rule)
+                    else:
+                        if effect in seen_free:
+                            continue
+                        seen_free.add(effect)
+                    prepared.append(
+                        LauncherPreparedAction(
+                            domain=domain,
+                            source_rule=source_rule,
+                            action=rendered,
+                            target_key=target_key,
+                        )
+                    )
+                    if domain not in domains:
+                        domains.append(domain)
+
+        if conflicts:
+            signature = hashlib.sha256(
+                json.dumps(
+                    {"sources": sources, "conflicts": conflicts},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            return LauncherPreparationPlan(
+                signature=signature,
+                actions=(),
+                domains=(),
+                override_keys=(),
+                sources=tuple(sources),
+                conflicts=tuple(conflicts),
+            )
+
+        signature_payload = [
+            {
+                "domain": item.domain,
+                "target": item.target_key,
+                "effect": self._launcher_effect_signature(
+                    item.action.type,
+                    item.action.params,
+                ),
+            }
+            for item in prepared
+        ]
+        signature = hashlib.sha256(
+            json.dumps(
+                signature_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return LauncherPreparationPlan(
+            signature=signature,
+            actions=tuple(prepared),
+            domains=tuple(domains),
+            override_keys=tuple(
+                item.target_key
+                for item in prepared
+                if item.target_key
+            ),
+            sources=tuple(sources),
+        )
+
+    def activate_launcher_preparation(
+        self,
+        plan: LauncherPreparationPlan,
+    ) -> DispatchResult:
+        if plan.conflicts:
+            return DispatchResult(0, 0, (), tuple(plan.conflicts))
+
+        executed = 0
+        skipped = 0
+        warnings: list[str] = []
+        domains: list[str] = []
+        successful_keys: set[str] = set()
+        self._launcher_override_keys.clear()
+
+        for prepared in plan.actions:
+            self._yield_runtime()
+            try:
+                self.execute_action(prepared.action)
+            except Exception as exc:
+                skipped += 1
+                warnings.append(
+                    f"{prepared.source_rule}/{prepared.domain}: {exc}"
+                )
+                continue
+            executed += 1
+            if prepared.domain not in domains:
+                domains.append(prepared.domain)
+            if prepared.target_key:
+                successful_keys.add(prepared.target_key)
+
+        self._launcher_override_keys = successful_keys
+        return DispatchResult(
+            executed,
+            skipped,
+            tuple(domains),
+            tuple(warnings),
+        )
+
+    def clear_launcher_preparation_overrides(self) -> None:
+        self._launcher_override_keys.clear()
+
+    def launcher_override_keys(self) -> tuple[str, ...]:
+        return tuple(sorted(self._launcher_override_keys))
+
+    def invalidate_applied_domains(self, domains: Sequence[str]) -> None:
+        for domain in domains:
+            self._applied_profiles.pop(str(domain), None)
+
+    def _action_overridden_by_launcher(
+        self,
+        action: OBSAction,
+        variables: Mapping[str, str],
+    ) -> bool:
+        if not self._launcher_override_keys:
+            return False
+        rendered_params = self._render_value(
+            dict(action.params),
+            variables,
+        )
+        key = self._launcher_target_key(
+            action.type,
+            rendered_params,
+        )
+        return bool(key and key in self._launcher_override_keys)
+
     def dispatch_state(
         self,
         state: StreamState,
@@ -920,6 +1189,13 @@ class OBSDispatcher:
             for action in profile.actions:
                 self._yield_runtime()
                 if not action.enabled:
+                    skipped += 1
+                    domain_skipped += 1
+                    continue
+                if self._action_overridden_by_launcher(
+                    action,
+                    variables,
+                ):
                     skipped += 1
                     domain_skipped += 1
                     continue
