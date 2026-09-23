@@ -429,6 +429,92 @@ class CurrentStateCaptureTests(unittest.TestCase):
             any("Layout" in warning for warning in result.report.warnings)
         )
 
+    def test_planner_never_mutates_source_config(self) -> None:
+        config = _config()
+        before = str(config)
+
+        build_current_state_capture_draft(
+            config,
+            snapshot=_snapshot(),
+            raw_layouts=_layouts(),
+            logical_state={},
+            options=CurrentStateCaptureOptions(
+                name="New Game",
+                process="NewGame.exe",
+            ),
+        )
+
+        self.assertEqual(str(config), before)
+
+    def test_shared_layout_is_not_repointed_when_layout_capture_is_disabled(self) -> None:
+        config = _config()
+        config["profiles"]["game"]["Target"] = {
+            "actions": [],
+            "extends": "",
+            "conditions": {},
+        }
+        config["layout_profiles"]["Shared Layout"] = {
+            "scene": "Existing",
+            "coordinate_mode": "normalized",
+            "modules": {},
+            "extends": "",
+            "conditions": {},
+            "transition": {
+                "mode": "instant",
+                "duration_ms": 0,
+                "steps": 8,
+            },
+        }
+        state = {
+            "Game": "Target",
+            "OverlayProfile": "Vanilla",
+            "CaptureProfile": "Default",
+            "AudioProfile": "Default",
+            "LayoutProfile": "Shared Layout",
+        }
+        config["rules"] = [
+            {
+                "name": "Target",
+                "behavior": "match",
+                "priority": 100,
+                "enabled": True,
+                "exe": "Target.exe",
+                "state": dict(state),
+                "conditions": {},
+            },
+            {
+                "name": "Other",
+                "behavior": "match",
+                "priority": 90,
+                "enabled": True,
+                "exe": "Other.exe",
+                "state": dict(state),
+                "conditions": {},
+            },
+        ]
+
+        result = build_current_state_capture_draft(
+            config,
+            snapshot=_snapshot(),
+            raw_layouts=_layouts(),
+            logical_state={},
+            options=CurrentStateCaptureOptions(
+                name="Target",
+                process="Target.exe",
+                existing_rule_name="Target",
+                include_layout=False,
+            ),
+        )
+
+        target = next(
+            rule for rule in result.config["rules"] if rule["name"] == "Target"
+        )
+        self.assertEqual(target["state"]["LayoutProfile"], "Shared Layout")
+        self.assertFalse(result.report.layout_captured)
+        self.assertFalse(
+            any("LayoutProfile existant était partagé" in note for note in result.report.notes)
+        )
+
     def test_find_process_rules_is_case_insensitive_and_priority_sorted(self) -> None:
         config = _config()
         config["rules"] = [
