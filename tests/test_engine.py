@@ -48,6 +48,42 @@ class StateRouterEngineTests(unittest.TestCase):
         self.assertIsNotNone(engine.observe(app))
         self.assertIsNone(engine.observe(app))
 
+    def test_equivalent_state_updates_current_rule_without_reapply(self):
+        background_rules = RuleSet(
+            [
+                AppRule(
+                    "Dofus foreground",
+                    self.dofus,
+                    priority=90,
+                    exe="Dofus.exe",
+                ),
+                AppRule(
+                    "Dofus background",
+                    self.dofus,
+                    priority=40,
+                    conditions={"process_running": "Dofus.exe"},
+                ),
+            ],
+            fallback=self.vanilla,
+        )
+        engine = StateRouterEngine(background_rules, debounce_ms=0)
+
+        first = engine.observe(
+            self.app("Dofus.exe"),
+            context={"running_processes": ("Dofus.exe",)},
+        )
+        self.assertIsNotNone(first)
+        self.assertEqual(engine.current_rule, "Dofus foreground")
+
+        second = engine.observe(
+            None,
+            context={"running_processes": ("Dofus.exe",)},
+        )
+
+        self.assertIsNone(second)
+        self.assertEqual(engine.current_state, self.dofus)
+        self.assertEqual(engine.current_rule, "Dofus background")
+
     def test_brief_focus_change_is_ignored(self):
         engine = StateRouterEngine(self.rules, debounce_ms=150)
         overwatch = self.app("Overwatch.exe")

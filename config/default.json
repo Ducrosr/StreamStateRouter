@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "router": {
     "poll_ms": 50,
     "debounce_ms": 150,
@@ -20,6 +20,11 @@
     "timeout_seconds": 2,
     "reconnect_seconds": 3
   },
+  "host_control": {
+    "soundvolumeview_path": "",
+    "audio_timeout_seconds": 5.0
+  },
+  "control_variables": {},
   "ui": {
     "close_to_tray": true,
     "start_with_windows": false,

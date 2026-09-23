@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Variable SSR</title>
+  <script src="sdpi-components.js"></script>
+</head>
+<body>
+  <sdpi-item label="Variable">
+    <sdpi-textfield setting="name" placeholder="ex. Mood"></sdpi-textfield>
+  </sdpi-item>
+  <sdpi-item label="Valeur">
+    <sdpi-textfield setting="value" placeholder="ex. Happy"></sdpi-textfield>
+  </sdpi-item>
+  <p style="margin:12px;color:#aaa;font:12px system-ui">
+    Définit une variable de contrôle persistante dans SSR. Exemple : Mood = Happy.
+    Les variables logiques réservées (Game, OverlayProfile, CaptureProfile,
+    AudioProfile, LayoutProfile) ne peuvent pas être modifiées par cette action.
+  </p>
+</body>
+</html>

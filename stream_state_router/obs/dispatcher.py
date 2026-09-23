@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import math
+import re
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from ..host import HostControlController
 from ..planning import (
     DesiredAssignment,
     DesiredOwnershipConflict,
@@ -14,7 +18,7 @@ from ..planning import (
     desired_state_from_action_sets,
 )
 from ..router.engine import StateChange
-from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
+from ..router.models import DEFAULT_PROFILE_NAMES, ForegroundApp, StreamState
 from .client import OBSClientManager
 from .layouts import OBSLayoutManager, resolve_layout_profile
 from .models import OBSAction, OBSProfile
@@ -23,6 +27,9 @@ from .models import OBSAction, OBSProfile
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
 STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
+_TEMPLATE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
 @dataclass(frozen=True, slots=True)
 class DomainDispatchStatus:
     domain: str
@@ -41,6 +48,24 @@ class DispatchResult:
     domain_statuses: tuple[DomainDispatchStatus, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class LauncherPreparedAction:
+    domain: str
+    source_rule: str
+    action: OBSAction
+    target_key: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LauncherPreparationPlan:
+    signature: str
+    actions: tuple[LauncherPreparedAction, ...]
+    domains: tuple[str, ...]
+    override_keys: tuple[str, ...]
+    sources: tuple[str, ...]
+    conflicts: tuple[str, ...] = ()
+
+
 class OBSDispatcher:
     """Translate logical stream states into explicit obs-websocket actions.
 
@@ -53,8 +78,10 @@ class OBSDispatcher:
         client: OBSClientManager,
         profiles: Mapping[str, Mapping[str, OBSProfile]] | None = None,
         layout_profiles: Mapping[str, Mapping[str, object]] | None = None,
+        host_controller: HostControlController | None = None,
     ):
         self.client = client
+        self.host_controller = host_controller
         self._profiles = {domain: dict(values) for domain, values in (profiles or {}).items()}
         self._layout_profiles = {
             str(name): dict(value) for name, value in (layout_profiles or {}).items()
@@ -71,6 +98,90 @@ class OBSDispatcher:
         self._manual_layout_routing_baseline = ""
         self._context_cache: tuple[float, dict[str, Any]] | None = None
         self._cooperative_yield = None
+        self._control_variables: dict[str, str] = {}
+        self._foreground_windows: dict[str, str] = {}
+        self._launcher_override_keys: set[str] = set()
+
+    def set_control_variables(
+        self,
+        values: Mapping[str, object] | None,
+    ) -> None:
+        self._control_variables = {
+            str(key): str(value)
+            for key, value in (values or {}).items()
+        }
+
+    def control_variables(self) -> dict[str, str]:
+        return dict(self._control_variables)
+
+    @staticmethod
+    def _foreground_window_selector(app: ForegroundApp | None) -> str:
+        if app is None:
+            return ""
+        title = str(app.window_title or "").strip()
+        window_class = str(app.window_class or "").strip()
+        exe = str(app.exe_name or "").strip()
+        if not title or not window_class or not exe:
+            return ""
+        return f"{title}:{window_class}:{exe}"
+
+    def update_foreground(self, app: ForegroundApp | None) -> bool:
+        """Remember the latest OBS-compatible window selector per process."""
+        if app is None or not str(app.exe_name or "").strip():
+            return False
+        selector = self._foreground_window_selector(app)
+        if not selector:
+            return False
+        key = str(app.exe_name).strip().casefold()
+        changed = self._foreground_windows.get(key) != selector
+        self._foreground_windows[key] = selector
+        return changed
+
+    def _execution_variables(
+        self,
+        state: StreamState | None = None,
+    ) -> dict[str, str]:
+        values = dict(self._control_variables)
+        active = state or self._desired_state or self._last_state
+        if active is not None:
+            values.update(active.as_variables())
+        return values
+
+    @classmethod
+    def _render_value(
+        cls,
+        value: Any,
+        variables: Mapping[str, str],
+    ) -> Any:
+        if isinstance(value, str):
+            def replace(match: re.Match[str]) -> str:
+                key = match.group(1)
+                if key not in variables:
+                    raise ValueError(
+                        f"Variable SSR non définie dans le template : {key}"
+                    )
+                return str(variables[key])
+            return _TEMPLATE_RE.sub(replace, value)
+        if isinstance(value, Mapping):
+            return {
+                key: cls._render_value(item, variables)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._render_value(item, variables) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._render_value(item, variables) for item in value)
+        return value
+
+    @classmethod
+    def _contains_template(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(_TEMPLATE_RE.search(value))
+        if isinstance(value, Mapping):
+            return any(cls._contains_template(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(cls._contains_template(item) for item in value)
+        return False
 
     @property
     def layout_manager(self) -> OBSLayoutManager:
@@ -94,6 +205,7 @@ class OBSDispatcher:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.clear()
+        self._launcher_override_keys.clear()
         self._layout_manager.reset_cache()
         self._context_cache = None
 
@@ -111,6 +223,7 @@ class OBSDispatcher:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.clear()
+        self._launcher_override_keys.clear()
         self._manual_layout_hold_active = False
         self._manual_layout_routing_baseline = ""
         self._layout_manager.reset_cache()
@@ -257,6 +370,21 @@ class OBSDispatcher:
         if str(conditions.get("program_scene") or "").strip():
             if str(context.get("program_scene") or "") != str(conditions.get("program_scene") or ""):
                 return False
+        wanted_process = str(conditions.get("process_running") or "").strip()
+        if wanted_process:
+            running = context.get("running_processes")
+            if running is None or isinstance(running, (str, bytes)):
+                return False
+            try:
+                names = {
+                    str(item).strip().casefold()
+                    for item in running
+                    if str(item).strip()
+                }
+            except TypeError:
+                return False
+            if wanted_process.casefold() not in names:
+                return False
         if bool(conditions.get("obs_enabled", False)) and not bool(context.get("obs_enabled")):
             return False
         return True
@@ -286,6 +414,23 @@ class OBSDispatcher:
                 f"{params.get('source', '')}/{params.get('filter', '')}"
             )
             description["value"] = bool(params.get("enabled", True))
+        elif kind == "source_filter_settings":
+            description["target"] = (
+                f"{params.get('source', '')}/{params.get('filter', '')}"
+            )
+            settings = params.get("settings")
+            description["setting_keys"] = (
+                sorted(str(key) for key in settings)
+                if isinstance(settings, Mapping)
+                else []
+            )
+        elif kind == "app_audio_output":
+            description["target"] = str(params.get("process") or "")
+            description["device"] = str(params.get("device") or "")
+            description["roles"] = str(params.get("roles") or "all")
+        elif kind == "windows_hdr":
+            description["target"] = str(params.get("display") or "primary")
+            description["value"] = bool(params.get("enabled", True))
         elif kind == "input_mute":
             description["target"] = str(params.get("input") or "")
             description["value"] = bool(params.get("muted", True))
@@ -297,6 +442,8 @@ class OBSDispatcher:
             description["target"] = str(params.get("input") or "")
             settings = params.get("settings")
             description["setting_keys"] = sorted(str(key) for key in settings) if isinstance(settings, Mapping) else []
+        elif kind == "wait_ms":
+            description["value"] = params.get("duration_ms")
         return description
 
     def _layout_visibility_owners(
@@ -552,7 +699,36 @@ class OBSDispatcher:
                 )
             row["operations"] = [self._describe_action(action) for action in profile.actions]
             row["extends"] = profile.extends
-            action_sets.append((f"{domain}:{desired}", profile.actions))
+            provenance = f"{domain}:{desired}"
+            if any(
+                action.enabled
+                and action.type.strip().casefold() == "wait_ms"
+                for action in profile.actions
+            ):
+                declarative_blocks.append(
+                    {
+                        "provenance": provenance,
+                        "reason": (
+                            "Profil avec séquence temporelle wait_ms : "
+                            "exécution classic-only"
+                        ),
+                    }
+                )
+            if any(
+                action.enabled
+                and self._contains_template(action.params)
+                for action in profile.actions
+            ):
+                declarative_blocks.append(
+                    {
+                        "provenance": provenance,
+                        "reason": (
+                            "Profil avec paramètres dynamiques ${...} : "
+                            "exécution classic-only"
+                        ),
+                    }
+                )
+            action_sets.append((provenance, profile.actions))
             domains.append(row)
 
         try:
@@ -640,6 +816,252 @@ class OBSDispatcher:
                 # the explicit manual divergence.
                 self.clear_manual_layout_hold()
         return self.dispatch_state(change.current)
+
+    @staticmethod
+    def _launcher_target_key(kind: str, params: Mapping[str, Any]) -> str:
+        kind = str(kind or "").strip().casefold()
+        if kind == "set_program_scene":
+            return "program_scene"
+        if kind == "scene_item_enabled":
+            return (
+                "scene_item_enabled:"
+                f"{str(params.get('scene') or '').casefold()}:"
+                f"{str(params.get('source') or '').casefold()}"
+            )
+        if kind in {"source_filter_enabled", "source_filter_settings"}:
+            return (
+                f"{kind}:"
+                f"{str(params.get('source') or '').casefold()}:"
+                f"{str(params.get('filter') or '').casefold()}"
+            )
+        if kind in {"input_mute", "input_volume_db", "set_input_settings"}:
+            return f"{kind}:{str(params.get('input') or '').casefold()}"
+        if kind == "app_audio_output":
+            return (
+                "app_audio_output:"
+                f"{str(params.get('process') or '').casefold()}"
+            )
+        if kind == "windows_hdr":
+            return "windows_hdr"
+        return ""
+
+    @staticmethod
+    def _launcher_effect_signature(kind: str, params: Mapping[str, Any]) -> str:
+        return json.dumps(
+            {
+                "type": str(kind or "").strip().casefold(),
+                "params": dict(params),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def build_launcher_preparation(
+        self,
+        candidates: Sequence[tuple[str, StreamState]],
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> LauncherPreparationPlan:
+        """Merge explicitly marked pre-launch actions from launcher candidates."""
+        frozen_context = (
+            dict(context)
+            if context is not None
+            else self.cached_obs_context()
+        )
+        prepared: list[LauncherPreparedAction] = []
+        seen_targets: dict[str, tuple[str, str]] = {}
+        seen_free: set[str] = set()
+        conflicts: list[str] = []
+        domains: list[str] = []
+        sources: list[str] = []
+
+        for source_rule, state in candidates:
+            source_rule = str(source_rule or "").strip() or "<règle>"
+            if source_rule not in sources:
+                sources.append(source_rule)
+            variables = self._execution_variables(state)
+            for domain in ACTION_PROFILE_DOMAINS:
+                profile_name = state.profile_name(domain)
+                try:
+                    profile = self._resolve_action_profile(domain, profile_name)
+                except Exception as exc:
+                    conflicts.append(
+                        f"{source_rule}: {domain}/{profile_name}: {exc}"
+                    )
+                    continue
+                if profile is None:
+                    continue
+                if not self.conditions_match_context(
+                    profile.conditions,
+                    frozen_context,
+                ):
+                    continue
+                for action in profile.actions:
+                    if (
+                        not action.enabled
+                        or not action.preapply_on_launcher
+                    ):
+                        continue
+                    rendered_params = self._render_value(
+                        dict(action.params),
+                        variables,
+                    )
+                    rendered = OBSAction(
+                        type=action.type,
+                        params=rendered_params,
+                        enabled=True,
+                        name=action.name,
+                        preapply_on_launcher=False,
+                    )
+                    target_key = self._launcher_target_key(
+                        rendered.type,
+                        rendered.params,
+                    )
+                    effect = self._launcher_effect_signature(
+                        rendered.type,
+                        rendered.params,
+                    )
+                    if target_key:
+                        previous = seen_targets.get(target_key)
+                        if previous is not None:
+                            previous_effect, previous_rule = previous
+                            if previous_effect != effect:
+                                conflicts.append(
+                                    (
+                                        f"{target_key}: préparation incompatible "
+                                        f"entre « {previous_rule} » et "
+                                        f"« {source_rule} »"
+                                    )
+                                )
+                            continue
+                        seen_targets[target_key] = (effect, source_rule)
+                    else:
+                        if effect in seen_free:
+                            continue
+                        seen_free.add(effect)
+                    prepared.append(
+                        LauncherPreparedAction(
+                            domain=domain,
+                            source_rule=source_rule,
+                            action=rendered,
+                            target_key=target_key,
+                        )
+                    )
+                    if domain not in domains:
+                        domains.append(domain)
+
+        if conflicts:
+            signature = hashlib.sha256(
+                json.dumps(
+                    {"sources": sources, "conflicts": conflicts},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            return LauncherPreparationPlan(
+                signature=signature,
+                actions=(),
+                domains=(),
+                override_keys=(),
+                sources=tuple(sources),
+                conflicts=tuple(conflicts),
+            )
+
+        signature_payload = [
+            {
+                "domain": item.domain,
+                "target": item.target_key,
+                "effect": self._launcher_effect_signature(
+                    item.action.type,
+                    item.action.params,
+                ),
+            }
+            for item in prepared
+        ]
+        signature = hashlib.sha256(
+            json.dumps(
+                signature_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return LauncherPreparationPlan(
+            signature=signature,
+            actions=tuple(prepared),
+            domains=tuple(domains),
+            override_keys=tuple(
+                item.target_key
+                for item in prepared
+                if item.target_key
+            ),
+            sources=tuple(sources),
+        )
+
+    def activate_launcher_preparation(
+        self,
+        plan: LauncherPreparationPlan,
+    ) -> DispatchResult:
+        if plan.conflicts:
+            return DispatchResult(0, 0, (), tuple(plan.conflicts))
+
+        executed = 0
+        skipped = 0
+        warnings: list[str] = []
+        domains: list[str] = []
+        successful_keys: set[str] = set()
+        self._launcher_override_keys.clear()
+
+        for prepared in plan.actions:
+            self._yield_runtime()
+            try:
+                self.execute_action(prepared.action)
+            except Exception as exc:
+                skipped += 1
+                warnings.append(
+                    f"{prepared.source_rule}/{prepared.domain}: {exc}"
+                )
+                continue
+            executed += 1
+            if prepared.domain not in domains:
+                domains.append(prepared.domain)
+            if prepared.target_key:
+                successful_keys.add(prepared.target_key)
+
+        self._launcher_override_keys = successful_keys
+        return DispatchResult(
+            executed,
+            skipped,
+            tuple(domains),
+            tuple(warnings),
+        )
+
+    def clear_launcher_preparation_overrides(self) -> None:
+        self._launcher_override_keys.clear()
+
+    def launcher_override_keys(self) -> tuple[str, ...]:
+        return tuple(sorted(self._launcher_override_keys))
+
+    def invalidate_applied_domains(self, domains: Sequence[str]) -> None:
+        for domain in domains:
+            self._applied_profiles.pop(str(domain), None)
+
+    def _action_overridden_by_launcher(
+        self,
+        action: OBSAction,
+        variables: Mapping[str, str],
+    ) -> bool:
+        if not self._launcher_override_keys:
+            return False
+        rendered_params = self._render_value(
+            dict(action.params),
+            variables,
+        )
+        key = self._launcher_target_key(
+            action.type,
+            rendered_params,
+        )
+        return bool(key and key in self._launcher_override_keys)
 
     def dispatch_state(
         self,
@@ -763,14 +1185,22 @@ class OBSDispatcher:
             domain_executed = 0
             domain_skipped = 0
             failed = ""
+            variables = self._execution_variables(state)
             for action in profile.actions:
                 self._yield_runtime()
                 if not action.enabled:
                     skipped += 1
                     domain_skipped += 1
                     continue
+                if self._action_overridden_by_launcher(
+                    action,
+                    variables,
+                ):
+                    skipped += 1
+                    domain_skipped += 1
+                    continue
                 try:
-                    self.execute_action(action)
+                    self.execute_action(action, variables=variables)
                 except Exception as exc:
                     failed = str(exc)
                     warnings.append(f"{domain}/{profile_name}: {exc}")
@@ -791,7 +1221,95 @@ class OBSDispatcher:
             tuple(statuses),
         )
 
-    def execute_profile(self, domain: str, profile_name: str) -> DispatchResult:
+    def refresh_foreground_actions(
+        self,
+        state: StreamState,
+        app: ForegroundApp | None,
+    ) -> DispatchResult:
+        """Refresh only active actions explicitly following this foreground process."""
+        if app is None:
+            return DispatchResult(0, 0, ())
+        exe_key = str(app.exe_name or "").strip().casefold()
+        if not exe_key:
+            return DispatchResult(0, 0, ())
+        self.update_foreground(app)
+
+        executed = 0
+        skipped = 0
+        warnings: list[str] = []
+        changed_domains: list[str] = []
+        statuses: list[DomainDispatchStatus] = []
+        variables = self._execution_variables(state)
+
+        for domain in ACTION_PROFILE_DOMAINS:
+            profile_name = state.profile_name(domain)
+            try:
+                profile = self._resolve_action_profile(domain, profile_name)
+            except Exception as exc:
+                warnings.append(str(exc))
+                continue
+            if profile is None or not self.conditions_match(profile.conditions):
+                continue
+
+            domain_executed = 0
+            domain_failed = ""
+            for action in profile.actions:
+                if not action.enabled:
+                    continue
+                if action.type.strip().casefold() != "set_input_settings":
+                    continue
+                follow = str(
+                    action.params.get("follow_foreground_process") or ""
+                ).strip()
+                if not follow or follow.casefold() != exe_key:
+                    continue
+                try:
+                    self.execute_action(action, variables=variables)
+                except Exception as exc:
+                    domain_failed = str(exc)
+                    warnings.append(
+                        f"{domain}/{profile_name}: {exc}"
+                    )
+                    break
+                executed += 1
+                domain_executed += 1
+
+            if domain_executed:
+                changed_domains.append(domain)
+                statuses.append(
+                    DomainDispatchStatus(
+                        domain=domain,
+                        desired_profile=profile_name,
+                        applied_profile=self._applied_profiles.get(
+                            domain,
+                            profile_name,
+                        ),
+                        status="applied" if not domain_failed else "failed",
+                        message=domain_failed,
+                    )
+                )
+
+        return DispatchResult(
+            executed,
+            skipped,
+            tuple(changed_domains),
+            tuple(warnings),
+            tuple(statuses),
+        )
+
+    def has_action_profile(self, domain: str, profile_name: str) -> bool:
+        return (
+            domain in ACTION_PROFILE_DOMAINS
+            and str(profile_name) in self._profiles.get(domain, {})
+        )
+
+    def execute_profile(
+        self,
+        domain: str,
+        profile_name: str,
+        *,
+        state: StreamState | None = None,
+    ) -> DispatchResult:
         if domain not in ACTION_PROFILE_DOMAINS:
             raise ValueError(f"Domaine inconnu : {domain}")
         profile = self._resolve_action_profile(domain, profile_name)
@@ -801,12 +1319,13 @@ class OBSDispatcher:
             return DispatchResult(0, len(profile.actions) or 1, (domain,))
         executed = 0
         skipped = 0
+        variables = self._execution_variables(state)
         for action in profile.actions:
             self._yield_runtime()
             if not action.enabled:
                 skipped += 1
                 continue
-            self.execute_action(action)
+            self.execute_action(action, variables=variables)
             executed += 1
         return DispatchResult(executed, skipped, (domain,))
 
@@ -869,10 +1388,38 @@ class OBSDispatcher:
             conditions=conditions,
         )
 
-    def execute_action(self, action: OBSAction) -> None:
+    def execute_action(
+        self,
+        action: OBSAction,
+        *,
+        variables: Mapping[str, str] | None = None,
+    ) -> None:
         self._yield_runtime()
         kind = action.type.strip().casefold()
-        p = dict(action.params)
+        p = self._render_value(
+            dict(action.params),
+            variables or self._execution_variables(),
+        )
+        if kind == "wait_ms":
+            raw = p.get("duration_ms")
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError("wait_ms requiert params.duration_ms numérique")
+            duration_ms = float(raw)
+            if (
+                not math.isfinite(duration_ms)
+                or not 0.0 <= duration_ms <= 10000.0
+            ):
+                raise ValueError(
+                    "wait_ms params.duration_ms doit être compris entre 0 et 10000"
+                )
+            deadline = time.monotonic() + duration_ms / 1000.0
+            while True:
+                self._yield_runtime()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+            return
         if kind == "set_program_scene":
             self.client.send(
                 "SetCurrentProgramScene",
@@ -901,6 +1448,28 @@ class OBSDispatcher:
                     "filterEnabled": bool(p.get("enabled", True)),
                 },
             )
+            return
+        if kind == "source_filter_settings":
+            settings = p.get("settings")
+            if not isinstance(settings, Mapping):
+                raise ValueError("source_filter_settings requiert params.settings")
+            self.client.send(
+                "SetSourceFilterSettings",
+                {
+                    "sourceName": self._need(p, "source"),
+                    "filterName": self._need(p, "filter"),
+                    "filterSettings": dict(settings),
+                    "overlay": bool(p.get("overlay", True)),
+                },
+            )
+            return
+        if kind in {"app_audio_output", "windows_hdr"}:
+            if self.host_controller is None:
+                raise RuntimeError(
+                    "Contrôle Windows indisponible pour cette action."
+                )
+            if not self.host_controller.execute(kind, p):
+                raise ValueError(f"Action Windows inconnue : {action.type}")
             return
         if kind == "input_mute":
             self.client.send(
@@ -938,16 +1507,26 @@ class OBSDispatcher:
             settings = p.get("settings")
             if not isinstance(settings, Mapping):
                 raise ValueError("set_input_settings requiert params.settings")
+            settings = dict(settings)
+            follow = str(
+                p.get("follow_foreground_process") or ""
+            ).strip()
+            if follow:
+                selector = self._foreground_windows.get(
+                    follow.casefold()
+                )
+                if selector:
+                    settings["window"] = selector
             self.client.send(
                 "SetInputSettings",
                 {
                     "inputName": self._need(p, "input"),
-                    "inputSettings": dict(settings),
+                    "inputSettings": settings,
                     "overlay": bool(p.get("overlay", True)),
                 },
             )
             return
-        raise ValueError(f"Type d'action OBS inconnu : {action.type}")
+        raise ValueError(f"Type d'action inconnu : {action.type}")
 
     def _scene_item_id(self, scene: str, source: str) -> int:
         # sceneItemId is ephemeral OBS state. Resolve the logical

@@ -6,7 +6,16 @@ from types import SimpleNamespace
 from stream_state_router.obs.dispatcher import OBSDispatcher, profile_map_from_raw
 from stream_state_router.router.engine import StateChange
 from stream_state_router.obs.models import OBSAction
-from stream_state_router.router.models import StreamState
+from stream_state_router.router.models import ForegroundApp, StreamState
+
+
+class FakeHostController:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, kind, params):
+        self.calls.append((kind, dict(params)))
+        return True
 
 
 class FakeClient:
@@ -814,6 +823,7 @@ class OBSDispatcherTests(unittest.TestCase):
         actions = [
             OBSAction("set_program_scene", {"scene": "Game"}),
             OBSAction("source_filter_enabled", {"source": "Game", "filter": "HDR", "enabled": False}),
+            OBSAction("source_filter_settings", {"source": "Game", "filter": "HDR", "settings": {"exposure": 1.0}}),
             OBSAction("input_mute", {"input": "Mic", "muted": True}),
             OBSAction("input_volume_db", {"input": "Music", "volume_db": -12.5}),
             OBSAction("set_input_settings", {"input": "Text", "settings": {"text": "Hello"}, "overlay": True}),
@@ -823,10 +833,86 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertEqual([r for r, _ in client.calls], [
             "SetCurrentProgramScene",
             "SetSourceFilterEnabled",
+            "SetSourceFilterSettings",
             "SetInputMute",
             "SetInputVolume",
             "SetInputSettings",
         ])
+
+    def test_filter_settings_action_uses_obs_request_with_overlay(self):
+        client = FakeClient()
+        dispatcher = OBSDispatcher(client, {})
+
+        dispatcher.execute_action(
+            OBSAction(
+                "source_filter_settings",
+                {
+                    "source": "Game",
+                    "filter": "HDR Tone Map",
+                    "settings": {"exposure": 1.25, "enabled": True},
+                    "overlay": True,
+                },
+            )
+        )
+
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    "SetSourceFilterSettings",
+                    {
+                        "sourceName": "Game",
+                        "filterName": "HDR Tone Map",
+                        "filterSettings": {
+                            "exposure": 1.25,
+                            "enabled": True,
+                        },
+                        "overlay": True,
+                    },
+                )
+            ],
+        )
+
+    def test_host_actions_are_delegated_outside_obs(self):
+        client = FakeClient()
+        host = FakeHostController()
+        dispatcher = OBSDispatcher(client, {}, host_controller=host)
+
+        dispatcher.execute_action(
+            OBSAction(
+                "app_audio_output",
+                {
+                    "device": "Game",
+                    "process": "Dofus.exe",
+                    "roles": "all",
+                },
+            )
+        )
+        dispatcher.execute_action(
+            OBSAction(
+                "windows_hdr",
+                {"enabled": True, "display": "primary"},
+            )
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(
+            host.calls,
+            [
+                (
+                    "app_audio_output",
+                    {
+                        "device": "Game",
+                        "process": "Dofus.exe",
+                        "roles": "all",
+                    },
+                ),
+                (
+                    "windows_hdr",
+                    {"enabled": True, "display": "primary"},
+                ),
+            ],
+        )
 
     def test_input_volume_execution_rejects_missing_or_invalid_target(self):
         client = FakeClient()
@@ -889,6 +975,349 @@ class OBSDispatcherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             OBSDispatcher(FakeClient(), {}).execute_action(OBSAction("nope", {}))
 
+
+    def test_dynamic_templates_use_control_and_logical_variables(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Overwatch": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Avatar Dynamic",
+                                    "settings": {
+                                        "file": r"C:\\Avatars\\${Mood}_${Game}.png"
+                                    },
+                                    "overlay": True,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        dispatcher.set_control_variables({"Mood": "Happy"})
+
+        dispatcher.dispatch_state(StreamState(game="Overwatch"))
+
+        write = next(
+            payload
+            for request, payload in client.calls
+            if request == "SetInputSettings"
+        )
+        self.assertEqual(
+            write["inputSettings"]["file"],
+            r"C:\\Avatars\\Happy_Overwatch.png",
+        )
+
+    def test_foreground_follow_refreshes_only_matching_process_window(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Dofus Unity": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Capture de jeu",
+                                    "settings": {
+                                        "capture_mode": "window",
+                                        "window": "fallback:UnityWndClass:Dofus.exe",
+                                    },
+                                    "overlay": True,
+                                    "follow_foreground_process": "Dofus.exe",
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        state = StreamState(game="Dofus Unity")
+        first = ForegroundApp(
+            101,
+            1001,
+            "Dofus.exe",
+            r"C:\Games\Dofus.exe",
+            "Dofus - Perso A",
+            "UnityWndClass",
+        )
+        second = ForegroundApp(
+            102,
+            1002,
+            "Dofus.exe",
+            r"C:\Games\Dofus.exe",
+            "Dofus - Perso B",
+            "UnityWndClass",
+        )
+        browser = ForegroundApp(
+            201,
+            2001,
+            "chrome.exe",
+            r"C:\Chrome\chrome.exe",
+            "ChatGPT",
+            "Chrome_WidgetWin_1",
+        )
+
+        dispatcher.update_foreground(first)
+        dispatcher.dispatch_state(state)
+        first_write = next(
+            payload
+            for request, payload in client.calls
+            if request == "SetInputSettings"
+        )
+        self.assertEqual(
+            first_write["inputSettings"]["window"],
+            "Dofus - Perso A:UnityWndClass:Dofus.exe",
+        )
+
+        client.calls.clear()
+        dispatcher.update_foreground(second)
+        refreshed = dispatcher.refresh_foreground_actions(state, second)
+        self.assertEqual(refreshed.executed, 1)
+        self.assertEqual(refreshed.changed_domains, ("game",))
+        self.assertEqual(
+            client.calls[0][1]["inputSettings"]["window"],
+            "Dofus - Perso B:UnityWndClass:Dofus.exe",
+        )
+
+        client.calls.clear()
+        dispatcher.update_foreground(browser)
+        ignored = dispatcher.refresh_foreground_actions(state, browser)
+        self.assertEqual(ignored.executed, 0)
+        self.assertEqual(client.calls, [])
+
+    def test_wait_ms_is_classic_only_in_declarative_plan(self):
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Animated": {
+                        "actions": [
+                            {"type": "wait_ms", "params": {"duration_ms": 0}},
+                            {
+                                "type": "input_mute",
+                                "params": {"input": "Mic", "muted": True},
+                            },
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Animated"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "OW",
+            },
+        )
+
+        self.assertTrue(
+            any("wait_ms" in row["reason"] for row in plan["declarative_blocks"]),
+            plan["declarative_blocks"],
+        )
+        kinds = {
+            row["property"]["kind"]
+            for row in plan["declarative_desired"]["properties"]
+        }
+        self.assertIn("input_mute", kinds)
+
+    def test_template_profile_is_classic_only_in_declarative_plan(self):
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Animated": {
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "params": {
+                                    "input": "Avatar",
+                                    "settings": {"file": "${Mood}.png"},
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+
+        plan = dispatcher.plan_state(
+            StreamState(game="Animated"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "OW",
+            },
+        )
+
+        self.assertTrue(
+            any(
+                "paramètres dynamiques" in row["reason"]
+                for row in plan["declarative_blocks"]
+            ),
+            plan["declarative_blocks"],
+        )
+
+
+    def test_launcher_preparation_overrides_fallback_until_released(self):
+        host = FakeHostController()
+        profiles = profile_map_from_raw(
+            {
+                "capture": {
+                    "SDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "params": {
+                                    "enabled": False,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                    "HDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": True,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(
+            FakeClient(),
+            profiles,
+            host_controller=host,
+        )
+        hdr_state = StreamState(capture_profile="HDR")
+        fallback = StreamState(capture_profile="SDR")
+
+        plan = dispatcher.build_launcher_preparation(
+            (("Overwatch", hdr_state),),
+            context={},
+        )
+        prepared = dispatcher.activate_launcher_preparation(plan)
+
+        self.assertEqual(prepared.executed, 1)
+        self.assertEqual(
+            dispatcher.launcher_override_keys(),
+            ("windows_hdr",),
+        )
+        self.assertEqual(
+            host.calls,
+            [
+                (
+                    "windows_hdr",
+                    {"enabled": True, "display": "primary"},
+                )
+            ],
+        )
+
+        dispatcher.dispatch_state(fallback)
+        self.assertEqual(len(host.calls), 1)
+
+        dispatcher.clear_launcher_preparation_overrides()
+        dispatcher.invalidate_applied_domains(("capture",))
+        dispatcher.dispatch_state(fallback)
+        self.assertEqual(
+            host.calls[-1],
+            (
+                "windows_hdr",
+                {"enabled": False, "display": "primary"},
+            ),
+        )
+
+    def test_shared_launcher_identical_preparation_is_deduplicated(self):
+        profiles = profile_map_from_raw(
+            {
+                "capture": {
+                    "HDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": True,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+        state = StreamState(capture_profile="HDR")
+
+        plan = dispatcher.build_launcher_preparation(
+            (("Game A", state), ("Game B", state)),
+            context={},
+        )
+
+        self.assertEqual(plan.conflicts, ())
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.override_keys, ("windows_hdr",))
+
+    def test_shared_launcher_conflicting_preparation_is_rejected(self):
+        profiles = profile_map_from_raw(
+            {
+                "capture": {
+                    "HDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": True,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                    "SDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": False,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+
+        plan = dispatcher.build_launcher_preparation(
+            (
+                ("HDR game", StreamState(capture_profile="HDR")),
+                ("SDR game", StreamState(capture_profile="SDR")),
+            ),
+            context={},
+        )
+
+        self.assertEqual(plan.actions, ())
+        self.assertTrue(plan.conflicts)
+        self.assertIn("windows_hdr", plan.conflicts[0])
 
 if __name__ == "__main__":
     unittest.main()

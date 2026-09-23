@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -63,34 +64,76 @@ class RuleDialog(QDialog):
         self.priority.setValue(int(self._source.get("priority", 0)))
         self.enabled = QCheckBox("Règle active")
         self.enabled.setChecked(bool(self._source.get("enabled", True)))
-        self.exe = QLineEdit(str(self._source.get("exe") or ""))
-        self.exe.setPlaceholderText("ex. Overwatch.exe ou *.exe")
-        self.path = QLineEdit(str(self._source.get("path") or ""))
+
+        conditions = (
+            self._source.get("conditions")
+            if isinstance(self._source.get("conditions"), dict)
+            else {}
+        )
+        source_exe = str(self._source.get("exe") or "").strip()
+        source_path = str(self._source.get("path") or "").strip()
+        source_title = str(self._source.get("title_regex") or "").strip()
+        source_running = str(conditions.get("process_running") or "").strip()
+        background_process_rule = bool(
+            source_running
+            and not source_exe
+            and not source_path
+            and not source_title
+        )
+
+        self.exe = QLineEdit(
+            source_running if background_process_rule else source_exe
+        )
+        self.exe.setPlaceholderText("ex. Overwatch.exe ou Dofus.exe")
+        self.launcher = QLineEdit(
+            str(self._source.get("launcher") or "")
+        )
+        self.launcher.setPlaceholderText(
+            "facultatif, ex. Battle.net.exe ou Ankama Launcher.exe"
+        )
+        self.launcher.setToolTip(
+            "Processus launcher pouvant préparer les actions marquées avant "
+            "le démarrage de l'application."
+        )
+        self.require_foreground = QCheckBox("Doit être au premier plan")
+        self.require_foreground.setChecked(not background_process_rule)
+        self.path = QLineEdit(source_path)
         self.path.setPlaceholderText(r"ex. C:\Games\*\game.exe")
-        self.title_regex = QLineEdit(str(self._source.get("title_regex") or ""))
+        self.title_regex = QLineEdit(source_title)
         self.title_regex.setPlaceholderText("Expression régulière facultative")
         self.apply_delay = QSpinBox()
         self.apply_delay.setRange(0, 10000)
         self.apply_delay.setSuffix(" ms")
         self.apply_delay.setValue(int(self._source.get("apply_delay_ms", 0)))
 
-        conditions = self._source.get("conditions") if isinstance(self._source.get("conditions"), dict) else {}
         self.cond_streaming = self._condition_combo(conditions.get("streaming"))
         self.cond_recording = self._condition_combo(conditions.get("recording"))
         self.cond_program_scene = QLineEdit(str(conditions.get("program_scene") or ""))
         self.cond_program_scene.setPlaceholderText("facultatif, ex. In Game")
+        self.cond_process_running = QLineEdit(
+            "" if background_process_rule else source_running
+        )
+        self.cond_process_running.setPlaceholderText(
+            "facultatif, ex. Discord.exe"
+        )
 
         form.addRow("Nom", self.name)
         form.addRow("Comportement", self.behavior)
         form.addRow("Priorité", self.priority)
         form.addRow("", self.enabled)
-        form.addRow("Exécutable", self.exe)
+        form.addRow("Processus", self.exe)
+        form.addRow("Launcher", self.launcher)
+        form.addRow("", self.require_foreground)
         form.addRow("Chemin", self.path)
         form.addRow("Titre fenêtre", self.title_regex)
         form.addRow("Délai actions OBS", self.apply_delay)
         form.addRow("Condition : stream actif", self.cond_streaming)
         form.addRow("Condition : enregistrement actif", self.cond_recording)
         form.addRow("Condition : scène programme", self.cond_program_scene)
+        form.addRow(
+            "Condition avancée : autre processus actif",
+            self.cond_process_running,
+        )
 
         title = QLabel("État logique")
         title.setObjectName("Section")
@@ -120,7 +163,9 @@ class RuleDialog(QDialog):
         root.addWidget(hint)
 
         self.behavior.currentIndexChanged.connect(self._sync_behavior)
+        self.require_foreground.toggled.connect(self._sync_process_mode)
         self._sync_behavior()
+        self._sync_process_mode()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save
@@ -153,28 +198,77 @@ class RuleDialog(QDialog):
         for widget in (self.game, self.overlay, self.capture, self.audio, self.layout):
             widget.setEnabled(enabled)
 
+    def _sync_process_mode(self) -> None:
+        foreground = self.require_foreground.isChecked()
+        self.path.setEnabled(foreground)
+        self.title_regex.setEnabled(foreground)
+        self.cond_process_running.setEnabled(foreground)
+        if foreground:
+            self.exe.setToolTip(
+                "Le processus doit correspondre à la fenêtre au premier plan."
+            )
+        else:
+            self.exe.setToolTip(
+                "La règle correspond tant que ce processus est en cours "
+                "d'exécution, quelle que soit la fenêtre au premier plan."
+            )
+
     def _accept_checked(self) -> None:
         if not self.name.text().strip():
             QMessageBox.warning(self, "Règle", "Le nom de la règle est requis.")
             return
-        if not any(w.text().strip() for w in (self.exe, self.path, self.title_regex)):
+        foreground = self.require_foreground.isChecked()
+        process = self.exe.text().strip()
+        if not foreground:
+            if not process:
+                QMessageBox.warning(
+                    self,
+                    "Règle",
+                    "Indiquez le processus qui doit être en cours d'exécution.",
+                )
+                return
+            if self.cond_process_running.text().strip():
+                QMessageBox.warning(
+                    self,
+                    "Règle",
+                    (
+                        "Une règle en arrière-plan utilise déjà le processus "
+                        "principal comme condition. Réactivez « Doit être au "
+                        "premier plan » pour ajouter un autre processus requis."
+                    ),
+                )
+                return
+        elif not (
+            process
+            or self.path.text().strip()
+            or self.title_regex.text().strip()
+            or self.cond_process_running.text().strip()
+        ):
             QMessageBox.warning(
                 self,
                 "Règle",
-                "Indiquez au moins un sélecteur : exécutable, chemin ou titre.",
+                (
+                    "Indiquez au moins un sélecteur : processus, chemin, "
+                    "titre ou processus actif supplémentaire."
+                ),
             )
             return
         self.accept()
 
     def result_rule(self) -> dict:
+        foreground = self.require_foreground.isChecked()
+        process = self.exe.text().strip()
         raw = {
             "name": self.name.text().strip(),
             "behavior": str(self.behavior.currentData()),
             "priority": self.priority.value(),
             "enabled": self.enabled.isChecked(),
-            "exe": self.exe.text().strip(),
-            "path": self.path.text().strip(),
-            "title_regex": self.title_regex.text().strip(),
+            "exe": process if foreground else "",
+            "launcher": self.launcher.text().strip(),
+            "path": self.path.text().strip() if foreground else "",
+            "title_regex": (
+                self.title_regex.text().strip() if foreground else ""
+            ),
             "apply_delay_ms": self.apply_delay.value(),
             "conditions": {},
         }
@@ -184,6 +278,12 @@ class RuleDialog(QDialog):
             raw["conditions"]["recording"] = bool(self.cond_recording.currentData())
         if self.cond_program_scene.text().strip():
             raw["conditions"]["program_scene"] = self.cond_program_scene.text().strip()
+        if foreground and self.cond_process_running.text().strip():
+            raw["conditions"]["process_running"] = (
+                self.cond_process_running.text().strip()
+            )
+        elif not foreground and process:
+            raw["conditions"]["process_running"] = process
         if raw["behavior"] == "match":
             raw["state"] = {
                 "Game": self.game.currentText().strip() or "Vanilla",
@@ -835,19 +935,215 @@ class ModuleLayoutDialog(QDialog):
         }
 
 
+class CollectionImportDialog(QDialog):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        target_domain: str,
+        target_profile: str,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Importer la collection OBS")
+        self.resize(650, 420)
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "La collection OBS courante sera lue sans mutation. "
+            f"Les actions compatibles seront ajoutées au profil "
+            f"{target_domain}/{target_profile}. Les doublons de cible sont remplacés."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        self.input_settings = QCheckBox("Importer les réglages des inputs OBS")
+        self.input_settings.setChecked(True)
+        self.audio_state = QCheckBox("Importer mute et volume des inputs")
+        self.audio_state.setChecked(True)
+        self.filters = QCheckBox(
+            "Importer état et paramètres des filtres OBS"
+        )
+        self.filters.setChecked(True)
+        self.visibility = QCheckBox(
+            "Importer la visibilité des Scene Items non ambigus"
+        )
+        self.visibility.setChecked(False)
+        self.layouts = QCheckBox(
+            "Importer/rafraîchir un LayoutProfile pour chaque scène OBS"
+        )
+        self.layouts.setChecked(True)
+        root.addWidget(self.input_settings)
+        root.addWidget(self.audio_state)
+        root.addWidget(self.filters)
+        root.addWidget(self.visibility)
+        root.addWidget(self.layouts)
+
+        asc_group = QFormLayout()
+        self.asc_path = QLineEdit()
+        self.asc_path.setPlaceholderText(
+            "Laisser vide pour détecter automatiquement le fichier "
+            "de la collection OBS courante"
+        )
+        browse_row = QHBoxLayout()
+        browse_row.addWidget(self.asc_path, 1)
+        browse = QPushButton("Parcourir…")
+        browse.clicked.connect(self._browse_asc)
+        browse_row.addWidget(browse)
+        asc_group.addRow("Advanced Scene Switcher", browse_row)
+        root.addLayout(asc_group)
+
+        note = QLabel(
+            "Les macros ASC ne sont converties que si leur sémantique est "
+            "reproductible exactement par SSR. Les autres restent listées "
+            "dans le rapport d'import et ne sont jamais approximées."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        root.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Importer")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _browse_asc(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner un export Advanced Scene Switcher",
+            self.asc_path.text().strip() or "",
+            "JSON (*.json);;Texte (*.txt);;Tous les fichiers (*)",
+        )
+        if selected:
+            self.asc_path.setText(selected)
+
+    def options(self) -> dict[str, object]:
+        return {
+            "include_input_settings": self.input_settings.isChecked(),
+            "include_audio_state": self.audio_state.isChecked(),
+            "include_filters": self.filters.isChecked(),
+            "include_visibility": self.visibility.isChecked(),
+            "include_layouts": self.layouts.isChecked(),
+            "asc_path": self.asc_path.text().strip(),
+        }
+
+
+class CollectionLogicImportDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Migrer la logique de la collection OBS")
+        self.resize(650, 340)
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "Ce mode ne copie pas l'état complet d'OBS dans un profil unique. "
+            "Il migre uniquement les comportements attribuables sans ambiguïté "
+            "à des profils/règles SSR (Advanced Scene Switcher) et, si demandé, "
+            "les LayoutProfiles de la collection."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        self.layouts = QCheckBox(
+            "Importer/rafraîchir un LayoutProfile pour chaque scène OBS"
+        )
+        self.layouts.setChecked(False)
+        root.addWidget(self.layouts)
+
+        self.hdr_profiles = QCheckBox(
+            "Configurer CaptureProfile HDR → Windows HDR ON et SDR → OFF"
+        )
+        self.hdr_profiles.setChecked(False)
+        root.addWidget(self.hdr_profiles)
+
+        self.enable_rules = QCheckBox(
+            "Activer les nouvelles règles ASC converties après prévisualisation"
+        )
+        self.enable_rules.setChecked(False)
+        root.addWidget(self.enable_rules)
+
+        self.neutralize_test_layouts = QCheckBox(
+            "Neutraliser les LayoutProfiles actifs encore liés à [Module] TEST SSR"
+        )
+        self.neutralize_test_layouts.setChecked(False)
+        root.addWidget(self.neutralize_test_layouts)
+
+        asc_group = QFormLayout()
+        self.asc_path = QLineEdit()
+        self.asc_path.setPlaceholderText(
+            "Laisser vide pour détecter automatiquement le fichier "
+            "de la collection OBS courante"
+        )
+        browse_row = QHBoxLayout()
+        browse_row.addWidget(self.asc_path, 1)
+        browse = QPushButton("Parcourir…")
+        browse.clicked.connect(self._browse_asc)
+        browse_row.addWidget(browse)
+        asc_group.addRow("Advanced Scene Switcher", browse_row)
+        root.addLayout(asc_group)
+
+        note = QLabel(
+            "Les inputs, volumes, filtres et visibilités non rattachés à une "
+            "macro restent inchangés. Pour capturer un état OBS global dans un "
+            "profil précis, utilisez « Importer collection OBS… »."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        root.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Prévisualiser la migration"
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _browse_asc(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner un export Advanced Scene Switcher",
+            self.asc_path.text().strip() or "",
+            "JSON (*.json);;Texte (*.txt);;Tous les fichiers (*)",
+        )
+        if selected:
+            self.asc_path.setText(selected)
+
+    def options(self) -> dict[str, object]:
+        return {
+            "include_layouts": self.layouts.isChecked(),
+            "wire_hdr_profiles": self.hdr_profiles.isChecked(),
+            "enable_converted_rules": self.enable_rules.isChecked(),
+            "neutralize_test_layouts": self.neutralize_test_layouts.isChecked(),
+            "asc_path": self.asc_path.text().strip(),
+        }
+
+
 class ActionDialog(QDialog):
     ACTION_TYPES = [
         ("Changer de scène programme", "set_program_scene"),
         ("Afficher/masquer une source de scène", "scene_item_enabled"),
         ("Activer/désactiver un filtre", "source_filter_enabled"),
+        ("Modifier les réglages d'un filtre", "source_filter_settings"),
         ("Mute/unmute une entrée", "input_mute"),
         ("Régler le volume d'une entrée (dB)", "input_volume_db"),
         ("Réglages avancés d'une entrée", "set_input_settings"),
+        ("Router l'audio Windows d'une application", "app_audio_output"),
+        ("Activer/désactiver HDR Windows", "windows_hdr"),
+        ("Attendre (millisecondes)", "wait_ms"),
     ]
 
     def __init__(self, parent=None, action: dict | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Action OBS")
+        self.setWindowTitle("Action profil")
         self.resize(620, 470)
         source = OBSAction.from_mapping(action or {})
 
@@ -857,6 +1153,17 @@ class ActionDialog(QDialog):
         self.name = QLineEdit(source.name)
         self.enabled = QCheckBox("Action active")
         self.enabled.setChecked(source.enabled)
+        self.preapply_on_launcher = QCheckBox(
+            "Préparer cette action dès le launcher"
+        )
+        self.preapply_on_launcher.setChecked(
+            source.preapply_on_launcher
+        )
+        self.preapply_on_launcher.setToolTip(
+            "Si la règle de l'application définit un Launcher, cette action "
+            "est appliquée dès que ce launcher est détecté et reste prioritaire "
+            "jusqu'au démarrage de l'application ou à la fermeture du launcher."
+        )
         self.kind = QComboBox()
         for label, value in self.ACTION_TYPES:
             self.kind.addItem(label, value)
@@ -866,6 +1173,7 @@ class ActionDialog(QDialog):
         form.addRow("Nom facultatif", self.name)
         form.addRow("Type", self.kind)
         form.addRow("", self.enabled)
+        form.addRow("", self.preapply_on_launcher)
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
@@ -899,6 +1207,29 @@ class ActionDialog(QDialog):
             fields[key] = widget
             form.addRow("", widget)
 
+        def combo(
+            key: str,
+            label: str,
+            choices: Sequence[tuple[str, str]],
+            default: str,
+        ):
+            widget = QComboBox()
+            for text, value in choices:
+                widget.addItem(text, value)
+            current = str(params.get(key) or default)
+            index = widget.findData(current)
+            widget.setCurrentIndex(max(0, index))
+            fields[key] = widget
+            form.addRow(label, widget)
+
+        def json_settings(label: str):
+            editor = QPlainTextEdit()
+            editor.setPlaceholderText('{"setting": "value"}')
+            settings = params.get("settings", {})
+            editor.setPlainText(json.dumps(settings, ensure_ascii=False, indent=2))
+            fields["settings"] = editor
+            form.addRow(label, editor)
+
         if kind == "set_program_scene":
             line("scene", "Scène")
         elif kind == "scene_item_enabled":
@@ -909,6 +1240,11 @@ class ActionDialog(QDialog):
             line("source", "Source")
             line("filter", "Filtre")
             check("enabled", "Activer le filtre", True)
+        elif kind == "source_filter_settings":
+            line("source", "Source")
+            line("filter", "Filtre")
+            json_settings("Settings du filtre (JSON)")
+            check("overlay", "Fusionner avec les réglages existants", True)
         elif kind == "input_mute":
             line("input", "Entrée OBS")
             check("muted", "Couper le son", True)
@@ -920,13 +1256,49 @@ class ActionDialog(QDialog):
             form.addRow("Volume (dB)", widget)
         elif kind == "set_input_settings":
             line("input", "Entrée OBS")
-            editor = QPlainTextEdit()
-            editor.setPlaceholderText('{"setting": "value"}')
-            settings = params.get("settings", {})
-            editor.setPlainText(json.dumps(settings, ensure_ascii=False, indent=2))
-            fields["settings"] = editor
-            form.addRow("Settings JSON", editor)
+            json_settings("Settings JSON")
             check("overlay", "Fusionner avec les réglages existants", True)
+            line(
+                "follow_foreground_process",
+                "Suivre fenêtre au premier plan",
+                "facultatif, ex. Dofus.exe",
+            )
+        elif kind == "app_audio_output":
+            line(
+                "device",
+                "Périphérique audio",
+                "ex. Game ou Command-Line Friendly ID SoundVolumeView",
+            )
+            line("process", "Processus", "ex. Overwatch.exe")
+            combo(
+                "roles",
+                "Rôles Windows",
+                [
+                    ("Tous (Console + Multimedia + Communications)", "all"),
+                    ("Console", "0"),
+                    ("Multimedia", "1"),
+                    ("Communications", "2"),
+                ],
+                "all",
+            )
+        elif kind == "windows_hdr":
+            check("enabled", "Activer HDR", True)
+            combo(
+                "display",
+                "Écran",
+                [
+                    ("Écran principal", "primary"),
+                    ("Tous les écrans compatibles", "all"),
+                ],
+                "primary",
+            )
+        elif kind == "wait_ms":
+            widget = QSpinBox()
+            widget.setRange(0, 10000)
+            widget.setSuffix(" ms")
+            widget.setValue(int(params.get("duration_ms", 0) or 0))
+            fields["duration_ms"] = widget
+            form.addRow("Durée", widget)
         return page, fields
 
     def _sync_page(self) -> None:
@@ -938,7 +1310,7 @@ class ActionDialog(QDialog):
         try:
             self.result_action()
         except Exception as exc:
-            QMessageBox.warning(self, "Action OBS", str(exc))
+            QMessageBox.warning(self, "Action profil", str(exc))
             return
         self.accept()
 
@@ -949,6 +1321,10 @@ class ActionDialog(QDialog):
         for key, widget in fields.items():
             if isinstance(widget, QCheckBox):
                 params[key] = widget.isChecked()
+            elif isinstance(widget, QComboBox):
+                params[key] = str(widget.currentData() or "")
+            elif isinstance(widget, QSpinBox):
+                params[key] = widget.value()
             elif isinstance(widget, QPlainTextEdit):
                 text = widget.toPlainText().strip() or "{}"
                 value = json.loads(text)
@@ -965,9 +1341,13 @@ class ActionDialog(QDialog):
             "set_program_scene": ("scene",),
             "scene_item_enabled": ("scene", "source"),
             "source_filter_enabled": ("source", "filter"),
+            "source_filter_settings": ("source", "filter", "settings"),
             "input_mute": ("input",),
             "input_volume_db": ("input",),
             "set_input_settings": ("input", "settings"),
+            "app_audio_output": ("device", "process", "roles"),
+            "windows_hdr": ("display",),
+            "wait_ms": ("duration_ms",),
         }[kind]
         for key in required:
             if params.get(key) in (None, "", {}):
@@ -976,5 +1356,8 @@ class ActionDialog(QDialog):
             "type": kind,
             "name": self.name.text().strip(),
             "enabled": self.enabled.isChecked(),
+            "preapply_on_launcher": (
+                self.preapply_on_launcher.isChecked()
+            ),
             "params": params,
         }

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..activation.models import TriggerPolicyConfig
+from ..host import HostControlConfig, HostControlController
 from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
@@ -19,14 +20,18 @@ from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
 from ..router.rules import AppRule, ResolutionKind, RuleSet
 from .paths import backups_dir, config_path, default_config_path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SUPPORTED_ACTION_TYPES = {
     "set_program_scene",
     "scene_item_enabled",
     "source_filter_enabled",
+    "source_filter_settings",
     "input_mute",
     "input_volume_db",
     "set_input_settings",
+    "app_audio_output",
+    "windows_hdr",
+    "wait_ms",
 }
 LAYOUT_ANCHORS = {
     "top_left",
@@ -284,6 +289,16 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
         migrated.setdefault("activation_policies", {})
         version = 5
 
+    if version == 5:
+        migrated.setdefault(
+            "host_control",
+            {
+                "soundvolumeview_path": "",
+                "audio_timeout_seconds": 5.0,
+            },
+        )
+        version = 6
+
     migrated["schema_version"] = version
     return migrated
 
@@ -380,6 +395,36 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
     api = result.get("api")
     if isinstance(api, dict):
         api["token"] = ""
+    host = result.get("host_control")
+    if isinstance(host, dict):
+        host["soundvolumeview_path"] = ""
+
+    profiles = result.get("profiles")
+    if isinstance(profiles, Mapping):
+        for domain_profiles in profiles.values():
+            if not isinstance(domain_profiles, Mapping):
+                continue
+            for profile in domain_profiles.values():
+                if not isinstance(profile, Mapping):
+                    continue
+                actions = profile.get("actions")
+                if not isinstance(actions, list):
+                    continue
+                for action in actions:
+                    if not isinstance(action, dict):
+                        continue
+                    if str(action.get("type") or "") not in {
+                        "set_input_settings",
+                        "source_filter_settings",
+                    }:
+                        continue
+                    params = action.get("params")
+                    if isinstance(params, dict):
+                        params["settings"] = {}
+                    # Arbitrary OBS settings may contain URLs, cookies, API
+                    # tokens or credentials. A shareable export must never
+                    # replay the redacted placeholder as an intentional write.
+                    action["enabled"] = False
     return result
 
 
@@ -482,7 +527,13 @@ def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
     if not isinstance(raw, Mapping):
         errors.append(f"{prefix} doit être un objet")
         return
-    allowed = {"streaming", "recording", "program_scene", "obs_enabled"}
+    allowed = {
+        "streaming",
+        "recording",
+        "program_scene",
+        "obs_enabled",
+        "process_running",
+    }
     unknown = set(raw) - allowed
     if unknown:
         errors.append(f"{prefix} contient des conditions inconnues : {', '.join(sorted(unknown))}")
@@ -491,6 +542,12 @@ def _validate_conditions(raw: Any, prefix: str, errors: list[str]) -> None:
             errors.append(f"{prefix}.{key} doit être booléen")
     if "program_scene" in raw and not isinstance(raw.get("program_scene"), str):
         errors.append(f"{prefix}.program_scene doit être une chaîne")
+    if "process_running" in raw:
+        value = raw.get("process_running")
+        if not isinstance(value, str) or not value.strip():
+            errors.append(
+                f"{prefix}.process_running doit être une chaîne non vide"
+            )
 
 
 def _check_inheritance_cycles(mapping: Mapping[str, Any], prefix: str, errors: list[str]) -> None:
@@ -567,8 +624,23 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         behavior = str(raw.get("behavior", "match")).casefold()
         if behavior not in {"match", "ignore"}:
             errors.append(f"{prefix}.behavior doit être match ou ignore")
-        if not any(str(raw.get(key) or "").strip() for key in ("exe", "path", "title_regex")):
-            errors.append(f"{prefix} doit définir exe, path ou title_regex")
+        if "launcher" in raw and not isinstance(raw.get("launcher"), str):
+            errors.append(f"{prefix}.launcher doit être une chaîne")
+        conditions_raw = raw.get("conditions", {})
+        has_process_selector = (
+            isinstance(conditions_raw, Mapping)
+            and bool(str(conditions_raw.get("process_running") or "").strip())
+        )
+        if (
+            not any(
+                str(raw.get(key) or "").strip()
+                for key in ("exe", "path", "title_regex")
+            )
+            and not has_process_selector
+        ):
+            errors.append(
+                f"{prefix} doit définir exe, path, title_regex ou process_running"
+            )
         title_regex = str(raw.get("title_regex") or "").strip()
         if title_regex:
             try:
@@ -734,6 +806,32 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 else:
                     activation_owners[identity] = str(policy_name)
 
+    control_variables = data.get("control_variables", {})
+    if not isinstance(control_variables, Mapping):
+        errors.append("control_variables doit être un objet")
+    else:
+        reserved = {
+            "Game",
+            "OverlayProfile",
+            "CaptureProfile",
+            "AudioProfile",
+            "LayoutProfile",
+        }
+        for name, value in control_variables.items():
+            text_name = str(name or "").strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text_name):
+                errors.append(
+                    f"control_variables contient un nom invalide : {name}"
+                )
+            elif text_name in reserved:
+                errors.append(
+                    f"control_variables.{text_name} est réservé par SSR"
+                )
+            if not isinstance(value, str):
+                errors.append(
+                    f"control_variables.{text_name or name} doit être une chaîne"
+                )
+
     profiles = data.get("profiles")
     if not isinstance(profiles, Mapping):
         errors.append("profiles doit être un objet")
@@ -772,6 +870,13 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     continue
                 if "enabled" in action and not isinstance(action.get("enabled"), bool):
                     errors.append(f"{aprefix}.enabled doit être booléen")
+                if (
+                    "preapply_on_launcher" in action
+                    and not isinstance(action.get("preapply_on_launcher"), bool)
+                ):
+                    errors.append(
+                        f"{aprefix}.preapply_on_launcher doit être booléen"
+                    )
 
                 def required_text(
                     key: str,
@@ -794,6 +899,13 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     required_text("filter")
                     if "enabled" in params and not isinstance(params.get("enabled"), bool):
                         errors.append(f"{aprefix}.params.enabled doit être booléen")
+                elif action_type == "source_filter_settings":
+                    required_text("source")
+                    required_text("filter")
+                    if not isinstance(params.get("settings"), Mapping):
+                        errors.append(f"{aprefix}.params.settings doit être un objet")
+                    if "overlay" in params and not isinstance(params.get("overlay"), bool):
+                        errors.append(f"{aprefix}.params.overlay doit être booléen")
                 elif action_type == "input_mute":
                     required_text("input")
                     if "muted" in params and not isinstance(params.get("muted"), bool):
@@ -824,6 +936,51 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         errors.append(f"{aprefix}.params.settings doit être un objet")
                     if "overlay" in params and not isinstance(params.get("overlay"), bool):
                         errors.append(f"{aprefix}.params.overlay doit être booléen")
+                elif action_type == "app_audio_output":
+                    required_text("device")
+                    required_text("process")
+                    roles = str(params.get("roles") or "all").strip().casefold()
+                    if roles not in {"0", "1", "2", "all"}:
+                        errors.append(
+                            f"{aprefix}.params.roles doit être 0, 1, 2 ou all"
+                        )
+                elif action_type == "windows_hdr":
+                    if "enabled" not in params or not isinstance(params.get("enabled"), bool):
+                        errors.append(f"{aprefix}.params.enabled doit être booléen")
+                    display = str(params.get("display") or "primary").strip().casefold()
+                    if display not in {"primary", "all"}:
+                        errors.append(
+                            f"{aprefix}.params.display doit être primary ou all"
+                        )
+                elif action_type == "wait_ms":
+                    raw_duration = params.get("duration_ms")
+                    if (
+                        isinstance(raw_duration, bool)
+                        or not isinstance(raw_duration, (int, float))
+                        or not math.isfinite(float(raw_duration))
+                        or not 0.0 <= float(raw_duration) <= 10000.0
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.duration_ms doit être compris entre 0 et 10000"
+                        )
+
+    host_control = data.get("host_control", {})
+    if not isinstance(host_control, Mapping):
+        errors.append("host_control doit être un objet")
+    else:
+        path = host_control.get("soundvolumeview_path", "")
+        if not isinstance(path, str):
+            errors.append("host_control.soundvolumeview_path doit être une chaîne")
+        timeout = host_control.get("audio_timeout_seconds", 5.0)
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            errors.append(
+                "host_control.audio_timeout_seconds doit être un nombre fini > 0"
+            )
 
     layout_profiles = data.get("layout_profiles")
     if not isinstance(layout_profiles, Mapping):
@@ -1033,6 +1190,7 @@ def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
                 name=str(raw.get("name") or "Unnamed rule"),
                 priority=int(raw.get("priority", 0)),
                 exe=str(raw.get("exe") or ""),
+                launcher=str(raw.get("launcher") or ""),
                 path=str(raw.get("path") or ""),
                 title_regex=str(raw.get("title_regex") or ""),
                 enabled=bool(raw.get("enabled", True)),
@@ -1051,6 +1209,22 @@ def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
         int(router.get("poll_ms", 50)),
         int(router.get("debounce_ms", 150)),
         int(router.get("fallback_debounce_ms", 350)),
+    )
+
+
+def build_host_controller(data: Mapping[str, Any]) -> HostControlController:
+    raw = data.get("host_control", {})
+    host = raw if isinstance(raw, Mapping) else {}
+    timeout_raw = host.get("audio_timeout_seconds", 5.0)
+    try:
+        timeout = float(timeout_raw)
+    except (TypeError, ValueError):
+        timeout = 5.0
+    return HostControlController(
+        HostControlConfig(
+            soundvolumeview_path=str(host.get("soundvolumeview_path") or ""),
+            audio_timeout_seconds=max(0.1, timeout),
+        )
     )
 
 

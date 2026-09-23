@@ -24,11 +24,14 @@ from ..activation import (
     TriggerPolicyConfig,
     TriggerTargetIdentity,
 )
+from ..importers import SceneCollectionImporter
 from ..obs.dispatcher import DispatchResult, OBSDispatcher
 from ..obs.observed import build_execution_bindings
 from ..router.engine import StateChange, StateRouterEngine
 from ..router.foreground import WindowsForegroundProvider
 from ..router.models import ForegroundApp, StreamState
+from ..router.processes import WindowsRunningProcessProvider
+from .control_variables import ControlVariableStore
 from .declarative import DeclarativePlanningService
 from .declarative_execution import (
     DECLARATIVE_EXECUTOR_KINDS,
@@ -201,13 +204,32 @@ class RoutingService:
         bootstrap_foreground: ForegroundApp | None = None,
         startup_layout_profile: str = "",
         declarative_execution_enabled: bool = False,
+        process_provider=None,
+        control_variables: Mapping[str, object] | None = None,
+        control_store: ControlVariableStore | None = None,
     ) -> None:
         self.engine = engine
         self.dispatcher = dispatcher
         self.config_revision = str(config_revision or "")
         self.poll_seconds = max(0.02, poll_ms / 1000.0)
         self.provider = provider or WindowsForegroundProvider()
+        self.process_provider = process_provider
+        if (
+            self.process_provider is None
+            and bool(getattr(self.engine, "needs_process_context", False))
+        ):
+            try:
+                self.process_provider = WindowsRunningProcessProvider()
+            except RuntimeError:
+                self.process_provider = None
         self.logger = logger or logging.getLogger("stream_state_router")
+        self.control_store = control_store or ControlVariableStore(
+            control_variables or {}
+        )
+        if hasattr(self.dispatcher, "set_control_variables"):
+            self.dispatcher.set_control_variables(
+                self.control_store.snapshot()
+            )
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
         self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
         self.declarative_execution_enabled = bool(declarative_execution_enabled)
@@ -263,6 +285,10 @@ class RoutingService:
         self._last_obs_connected: bool | None = None
         self._last_obs_session_generation: int | None = None
         self._last_state_reconcile = 0.0
+        self._active_launcher_preparation_signature = ""
+        self._active_launcher_preparation_domains: tuple[str, ...] = ()
+        self._active_launcher_preparation_sources: tuple[str, ...] = ()
+        self._launcher_conflict_signature = ""
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._routing_diagnostics: deque[RoutingDecisionStatus] = deque(maxlen=100)
         self._last_routing_status: RoutingDecisionStatus | None = None
@@ -323,6 +349,34 @@ class RoutingService:
             self.activation_controller, "set_cooperative_yield"
         ):
             self.activation_controller.set_cooperative_yield(self._cooperative_obs_yield)
+
+    def _with_process_context(
+        self,
+        context: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        result = dict(context or {})
+        if not bool(getattr(self.engine, "needs_process_context", False)):
+            return result
+        provider = self.process_provider
+        if provider is None:
+            result["running_processes"] = None
+            return result
+        try:
+            result["running_processes"] = tuple(sorted(provider.names()))
+        except Exception as exc:
+            self.logger.warning("process_context: %s", exc)
+            result["running_processes"] = None
+        return result
+
+    def routing_context_snapshot(self) -> dict[str, object]:
+        """Build the live rule context on the runtime worker-safe providers."""
+        context: dict[str, object] = {}
+        if bool(getattr(self.engine, "needs_context", False)):
+            try:
+                context.update(self.dispatcher.obs_context())
+            except Exception:
+                pass
+        return self._with_process_context(context)
 
     @property
     def paused(self) -> bool:
@@ -571,6 +625,7 @@ class RoutingService:
                 context = self.dispatcher.obs_context()
             except Exception:
                 context = {}
+            context = self._with_process_context(context)
         with self._lock:
             app = self._last_app
             change = self.engine.clear_manual_override(
@@ -789,6 +844,16 @@ class RoutingService:
     def request_catalog_sync(self) -> str:
         return self.submit_obs_command("catalog.sync")
 
+    def request_collection_import_preview(
+        self,
+        *,
+        include_layouts: bool = True,
+    ) -> str:
+        return self.submit_obs_command(
+            "collection.import.preview",
+            options={"include_layouts": bool(include_layouts)},
+        )
+
     def request_declarative_plan(
         self,
         *,
@@ -831,6 +896,15 @@ class RoutingService:
             options={"plan_id": value},
         )
 
+    def control_variables(self) -> dict[str, str]:
+        return self.control_store.snapshot()
+
+    def request_control_variable(self, name: str, value: object) -> str:
+        return self.submit_obs_command(
+            "control.set",
+            options={"name": str(name), "value": str(value)},
+        )
+
     def request_force_reapply(self) -> str:
         return self.submit_obs_command("reapply")
 
@@ -858,6 +932,7 @@ class RoutingService:
             context = self.dispatcher.cached_obs_context()
         else:
             context = {}
+        context = self._with_process_context(context)
         routing = self.engine.explain(target_app, context=context)
         kind = str(routing.get("kind") or "")
         effective_raw = routing.get("effective_state")
@@ -1069,12 +1144,17 @@ class RoutingService:
                             else 0
                         )
                     routing_app = bootstrap_app if bootstrap_routing else app
+                    foreground_selector_changed = False
                     if changed_app:
                         self.logger.info(
                             "Foreground -> %s | %s",
                             app.exe_name if app else "<none>",
                             app.window_title if app else "",
                         )
+                        if hasattr(self.dispatcher, "update_foreground"):
+                            foreground_selector_changed = bool(
+                                self.dispatcher.update_foreground(app)
+                            )
                         if self.on_foreground:
                             self.on_foreground(app)
                     if bootstrap_routing:
@@ -1085,22 +1165,94 @@ class RoutingService:
                         )
                     if not paused:
                         routing_context = None
-                        if bool(getattr(self.engine, "needs_context", False)):
+                        needs_context = bool(
+                            getattr(self.engine, "needs_context", False)
+                        )
+                        needs_process_context = bool(
+                            getattr(self.engine, "needs_process_context", False)
+                        )
+                        if needs_context or needs_process_context:
                             self._worker_phase = "routing_context"
-                            try:
-                                routing_context = self.dispatcher.obs_context()
-                            except Exception:
-                                routing_context = {}
+                            routing_context = {}
+                            if needs_context:
+                                try:
+                                    routing_context.update(
+                                        self.dispatcher.obs_context()
+                                    )
+                                except Exception:
+                                    pass
+                            routing_context = self._with_process_context(
+                                routing_context
+                            )
                         self._worker_phase = "observe"
                         with self._lock:
+                            previous_rule = self.engine.current_rule
                             change = self.engine.observe(
                                 routing_app,
                                 force=bootstrap_routing or resume_revalidation,
                                 context=routing_context,
                                 use_context_provider=False,
                             )
+                            resolved_rule = self.engine.current_rule
                         if change:
                             self._apply_change(change)
+                        else:
+                            if (
+                                changed_app
+                                and foreground_selector_changed
+                                and self.engine.current_state is not None
+                                and hasattr(
+                                    self.dispatcher,
+                                    "refresh_foreground_actions",
+                                )
+                            ):
+                                with self._dispatch_lock:
+                                    refreshed = (
+                                        self.dispatcher.refresh_foreground_actions(
+                                            self.engine.current_state,
+                                            routing_app,
+                                        )
+                                    )
+                                if refreshed.executed:
+                                    if self.on_dispatch:
+                                        self.on_dispatch(refreshed)
+                                    self._emit(
+                                        RuntimeEvent(
+                                            "foreground_refresh",
+                                            (
+                                                f"{refreshed.executed} action(s) "
+                                                "OBS dynamique(s) actualisée(s)"
+                                            ),
+                                            payload={
+                                                "exe": (
+                                                    routing_app.exe_name
+                                                    if routing_app
+                                                    else ""
+                                                ),
+                                                "executed": refreshed.executed,
+                                                "domains": list(
+                                                    refreshed.changed_domains
+                                                ),
+                                                "warnings": list(
+                                                    refreshed.warnings
+                                                ),
+                                            },
+                                            success=not bool(
+                                                refreshed.warnings
+                                            ),
+                                        )
+                                    )
+                            if resolved_rule != previous_rule:
+                                self._emit(
+                                    RuntimeEvent(
+                                        "routing_rule",
+                                        f"{resolved_rule}: état logique inchangé",
+                                        payload={
+                                            "rule_name": resolved_rule,
+                                            "reason": "état inchangé",
+                                        },
+                                    )
+                                )
                         if resume_revalidation:
                             with self._lock:
                                 if (
@@ -1113,6 +1265,10 @@ class RoutingService:
                                     # that this observation revalidated. A newer
                                     # pause/resume request remains a hard barrier.
                                     self._resume_revalidation_pending = False
+                        self._worker_phase = "launcher_preparation"
+                        self._sync_launcher_preparation(
+                            routing_context or {}
+                        )
                     self._worker_phase = "due_dispatch"
                     self._process_due_dispatch()
                     with self._lock:
@@ -1197,6 +1353,15 @@ class RoutingService:
                 self.logger.info("OBS connection established: %s", message)
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
+                if self._active_launcher_preparation_signature:
+                    clearer = getattr(
+                        self.dispatcher,
+                        "clear_launcher_preparation_overrides",
+                        None,
+                    )
+                    if callable(clearer):
+                        clearer()
+                    self._clear_launcher_preparation_tracking()
                 if self._declarative_planning is not None:
                     self._declarative_planning.invalidate_catalog(
                         "OBS session connected or replaced"
@@ -1244,6 +1409,212 @@ class RoutingService:
             failed_generation = 0
         if failed_generation:
             self._last_obs_session_generation = failed_generation
+
+    def _clear_launcher_preparation_tracking(self) -> None:
+        self._active_launcher_preparation_signature = ""
+        self._active_launcher_preparation_domains = ()
+        self._active_launcher_preparation_sources = ()
+
+    def _release_launcher_preparation_without_restore(self) -> None:
+        if not self._active_launcher_preparation_signature:
+            return
+        clearer = getattr(
+            self.dispatcher,
+            "clear_launcher_preparation_overrides",
+            None,
+        )
+        if callable(clearer):
+            clearer()
+        sources = self._active_launcher_preparation_sources
+        self._clear_launcher_preparation_tracking()
+        self._launcher_conflict_signature = ""
+        self._emit(
+            RuntimeEvent(
+                "launcher_preparation_released",
+                (
+                    "Préparation launcher transférée à l'état applicatif"
+                    + (f" — {', '.join(sources)}" if sources else "")
+                ),
+                payload={"sources": list(sources)},
+            )
+        )
+
+    def _restore_after_launcher_preparation(self) -> None:
+        if not self._active_launcher_preparation_signature:
+            return
+        domains = self._active_launcher_preparation_domains
+        sources = self._active_launcher_preparation_sources
+        clearer = getattr(
+            self.dispatcher,
+            "clear_launcher_preparation_overrides",
+            None,
+        )
+        invalidator = getattr(
+            self.dispatcher,
+            "invalidate_applied_domains",
+            None,
+        )
+        if callable(clearer):
+            clearer()
+        self._clear_launcher_preparation_tracking()
+
+        state = self.engine.current_state
+        if state is None or not domains:
+            return
+        if callable(invalidator):
+            invalidator(domains)
+        with self._dispatch_lock:
+            result = self.dispatcher.dispatch_state(state)
+        if self.on_dispatch:
+            self.on_dispatch(result)
+        for warning in result.warnings:
+            self.logger.warning("Launcher restore: %s", warning)
+        self._emit(
+            RuntimeEvent(
+                "launcher_preparation_cleared",
+                (
+                    "Préparation launcher terminée ; état courant restauré"
+                    + (f" — {', '.join(sources)}" if sources else "")
+                ),
+                payload={
+                    "sources": list(sources),
+                    "domains": list(domains),
+                    "warnings": list(result.warnings),
+                },
+                success=not bool(result.warnings),
+            )
+        )
+
+    def _sync_launcher_preparation(
+        self,
+        context: Mapping[str, object],
+    ) -> None:
+        builder = getattr(
+            self.dispatcher,
+            "build_launcher_preparation",
+            None,
+        )
+        activator = getattr(
+            self.dispatcher,
+            "activate_launcher_preparation",
+            None,
+        )
+        if not callable(builder) or not callable(activator):
+            return
+
+        if (
+            self.engine.manual_override is not None
+            or self.engine.current_rule != "fallback"
+        ):
+            self._release_launcher_preparation_without_restore()
+            return
+
+        candidates_provider = getattr(
+            self.engine,
+            "launcher_candidates",
+            None,
+        )
+        candidates = (
+            tuple(candidates_provider(context))
+            if callable(candidates_provider)
+            else ()
+        )
+        candidate_states = tuple(
+            (rule.name, rule.state)
+            for rule in candidates
+            if getattr(rule, "state", None) is not None
+        )
+
+        if not candidate_states:
+            self._launcher_conflict_signature = ""
+            self._restore_after_launcher_preparation()
+            return
+
+        plan = builder(
+            candidate_states,
+            context=context,
+        )
+        conflicts = tuple(getattr(plan, "conflicts", ()) or ())
+        if conflicts:
+            self._restore_after_launcher_preparation()
+            signature = str(getattr(plan, "signature", "") or "")
+            if signature != self._launcher_conflict_signature:
+                self._launcher_conflict_signature = signature
+                message = (
+                    "Préparation launcher ambiguë : "
+                    + " ; ".join(conflicts)
+                )
+                self.logger.warning(message)
+                self._emit(
+                    RuntimeEvent(
+                        "launcher_preparation_conflict",
+                        message,
+                        payload={
+                            "sources": list(
+                                getattr(plan, "sources", ()) or ()
+                            ),
+                            "conflicts": list(conflicts),
+                        },
+                        success=False,
+                    )
+                )
+            return
+
+        self._launcher_conflict_signature = ""
+        actions = tuple(getattr(plan, "actions", ()) or ())
+        if not actions:
+            self._restore_after_launcher_preparation()
+            return
+
+        signature = str(getattr(plan, "signature", "") or "")
+        if (
+            signature
+            and signature
+            == self._active_launcher_preparation_signature
+        ):
+            return
+
+        if self._active_launcher_preparation_signature:
+            self._restore_after_launcher_preparation()
+
+        with self._dispatch_lock:
+            result = activator(plan)
+        self._active_launcher_preparation_signature = signature
+        self._active_launcher_preparation_domains = tuple(
+            result.changed_domains
+        )
+        self._active_launcher_preparation_sources = tuple(
+            getattr(plan, "sources", ()) or ()
+        )
+        if self.on_dispatch:
+            self.on_dispatch(result)
+        for warning in result.warnings:
+            self.logger.warning("Launcher preparation: %s", warning)
+        self._emit(
+            RuntimeEvent(
+                "launcher_preparation",
+                (
+                    f"Préparation launcher : {result.executed} action(s)"
+                    + (
+                        " — "
+                        + ", ".join(
+                            self._active_launcher_preparation_sources
+                        )
+                        if self._active_launcher_preparation_sources
+                        else ""
+                    )
+                ),
+                payload={
+                    "sources": list(
+                        self._active_launcher_preparation_sources
+                    ),
+                    "domains": list(result.changed_domains),
+                    "executed": result.executed,
+                    "warnings": list(result.warnings),
+                },
+                success=not bool(result.warnings),
+            )
+        )
 
     def _reconcile_desired_state_if_due(self) -> None:
         if self._last_obs_connected is False:
@@ -1885,7 +2256,68 @@ class RoutingService:
             self._active_obs_command = command
         try:
             with self._dispatch_lock:
-                if command.action == "reapply":
+                if command.action == "collection.import.preview":
+                    importer = SceneCollectionImporter(
+                        self.dispatcher.client,
+                        layout_manager=getattr(
+                            self.dispatcher,
+                            "layout_manager",
+                            None,
+                        ),
+                        cooperative_yield=self._cooperative_obs_yield,
+                    )
+                    snapshot = importer.snapshot()
+                    layouts: dict[str, dict[str, object]] = {}
+                    layout_skipped: tuple[str, ...] = ()
+                    if bool(command.options.get("include_layouts", True)):
+                        layouts, layout_skipped = (
+                            importer.capture_layout_profiles(
+                                snapshot=snapshot,
+                            )
+                        )
+                    result = {
+                        "snapshot": snapshot.as_mapping(),
+                        "layouts": copy.deepcopy(layouts),
+                        "layout_skipped": list(layout_skipped),
+                    }
+                elif command.action == "control.set":
+                    name = str(command.options.get("name") or "").strip()
+                    if not name:
+                        raise ValueError("name requis")
+                    if "value" not in command.options:
+                        raise ValueError("value requis")
+                    value = str(command.options.get("value"))
+                    changed = self.control_store.set(name, value)
+                    snapshot = self.control_store.snapshot()
+                    if hasattr(self.dispatcher, "set_control_variables"):
+                        self.dispatcher.set_control_variables(snapshot)
+                    with self._lock:
+                        state = self.engine.current_state
+                    profile_result = None
+                    can_reapply = bool(changed and state is not None)
+                    checker = getattr(
+                        self.dispatcher,
+                        "has_action_profile",
+                        None,
+                    )
+                    if can_reapply and callable(checker):
+                        can_reapply = bool(checker("game", state.game))
+                    if can_reapply and state is not None:
+                        profile_result = self.dispatcher.execute_profile(
+                            "game",
+                            state.game,
+                            state=state,
+                        )
+                        if self.on_dispatch:
+                            self.on_dispatch(profile_result)
+                    result = {
+                        "changed": changed,
+                        "name": name,
+                        "value": value,
+                        "variables": snapshot,
+                        "game_profile_reapplied": bool(profile_result is not None),
+                    }
+                elif command.action == "reapply":
                     with self._lock:
                         state = self.engine.current_state
                         rule_name = self.engine.current_rule

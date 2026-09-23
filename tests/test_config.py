@@ -24,7 +24,7 @@ from stream_state_router.services.config import (
 class ConfigTests(unittest.TestCase):
     def sample(self):
         return {
-            "schema_version": 5,
+            "schema_version": 6,
             "router": {
                 "poll_ms": 50,
                 "debounce_ms": 150,
@@ -115,7 +115,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         self.assertEqual(migrated["router"]["fallback_state"]["LayoutProfile"], "Vanilla")
         self.assertIn("Vanilla", migrated["layout_profiles"])
         self.assertEqual(validate_config(migrated), [])
@@ -170,7 +170,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         modules = migrated["layout_profiles"]["Vanilla"]["modules"]
         self.assertEqual(set(modules), {"[Global] Date", "[Global] Signature"})
         self.assertEqual(modules["[Global] Date"]["module_type"], "Global")
@@ -189,6 +189,49 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(exported["obs"]["password"], "")
         self.assertEqual(exported["api"]["token"], "")
         self.assertEqual(validate_config(exported), [])
+
+    def test_shareable_export_redacts_imported_obs_settings_and_host_path(self):
+        data = self.sample()
+        data["host_control"] = {
+            "soundvolumeview_path": r"C:\\Tools\\SoundVolumeView.exe",
+            "audio_timeout_seconds": 5.0,
+        }
+        data["profiles"]["capture"]["Default"]["actions"] = [
+            {
+                "type": "set_input_settings",
+                "enabled": True,
+                "params": {
+                    "input": "Browser",
+                    "settings": {
+                        "url": "https://example.test/?token=secret",
+                        "cookie": "secret",
+                    },
+                    "overlay": True,
+                },
+            },
+            {
+                "type": "source_filter_settings",
+                "enabled": True,
+                "params": {
+                    "source": "Game",
+                    "filter": "Shader",
+                    "settings": {"api_token": "secret"},
+                    "overlay": True,
+                },
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exported["host_control"]["soundvolumeview_path"], "")
+        actions = exported["profiles"]["capture"]["Default"]["actions"]
+        self.assertEqual(actions[0]["params"]["settings"], {})
+        self.assertEqual(actions[1]["params"]["settings"], {})
+        self.assertFalse(actions[0]["enabled"])
+        self.assertFalse(actions[1]["enabled"])
 
     def test_backup_names_do_not_collide_and_retention_is_bounded(self):
         data = self.sample()
@@ -271,9 +314,98 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         self.assertEqual(migrated["activation_policies"], {})
         self.assertEqual(validate_config(migrated), [])
+
+    def test_schema_v5_adds_host_control_defaults(self):
+        data = self.sample()
+        data["schema_version"] = 5
+        data.pop("host_control", None)
+
+        migrated = migrate_config(data)
+
+        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(
+            migrated["host_control"],
+            {
+                "soundvolumeview_path": "",
+                "audio_timeout_seconds": 5.0,
+            },
+        )
+        self.assertEqual(validate_config(migrated), [])
+
+    def test_host_and_filter_actions_validate(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data["host_control"] = {
+            "soundvolumeview_path": r"C:\\Tools\\SoundVolumeView.exe",
+            "audio_timeout_seconds": 4.0,
+        }
+        data["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "app_audio_output",
+                "params": {
+                    "device": "Game",
+                    "process": "Overwatch.exe",
+                    "roles": "all",
+                },
+            }
+        ]
+        data["profiles"]["capture"]["Default"]["actions"] = [
+            {
+                "type": "windows_hdr",
+                "params": {"enabled": True, "display": "primary"},
+            },
+            {
+                "type": "source_filter_settings",
+                "params": {
+                    "source": "Capture",
+                    "filter": "HDR Tone Map",
+                    "settings": {"exposure": 1.0},
+                    "overlay": True,
+                },
+            },
+        ]
+
+        self.assertEqual(validate_config(data), [])
+
+    def test_invalid_host_actions_are_rejected(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data["host_control"] = {
+            "soundvolumeview_path": 42,
+            "audio_timeout_seconds": 0,
+        }
+        data["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "app_audio_output",
+                "params": {"device": "", "process": "", "roles": "gaming"},
+            },
+            {
+                "type": "windows_hdr",
+                "params": {"enabled": "yes", "display": "secondary"},
+            },
+            {
+                "type": "source_filter_settings",
+                "params": {
+                    "source": "Capture",
+                    "filter": "HDR",
+                    "settings": [],
+                },
+            },
+        ]
+
+        errors = validate_config(data)
+
+        self.assertTrue(any("soundvolumeview_path" in item for item in errors), errors)
+        self.assertTrue(any("audio_timeout_seconds" in item for item in errors), errors)
+        self.assertTrue(any(".params.device est requis" in item for item in errors), errors)
+        self.assertTrue(any(".params.process est requis" in item for item in errors), errors)
+        self.assertTrue(any(".params.roles" in item for item in errors), errors)
+        self.assertTrue(any(".params.enabled doit être booléen" in item for item in errors), errors)
+        self.assertTrue(any(".params.display" in item for item in errors), errors)
+        self.assertTrue(any(".params.settings doit être un objet" in item for item in errors), errors)
 
     def test_random_activation_policy_is_valid_and_buildable(self):
         data = self.sample()
@@ -503,6 +635,32 @@ class ConfigTests(unittest.TestCase):
             errors = validate_config(data)
             self.assertTrue(any(f".geometry.{key}" in error for error in errors), errors)
 
+    def test_process_running_rule_is_valid_without_foreground_selector(self):
+        data = self.sample()
+        data["profiles"]["game"]["Dofus"] = {"actions": []}
+        data["rules"] = [
+            {
+                "name": "Dofus background",
+                "behavior": "match",
+                "priority": 100,
+                "enabled": True,
+                "exe": "",
+                "path": "",
+                "title_regex": "",
+                "state": {
+                    "Game": "Dofus",
+                    "OverlayProfile": "Vanilla",
+                    "CaptureProfile": "Default",
+                    "AudioProfile": "Default",
+                    "LayoutProfile": "Vanilla",
+                },
+                "conditions": {"process_running": "Dofus.exe"},
+                "apply_delay_ms": 0,
+            }
+        ]
+
+        self.assertEqual(validate_config(data), [])
+
     def test_invalid_rule_regex_is_rejected(self):
         data = self.sample()
         data["rules"][1]["title_regex"] = "([unterminated"
@@ -541,6 +699,50 @@ class ConfigTests(unittest.TestCase):
         errors = validate_config(data)
         self.assertTrue(any(".conditions.streaming doit être booléen" in error for error in errors), errors)
 
+
+
+    def test_launcher_and_preapply_flag_round_trip_through_config(self):
+        data = self.sample()
+        data["rules"][1]["launcher"] = "Battle.net.exe"
+        data["profiles"]["game"]["Game"]["actions"] = [
+            {
+                "type": "wait_ms",
+                "name": "pre-launch",
+                "enabled": True,
+                "preapply_on_launcher": True,
+                "params": {"duration_ms": 0},
+            }
+        ]
+
+        self.assertEqual(validate_config(data), [])
+        rules, _poll, _debounce, _fallback = build_ruleset(data)
+        game_rule = next(rule for rule in rules.rules if rule.name == "Game")
+        self.assertEqual(game_rule.launcher, "Battle.net.exe")
+
+    def test_launcher_and_preapply_types_are_validated(self):
+        data = self.sample()
+        data["rules"][1]["launcher"] = 123
+        data["profiles"]["game"]["Game"]["actions"] = [
+            {
+                "type": "wait_ms",
+                "preapply_on_launcher": "yes",
+                "params": {"duration_ms": 0},
+            }
+        ]
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(".launcher doit être une chaîne" in error for error in errors),
+            errors,
+        )
+        self.assertTrue(
+            any(
+                ".preapply_on_launcher doit être booléen" in error
+                for error in errors
+            ),
+            errors,
+        )
 
 if __name__ == "__main__":
     unittest.main()

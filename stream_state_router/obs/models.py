@@ -10,6 +10,7 @@ class OBSAction:
     params: Mapping[str, Any] = field(default_factory=dict)
     enabled: bool = True
     name: str = ""
+    preapply_on_launcher: bool = False
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "OBSAction":
@@ -19,6 +20,9 @@ class OBSAction:
             params=dict(params) if isinstance(params, Mapping) else {},
             enabled=bool(raw.get("enabled", True)),
             name=str(raw.get("name") or ""),
+            preapply_on_launcher=bool(
+                raw.get("preapply_on_launcher", False)
+            ),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -26,6 +30,7 @@ class OBSAction:
             "type": self.type,
             "name": self.name,
             "enabled": self.enabled,
+            "preapply_on_launcher": self.preapply_on_launcher,
             "params": dict(self.params),
         }
 

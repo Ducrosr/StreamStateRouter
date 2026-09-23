@@ -3,7 +3,8 @@ from __future__ import annotations
 import copy
 import json
 import os
-from PySide6.QtCore import QObject, Qt, Signal, QTimer
+from typing import Mapping
+from PySide6.QtCore import QObject, Qt, Signal, QTimer, QSettings
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -34,10 +35,17 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMenu,
     QPlainTextEdit,
+    QScrollArea,
 )
 
 from .. import __version__
 from ..activation import TriggerTargetIdentity
+from ..importers import (
+    AdvancedSceneSwitcherImporter,
+    SceneCollectionImporter,
+    neutralize_referenced_test_layout_profiles,
+    wire_windows_hdr_capture_profiles,
+)
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -47,6 +55,7 @@ from ..services.config import (
     build_activation_policies,
     config_revision,
     build_obs_config,
+    build_host_controller,
     build_profiles,
     build_layout_profiles,
     build_ruleset,
@@ -59,10 +68,17 @@ from ..services.config import (
     pop_layout_history,
     release_runtime_visibility_ownership,
 )
+from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
-from .dialogs import ActionDialog, ModuleLayoutDialog, RuleDialog
+from .dialogs import (
+    ActionDialog,
+    CollectionImportDialog,
+    CollectionLogicImportDialog,
+    ModuleLayoutDialog,
+    RuleDialog,
+)
 
 
 DOMAIN_LABELS = {
@@ -93,7 +109,12 @@ class MainWindow(QMainWindow):
     ):
         super().__init__()
         self.setWindowTitle(f"Stream State Router {__version__}")
+        self.setMinimumSize(760, 520)
         self.resize(1180, 760)
+        self._window_settings = QSettings("Ducrosr", "StreamStateRouter")
+        saved_geometry = self._window_settings.value("main_window/geometry")
+        if saved_geometry is not None:
+            self.restoreGeometry(saved_geometry)
         self.config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
         self._applied_revision = ""
@@ -115,6 +136,7 @@ class MainWindow(QMainWindow):
         self._preview_active = False
         self._routing_incomplete = False
         self._runtime_restart_in_progress = False
+        self._pending_collection_imports: dict[str, dict[str, object]] = {}
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -159,12 +181,12 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
-        self.tabs.addTab(self._build_dashboard(), "Dashboard")
-        self.tabs.addTab(self._build_rules_tab(), "Règles")
-        self.tabs.addTab(self._build_profiles_tab(), "Profils OBS")
-        self.tabs.addTab(self._build_layouts_tab(), "Layouts")
-        self.tabs.addTab(self._build_settings_tab(), "Paramètres")
-        self.tabs.addTab(self._build_logs_tab(), "Journal")
+        self.tabs.addTab(self._scrollable_tab(self._build_dashboard()), "Dashboard")
+        self.tabs.addTab(self._scrollable_tab(self._build_rules_tab()), "Règles")
+        self.tabs.addTab(self._scrollable_tab(self._build_profiles_tab()), "Profils")
+        self.tabs.addTab(self._scrollable_tab(self._build_layouts_tab()), "Layouts")
+        self.tabs.addTab(self._scrollable_tab(self._build_settings_tab()), "Paramètres")
+        self.tabs.addTab(self._scrollable_tab(self._build_logs_tab()), "Journal")
 
         footer = QHBoxLayout()
         self.unsaved = QLabel("")
@@ -176,6 +198,26 @@ class MainWindow(QMainWindow):
         self.save_button.clicked.connect(self.save_and_apply)
         footer.addWidget(self.save_button)
         layout.addLayout(footer)
+
+    def _scrollable_tab(self, page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setWidget(page)
+        return scroll
+
+    def _save_window_geometry(self) -> None:
+        self._window_settings.setValue(
+            "main_window/geometry",
+            self.saveGeometry(),
+        )
+        self._window_settings.sync()
 
     def _card(self, title_text: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
@@ -255,9 +297,21 @@ class MainWindow(QMainWindow):
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
-        self.rules_table = QTableWidget(0, 9)
+        self.rules_table = QTableWidget(0, 11)
         self.rules_table.setHorizontalHeaderLabels(
-            ["Actif", "Nom", "Comportement", "Priorité", "Exe", "Chemin", "Titre", "Game", "Profils"]
+            [
+                "Actif",
+                "Nom",
+                "Comportement",
+                "Priorité",
+                "Processus",
+                "Launcher",
+                "Premier plan",
+                "Chemin",
+                "Titre",
+                "Game",
+                "Profils",
+            ]
         )
         self.rules_table.setAlternatingRowColors(True)
         self.rules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -342,6 +396,8 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         for text, slot in [
             ("Ajouter une action", self._add_action),
+            ("Importer collection OBS…", self._import_collection_to_profile),
+            ("Migrer logique collection / ASC…", self._migrate_collection_logic),
             ("Modifier", self._edit_action),
             ("Dupliquer", self._duplicate_action),
             ("Activer/Désactiver", self._toggle_action),
@@ -517,6 +573,29 @@ class MainWindow(QMainWindow):
         obs_lay.addWidget(test, alignment=Qt.AlignLeft)
         root.addWidget(obs_card)
 
+        host_card, host_lay = self._card("Contrôle Windows")
+        host_form = QFormLayout()
+        self.soundvolumeview_path = QLineEdit()
+        self.soundvolumeview_path.setPlaceholderText(
+            r"C:\Streaming\OBS\Tools\SoundVolumeView\SoundVolumeView.exe"
+        )
+        host_form.addRow("SoundVolumeView.exe", self.soundvolumeview_path)
+        browse_row = QHBoxLayout()
+        browse = QPushButton("Parcourir…")
+        browse.clicked.connect(self._browse_soundvolumeview)
+        browse_row.addWidget(browse)
+        browse_row.addStretch(1)
+        host_lay.addLayout(host_form)
+        host_lay.addLayout(browse_row)
+        host_note = QLabel(
+            "Audio par application : backend SoundVolumeView. "
+            "HDR/SDR : contrôle natif Windows DisplayConfig."
+        )
+        host_note.setWordWrap(True)
+        host_note.setObjectName("Muted")
+        host_lay.addWidget(host_note)
+        root.addWidget(host_card)
+
         api_card, api_lay = self._card("API locale / Stream Deck")
         api_form = QFormLayout()
         self.api_enabled = QCheckBox("Activer l’API locale")
@@ -548,6 +627,16 @@ class MainWindow(QMainWindow):
         root.addWidget(behavior_card)
         root.addStretch(1)
         return page
+
+    def _browse_soundvolumeview(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner SoundVolumeView.exe",
+            self.soundvolumeview_path.text().strip() or "",
+            "Exécutables Windows (*.exe);;Tous les fichiers (*)",
+        )
+        if selected:
+            self.soundvolumeview_path.setText(selected)
 
     def _build_logs_tab(self) -> QWidget:
         page = QWidget()
@@ -601,6 +690,15 @@ class MainWindow(QMainWindow):
         self.obs_host.setText(str(obs.get("host") or "127.0.0.1"))
         self.obs_port.setValue(int(obs.get("port", 4455)))
         self.obs_password.setText(str(obs.get("password") or ""))
+        host = self.config.get("host_control", {})
+        self.soundvolumeview_path.setText(
+            str(
+                host.get("soundvolumeview_path")
+                if isinstance(host, dict)
+                else ""
+            )
+            or ""
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -623,7 +721,12 @@ class MainWindow(QMainWindow):
             widget.valueChanged.connect(self._mark_dirty)
         for widget in (self.obs_enabled, self.close_to_tray, self.start_with_windows, self.api_enabled, self.auto_detect_modules):
             widget.toggled.connect(self._mark_dirty)
-        for widget in (self.obs_host, self.obs_password, self.api_token):
+        for widget in (
+            self.obs_host,
+            self.obs_password,
+            self.api_token,
+            self.soundvolumeview_path,
+        ):
             widget.textChanged.connect(self._mark_dirty)
 
     def _collect_settings(self) -> None:
@@ -635,6 +738,9 @@ class MainWindow(QMainWindow):
         obs["host"] = self.obs_host.text().strip() or "127.0.0.1"
         obs["port"] = self.obs_port.value()
         obs["password"] = self.obs_password.text()
+        host = self.config.setdefault("host_control", {})
+        host["soundvolumeview_path"] = self.soundvolumeview_path.text().strip()
+        host.setdefault("audio_timeout_seconds", 5.0)
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -686,6 +792,7 @@ class MainWindow(QMainWindow):
             self._client,
             build_profiles(self.config),
             build_layout_profiles(self.config),
+            host_controller=build_host_controller(self.config),
         )
         if startup_layout_profile:
             self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
@@ -713,6 +820,16 @@ class MainWindow(QMainWindow):
                     )
                 ).strip().casefold()
                 in {"1", "true", "yes", "on"}
+            ),
+            control_variables=(
+                self.config.get("control_variables", {})
+                if isinstance(self.config.get("control_variables"), Mapping)
+                else {}
+            ),
+            control_store=ControlVariableStore.persistent(
+                self.config.get("control_variables", {})
+                if isinstance(self.config.get("control_variables"), Mapping)
+                else {}
             ),
         )
         self._pending_cleanup_transfer = ()
@@ -818,12 +935,28 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         self._log(f"{event.kind}: {event.message}")
+        if event.kind == "routing_rule" and isinstance(event.payload, dict):
+            rule_name = str(event.payload.get("rule_name") or "—")
+            reason = str(event.payload.get("reason") or "état inchangé")
+            self.rule_label.setText(
+                f"Règle : {rule_name} · raison : {reason}"
+            )
+            return
         if event.kind == "activation_command_result" and event.payload is not None:
             self.bridge.activation_result.emit(event.payload)
             return
         if event.kind == "obs_command_result" and event.payload is not None:
             payload = event.payload
             action = str(getattr(payload, "action", "") or "")
+            request_id = str(getattr(payload, "request_id", "") or "")
+            if (
+                action == "collection.import.preview"
+                and request_id in self._pending_collection_imports
+            ):
+                context = self._pending_collection_imports.pop(request_id)
+                self._complete_collection_import(payload, context)
+                self._update_obs_status()
+                return
             if bool(getattr(payload, "success", False)):
                 if action == "layout.preview":
                     self._preview_active = True
@@ -998,6 +1131,32 @@ class MainWindow(QMainWindow):
         self.rules_table.setRowCount(len(rules))
         for row, rule in enumerate(rules):
             state = rule.get("state") if isinstance(rule.get("state"), dict) else {}
+            conditions = (
+                rule.get("conditions")
+                if isinstance(rule.get("conditions"), dict)
+                else {}
+            )
+            foreground_selectors = bool(
+                str(rule.get("exe") or "").strip()
+                or str(rule.get("path") or "").strip()
+                or str(rule.get("title_regex") or "").strip()
+            )
+            process_running = str(
+                conditions.get("process_running") or ""
+            ).strip()
+            process_display = (
+                str(rule.get("exe") or "").strip()
+                or (
+                    process_running
+                    if not foreground_selectors
+                    else ""
+                )
+            )
+            foreground_display = (
+                "Oui"
+                if foreground_selectors
+                else ("Non" if process_running else "—")
+            )
             profiles = (
                 f"{state.get('OverlayProfile', '')} / {state.get('CaptureProfile', '')} / "
                 f"{state.get('AudioProfile', '')} / {state.get('LayoutProfile', '')}"
@@ -1009,7 +1168,9 @@ class MainWindow(QMainWindow):
                 rule.get("name", ""),
                 rule.get("behavior", "match"),
                 str(rule.get("priority", 0)),
-                rule.get("exe", ""),
+                process_display,
+                rule.get("launcher", ""),
+                foreground_display,
                 rule.get("path", ""),
                 rule.get("title_regex", ""),
                 state.get("Game", "") if rule.get("behavior", "match") == "match" else "—",
@@ -1069,27 +1230,44 @@ class MainWindow(QMainWindow):
         if idx is None or not self._service:
             return
         app = self._service.last_app
-        if app is None:
-            QMessageBox.information(self, "Test de règle", "Aucune application au premier plan détectée.")
+        selected = self.config["rules"][idx]
+        requires_foreground = any(
+            str(selected.get(key) or "").strip()
+            for key in ("exe", "path", "title_regex")
+        )
+        if app is None and requires_foreground:
+            QMessageBox.information(
+                self,
+                "Test de règle",
+                "Cette règle exige une application au premier plan.",
+            )
             return
         temp = copy.deepcopy(self.config)
         temp["rules"] = [copy.deepcopy(self.config["rules"][idx])]
         try:
             rules, _poll, _debounce, _fallback = build_ruleset(temp)
-            context = self._dispatcher.obs_context() if self._dispatcher else {}
+            context = (
+                self._service.routing_context_snapshot()
+                if self._service
+                else {}
+            )
             resolution = rules.resolve(app, context)
         except Exception as exc:
             QMessageBox.critical(self, "Test de règle", str(exc))
             return
-        selected = self.config["rules"][idx]
         if resolution.rule_name == selected.get("name"):
+            subject = app.exe_name if app is not None else "les conditions actuelles"
             if resolution.kind.value == "ignore":
-                message = f"La règle correspond à {app.exe_name} et conserverait l’état courant (IGNORE)."
+                message = (
+                    f"La règle correspond à {subject} et conserverait "
+                    "l’état courant (IGNORE)."
+                )
             else:
                 state = resolution.state.as_variables() if resolution.state else {}
-                message = f"La règle correspond à {app.exe_name}.\n\nÉtat : {state}"
+                message = f"La règle correspond à {subject}.\n\nÉtat : {state}"
         else:
-            message = f"La règle ne correspond pas à l’application courante : {app.exe_name}."
+            subject = app.exe_name if app is not None else "les conditions actuelles"
+            message = f"La règle ne correspond pas à {subject}."
         QMessageBox.information(self, "Test de règle", message)
 
     def _delete_rule(self) -> None:
@@ -1289,6 +1467,417 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._refresh_profile_names()
         self._refresh_override_boxes()
+
+    def _import_collection_to_profile(self) -> None:
+        current = self._current_profile()
+        if not current:
+            QMessageBox.warning(
+                self,
+                "Import collection OBS",
+                "Sélectionnez d'abord un profil cible.",
+            )
+            return
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Import collection OBS",
+                "Le runtime SSR n'est pas disponible.",
+            )
+            return
+
+        domain, profile_name, _profile = current
+        dialog = CollectionImportDialog(
+            self,
+            target_domain=domain,
+            target_profile=profile_name,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        options = dialog.options()
+        try:
+            request_id = self._service.request_collection_import_preview(
+                include_layouts=bool(options.get("include_layouts", False)),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                str(exc),
+            )
+            return
+
+        self._pending_collection_imports[request_id] = {
+            "mode": "snapshot_profile",
+            "domain": domain,
+            "profile_name": profile_name,
+            "options": copy.deepcopy(options),
+        }
+        self._log(
+            "Import collection OBS mis en file "
+            f"({request_id[:8]}) vers {domain}/{profile_name}."
+        )
+        self.statusBar().showMessage(
+            "Lecture de la collection OBS en cours…",
+            8000,
+        )
+
+    def _migrate_collection_logic(self) -> None:
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Migration collection OBS",
+                "Le runtime SSR n'est pas disponible.",
+            )
+            return
+
+        dialog = CollectionLogicImportDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        options = dialog.options()
+        try:
+            request_id = self._service.request_collection_import_preview(
+                include_layouts=bool(options.get("include_layouts", False)),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Migration collection OBS",
+                str(exc),
+            )
+            return
+
+        self._pending_collection_imports[request_id] = {
+            "mode": "logic_migration",
+            "domain": "",
+            "profile_name": "",
+            "options": copy.deepcopy(options),
+        }
+        self._log(
+            "Prévisualisation migration logique OBS/ASC mise en file "
+            f"({request_id[:8]})."
+        )
+        self.statusBar().showMessage(
+            "Lecture de la collection OBS pour migration logique…",
+            8000,
+        )
+
+    def _complete_collection_import(
+        self,
+        payload,
+        context: Mapping[str, object],
+    ) -> None:
+        if not bool(getattr(payload, "success", False)):
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                str(
+                    getattr(payload, "error", "")
+                    or "La lecture de la collection OBS a échoué."
+                ),
+            )
+            return
+
+        raw_result = getattr(payload, "result", None)
+        if not isinstance(raw_result, Mapping):
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                "Le runtime a retourné un rapport d'import invalide.",
+            )
+            return
+        raw_snapshot = raw_result.get("snapshot")
+        if not isinstance(raw_snapshot, Mapping):
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                "Le snapshot de collection OBS est absent ou invalide.",
+            )
+            return
+
+        mode = str(context.get("mode") or "snapshot_profile")
+        domain = str(context.get("domain") or "")
+        profile_name = str(context.get("profile_name") or "")
+        raw_options = context.get("options")
+        options = (
+            dict(raw_options)
+            if isinstance(raw_options, Mapping)
+            else {}
+        )
+        snapshot = SceneCollectionImporter.snapshot_from_mapping(
+            raw_snapshot
+        )
+
+        previous = copy.deepcopy(self.config)
+        asc_report = None
+        asc_path = ""
+        layout_report = None
+        hdr_profiles_changed: tuple[str, ...] = ()
+        test_layouts_neutralized: tuple[str, ...] = ()
+        try:
+            report = None
+            if mode == "snapshot_profile":
+                report = SceneCollectionImporter.merge_actions_into_profile(
+                    self.config,
+                    domain=domain,
+                    profile_name=profile_name,
+                    snapshot=snapshot,
+                    include_input_settings=bool(
+                        options.get("include_input_settings", True)
+                    ),
+                    include_audio_state=bool(
+                        options.get("include_audio_state", True)
+                    ),
+                    include_filters=bool(
+                        options.get("include_filters", True)
+                    ),
+                    include_visibility=bool(
+                        options.get("include_visibility", False)
+                    ),
+                )
+
+            if bool(options.get("include_layouts", False)):
+                raw_layouts = raw_result.get("layouts")
+                layouts = (
+                    {
+                        str(name): dict(profile)
+                        for name, profile in raw_layouts.items()
+                        if isinstance(profile, Mapping)
+                    }
+                    if isinstance(raw_layouts, Mapping)
+                    else {}
+                )
+                raw_skipped = raw_result.get("layout_skipped")
+                layout_skipped = tuple(
+                    str(item)
+                    for item in (
+                        raw_skipped
+                        if isinstance(raw_skipped, list)
+                        else []
+                    )
+                )
+                layout_report = (
+                    SceneCollectionImporter.apply_layout_profiles(
+                        self.config,
+                        collection=snapshot.collection,
+                        profiles=layouts,
+                        skipped=layout_skipped,
+                    )
+                )
+
+            asc_path = str(options.get("asc_path") or "").strip()
+            if not asc_path:
+                detected = (
+                    AdvancedSceneSwitcherImporter.find_scene_collection_file(
+                        snapshot.collection
+                    )
+                )
+                asc_path = str(detected) if detected is not None else ""
+            if asc_path:
+                asc_data = AdvancedSceneSwitcherImporter.load(asc_path)
+                asc_report = AdvancedSceneSwitcherImporter.apply_to_config(
+                    asc_data,
+                    self.config,
+                    snapshot=snapshot,
+                    enable_created_rules=bool(
+                        options.get("enable_converted_rules", False)
+                    ),
+                )
+
+            if (
+                mode == "logic_migration"
+                and bool(options.get("wire_hdr_profiles", False))
+            ):
+                hdr_profiles_changed = wire_windows_hdr_capture_profiles(
+                    self.config
+                )
+            if (
+                mode == "logic_migration"
+                and bool(options.get("neutralize_test_layouts", False))
+            ):
+                test_layouts_neutralized = (
+                    neutralize_referenced_test_layout_profiles(self.config)
+                )
+
+            errors = validate_config(self.config)
+            if errors:
+                raise ValueError(
+                    "La configuration importée n'est pas valide :\n- "
+                    + "\n- ".join(errors)
+                )
+        except Exception as exc:
+            self.config = previous
+            self._refresh_rules_table()
+            self._refresh_profile_names()
+            self._refresh_layout_profile_names()
+            self._refresh_override_boxes()
+            QMessageBox.critical(
+                self,
+                "Import collection OBS",
+                str(exc),
+            )
+            return
+
+        self._mark_dirty()
+        self._refresh_rules_table()
+        self._refresh_profile_names()
+        self._refresh_layout_profile_names()
+        if mode == "snapshot_profile":
+            self.profile_domain.setCurrentIndex(
+                max(0, self.profile_domain.findData(domain))
+            )
+            self._refresh_profile_names()
+            self.profile_name.setCurrentText(profile_name)
+            self._refresh_actions_table()
+        self._refresh_override_boxes()
+
+        summary = (
+            report.summary()
+            if report is not None
+            else (
+                "Migration logique de collection : aucun snapshot OBS global "
+                "n'a été fusionné dans un profil unique."
+            )
+        )
+        if layout_report is not None:
+            summary += "\n\nLayouts\n" + layout_report.summary()
+        if asc_report is not None:
+            summary += (
+                "\n\nAdvanced Scene Switcher\n"
+                + asc_report.summary()
+            )
+        if bool(options.get("wire_hdr_profiles", False)):
+            if hdr_profiles_changed:
+                summary += (
+                    "\n\nHDR Windows\nCaptureProfile(s) câblé(s) : "
+                    + ", ".join(hdr_profiles_changed)
+                )
+            else:
+                summary += (
+                    "\n\nHDR Windows\nLes CaptureProfiles HDR/SDR "
+                    "étaient déjà correctement câblés."
+                )
+        if bool(options.get("enable_converted_rules", False)):
+            summary += (
+                "\n\nRègles ASC\nLes nouvelles règles converties "
+                "ont été activées explicitement."
+            )
+        if bool(options.get("neutralize_test_layouts", False)):
+            summary += (
+                "\n\nLayouts de test neutralisés : "
+                + (
+                    ", ".join(test_layouts_neutralized)
+                    if test_layouts_neutralized
+                    else "aucun"
+                )
+            )
+        elif not asc_path:
+            summary += (
+                "\n\nAdvanced Scene Switcher\n"
+                "Aucun JSON ASC détecté pour cette collection."
+            )
+        summary += (
+            "\n\nLa configuration est modifiée uniquement en mémoire. "
+            "Vérifiez-la puis utilisez « Enregistrer et appliquer »."
+        )
+        QMessageBox.information(
+            self,
+            "Import collection OBS terminé",
+            summary,
+        )
+
+        if asc_report is not None and asc_report.rejected_raw:
+            self._offer_save_collection_import_report(
+                snapshot=snapshot,
+                domain=domain,
+                profile_name=profile_name,
+                asc_path=asc_path,
+                collection_report=report,
+                layout_report=layout_report,
+                asc_report=asc_report,
+            )
+
+    def _offer_save_collection_import_report(
+        self,
+        *,
+        snapshot,
+        domain: str,
+        profile_name: str,
+        asc_path: str,
+        collection_report,
+        layout_report,
+        asc_report,
+    ) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Macros ASC non converties",
+            (
+                f"{len(asc_report.rejected_raw)} macro(s) Advanced Scene "
+                "Switcher n'ont pas été converties.\n\n"
+                "Leur JSON brut et la raison du refus sont conservés dans "
+                "le rapport. Voulez-vous enregistrer ce rapport maintenant ?\n\n"
+                "Attention : le JSON brut d'une macro peut contenir des "
+                "chemins, URL, tokens ou autres paramètres sensibles."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Enregistrer le rapport d'import",
+            "stream-state-router-import-report.json",
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        payload = {
+            "collection": snapshot.collection,
+            "target": {
+                "domain": domain,
+                "profile": profile_name,
+            },
+            "advanced_scene_switcher_source": asc_path,
+            "collection_import": (
+                {
+                    "added_actions": collection_report.added_actions,
+                    "replaced_actions": collection_report.replaced_actions,
+                    "skipped": list(collection_report.skipped),
+                }
+                if collection_report is not None
+                else None
+            ),
+            "layout_import": (
+                {
+                    "added": layout_report.added,
+                    "refreshed": layout_report.refreshed,
+                    "skipped": list(layout_report.skipped),
+                }
+                if layout_report is not None
+                else None
+            ),
+            "advanced_scene_switcher": asc_report.as_mapping(),
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    payload,
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                    allow_nan=False,
+                )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Rapport d'import",
+                str(exc),
+            )
+            return
+        self._log(f"Rapport d'import enregistré : {path}")
 
     def _add_action(self) -> None:
         current = self._current_profile()
@@ -2193,6 +2782,9 @@ class MainWindow(QMainWindow):
             "rule": service.engine.current_rule if service else "",
             "state": state.as_variables() if state else {},
             "obs_connected": bool(self._client.connected) if self._client else False,
+            "control_variables": (
+                service.control_variables() if service else {}
+            ),
             "config_revision": {
                 "saved": self._saved_revision,
                 "applied": self._applied_revision,
@@ -2240,6 +2832,17 @@ class MainWindow(QMainWindow):
             if not plan_id:
                 raise ValueError("plan_id requis")
             request_id = self._service.request_execute_declarative_plan(plan_id)
+            return {"request_id": request_id, "status": "accepted"}
+        if action == "control.set":
+            name = str(payload.get("name") or "").strip()
+            if not name:
+                raise ValueError("name requis")
+            if "value" not in payload:
+                raise ValueError("value requis")
+            request_id = self._service.request_control_variable(
+                name,
+                payload.get("value"),
+            )
             return {"request_id": request_id, "status": "accepted"}
         if action == "reapply":
             request_id = self._service.request_force_reapply()
@@ -2431,6 +3034,7 @@ class MainWindow(QMainWindow):
         return result
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._save_window_geometry()
         if not self._quitting and self.close_to_tray.isChecked() and self.tray.isVisible():
             event.ignore()
             self.hide()
@@ -2448,6 +3052,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def _quit_app(self) -> None:
+        self._save_window_geometry()
         self._quitting = True
         if self._api:
             self._api.stop()

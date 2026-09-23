@@ -6,6 +6,7 @@ import { saveConnectionSettings, ssrClient } from "../ssr-client";
 type EmptySettings = Record<string, never>;
 type LayoutSettings = { layout?: string; mode?: "apply" | "preview" };
 type ConnectionSettings = { port?: number; token?: string };
+type ControlVariableSettings = { name?: string; value?: string };
 
 abstract class CommandAction<T extends JsonObject> extends SingletonAction<T> {
   protected async run(ev: KeyDownEvent<T>, fn: () => Promise<unknown>): Promise<void> {
@@ -79,3 +80,18 @@ export class ConnectionSettingsAction extends CommandAction<ConnectionSettings> 
     });
   }
 }
+
+@action({ UUID: "com.remyducros.streamstaterouter.control-variable" })
+export class ControlVariableAction extends CommandAction<ControlVariableSettings> {
+  override async onKeyDown(ev: KeyDownEvent<ControlVariableSettings>): Promise<void> {
+    const settings = ev.payload.settings;
+    const name = String(settings.name ?? "").trim();
+    if (!name) {
+      await ev.action.showAlert();
+      return;
+    }
+    const value = String(settings.value ?? "");
+    await this.run(ev, () => ssrClient.setControlVariable(name, value));
+  }
+}
+

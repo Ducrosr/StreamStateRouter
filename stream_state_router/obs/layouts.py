@@ -824,7 +824,13 @@ class OBSLayoutManager:
                         f"Scène imbriquée '{source}' non lisible depuis '{container}' : {exc}"
                     )
 
-    def discover_scene(self, scene: str, *, recursive: bool = True) -> dict[str, list[CatalogElement]]:
+    def discover_scene(
+        self,
+        scene: str,
+        *,
+        recursive: bool = True,
+        include_unprefixed: bool = False,
+    ) -> dict[str, list[CatalogElement]]:
         scene = str(scene or "").strip()
         if not scene:
             return {}
@@ -843,6 +849,7 @@ class OBSLayoutManager:
             depth=0,
             prefetched=None,
             container_kind="scene",
+            include_unprefixed=include_unprefixed,
         )
 
         # Naming convention: ``[Type] Module name``. The text between
@@ -878,6 +885,7 @@ class OBSLayoutManager:
         depth: int,
         prefetched: list[Mapping[str, Any]] | None,
         container_kind: str,
+        include_unprefixed: bool = False,
     ) -> None:
         if depth > 8:
             return
@@ -908,7 +916,16 @@ class OBSLayoutManager:
 
             parsed = parse_module_source(source)
             hard_locked = parsed is not None and "locked" in parsed.flags
-            if parsed is not None and not hard_locked:
+            imported = (
+                parsed
+                if parsed is not None
+                else (
+                    ModuleSourceName("Imported", source)
+                    if include_unprefixed
+                    else None
+                )
+            )
+            if imported is not None and not hard_locked:
                 transform_response = self.client.send(
                     "GetSceneItemTransform",
                     {"sceneName": container, "sceneItemId": item_id},
@@ -922,13 +939,13 @@ class OBSLayoutManager:
                         container=container,
                         path=path,
                         container_kind=container_kind,
-                        module=parsed.module,
-                        element=parsed.element,
+                        module=imported.module,
+                        element=imported.element,
                         source=source,
                         enabled=bool(raw.get("sceneItemEnabled", True)),
                         transform=dict(transform),
                         source_type=source_kind,
-                        flags=parsed.flags,
+                        flags=imported.flags,
                     )
                 )
 
@@ -954,6 +971,7 @@ class OBSLayoutManager:
                         depth=depth + 1,
                         prefetched=children,
                         container_kind="group",
+                        include_unprefixed=include_unprefixed,
                     )
                 except Exception as exc:
                     self._last_discovery_warnings.append(
@@ -972,6 +990,7 @@ class OBSLayoutManager:
                         depth=depth + 1,
                         prefetched=None,
                         container_kind="scene",
+                        include_unprefixed=include_unprefixed,
                     )
                 except Exception as exc:
                     self._last_discovery_warnings.append(
@@ -985,12 +1004,14 @@ class OBSLayoutManager:
         selected_sources: Iterable[str] | None = None,
         extends: str = "",
         transition: Mapping[str, Any] | None = None,
+        include_unprefixed: bool = False,
     ) -> LayoutCaptureResult:
         profile = self.capture_profile(
             scene,
             selected_sources=selected_sources,
             extends=extends,
             transition=transition,
+            include_unprefixed=include_unprefixed,
         )
         modules = profile.get("modules") if isinstance(profile.get("modules"), Mapping) else {}
         warnings = tuple(self._last_discovery_warnings)
@@ -1008,9 +1029,13 @@ class OBSLayoutManager:
         selected_sources: Iterable[str] | None = None,
         extends: str = "",
         transition: Mapping[str, Any] | None = None,
+        include_unprefixed: bool = False,
     ) -> dict[str, Any]:
         selected = None if selected_sources is None else {str(item) for item in selected_sources}
-        catalog = self.discover_scene(scene)
+        catalog = self.discover_scene(
+            scene,
+            include_unprefixed=include_unprefixed,
+        )
         canvas = self.canvas_size()
         modules_raw: dict[str, Any] = {}
         for module_key, elements in catalog.items():
@@ -1112,8 +1137,20 @@ class OBSLayoutManager:
                 if selected is not None and element.source not in selected:
                     continue
                 if element.source in scene_names:
-                    managed_scene_roots.append((element.source, (*element.path, element.source)))
-        support_items = self._capture_managed_scene_support(managed_scene_roots, scene_names)
+                    managed_scene_roots.append(
+                        (element.source, (*element.path, element.source))
+                    )
+        # Exhaustive collection import already materializes ordinary descendants
+        # as generic modules. Capturing them again as support_items would create
+        # duplicate ownership of the same physical Scene Item.
+        support_items = (
+            []
+            if include_unprefixed
+            else self._capture_managed_scene_support(
+                managed_scene_roots,
+                scene_names,
+            )
+        )
 
         profile: dict[str, Any] = {
             "scene": scene,

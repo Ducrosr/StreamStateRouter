@@ -2,6 +2,8 @@ import streamDeck from "@elgato/streamdeck";
 import {
   AutoAction,
   CancelPreviewAction,
+  ConnectionSettingsAction,
+  ControlVariableAction,
   LayoutAction,
   ReapplyAction,
   TogglePauseAction,
@@ -15,4 +17,6 @@ streamDeck.actions.registerAction(new ReapplyAction());
 streamDeck.actions.registerAction(new LayoutAction());
 streamDeck.actions.registerAction(new UndoLayoutAction());
 streamDeck.actions.registerAction(new CancelPreviewAction());
+streamDeck.actions.registerAction(new ControlVariableAction());
+streamDeck.actions.registerAction(new ConnectionSettingsAction());
 streamDeck.connect();

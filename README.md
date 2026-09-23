@@ -1,5 +1,82 @@
 # Stream State Router 2.1.0
 
+## 2.2.0 — contrôle Windows et filtres avancés (en développement)
+
+SSR peut désormais associer aux profils existants des actions qui dépassent le
+seul état OBS, sans ajouter une nouvelle dimension de routage :
+
+- `app_audio_output` : affecte le périphérique audio Windows d'une application
+  via SoundVolumeView `/SetAppDefault`. Le backend est isolé derrière une
+  interface SSR afin de pouvoir être remplacé si Windows publie un jour une API
+  stable pour cette préférence ;
+- `windows_hdr` : active ou désactive HDR/Advanced Color sur l'écran principal
+  ou sur tous les écrans compatibles via l'API Win32 DisplayConfig ;
+- `source_filter_settings` : modifie les paramètres JSON d'un filtre OBS avec
+  `SetSourceFilterSettings`, en fusionnant par défaut avec les réglages
+  existants.
+
+Usage recommandé :
+
+- **AudioProfile** : routage du jeu vers le canal/périphérique Windows voulu ;
+- **CaptureProfile** : HDR/SDR Windows et réglages liés à la capture ;
+- **Game / Overlay / Capture / Audio** : réglages de filtres OBS lorsque cela
+  correspond au rôle du profil.
+
+Le chemin SoundVolumeView est configurable dans **Paramètres > Contrôle Windows**.
+HDR ne dépend d'aucun utilitaire externe.
+
+### Préparation via launcher
+
+Une règle d'application peut déclarer un exécutable **Launcher** (par exemple
+`Battle.net.exe` ou `Ankama Launcher.exe`). Chaque action de profil dispose
+d'une option **Préparer cette action dès le launcher**. Les actions marquées
+sont appliquées dès que le launcher est détecté, sans créer une seconde règle
+de routage pour le launcher.
+
+La préparation reste prioritaire tant que le launcher est actif : un fallback
+ne réécrit pas brièvement la même propriété (par exemple HDR OFF pendant un
+Alt-Tab). Lorsque l'application démarre, son état complet reprend la propriété ;
+si le launcher se ferme sans lancer l'application, SSR invalide uniquement les
+domaines préparés et restaure l'état routé courant.
+
+Si plusieurs applications ou launchers actifs demandent exactement la même
+préparation, SSR la déduplique. Si deux préparations écrivent des valeurs
+incompatibles sur la même cible, SSR refuse la préparation ambiguë et la
+signale dans le journal au lieu de choisir silencieusement.
+
+### Import de collection OBS / Advanced Scene Switcher
+
+Depuis l'onglet **Profils**, le bouton **Importer collection OBS…** peut lire la
+collection OBS courante sans la modifier et projeter dans le profil sélectionné :
+
+- les settings des inputs OBS ;
+- mute et volume ;
+- état et settings des filtres ;
+- la visibilité des Scene Items lorsque l'identité n'est pas ambiguë ;
+- la géométrie de chaque scène sous forme de LayoutProfiles importés, y compris
+  les sources qui ne suivent pas la convention `[Type] Nom`.
+
+Le mode d'import de layouts est plus large que la capture LayoutProfile
+historique : les sources ordinaires deviennent des modules génériques
+`Imported`. Lorsque plusieurs occurrences portent exactement le même nom dans
+le même conteneur, SSR les exclut de l'import géométrique et les signale au lieu
+de risquer de déplacer la mauvaise occurrence.
+
+L'importeur peut également lire un export JSON Advanced Scene Switcher ou
+détecter automatiquement l'objet `advanced-scene-switcher` stocké dans le
+fichier de la collection OBS courante. Les macros ne sont converties que lorsque
+leur déclencheur et leurs actions sont représentables comme un état SSR stable.
+Les waits, toggles, variables, scripts, `elseActions`, transitions spécifiques,
+logique négative/composée, contraintes temporelles et séquences qui écrivent
+plusieurs fois la même propriété sont conservés dans le rapport mais jamais
+approximés. Les nouvelles règles ASC sont créées désactivées pour revue, et un
+conflit avec une action SSR existante refuse toute la macro sans mutation
+partielle.
+
+Les exports SSR « partageables » neutralisent les settings OBS importés et le
+chemin local SoundVolumeView afin d'éviter la fuite accidentelle d'URL, cookies,
+tokens ou informations locales.
+
 ## 2.1.0 — routage déclaratif gardé
 
 La 2.1.0 consolide la fondation déclarative construite au-dessus de l'architecture

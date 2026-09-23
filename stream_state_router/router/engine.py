@@ -57,6 +57,16 @@ class StateRouterEngine:
         return bool(self._rules.needs_context)
 
     @property
+    def needs_process_context(self) -> bool:
+        return bool(self._rules.needs_process_context)
+
+    def launcher_candidates(
+        self,
+        context: Mapping[str, Any] | None = None,
+    ):
+        return self._rules.launcher_candidates(context)
+
+    @property
     def current_state(self) -> StreamState | None:
         return self._current_state
 
@@ -222,6 +232,11 @@ class StateRouterEngine:
         assert resolution.state is not None
         state = resolution.state
         if state == self._current_state:
+            # The effective stream state is already correct, but the rule that
+            # currently explains it may have changed (for example foreground
+            # Dofus -> process_running Dofus background). Keep diagnostics/API
+            # aligned without producing a StateChange or replaying side effects.
+            self._current_rule = resolution.rule_name
             self._reset_candidate()
             return None
 

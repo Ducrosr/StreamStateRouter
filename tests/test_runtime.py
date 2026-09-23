@@ -27,6 +27,25 @@ from stream_state_router.services.declarative_execution import ExecutionStepResu
 from stream_state_router.services.runtime import RoutingService
 
 
+class FakeProcessProvider:
+    def __init__(self, names=()):
+        self._names = frozenset(str(item).casefold() for item in names)
+        self.calls = 0
+
+    def names(self):
+        self.calls += 1
+        return self._names
+
+
+class FakeHostController:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, kind, params):
+        self.calls.append((kind, dict(params)))
+        return True
+
+
 class FakeProvider:
     def __init__(self, app):
         self.app = app
@@ -115,8 +134,12 @@ class CommandDispatcher(FakeDispatcher):
         super().__init__()
         self.profile_threads = []
         self.layout_threads = []
+        self.control_values = {}
 
-    def execute_profile(self, domain, profile_name):
+    def set_control_variables(self, values):
+        self.control_values = dict(values)
+
+    def execute_profile(self, domain, profile_name, *, state=None):
         self.profile_threads.append((domain, profile_name, threading.current_thread().name))
         return DispatchResult(1, 0, (domain,))
 
@@ -741,6 +764,94 @@ def activation_policy(*, enabled=True, cooldown=20.0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_control_variable_command_runs_on_worker_and_reapplies_game_profile(self):
+        app = ForegroundApp(1, 1, "game.exe")
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "game",
+                        StreamState(game="Game"),
+                        priority=100,
+                        exe="game.exe",
+                    )
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            control_variables={"Mood": "Happy"},
+        )
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while engine.current_state is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            request_id = service.request_control_variable("Mood", "Angry")
+            deadline = time.monotonic() + 1.0
+            status = None
+            while time.monotonic() < deadline:
+                status = service.command_status(request_id)
+                if status and status.get("status") in {"completed", "failed"}:
+                    break
+                time.sleep(0.01)
+            self.assertIsNotNone(status)
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(service.control_variables()["Mood"], "Angry")
+            self.assertEqual(dispatcher.control_values["Mood"], "Angry")
+            self.assertTrue(dispatcher.profile_threads)
+            self.assertEqual(
+                dispatcher.profile_threads[-1][0:2],
+                ("game", "Game"),
+            )
+            self.assertTrue(
+                all(
+                    thread == "SSR-Router"
+                    for _domain, _profile, thread in dispatcher.profile_threads
+                )
+            )
+        finally:
+            service.stop()
+
+    def test_process_context_routes_background_process_without_foreground_match(self):
+        app = ForegroundApp(1, 1, "explorer.exe")
+        rules = RuleSet(
+            [
+                AppRule(
+                    "dofus-running",
+                    StreamState(game="Dofus"),
+                    priority=100,
+                    conditions={"process_running": "Dofus.exe"},
+                )
+            ],
+            fallback=StreamState(game="Vanilla"),
+        )
+        engine = StateRouterEngine(rules, debounce_ms=0)
+        dispatcher = FakeDispatcher()
+        processes = FakeProcessProvider(("Dofus.exe",))
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+            process_provider=processes,
+        )
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while not dispatcher.changes and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(dispatcher.changes)
+            self.assertEqual(dispatcher.changes[-1].current.game, "Dofus")
+            self.assertGreater(processes.calls, 0)
+        finally:
+            service.stop()
+
     def test_cooperative_checkpoint_does_not_start_probe_or_activation_tick(self):
         app = ForegroundApp(1, 1, "terminal.exe")
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
@@ -2950,6 +3061,124 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.profile_threads,
                 [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+
+    def test_launcher_preparation_persists_over_fallback_and_restores_on_close(self):
+        fallback = StreamState(capture_profile="SDR")
+        target = StreamState(
+            game="Overwatch",
+            capture_profile="HDR",
+        )
+        rules = RuleSet(
+            [
+                AppRule(
+                    "Overwatch",
+                    target,
+                    priority=100,
+                    exe="Overwatch.exe",
+                    launcher="Battle.net.exe",
+                )
+            ],
+            fallback=fallback,
+        )
+        engine = StateRouterEngine(
+            rules,
+            debounce_ms=0,
+            fallback_debounce_ms=0,
+        )
+        profiles = profile_map_from_raw(
+            {
+                "capture": {
+                    "SDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "params": {
+                                    "enabled": False,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                    "HDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": True,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        host = FakeHostController()
+        client = SimpleNamespace(
+            config=SimpleNamespace(enabled=False),
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            profiles,
+            host_controller=host,
+        )
+        process_provider = FakeProcessProvider(("Battle.net.exe",))
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(
+                ForegroundApp(1, 1, "explorer.exe")
+            ),
+            process_provider=process_provider,
+        )
+
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while not host.calls and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertTrue(host.calls)
+            self.assertEqual(
+                host.calls[0],
+                (
+                    "windows_hdr",
+                    {"enabled": True, "display": "primary"},
+                ),
+            )
+            self.assertFalse(
+                any(
+                    kind == "windows_hdr"
+                    and params.get("enabled") is False
+                    for kind, params in host.calls
+                )
+            )
+
+            process_provider._names = frozenset()
+            service._wake.set()
+            deadline = time.monotonic() + 1.0
+            while (
+                not any(
+                    kind == "windows_hdr"
+                    and params.get("enabled") is False
+                    for kind, params in host.calls
+                )
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            self.assertTrue(
+                any(
+                    kind == "windows_hdr"
+                    and params.get("enabled") is False
+                    for kind, params in host.calls
+                )
             )
         finally:
             self.assertTrue(service.stop())

@@ -64,6 +64,11 @@ def desired_assignments_from_actions(
         kind = action.type.strip().casefold()
         params = dict(action.params)
 
+        if kind == "wait_ms":
+            # Temporal sequencing has no stable property representation.
+            # Dispatcher.plan_state marks profiles containing it classic-only.
+            continue
+
         if kind == "set_program_scene":
             scene = str(params.get("scene") or "").strip()
             if not scene:
@@ -115,6 +120,66 @@ def desired_assignments_from_actions(
                     provenance=provenance,
                 )
             )
+            continue
+
+        if kind == "source_filter_settings":
+            source = str(params.get("source") or "").strip()
+            filter_name = str(params.get("filter") or "").strip()
+            settings = params.get("settings")
+            if not source or not filter_name:
+                raise ValueError(
+                    "source_filter_settings requires params.source and params.filter"
+                )
+            if not isinstance(settings, Mapping):
+                raise ValueError(
+                    "source_filter_settings requires params.settings"
+                )
+            if params.get("overlay") is False:
+                raise UnsupportedIntentAction(
+                    "source_filter_settings with overlay=false cannot be represented "
+                    "as independent stable setting assignments"
+                )
+            for setting in sorted(settings, key=str):
+                assign(
+                    DesiredAssignment.create(
+                        PropertyKey.filter_setting(
+                            collection=collection,
+                            source=source,
+                            filter_name=filter_name,
+                            setting=str(setting),
+                        ),
+                        settings[setting],
+                        provenance=provenance,
+                    )
+                )
+            continue
+
+        if kind == "app_audio_output":
+            device = str(params.get("device") or "").strip()
+            process = str(params.get("process") or "").strip()
+            roles = str(params.get("roles") or "all").strip().casefold()
+            if not device or not process:
+                raise ValueError(
+                    "app_audio_output requires params.device and params.process"
+                )
+            if roles not in {"0", "1", "2", "all"}:
+                raise ValueError(
+                    "app_audio_output params.roles must be 0, 1, 2 or all"
+                )
+            # Host actions are intentionally executed by the classic guarded
+            # profile path for now. Returning no managed property keeps them
+            # visible as intent-only in migration coverage without pretending
+            # that OBS observation can acknowledge Windows host state.
+            continue
+
+        if kind == "windows_hdr":
+            if "enabled" not in params or not isinstance(params.get("enabled"), bool):
+                raise ValueError("windows_hdr requires boolean params.enabled")
+            display = str(params.get("display") or "primary").strip().casefold()
+            if display not in {"primary", "all"}:
+                raise ValueError(
+                    "windows_hdr params.display must be primary or all"
+                )
             continue
 
         if kind == "input_mute":
