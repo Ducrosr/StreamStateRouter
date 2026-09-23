@@ -2602,6 +2602,8 @@ class MainWindow(QMainWindow):
             "obs_disconnected",
             "obs_error",
             "obs_command_result",
+            "manual_override",
+            "manual_override_released",
         }:
             self._schedule_dashboard_refresh()
         if event.kind == "routing_rule" and isinstance(event.payload, dict):
