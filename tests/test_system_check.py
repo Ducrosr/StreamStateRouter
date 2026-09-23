@@ -195,7 +195,16 @@ class SystemCheckTests(unittest.TestCase):
 
     def test_invalid_config_forces_error_status(self) -> None:
         config = _config()
-        config["router"]["poll_ms"] = 0
+        config["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "app_audio_output",
+                "params": {
+                    "device": "",
+                    "process": "",
+                    "roles": "gaming",
+                },
+            }
+        ]
 
         report = run_system_check(config)
 
