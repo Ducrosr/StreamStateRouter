@@ -106,6 +106,124 @@ class ConfigInsightsTests(unittest.TestCase):
         self.assertIn("fallback", kinds)
         self.assertIn("inheritance", kinds)
 
+    def test_detach_action_profile_preserves_effective_sequence_and_conditions(self) -> None:
+        config = _config()
+        config["profiles"]["game"]["Base"] = {
+            "actions": [
+                {
+                    "type": "wait_ms",
+                    "name": "Parent",
+                    "enabled": True,
+                    "params": {"duration_ms": 10},
+                }
+            ],
+            "extends": "",
+            "conditions": {"streaming": True},
+        }
+        config["profiles"]["game"]["Overwatch"] = {
+            "actions": [
+                {
+                    "type": "wait_ms",
+                    "name": "Child",
+                    "enabled": True,
+                    "params": {"duration_ms": 20},
+                }
+            ],
+            "extends": "Base",
+            "conditions": {"program_scene": "In Game"},
+        }
+
+        before = profile_content_entries(config, "game", "Overwatch")
+        draft, changed = detach_profile_inheritance(
+            config,
+            "game",
+            "Overwatch",
+        )
+        after = profile_content_entries(draft, "game", "Overwatch")
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [entry.name for entry in before],
+            [entry.name for entry in after],
+        )
+        detached = draft["profiles"]["game"]["Overwatch"]
+        self.assertEqual(detached["extends"], "")
+        self.assertEqual(
+            detached["conditions"],
+            {"streaming": True, "program_scene": "In Game"},
+        )
+        self.assertEqual(config["profiles"]["game"]["Overwatch"]["extends"], "Base")
+
+    def test_detach_layout_profile_preserves_resolved_layout(self) -> None:
+        config = _config()
+        config["layout_profiles"]["Base"] = {
+            "scene": "In Game",
+            "modules": {
+                "A": {
+                    "base_bounds": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 100,
+                        "height": 100,
+                    },
+                    "geometry": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 100,
+                        "height": 100,
+                    },
+                    "elements": [],
+                }
+            },
+            "extends": "",
+            "coordinate_mode": "normalized",
+            "conditions": {},
+            "transition": {"mode": "instant", "duration_ms": 0, "steps": 8},
+        }
+        config["layout_profiles"]["Child"] = {
+            "scene": "",
+            "modules": {
+                "A": {
+                    "geometry": {
+                        "x": 20,
+                        "y": 30,
+                        "width": 100,
+                        "height": 100,
+                    }
+                }
+            },
+            "extends": "Base",
+            "coordinate_mode": "normalized",
+            "conditions": {},
+            "transition": {"mode": "instant", "duration_ms": 0, "steps": 8},
+        }
+
+        from stream_state_router.obs.layouts import resolve_layout_profile
+
+        before = resolve_layout_profile(
+            "Child",
+            config["layout_profiles"],
+        )
+        draft, changed = detach_profile_inheritance(
+            config,
+            "layout",
+            "Child",
+        )
+        after = resolve_layout_profile(
+            "Child",
+            draft["layout_profiles"],
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            {key: value for key, value in before.items() if key != "extends"},
+            {key: value for key, value in after.items() if key != "extends"},
+        )
+        self.assertEqual(
+            draft["layout_profiles"]["Child"]["extends"],
+            "",
+        )
+
     def test_profile_content_entries_identify_parent_and_local_ownership(self) -> None:
         config = _config()
         config["profiles"]["game"]["Base"] = {
