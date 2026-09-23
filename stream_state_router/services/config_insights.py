@@ -62,6 +62,15 @@ class ProfileUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileContentEntry:
+    source_profile: str
+    kind: str
+    name: str
+    target: str
+    enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ProvenanceRow:
     domain: str
     label: str
@@ -225,6 +234,109 @@ def profile_lineage(
             break
         current = str(profile.get("extends") or "").strip()
     return tuple(lineage)
+
+
+def profile_content_entries(
+    config: Mapping[str, Any],
+    domain: str,
+    profile_name: str,
+) -> tuple[ProfileContentEntry, ...]:
+    lineage = profile_lineage(config, domain, profile_name)
+    profiles = _profile_maps(config, domain)
+    entries: list[ProfileContentEntry] = []
+
+    if domain == "layout":
+        for source_profile in reversed(lineage):
+            profile = profiles.get(source_profile)
+            if not isinstance(profile, Mapping):
+                continue
+            modules = profile.get("modules")
+            if not isinstance(modules, Mapping):
+                continue
+            for module_name, module in modules.items():
+                if not isinstance(module, Mapping):
+                    continue
+                elements = module.get("elements")
+                sources = [
+                    str(element.get("source") or "").strip()
+                    for element in elements
+                    if isinstance(elements, list)
+                    and isinstance(element, Mapping)
+                    and bool(element.get("included", True))
+                    and str(element.get("source") or "").strip()
+                ] if isinstance(elements, list) else []
+                entries.append(
+                    ProfileContentEntry(
+                        source_profile=source_profile,
+                        kind="module",
+                        name=str(module_name),
+                        target=", ".join(sources) or str(
+                            profile.get("scene") or ""
+                        ),
+                        enabled=bool(module.get("managed", True)),
+                    )
+                )
+        return tuple(entries)
+
+    for source_profile in reversed(lineage):
+        profile = profiles.get(source_profile)
+        if not isinstance(profile, Mapping):
+            continue
+        actions = profile.get("actions")
+        if not isinstance(actions, list):
+            continue
+        for index, action in enumerate(actions):
+            if not isinstance(action, Mapping):
+                continue
+            kind = str(action.get("type") or "").strip()
+            params = _mapping(action.get("params"))
+            target = ""
+            normalized = kind.casefold()
+            if normalized == "set_program_scene":
+                target = str(params.get("scene") or "")
+            elif normalized == "scene_item_enabled":
+                target = (
+                    f"{params.get('scene', '')}/{params.get('source', '')}"
+                )
+            elif normalized in {
+                "source_filter_enabled",
+                "source_filter_settings",
+            }:
+                target = (
+                    f"{params.get('source', '')}/{params.get('filter', '')}"
+                )
+            elif normalized in {
+                "input_mute",
+                "input_volume_db",
+                "set_input_settings",
+            }:
+                target = str(params.get("input") or "")
+            elif normalized == "app_audio_output":
+                process = str(params.get("process") or "")
+                device = str(params.get("device") or "")
+                target = (
+                    f"{process} → {device}"
+                    if process or device
+                    else ""
+                )
+            elif normalized == "windows_hdr":
+                target = str(params.get("display") or "primary")
+            elif normalized == "wait_ms":
+                target = f"{params.get('duration_ms', 0)} ms"
+
+            entries.append(
+                ProfileContentEntry(
+                    source_profile=source_profile,
+                    kind=kind or "action",
+                    name=str(
+                        action.get("name")
+                        or f"Action {index + 1}"
+                    ),
+                    target=target,
+                    enabled=bool(action.get("enabled", True)),
+                )
+            )
+    return tuple(entries)
 
 
 def _profile_content_summary(
