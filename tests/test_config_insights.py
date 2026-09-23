@@ -14,6 +14,7 @@ from stream_state_router.importers.scene_collection import (
 from stream_state_router.services.config_insights import (
     apply_reference_repairs,
     build_capability_report,
+    build_config_change_report,
     build_effective_dependency_tree,
     build_effective_provenance,
     build_static_health_findings,
@@ -264,6 +265,56 @@ class ConfigInsightsTests(unittest.TestCase):
         )
         self.assertEqual(entries[0].target, "In Game")
         self.assertEqual(entries[1].target, "25 ms")
+
+    def test_config_change_report_describes_rules_profiles_and_settings(self) -> None:
+        before = _config()
+        after = copy.deepcopy(before)
+        after["rules"][0]["priority"] += 10
+        after["profiles"]["game"]["Overwatch"]["actions"] = [
+            {
+                "type": "wait_ms",
+                "name": "Delay",
+                "enabled": True,
+                "params": {"duration_ms": 25},
+            }
+        ]
+        after["profiles"]["game"]["New Game"] = {
+            "actions": [],
+            "extends": "",
+            "conditions": {},
+        }
+        after["ui"]["safe_live"] = not bool(
+            after["ui"].get("safe_live", True)
+        )
+
+        changes = build_config_change_report(before, after)
+        keyed = {(item.section, item.item): item for item in changes}
+
+        self.assertEqual(
+            keyed[("Règles", "Overwatch")].change_type,
+            "modified",
+        )
+        self.assertIn(
+            "priorité",
+            keyed[("Règles", "Overwatch")].detail,
+        )
+        self.assertIn(
+            "actions",
+            keyed[("Profils Jeu", "Overwatch")].detail,
+        )
+        self.assertEqual(
+            keyed[("Profils Jeu", "New Game")].change_type,
+            "added",
+        )
+        self.assertIn(("Interface", "Interface"), keyed)
+
+    def test_config_change_report_is_empty_for_identical_config(self) -> None:
+        config = _config()
+
+        self.assertEqual(
+            build_config_change_report(config, copy.deepcopy(config)),
+            (),
+        )
 
     def test_dependency_tree_tracks_decision_domains_and_content_origin(self) -> None:
         config = _config()
