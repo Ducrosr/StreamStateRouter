@@ -4944,6 +4944,11 @@ class MainWindow(QMainWindow):
             request_id = self._service.request_collection_import_preview(
                 include_layouts=bool(options.get("include_layouts", False)),
             )
+            self._track_obs_request(
+                request_id,
+                busy_text="Analyse…",
+                control=feedback_control,
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self,
