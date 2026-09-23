@@ -1055,11 +1055,35 @@ class MainWindow(QMainWindow):
             box = QComboBox()
             self.override_boxes[domain] = box
             form.addRow(DOMAIN_LABELS[domain], box)
+        self.override_release_mode = QComboBox()
+        self.override_release_mode.addItem(
+            "Jusqu’à désactivation manuelle",
+            "manual",
+        )
+        self.override_release_mode.addItem(
+            "Après une durée",
+            "duration",
+        )
+        self.override_release_mode.addItem(
+            "Au prochain changement d’application",
+            "foreground_change",
+        )
+        self.override_release_mode.addItem(
+            "À la fin du stream",
+            "stream_end",
+        )
         self.override_duration = QSpinBox()
-        self.override_duration.setRange(0, 1440)
+        self.override_duration.setRange(1, 1440)
+        self.override_duration.setValue(30)
         self.override_duration.setSuffix(" min")
-        self.override_duration.setSpecialValueText("Permanent")
-        form.addRow("Durée override", self.override_duration)
+        self.override_duration.setEnabled(False)
+        self.override_release_mode.currentIndexChanged.connect(
+            lambda *_args: self.override_duration.setEnabled(
+                self.override_release_mode.currentData() == "duration"
+            )
+        )
+        form.addRow("Fin de l’override", self.override_release_mode)
+        form.addRow("Durée", self.override_duration)
         override_lay.addLayout(form)
         actions = QHBoxLayout()
         apply_button = QPushButton("Appliquer l'override")
@@ -2957,14 +2981,37 @@ class MainWindow(QMainWindow):
             audio_profile=self.override_boxes["audio"].currentText(),
             layout_profile=self.override_boxes["layout"].currentText(),
         )
-        duration = self.override_duration.value() * 60
-        self._service.set_manual_override(
-            state,
-            duration_seconds=(duration if duration > 0 else None),
+        release_mode = str(
+            self.override_release_mode.currentData() or "manual"
         )
+        duration = (
+            self.override_duration.value() * 60
+            if release_mode == "duration"
+            else None
+        )
+        try:
+            self._service.set_manual_override(
+                state,
+                duration_seconds=duration,
+                release_mode=release_mode,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Override manuel",
+                str(exc),
+            )
+            return
+
+        labels = {
+            "manual": "jusqu’à désactivation manuelle",
+            "duration": f"pendant {self.override_duration.value()} min",
+            "foreground_change": "jusqu’au prochain changement d’application",
+            "stream_end": "jusqu’à la fin du stream",
+        }
         self._log(
-            "Override manuel appliqué"
-            + (f" pour {self.override_duration.value()} min." if duration else " sans expiration.")
+            "Override manuel appliqué · "
+            + labels.get(release_mode, release_mode)
         )
 
     def _clear_override(self) -> None:
