@@ -359,6 +359,80 @@ class UserActivityEntry:
     detail: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class DriftPresentation:
+    visible: bool
+    signature: str = ""
+    title: str = ""
+    detail: str = ""
+
+
+def build_obs_drift_presentation(
+    status: Mapping[str, object] | None,
+    *,
+    ignored_signature: str = "",
+) -> DriftPresentation:
+    values = status if isinstance(status, Mapping) else {}
+    signature = str(values.get("signature") or "")
+    detected = bool(values.get("detected", False))
+    if (
+        not bool(values.get("available", False))
+        or not detected
+        or (signature and signature == str(ignored_signature or ""))
+    ):
+        return DriftPresentation(False, signature=signature)
+
+    count = int(values.get("count", 0) or 0)
+    unknown_count = int(values.get("unknown_count", 0) or 0)
+    title = (
+        f"{count} propriété gérée diffère de la cible SSR"
+        if count == 1
+        else f"{count} propriétés gérées diffèrent de la cible SSR"
+    )
+
+    details: list[str] = []
+    raw_changes = values.get("changes")
+    if isinstance(raw_changes, list):
+        for raw in raw_changes[:3]:
+            if not isinstance(raw, Mapping):
+                continue
+            prop = raw.get("property")
+            prop_map = prop if isinstance(prop, Mapping) else {}
+            kind = str(prop_map.get("kind") or "propriété")
+            target = (
+                str(prop_map.get("source") or "")
+                or str(prop_map.get("container") or "")
+            )
+            if str(prop_map.get("filter") or ""):
+                target = (
+                    f"{target}/{prop_map.get('filter')}"
+                    if target
+                    else str(prop_map.get("filter"))
+                )
+            if str(prop_map.get("setting") or ""):
+                target = (
+                    f"{target}.{prop_map.get('setting')}"
+                    if target
+                    else str(prop_map.get("setting"))
+                )
+            label = f"{kind} · {target}" if target else kind
+            details.append(label)
+
+    if count > len(details):
+        details.append(f"+ {count - len(details)} autre(s)")
+    if unknown_count:
+        details.append(
+            f"Détection partielle : {unknown_count} propriété(s) non vérifiable(s)"
+        )
+
+    return DriftPresentation(
+        True,
+        signature=signature,
+        title=title,
+        detail=" · ".join(details),
+    )
+
+
 def render_capability_report_text(
     report,
     *,
@@ -661,6 +735,25 @@ def user_activity_from_runtime_event(
             "Override manuel activé" if active else "Override manuel désactivé",
             presentation.detail if active else "",
         )
+    if kind == "obs_drift":
+        count = int((payload or {}).get("count", 0) or 0)
+        return UserActivityEntry(
+            "Warn",
+            "Écart OBS détecté",
+            (
+                f"{count} propriété(s) gérée(s) diffèrent de la cible SSR"
+                if count
+                else str(message or "")
+            ),
+        )
+
+    if kind == "obs_drift_cleared":
+        return UserActivityEntry(
+            "Good",
+            "Écart OBS résolu",
+            "",
+        )
+
     if kind == "manual_override_released":
         return UserActivityEntry(
             "Good",
