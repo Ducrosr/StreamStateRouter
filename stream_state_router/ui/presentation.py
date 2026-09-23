@@ -605,3 +605,115 @@ def build_simulation_report(
         would_change=would_change,
         steps=tuple(steps),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRow:
+    name: str
+    trigger: str
+    result: str
+    status: str
+
+
+def _rule_trigger_text(rule: Mapping[str, object]) -> str:
+    parts: list[str] = []
+    exe = str(rule.get("exe") or "").strip()
+    path = str(rule.get("path") or "").strip()
+    title_regex = str(rule.get("title_regex") or "").strip()
+    launcher = str(rule.get("launcher") or "").strip()
+    conditions = _mapping(rule.get("conditions"))
+    process_running = str(conditions.get("process_running") or "").strip()
+
+    if exe:
+        parts.append(f"{exe} au premier plan")
+    elif path:
+        parts.append(f"application au chemin {path}")
+    elif title_regex:
+        parts.append(f"titre de fenêtre correspondant à /{title_regex}/")
+    elif process_running:
+        parts.append(f"{process_running} lancé")
+
+    if exe and process_running:
+        parts.append(f"{process_running} lancé")
+    if conditions.get("streaming") is True:
+        parts.append("stream actif")
+    elif conditions.get("streaming") is False and "streaming" in conditions:
+        parts.append("stream inactif")
+    if conditions.get("recording") is True:
+        parts.append("enregistrement actif")
+    elif conditions.get("recording") is False and "recording" in conditions:
+        parts.append("enregistrement inactif")
+    program_scene = str(conditions.get("program_scene") or "").strip()
+    if program_scene:
+        parts.append(f"scène OBS « {program_scene} »")
+    if bool(conditions.get("obs_enabled", False)):
+        parts.append("OBS requis")
+    if launcher:
+        parts.append(f"préparation via {launcher}")
+
+    return " et ".join(parts) if parts else "Condition non décrite"
+
+
+def _rule_result_text(rule: Mapping[str, object]) -> str:
+    behavior = str(rule.get("behavior") or "match").strip().casefold()
+    if behavior == "ignore":
+        return "Conserver l’état courant"
+
+    state = _mapping(rule.get("state"))
+    values = [
+        ("Jeu", state.get("Game")),
+        ("Overlay", state.get("OverlayProfile")),
+        ("Capture", state.get("CaptureProfile")),
+        ("Audio", state.get("AudioProfile")),
+        ("Layout", state.get("LayoutProfile")),
+    ]
+    rendered = [
+        f"{label}={value}"
+        for label, value in values
+        if str(value or "").strip()
+    ]
+    return " · ".join(rendered) if rendered else "Aucun état cible"
+
+
+def build_automation_rows(
+    config: Mapping[str, object] | None,
+) -> tuple[AutomationRow, ...]:
+    config = _mapping(config)
+    raw_rules = config.get("rules")
+    rules = [
+        item
+        for item in raw_rules
+        if isinstance(item, Mapping)
+    ] if isinstance(raw_rules, list) else []
+    rules.sort(
+        key=lambda item: int(item.get("priority", 0))
+        if str(item.get("priority", 0)).lstrip("-").isdigit()
+        else 0,
+        reverse=True,
+    )
+
+    rows = [
+        AutomationRow(
+            name=str(rule.get("name") or "Règle sans nom"),
+            trigger=f"Quand {_rule_trigger_text(rule)}",
+            result=_rule_result_text(rule),
+            status="Active" if bool(rule.get("enabled", True)) else "Désactivée",
+        )
+        for rule in rules
+    ]
+
+    fallback = _mapping(_mapping(config.get("router")).get("fallback_state"))
+    if fallback:
+        fallback_rule = {
+            "behavior": "match",
+            "state": fallback,
+        }
+        rows.append(
+            AutomationRow(
+                name="Configuration de secours",
+                trigger="Quand aucune règle ne correspond",
+                result=_rule_result_text(fallback_rule),
+                status="Active",
+            )
+        )
+    return tuple(rows)
