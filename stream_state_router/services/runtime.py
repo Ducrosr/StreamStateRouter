@@ -285,6 +285,10 @@ class RoutingService:
         self._last_obs_connected: bool | None = None
         self._last_obs_session_generation: int | None = None
         self._last_state_reconcile = 0.0
+        self._active_launcher_preparation_signature = ""
+        self._active_launcher_preparation_domains: tuple[str, ...] = ()
+        self._active_launcher_preparation_sources: tuple[str, ...] = ()
+        self._launcher_conflict_signature = ""
         self._activation_diagnostics: deque[tuple[float, str, str, str]] = deque(maxlen=250)
         self._routing_diagnostics: deque[RoutingDecisionStatus] = deque(maxlen=100)
         self._last_routing_status: RoutingDecisionStatus | None = None
@@ -1161,12 +1165,22 @@ class RoutingService:
                         )
                     if not paused:
                         routing_context = None
-                        if bool(getattr(self.engine, "needs_context", False)):
+                        needs_context = bool(
+                            getattr(self.engine, "needs_context", False)
+                        )
+                        needs_process_context = bool(
+                            getattr(self.engine, "needs_process_context", False)
+                        )
+                        if needs_context or needs_process_context:
                             self._worker_phase = "routing_context"
-                            try:
-                                routing_context = self.dispatcher.obs_context()
-                            except Exception:
-                                routing_context = {}
+                            routing_context = {}
+                            if needs_context:
+                                try:
+                                    routing_context.update(
+                                        self.dispatcher.obs_context()
+                                    )
+                                except Exception:
+                                    pass
                             routing_context = self._with_process_context(
                                 routing_context
                             )
@@ -1251,6 +1265,10 @@ class RoutingService:
                                     # that this observation revalidated. A newer
                                     # pause/resume request remains a hard barrier.
                                     self._resume_revalidation_pending = False
+                        self._worker_phase = "launcher_preparation"
+                        self._sync_launcher_preparation(
+                            routing_context or {}
+                        )
                     self._worker_phase = "due_dispatch"
                     self._process_due_dispatch()
                     with self._lock:
@@ -1382,6 +1400,212 @@ class RoutingService:
             failed_generation = 0
         if failed_generation:
             self._last_obs_session_generation = failed_generation
+
+    def _clear_launcher_preparation_tracking(self) -> None:
+        self._active_launcher_preparation_signature = ""
+        self._active_launcher_preparation_domains = ()
+        self._active_launcher_preparation_sources = ()
+
+    def _release_launcher_preparation_without_restore(self) -> None:
+        if not self._active_launcher_preparation_signature:
+            return
+        clearer = getattr(
+            self.dispatcher,
+            "clear_launcher_preparation_overrides",
+            None,
+        )
+        if callable(clearer):
+            clearer()
+        sources = self._active_launcher_preparation_sources
+        self._clear_launcher_preparation_tracking()
+        self._launcher_conflict_signature = ""
+        self._emit(
+            RuntimeEvent(
+                "launcher_preparation_released",
+                (
+                    "Préparation launcher transférée à l'état applicatif"
+                    + (f" — {', '.join(sources)}" if sources else "")
+                ),
+                payload={"sources": list(sources)},
+            )
+        )
+
+    def _restore_after_launcher_preparation(self) -> None:
+        if not self._active_launcher_preparation_signature:
+            return
+        domains = self._active_launcher_preparation_domains
+        sources = self._active_launcher_preparation_sources
+        clearer = getattr(
+            self.dispatcher,
+            "clear_launcher_preparation_overrides",
+            None,
+        )
+        invalidator = getattr(
+            self.dispatcher,
+            "invalidate_applied_domains",
+            None,
+        )
+        if callable(clearer):
+            clearer()
+        self._clear_launcher_preparation_tracking()
+
+        state = self.engine.current_state
+        if state is None or not domains:
+            return
+        if callable(invalidator):
+            invalidator(domains)
+        with self._dispatch_lock:
+            result = self.dispatcher.dispatch_state(state)
+        if self.on_dispatch:
+            self.on_dispatch(result)
+        for warning in result.warnings:
+            self.logger.warning("Launcher restore: %s", warning)
+        self._emit(
+            RuntimeEvent(
+                "launcher_preparation_cleared",
+                (
+                    "Préparation launcher terminée ; état courant restauré"
+                    + (f" — {', '.join(sources)}" if sources else "")
+                ),
+                payload={
+                    "sources": list(sources),
+                    "domains": list(domains),
+                    "warnings": list(result.warnings),
+                },
+                success=not bool(result.warnings),
+            )
+        )
+
+    def _sync_launcher_preparation(
+        self,
+        context: Mapping[str, object],
+    ) -> None:
+        builder = getattr(
+            self.dispatcher,
+            "build_launcher_preparation",
+            None,
+        )
+        activator = getattr(
+            self.dispatcher,
+            "activate_launcher_preparation",
+            None,
+        )
+        if not callable(builder) or not callable(activator):
+            return
+
+        if (
+            self.engine.manual_override is not None
+            or self.engine.current_rule != "fallback"
+        ):
+            self._release_launcher_preparation_without_restore()
+            return
+
+        candidates_provider = getattr(
+            self.engine,
+            "launcher_candidates",
+            None,
+        )
+        candidates = (
+            tuple(candidates_provider(context))
+            if callable(candidates_provider)
+            else ()
+        )
+        candidate_states = tuple(
+            (rule.name, rule.state)
+            for rule in candidates
+            if getattr(rule, "state", None) is not None
+        )
+
+        if not candidate_states:
+            self._launcher_conflict_signature = ""
+            self._restore_after_launcher_preparation()
+            return
+
+        plan = builder(
+            candidate_states,
+            context=context,
+        )
+        conflicts = tuple(getattr(plan, "conflicts", ()) or ())
+        if conflicts:
+            self._restore_after_launcher_preparation()
+            signature = str(getattr(plan, "signature", "") or "")
+            if signature != self._launcher_conflict_signature:
+                self._launcher_conflict_signature = signature
+                message = (
+                    "Préparation launcher ambiguë : "
+                    + " ; ".join(conflicts)
+                )
+                self.logger.warning(message)
+                self._emit(
+                    RuntimeEvent(
+                        "launcher_preparation_conflict",
+                        message,
+                        payload={
+                            "sources": list(
+                                getattr(plan, "sources", ()) or ()
+                            ),
+                            "conflicts": list(conflicts),
+                        },
+                        success=False,
+                    )
+                )
+            return
+
+        self._launcher_conflict_signature = ""
+        actions = tuple(getattr(plan, "actions", ()) or ())
+        if not actions:
+            self._restore_after_launcher_preparation()
+            return
+
+        signature = str(getattr(plan, "signature", "") or "")
+        if (
+            signature
+            and signature
+            == self._active_launcher_preparation_signature
+        ):
+            return
+
+        if self._active_launcher_preparation_signature:
+            self._restore_after_launcher_preparation()
+
+        with self._dispatch_lock:
+            result = activator(plan)
+        self._active_launcher_preparation_signature = signature
+        self._active_launcher_preparation_domains = tuple(
+            result.changed_domains
+        )
+        self._active_launcher_preparation_sources = tuple(
+            getattr(plan, "sources", ()) or ()
+        )
+        if self.on_dispatch:
+            self.on_dispatch(result)
+        for warning in result.warnings:
+            self.logger.warning("Launcher preparation: %s", warning)
+        self._emit(
+            RuntimeEvent(
+                "launcher_preparation",
+                (
+                    f"Préparation launcher : {result.executed} action(s)"
+                    + (
+                        " — "
+                        + ", ".join(
+                            self._active_launcher_preparation_sources
+                        )
+                        if self._active_launcher_preparation_sources
+                        else ""
+                    )
+                ),
+                payload={
+                    "sources": list(
+                        self._active_launcher_preparation_sources
+                    ),
+                    "domains": list(result.changed_domains),
+                    "executed": result.executed,
+                    "warnings": list(result.warnings),
+                },
+                success=not bool(result.warnings),
+            )
+        )
 
     def _reconcile_desired_state_if_due(self) -> None:
         if self._last_obs_connected is False:
