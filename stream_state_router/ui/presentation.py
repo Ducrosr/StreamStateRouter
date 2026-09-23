@@ -57,6 +57,8 @@ def _status_label(status: str, *, desired: str, applied: str) -> str:
         return "À corriger" if normalized != "pending" else "À appliquer"
     if desired and applied and desired != applied:
         return "À appliquer"
+    if desired and not applied and normalized in _OK_STATUSES:
+        return "À vérifier"
     if normalized in _OK_STATUSES:
         return "Conforme"
     return status or "À vérifier"
@@ -121,8 +123,16 @@ def build_dashboard_snapshot(
     plan = _mapping(explanation.get("obs_plan"))
     effective = _mapping(routing.get("effective_state"))
 
+    current_rule = str(routing.get("rule_name") or "").strip()
+    status_rule = str(routing_status.get("rule_name") or "").strip()
+    status_is_current = bool(routing_status) and (
+        not current_rule or not status_rule or current_rule == status_rule
+    )
+
     status_details: dict[str, Mapping[str, object]] = {}
-    raw_status_details = routing_status.get("domain_details")
+    raw_status_details = (
+        routing_status.get("domain_details") if status_is_current else None
+    )
     if isinstance(raw_status_details, list):
         for item in raw_status_details:
             if not isinstance(item, Mapping):
@@ -174,6 +184,8 @@ def build_dashboard_snapshot(
         health_text, health_style = "OBS désactivé", "Muted"
     elif not obs_connected:
         health_text, health_style = "OBS déconnecté", "Bad"
+    elif routing_status and not status_is_current:
+        health_text, health_style = "Nouvelle décision · application en attente", "Warn"
     elif routing_status:
         if bool(routing_status.get("success", False)):
             health_text, health_style = "Configuration appliquée", "Good"
