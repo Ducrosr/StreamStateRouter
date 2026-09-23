@@ -740,6 +740,25 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(any("transition.duration_ms" in error for error in errors), errors)
         self.assertTrue(any("transition.steps" in error for error in errors), errors)
 
+    def test_layout_transition_duration_is_bounded_to_ui_range(self):
+        data = self.sample()
+        data["layout_profiles"]["Vanilla"]["transition"] = {
+            "mode": "move",
+            "duration_ms": 10001,
+            "steps": 8,
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(
+                "transition.duration_ms doit être compris entre 0 et 10000"
+                in error
+                for error in errors
+            ),
+            errors,
+        )
+
     def test_condition_types_are_rejected_when_not_boolean(self):
         data = self.sample()
         data["profiles"]["game"]["Game"]["conditions"] = {"streaming": "true"}

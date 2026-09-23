@@ -1013,8 +1013,14 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             mode = str(transition.get("mode") or "instant")
             if mode not in LAYOUT_TRANSITIONS:
                 errors.append(f"{prefix}.transition.mode inconnu : {mode}")
-            if not _valid_int(transition.get("duration_ms", 0), minimum=0):
-                errors.append(f"{prefix}.transition.duration_ms doit être un entier >= 0")
+            if not _valid_int(
+                transition.get("duration_ms", 0),
+                minimum=0,
+                maximum=10000,
+            ):
+                errors.append(
+                    f"{prefix}.transition.duration_ms doit être compris entre 0 et 10000"
+                )
             if not _valid_int(transition.get("steps", 8), minimum=1, maximum=60):
                 errors.append(f"{prefix}.transition.steps doit être compris entre 1 et 60")
         modules = profile.get("modules", {})

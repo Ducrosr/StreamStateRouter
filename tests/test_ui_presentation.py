@@ -285,6 +285,57 @@ class DashboardPresentationTests(unittest.TestCase):
             titles,
         )
 
+    def test_diagnostic_surfaces_unavailable_drift_monitoring(self) -> None:
+        report = build_diagnostic_report(
+            _explanation(),
+            {"success": True},
+            obs_enabled=True,
+            obs_connected=True,
+            drift_status={
+                "available": False,
+                "checked_at": 123.0,
+                "reason": "Budget du probe de dérive OBS dépassé",
+                "duration_ms": 2050.0,
+                "obs_requests": 9,
+            },
+        )
+
+        item = next(
+            item
+            for item in report.items
+            if item.title == "Surveillance de dérive OBS indisponible"
+        )
+        self.assertEqual(item.severity, "warning")
+        self.assertIn("Budget", item.detail)
+        self.assertIn("2050 ms", item.detail)
+        self.assertIn("9 requête(s) OBS", item.detail)
+        self.assertEqual(report.status_style, "Warn")
+
+    def test_diagnostic_surfaces_partial_drift_coverage(self) -> None:
+        report = build_diagnostic_report(
+            _explanation(),
+            {"success": True},
+            obs_enabled=True,
+            obs_connected=True,
+            drift_status={
+                "available": True,
+                "checked_at": 123.0,
+                "coverage_limited": True,
+                "unknown_count": 2,
+                "duration_ms": 80.0,
+                "obs_requests": 4,
+            },
+        )
+
+        item = next(
+            item
+            for item in report.items
+            if item.title == "Surveillance de dérive OBS partielle"
+        )
+        self.assertEqual(item.severity, "warning")
+        self.assertIn("2 propriété(s)", item.detail)
+        self.assertEqual(report.status_style, "Warn")
+
     def test_diagnostic_translates_failed_domain_into_action(self) -> None:
         report = build_diagnostic_report(
             _explanation(),

@@ -160,11 +160,21 @@ def main(argv: list[str] | None = None) -> int:
     marker.start()
     try:
         if args.headless:
-            return run_headless(config)
+            code = run_headless(config)
+            if not marker.finalized:
+                # Headless mode never starts the OBS runtime, so a normal
+                # return is sufficient proof that there is no runtime cleanup
+                # obligation left behind. Exceptions deliberately keep the
+                # marker dirty.
+                marker.clean_shutdown()
+            return code
+
+        # GUI cleanup is owned by MainWindow/RoutingService. Do not infer a
+        # clean shutdown merely because the Qt event loop returned: an
+        # exception or an abnormal exit may have left OBS cleanup obligations
+        # that must survive for the next launch.
         return run_gui(config, minimized=args.minimized, marker=marker)
     finally:
-        if not marker.finalized:
-            marker.clean_shutdown()
         guard.close()
 
 

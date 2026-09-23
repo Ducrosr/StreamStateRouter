@@ -20,6 +20,7 @@ from stream_state_router.obs.dispatcher import (
     OBSDispatcher,
     profile_map_from_raw,
 )
+from stream_state_router.obs.layouts import CatalogElement
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
@@ -174,6 +175,40 @@ class CommandDispatcher(FakeDispatcher):
         return SimpleNamespace(warnings=(), missing_sources=())
 
 
+class WorkerLayoutCatalogManager:
+    def __init__(self):
+        self.thread_names = []
+
+    def set_cooperative_yield(self, _callback):
+        return
+
+    def discover_scene(self, scene):
+        self.thread_names.append(threading.current_thread().name)
+        return {
+            "[Webcam] Avatar": [
+                CatalogElement(
+                    scene=scene,
+                    container=scene,
+                    path=(scene,),
+                    container_kind="scene",
+                    module="Webcam",
+                    element="Avatar",
+                    source="[Webcam] Avatar",
+                    enabled=True,
+                    transform={"positionX": 42.0},
+                    source_type="scene",
+                    flags=frozenset({"novis"}),
+                )
+            ]
+        }
+
+
+class LayoutCatalogDispatcher(CommandDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.layout_manager = WorkerLayoutCatalogManager()
+
+
 class BlockingLayoutDispatcher(CommandDispatcher):
     def __init__(self):
         super().__init__()
@@ -215,6 +250,35 @@ class CooperativeLayoutDispatcher(CommandDispatcher):
                 time.sleep(0.01)
         finally:
             self.in_layout = False
+
+
+class PreemptibleAutomaticDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self._yield = None
+        self.dispatch_entered = threading.Event()
+        self.first_dispatch_exited = threading.Event()
+        self.games = []
+
+    def set_cooperative_yield(self, callback):
+        self._yield = callback
+
+    def pending_domains(self, state=None):
+        del state
+        return ("game",)
+
+    def dispatch_change(self, change):
+        self.games.append(change.current.game)
+        if len(self.games) > 1:
+            return DispatchResult(1, 0, ("game",))
+        self.dispatch_entered.set()
+        try:
+            while True:
+                if self._yield is not None:
+                    self._yield()
+                time.sleep(0.01)
+        finally:
+            self.first_dispatch_exited.set()
 
 
 class BlockingDispatcher(FakeDispatcher):
@@ -1108,6 +1172,38 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_layout_catalog_scan_runs_on_runtime_worker_and_serializes_snapshot(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = LayoutCatalogDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_layout_catalog("In Game")
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(
+                dispatcher.layout_manager.thread_names,
+                ["SSR-Router"],
+            )
+            self.assertEqual(result.result["scene"], "In Game")
+            row = result.result["catalog"]["[Webcam] Avatar"][0]
+            self.assertEqual(row["source"], "[Webcam] Avatar")
+            self.assertEqual(row["container"], "In Game")
+            self.assertEqual(row["path"], ["In Game"])
+            self.assertEqual(row["transform"], {"positionX": 42.0})
+            self.assertEqual(row["flags"], ["novis"])
+        finally:
+            self.assertTrue(service.stop())
+
     def test_catalog_sync_runs_on_runtime_worker_and_updates_status(self):
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
         client = CatalogRuntimeClient()
@@ -1811,6 +1907,116 @@ class RuntimeTests(unittest.TestCase):
             service_a.stop()
             if service_b is not None:
                 self.assertTrue(service_b.stop())
+
+    def test_foreground_change_preempts_long_automatic_dispatch(self):
+        app_a = ForegroundApp(
+            1,
+            101,
+            "a.exe",
+            process_path=r"C:\\Games\\A\\a.exe",
+            window_title="Game A",
+        )
+        app_b = ForegroundApp(
+            2,
+            202,
+            "b.exe",
+            process_path=r"C:\\Games\\B\\b.exe",
+            window_title="Game B",
+        )
+        provider = FakeProvider(app_a)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "A",
+                        StreamState(game="A"),
+                        priority=100,
+                        exe="a.exe",
+                    ),
+                    AppRule(
+                        "B",
+                        StreamState(game="B"),
+                        priority=100,
+                        exe="b.exe",
+                    ),
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = PreemptibleAutomaticDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=provider,
+        )
+        events = []
+        service.on_event = events.append
+        service.start()
+        try:
+            self.assertTrue(dispatcher.dispatch_entered.wait(1.0))
+
+            provider.app = app_b
+
+            self.assertTrue(
+                dispatcher.first_dispatch_exited.wait(0.5),
+                "stale automatic dispatch was not cooperatively preempted",
+            )
+            deadline = time.monotonic() + 1.0
+            while dispatcher.games[-1:] != ["B"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(dispatcher.games[:2], ["A", "B"])
+            self.assertTrue(
+                any(
+                    event.kind == "routing_result"
+                    and "foreground a changé" in event.message
+                    for event in events
+                ),
+                [getattr(event, "message", "") for event in events],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_foreground_change_does_not_preempt_manual_layout_command(self):
+        app_a = ForegroundApp(
+            1,
+            101,
+            "a.exe",
+            process_path=r"C:\\Games\\A\\a.exe",
+            window_title="Game A",
+        )
+        app_b = ForegroundApp(
+            2,
+            202,
+            "b.exe",
+            process_path=r"C:\\Games\\B\\b.exe",
+            window_title="Game B",
+        )
+        provider = FakeProvider(app_a)
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CooperativeLayoutDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=provider,
+        )
+        service.start()
+        try:
+            service.request_layout("apply", "Manual")
+            self.assertTrue(dispatcher.layout_entered.wait(1.0))
+
+            provider.app = app_b
+            time.sleep(0.12)
+
+            self.assertTrue(
+                dispatcher.in_layout,
+                "manual layout command was incorrectly foreground-preempted",
+            )
+        finally:
+            shutdown = service.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
 
     def test_shutdown_interrupts_cooperative_background_reconciliation(self):
         app = ForegroundApp(1, 1, "game.exe")

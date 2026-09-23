@@ -174,6 +174,8 @@ class MainWindow(QMainWindow):
         self._quitting = False
         self._api: LocalControlAPI | None = None
         self._known_catalog_sources: set[str] = set()
+        self._pending_auto_layout_catalog_request = ""
+        self._pending_auto_layout_catalog_scene = ""
         self._obs_connected_controls: list[tuple[object, bool]] = []
         self._preview_active = False
         self._routing_incomplete = False
@@ -3308,6 +3310,7 @@ class MainWindow(QMainWindow):
         rules, poll_ms, debounce_ms, fallback_ms = build_ruleset(
             runtime_config
         )
+        self._dispose_layout_sync_manager()
         self._client = OBSClientManager(build_obs_config(runtime_config))
         self._dispatcher = OBSDispatcher(
             self._client,
@@ -3366,6 +3369,8 @@ class MainWindow(QMainWindow):
         self._applied_revision = self._service.config_revision
         self._layout_sync_manager = None
         self._obs_module_catalog = {}
+        self._pending_auto_layout_catalog_request = ""
+        self._pending_auto_layout_catalog_scene = ""
         self._update_obs_status()
         self._refresh_config_revision_status()
 
@@ -3579,6 +3584,16 @@ class MainWindow(QMainWindow):
                 context = self._pending_collection_imports.pop(request_id)
                 self._complete_collection_import(payload, context)
                 self._update_obs_status()
+                return
+            if (
+                action == "layout.catalog"
+                and request_id
+                and request_id == self._pending_auto_layout_catalog_request
+            ):
+                if command_success:
+                    self._complete_auto_layout_catalog(payload)
+                self._pending_auto_layout_catalog_request = ""
+                self._pending_auto_layout_catalog_scene = ""
                 return
             if bool(getattr(payload, "success", False)):
                 if action == "layout.preview":
@@ -3810,6 +3825,7 @@ class MainWindow(QMainWindow):
                 and bool(self._applied_revision)
                 and self._saved_revision != self._applied_revision
             ),
+            drift_status=service.drift_status(),
         )
 
         dialog = QDialog(self)
@@ -6024,9 +6040,32 @@ class MainWindow(QMainWindow):
         self._refresh_layout_profile_names()
         self._refresh_override_boxes()
 
-    def _sync_obs_modules(self) -> None:
+    def _dispose_layout_sync_manager(self) -> None:
+        manager = self._layout_sync_manager
+        self._layout_sync_manager = None
+        if manager is None:
+            return
+        client = getattr(manager, "client", None)
+        # Defensive compatibility with sessions created by older code where
+        # the UI could reference the runtime-owned LayoutManager directly.
+        if client is None or client is self._client:
+            return
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            self._log(f"Fermeture client OBS outil layout : {exc}")
+
+    def _layout_tool_obs_config(self):
+        if self._client is not None:
+            return self._client.config
         self._collect_settings()
-        cfg = build_obs_config(self.config)
+        return build_obs_config(self.config)
+
+    def _sync_obs_modules(self) -> None:
+        cfg = self._layout_tool_obs_config()
         if not cfg.enabled:
             QMessageBox.information(
                 self,
@@ -6034,12 +6073,17 @@ class MainWindow(QMainWindow):
                 "Activez « Piloter OBS » dans Paramètres, puis enregistrez/appliquez la configuration.",
             )
             return
+        manager = OBSLayoutManager(OBSClientManager(cfg))
         try:
-            manager = self._dispatcher.layout_manager if self._dispatcher is not None else OBSLayoutManager(OBSClientManager(cfg))
             scenes, current = manager.list_scenes()
         except Exception as exc:
+            try:
+                manager.client.close()
+            except Exception:
+                pass
             QMessageBox.critical(self, "Layouts OBS", str(exc))
             return
+        self._dispose_layout_sync_manager()
         self._layout_sync_manager = manager
         previous = self.layout_scene.currentText().strip()
         self.layout_scene.blockSignals(True)
@@ -6067,6 +6111,12 @@ class MainWindow(QMainWindow):
             return
         self._populate_module_tree()
 
+    @staticmethod
+    def _catalog_element_value(element, key: str, default=""):
+        if isinstance(element, Mapping):
+            return element.get(key, default)
+        return getattr(element, key, default)
+
     def _populate_module_tree(self) -> None:
         self._catalog_tree_guard = True
         try:
@@ -6075,10 +6125,19 @@ class MainWindow(QMainWindow):
             for module_key, elements in self._obs_module_catalog.items():
                 if not elements:
                     continue
-                module_type = str(elements[0].module or "Autre")
-                by_type.setdefault(module_type, []).append((module_key, elements[0]))
+                element = elements[0]
+                module_type = str(
+                    self._catalog_element_value(element, "module", "Autre")
+                    or "Autre"
+                )
+                by_type.setdefault(module_type, []).append(
+                    (module_key, element)
+                )
 
-            for module_type, modules in sorted(by_type.items(), key=lambda item: item[0].casefold()):
+            for module_type, modules in sorted(
+                by_type.items(),
+                key=lambda item: item[0].casefold(),
+            ):
                 parent = QTreeWidgetItem([f"[{module_type}]", ""])
                 parent.setFlags(
                     parent.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate
@@ -6086,13 +6145,43 @@ class MainWindow(QMainWindow):
                 parent.setCheckState(0, Qt.Checked)
                 self.module_tree.addTopLevelItem(parent)
                 for module_key, element in sorted(
-                    modules, key=lambda item: (str(item[1].element).casefold(), item[0].casefold())
+                    modules,
+                    key=lambda item: (
+                        str(
+                            self._catalog_element_value(
+                                item[1],
+                                "element",
+                                "",
+                            )
+                        ).casefold(),
+                        item[0].casefold(),
+                    ),
                 ):
-                    label = str(element.element)
+                    label = str(
+                        self._catalog_element_value(
+                            element,
+                            "element",
+                            "",
+                        )
+                    )
+                    container = str(
+                        self._catalog_element_value(
+                            element,
+                            "container",
+                            "",
+                        )
+                    )
+                    source = str(
+                        self._catalog_element_value(
+                            element,
+                            "source",
+                            "",
+                        )
+                    )
                     if " @ " in module_key:
-                        label = f"{label} @ {element.container}"
-                    child = QTreeWidgetItem([label, element.source])
-                    child.setData(0, Qt.UserRole, element.source)
+                        label = f"{label} @ {container}"
+                    child = QTreeWidgetItem([label, source])
+                    child.setData(0, Qt.UserRole, source)
                     child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
                     child.setCheckState(0, Qt.Checked)
                     parent.addChild(child)
@@ -6432,15 +6521,20 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Appliquer le layout", str(exc))
 
     def _layout_manager_for_tools(self) -> OBSLayoutManager:
-        self._collect_settings()
-        cfg = build_obs_config(self.config)
+        cfg = self._layout_tool_obs_config()
         if not cfg.enabled:
             raise RuntimeError("Activez le pilotage OBS avant d'utiliser cet outil.")
-        if self._dispatcher is not None:
-            return self._dispatcher.layout_manager
-        # Tools must never silently use a manager kept from an older runtime.
-        self._layout_sync_manager = None
-        return OBSLayoutManager(OBSClientManager(cfg))
+        manager = self._layout_sync_manager
+        if (
+            manager is not None
+            and getattr(getattr(manager, "client", None), "config", None)
+            == cfg
+        ):
+            return manager
+        self._dispose_layout_sync_manager()
+        manager = OBSLayoutManager(OBSClientManager(cfg))
+        self._layout_sync_manager = manager
+        return manager
 
     def _preview_layout_profile(self) -> None:
         current = self._current_layout_profile()
@@ -6575,23 +6669,74 @@ class MainWindow(QMainWindow):
             self._module_scan_timer.stop()
 
     def _auto_scan_modules(self) -> None:
-        if self._layout_sync_manager is None or not hasattr(self, "layout_scene"):
+        if (
+            self._service is None
+            or self._client is None
+            or not self._client.config.enabled
+            or not self._client.connected
+            or self._pending_auto_layout_catalog_request
+            or not self._obs_module_catalog
+            or not hasattr(self, "layout_scene")
+        ):
             return
         scene = self.layout_scene.currentText().strip()
         if not scene:
             return
         try:
-            catalog = self._layout_sync_manager.discover_scene(scene)
+            request_id = self._service.request_layout_catalog(scene)
         except Exception:
             return
-        sources = {element.source for values in catalog.values() for element in values}
+        self._pending_auto_layout_catalog_request = request_id
+        self._pending_auto_layout_catalog_scene = scene
+
+    def _complete_auto_layout_catalog(self, payload) -> None:
+        result = getattr(payload, "result", None)
+        if not isinstance(result, Mapping):
+            return
+        scene = str(result.get("scene") or "").strip()
+        expected_scene = self._pending_auto_layout_catalog_scene
+        if (
+            not scene
+            or scene != expected_scene
+            or not hasattr(self, "layout_scene")
+            or self.layout_scene.currentText().strip() != scene
+        ):
+            return
+        raw_catalog = result.get("catalog")
+        if not isinstance(raw_catalog, Mapping):
+            return
+
+        catalog: dict[str, list] = {}
+        sources: set[str] = set()
+        for module_key, raw_elements in raw_catalog.items():
+            if not isinstance(raw_elements, list):
+                continue
+            elements = [
+                dict(element)
+                for element in raw_elements
+                if isinstance(element, Mapping)
+            ]
+            if not elements:
+                continue
+            catalog[str(module_key)] = elements
+            for element in elements:
+                source = str(element.get("source") or "").strip()
+                if source:
+                    sources.add(source)
+
         new_sources = sources - self._known_catalog_sources
         if new_sources and self._known_catalog_sources:
-            self._log("Nouveaux éléments OBS détectés : " + ", ".join(sorted(new_sources)))
+            self._log(
+                "Nouveaux éléments OBS détectés : "
+                + ", ".join(sorted(new_sources))
+            )
             if self.tray.isVisible():
                 self.tray.showMessage(
                     "Stream State Router",
-                    f"{len(new_sources)} nouvel(aux) élément(s) de module détecté(s) dans {scene}.",
+                    (
+                        f"{len(new_sources)} nouvel(aux) élément(s) de module "
+                        f"détecté(s) dans {scene}."
+                    ),
                     QSystemTrayIcon.MessageIcon.Information,
                     2500,
                 )
@@ -7128,6 +7273,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._dispose_layout_sync_manager()
         self._stop_runtime_for_exit()
         event.accept()
         QApplication.instance().quit()
@@ -7137,6 +7283,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        self._dispose_layout_sync_manager()
         self._stop_runtime_for_exit()
         self.tray.hide()
         QApplication.instance().quit()

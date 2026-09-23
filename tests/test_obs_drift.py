@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from stream_state_router.services.runtime import (
     RoutingService,
     RuntimeEvent,
+    _DriftProbeBudgetExceeded,
     summarize_obs_drift,
 )
 
@@ -82,6 +83,32 @@ class DriftSummaryTests(unittest.TestCase):
         self.assertEqual(status["unknown_count"], 1)
 
 
+class DriftProbeBudgetTests(unittest.TestCase):
+    def test_cooperative_checkpoint_aborts_expired_read_only_probe(self) -> None:
+        service = SimpleNamespace(
+            _thread=threading.current_thread(),
+            _shutdown_cleanup_active=False,
+            _lock=threading.RLock(),
+            _stopping=False,
+            _stop=threading.Event(),
+            _automatic_dispatch_foreground_signature=None,
+            _automatic_dispatch_superseded=False,
+            _automatic_dispatch_next_foreground_probe=0.0,
+            _drift_probe_deadline=1.0,
+            poll_seconds=0.05,
+        )
+
+        with patch(
+            "stream_state_router.services.runtime.time.monotonic",
+            return_value=2.0,
+        ):
+            with self.assertRaisesRegex(
+                _DriftProbeBudgetExceeded,
+                "Budget du probe",
+            ):
+                RoutingService._cooperative_obs_yield(service)
+
+
 class DriftProbeTests(unittest.TestCase):
     def _service(self, report: dict[str, object]):
         events: list[RuntimeEvent] = []
@@ -90,7 +117,9 @@ class DriftProbeTests(unittest.TestCase):
             _last_obs_connected=True,
             _declarative_planning=object(),
             _last_drift_probe=0.0,
+            _drift_probe_deadline=0.0,
             drift_probe_seconds=2.0,
+            drift_probe_budget_seconds=2.0,
             _lock=threading.RLock(),
             _dispatch_lock=threading.RLock(),
             _stopping=False,
@@ -98,9 +127,16 @@ class DriftProbeTests(unittest.TestCase):
             _resume_revalidation_pending=False,
             _pending_dispatch=None,
             _active_obs_command=None,
-            engine=SimpleNamespace(current_state=state),
+            _last_app=None,
+            engine=SimpleNamespace(
+                current_state=state,
+                manual_override=None,
+            ),
             _dispatch_generation=4,
             config_revision="cfg",
+            _obs_request_count=lambda: 0,
+            _arm_automatic_dispatch_preemption=lambda _app: False,
+            _clear_automatic_dispatch_preemption=lambda: False,
             _last_drift_status={
                 "available": False,
                 "detected": False,
@@ -115,18 +151,14 @@ class DriftProbeTests(unittest.TestCase):
     def test_probe_emits_only_when_drift_state_changes(self) -> None:
         service, events = self._service(_report())
 
-        with (
-            patch(
-                "stream_state_router.services.runtime.time.monotonic",
-                side_effect=[10.0, 20.0, 30.0],
-            ),
-            patch(
-                "stream_state_router.services.runtime.time.time",
-                side_effect=[100.0, 110.0, 120.0],
-            ),
+        with patch(
+            "stream_state_router.services.runtime.time.time",
+            side_effect=[100.0, 110.0, 120.0],
         ):
             RoutingService._probe_obs_drift_if_due(service)
+            service._last_drift_probe = 0.0
             RoutingService._probe_obs_drift_if_due(service)
+            service._last_drift_probe = 0.0
             service._build_current_declarative_plan.return_value = _report(
                 changed=False
             )
@@ -137,6 +169,10 @@ class DriftProbeTests(unittest.TestCase):
             ["obs_drift", "obs_drift_cleared"],
         )
         self.assertEqual(events[0].payload["count"], 1)
+        status = service._last_drift_status
+        self.assertIn("duration_ms", status)
+        self.assertEqual(status["obs_requests"], 0)
+        self.assertEqual(status["budget_seconds"], 2.0)
 
     def test_probe_skips_while_runtime_is_paused(self) -> None:
         service, events = self._service(_report())
