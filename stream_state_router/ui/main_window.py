@@ -184,6 +184,12 @@ class MainWindow(QMainWindow):
         self._build_tray()
         self._load_config_into_ui()
         self._wire_dirty_signals()
+        self._dashboard_refresh_timer = QTimer(self)
+        self._dashboard_refresh_timer.setSingleShot(True)
+        self._dashboard_refresh_timer.setInterval(75)
+        self._dashboard_refresh_timer.timeout.connect(
+            self._refresh_dashboard_summary
+        )
         self._start_runtime()
         self._start_api()
         self._module_scan_timer = QTimer(self)
@@ -312,6 +318,13 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(self.dashboard_tab_index)
         if hasattr(self, "unsaved"):
             self._refresh_config_revision_status()
+
+    def _schedule_dashboard_refresh(self) -> None:
+        timer = getattr(self, "_dashboard_refresh_timer", None)
+        if timer is None:
+            self._refresh_dashboard_summary()
+            return
+        timer.start()
 
     def _refresh_dashboard_summary(self) -> None:
         if not hasattr(self, "dashboard_health"):
@@ -2254,12 +2267,12 @@ class MainWindow(QMainWindow):
             self.fg_exe.setText("Aucune fenêtre")
             self.fg_title.setText("—")
             self.fg_path.setText("—")
-            self._refresh_dashboard_summary()
+            self._schedule_dashboard_refresh()
             return
         self.fg_exe.setText(app.exe_name or f"PID {app.pid}")
         self.fg_title.setText(app.window_title or "(sans titre)")
         self.fg_path.setText(app.process_path or "(chemin indisponible)")
-        self._refresh_dashboard_summary()
+        self._schedule_dashboard_refresh()
 
     def _on_state_change(self, change: StateChange) -> None:
         values = change.current.as_variables()
@@ -2278,7 +2291,7 @@ class MainWindow(QMainWindow):
                 f"Règle : {change.rule_name}",
             )
         )
-        self._refresh_dashboard_summary()
+        self._schedule_dashboard_refresh()
 
     def _on_dispatch(self, result) -> None:
         self._update_obs_status()
@@ -2287,7 +2300,7 @@ class MainWindow(QMainWindow):
                 f"OBS : {result.executed} action(s) exécutée(s) · "
                 f"{', '.join(result.changed_domains)}"
             )
-        self._refresh_dashboard_summary()
+        self._schedule_dashboard_refresh()
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         self._log(f"{event.kind}: {event.message}")
@@ -2298,7 +2311,16 @@ class MainWindow(QMainWindow):
         )
         if activity is not None:
             self._record_user_activity(activity)
-        self._refresh_dashboard_summary()
+        if event.kind in {
+            "routing_rule",
+            "routing_result",
+            "pause",
+            "obs_connected",
+            "obs_disconnected",
+            "obs_error",
+            "obs_command_result",
+        }:
+            self._schedule_dashboard_refresh()
         if event.kind == "routing_rule" and isinstance(event.payload, dict):
             rule_name = str(event.payload.get("rule_name") or "—")
             reason = str(event.payload.get("reason") or "état inchangé")
