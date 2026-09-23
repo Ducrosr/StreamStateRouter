@@ -18,6 +18,7 @@ from stream_state_router.services.config_insights import (
     build_static_health_findings,
     profile_usages,
     scan_obs_reference_repairs,
+    simulate_rule_scenario,
 )
 
 
@@ -212,6 +213,76 @@ class ConfigInsightsTests(unittest.TestCase):
         self.assertEqual(statuses["catalog"], "ready")
         self.assertEqual(statuses["audio"], "ready")
         self.assertEqual(statuses["hdr"], "ready")
+
+    def test_scenario_simulator_reuses_rule_matching_and_conditions(self) -> None:
+        config = _config()
+        config["rules"][0]["conditions"] = {
+            "streaming": True,
+            "program_scene": "In Game",
+        }
+
+        matching = simulate_rule_scenario(
+            config,
+            exe="Overwatch.exe",
+            streaming=True,
+            program_scene="In Game",
+            obs_enabled=True,
+        )
+        blocked = simulate_rule_scenario(
+            config,
+            exe="Overwatch.exe",
+            streaming=False,
+            program_scene="In Game",
+            obs_enabled=True,
+        )
+
+        self.assertEqual(matching.kind, "match")
+        self.assertEqual(matching.rule_name, "Overwatch")
+        self.assertEqual(matching.state["Game"], "Overwatch")
+        self.assertEqual(blocked.kind, "fallback")
+        self.assertTrue(
+            any(
+                check.name == "Overwatch"
+                and not check.matched
+                and "streaming" in check.reason
+                for check in blocked.checks
+            )
+        )
+
+    def test_scenario_simulator_supports_background_process_rules(self) -> None:
+        config = _config()
+        config["rules"].insert(
+            0,
+            {
+                "name": "Discord running",
+                "behavior": "match",
+                "priority": 500,
+                "enabled": True,
+                "exe": "",
+                "path": "",
+                "title_regex": "",
+                "state": {
+                    "Game": "Vanilla",
+                    "OverlayProfile": "Vanilla",
+                    "CaptureProfile": "Default",
+                    "AudioProfile": "Default",
+                    "LayoutProfile": "Vanilla",
+                },
+                "apply_delay_ms": 0,
+                "conditions": {
+                    "process_running": "Discord.exe",
+                },
+            },
+        )
+
+        report = simulate_rule_scenario(
+            config,
+            running_processes=("Discord.exe",),
+            obs_enabled=True,
+        )
+
+        self.assertEqual(report.kind, "match")
+        self.assertEqual(report.rule_name, "Discord running")
 
     def test_reference_scan_suggests_scene_input_filter_and_source_repairs(self) -> None:
         config = _config()
