@@ -84,6 +84,7 @@ from .presentation import (
     UserActivityEntry,
     build_dashboard_snapshot,
     build_diagnostic_report,
+    build_simulation_report,
     user_activity_from_runtime_event,
 )
 
@@ -384,6 +385,9 @@ class MainWindow(QMainWindow):
         diagnose_summary = QPushButton("Pourquoi ça ne marche pas ?")
         diagnose_summary.clicked.connect(self._show_guided_diagnostic)
         summary_actions.addWidget(diagnose_summary)
+        preview_summary = QPushButton("Prévisualiser sans appliquer")
+        preview_summary.clicked.connect(self._show_routing_preview)
+        summary_actions.addWidget(preview_summary)
         repair_summary = QPushButton("Corriger les différences")
         repair_summary.setObjectName("Primary")
         repair_summary.clicked.connect(self._force_reapply)
@@ -1279,6 +1283,78 @@ class MainWindow(QMainWindow):
                 ]
             )
             tree.addTopLevelItem(item)
+
+    def _show_routing_preview(self) -> None:
+        service = self._service
+        if service is None:
+            QMessageBox.information(
+                self,
+                "Prévisualisation",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        try:
+            explanation = service.explain_decision()
+        except Exception as exc:
+            QMessageBox.critical(self, "Prévisualisation", str(exc))
+            return
+
+        report = build_simulation_report(explanation)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Prévisualisation du routage")
+        dialog.resize(720, 430)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(report.summary)
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        table = QTreeWidget()
+        table.setColumnCount(5)
+        table.setHeaderLabels(
+            ["Élément", "Attendu", "Actuel", "État", "Opérations"]
+        )
+        table.setRootIsDecorated(False)
+        table.setAlternatingRowColors(True)
+        for step in report.steps:
+            table.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        step.label,
+                        step.desired,
+                        step.applied,
+                        step.status_label,
+                        str(step.operation_count),
+                    ]
+                )
+            )
+        table.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        table.header().setStretchLastSection(True)
+        root.addWidget(table, 1)
+
+        note = QLabel(
+            "Cette prévisualisation utilise le plan de routage courant et "
+            "n’envoie aucune mutation à OBS."
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        root.addWidget(note)
+
+        actions = QHBoxLayout()
+        if report.would_change:
+            apply_now = QPushButton("Appliquer maintenant")
+            apply_now.setObjectName("Primary")
+            apply_now.clicked.connect(dialog.accept)
+            apply_now.clicked.connect(self._force_reapply)
+            actions.addWidget(apply_now)
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
 
     def _show_guided_diagnostic(self) -> None:
         service = self._service
