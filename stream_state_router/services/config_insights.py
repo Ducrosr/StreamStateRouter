@@ -208,7 +208,7 @@ def profile_usages(
     return tuple(usages)
 
 
-def _profile_lineage(
+def profile_lineage(
     config: Mapping[str, Any],
     domain: str,
     profile_name: str,
@@ -289,7 +289,7 @@ def build_effective_provenance(
     rows: list[ProvenanceRow] = []
     for domain, label in DOMAIN_LABELS.items():
         profile = str(state.get(STATE_KEYS[domain]) or "").strip()
-        lineage = _profile_lineage(config, domain, profile)
+        lineage = profile_lineage(config, domain, profile)
         rows.append(
             ProvenanceRow(
                 domain=domain,
