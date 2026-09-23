@@ -96,12 +96,20 @@ class _FakeTabs:
 
 
 def _bind_obs_helpers(window) -> None:
+    if not hasattr(window, "_manual_undo"):
+        window._manual_undo = None
+    if not hasattr(window, "_manual_undo_controls"):
+        window._manual_undo_controls = []
     window._obs_connection_available = MethodType(
         MainWindow._obs_connection_available,
         window,
     )
     window._apply_obs_connected_control_state = MethodType(
         MainWindow._apply_obs_connected_control_state,
+        window,
+    )
+    window._refresh_manual_undo_controls = MethodType(
+        MainWindow._refresh_manual_undo_controls,
         window,
     )
     window._refresh_obs_connected_controls = MethodType(
