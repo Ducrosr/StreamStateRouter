@@ -122,3 +122,31 @@ def test_dashboard_snapshot_prioritizes_connection_health() -> None:
     assert snapshot.health_style == "Bad"
     assert snapshot.health_text.startswith("OBS déconnecté")
     assert "routage suspendu" in snapshot.health_text
+
+
+def test_dashboard_snapshot_does_not_reuse_previous_rule_success() -> None:
+    snapshot = build_dashboard_snapshot(
+        _explanation(rule_name="League", game="League of Legends"),
+        {
+            "rule_name": "Overwatch",
+            "success": True,
+            "domain_details": [
+                {
+                    "domain": "game",
+                    "desired_profile": "Overwatch",
+                    "applied_profile": "Overwatch",
+                    "status": "applied",
+                    "message": "",
+                }
+            ],
+        },
+        obs_enabled=True,
+        obs_connected=True,
+    )
+
+    assert snapshot.health_text == "Nouvelle décision · application en attente"
+    assert snapshot.health_style == "Warn"
+    game = next(row for row in snapshot.differences if row.domain == "game")
+    assert game.desired == "League of Legends"
+    assert game.applied == "—"
+    assert game.status_label == "À vérifier"
