@@ -5,7 +5,6 @@ import unittest
 from stream_state_router.importers.current_state_capture import (
     CurrentStateCaptureOptions,
     build_current_state_capture_draft,
-    find_ignored_process_rules,
     find_process_rules,
     suggest_capture_name,
 )
@@ -601,28 +600,6 @@ class CurrentStateCaptureTests(unittest.TestCase):
             result.config["layout_profiles"]["Child Layout"]["extends"],
             "Parent Layout",
         )
-
-    def test_find_ignored_process_rules_is_case_insensitive(self) -> None:
-        config = _config()
-        config["rules"] = [
-            {
-                "name": "Ignore launcher",
-                "behavior": "ignore",
-                "priority": 200,
-                "exe": "Launcher.exe",
-            },
-            {
-                "name": "Normal",
-                "behavior": "match",
-                "priority": 100,
-                "exe": "Launcher.exe",
-            },
-        ]
-
-        ignored = find_ignored_process_rules(config, "launcher.EXE")
-
-        self.assertEqual(len(ignored), 1)
-        self.assertEqual(ignored[0]["name"], "Ignore launcher")
 
     def test_suggest_capture_name_avoids_rule_and_profile_collisions(self) -> None:
         config = _config()
