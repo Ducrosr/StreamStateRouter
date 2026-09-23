@@ -12,6 +12,7 @@ from stream_state_router.services.config import (
     build_activation_policies,
     build_ruleset,
     export_config,
+    list_valid_backups,
     load_config,
     migrate_config,
     save_config,
@@ -247,6 +248,52 @@ class ConfigTests(unittest.TestCase):
                 backups = list(backup_dir.glob("config-*.json"))
         self.assertLessEqual(len(backups), 2)
         self.assertEqual(len({item.name for item in backups}), len(backups))
+
+    def test_list_valid_backups_returns_newest_first_and_skips_invalid(self):
+        data = self.sample()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "config.json"
+            backup_dir = root / "backups"
+            with patch(
+                "stream_state_router.services.config.backups_dir",
+                return_value=backup_dir,
+            ):
+                save_config(data, target)
+                data["router"]["poll_ms"] = 51
+                save_config(data, target)
+                data["router"]["poll_ms"] = 52
+                save_config(data, target)
+
+                invalid = backup_dir / "config-99999999-invalid.json"
+                invalid.write_text("{not-json", encoding="utf-8")
+                invalid.touch()
+
+                backups = list_valid_backups(limit=20)
+
+        self.assertEqual(len(backups), 2)
+        self.assertEqual(
+            [payload["router"]["poll_ms"] for payload, _path in backups],
+            [51, 50],
+        )
+
+    def test_list_valid_backups_honors_limit(self):
+        data = self.sample()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "config.json"
+            backup_dir = root / "backups"
+            with patch(
+                "stream_state_router.services.config.backups_dir",
+                return_value=backup_dir,
+            ):
+                save_config(data, target)
+                for value in (51, 52, 53):
+                    data["router"]["poll_ms"] = value
+                    save_config(data, target)
+                backups = list_valid_backups(limit=2)
+
+        self.assertEqual(len(backups), 2)
 
     def test_config_revision_is_stable_and_changes_with_content(self):
         data = self.sample()

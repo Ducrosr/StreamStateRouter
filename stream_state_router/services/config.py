@@ -446,21 +446,32 @@ def import_config(source: str | Path) -> dict[str, Any]:
     return load_config(Path(source))
 
 
-def latest_valid_backup() -> tuple[dict[str, Any], Path] | None:
+def list_valid_backups(
+    *,
+    limit: int = 20,
+) -> tuple[tuple[dict[str, Any], Path], ...]:
     directory = backups_dir()
     if not directory.exists():
-        return None
+        return ()
     candidates = sorted(
         directory.glob("config-*.json"),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
+    found: list[tuple[dict[str, Any], Path]] = []
     for candidate in candidates:
         try:
-            return load_config(candidate), candidate
+            found.append((load_config(candidate), candidate))
         except ConfigError:
             continue
-    return None
+        if len(found) >= max(1, int(limit)):
+            break
+    return tuple(found)
+
+
+def latest_valid_backup() -> tuple[dict[str, Any], Path] | None:
+    backups = list_valid_backups(limit=1)
+    return backups[0] if backups else None
 
 
 def push_layout_history(data: dict[str, Any], name: str, profile: Mapping[str, Any], *, limit: int = 10) -> None:

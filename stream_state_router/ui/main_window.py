@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -66,12 +68,25 @@ from ..services.config import (
     build_ruleset,
     export_config,
     import_config,
-    latest_valid_backup,
+    list_valid_backups,
     save_config,
     validate_config,
     push_layout_history,
     pop_layout_history,
     release_runtime_visibility_ownership,
+)
+from ..services.config_insights import (
+    apply_reference_repairs,
+    build_capability_report,
+    build_effective_provenance,
+    configured_action_types,
+    detach_profile_inheritance,
+    live_output_active,
+    profile_content_entries,
+    profile_lineage,
+    profile_usages,
+    scan_obs_reference_repairs,
+    simulate_rule_scenario,
 )
 from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
@@ -169,6 +184,12 @@ class MainWindow(QMainWindow):
         self._build_tray()
         self._load_config_into_ui()
         self._wire_dirty_signals()
+        self._dashboard_refresh_timer = QTimer(self)
+        self._dashboard_refresh_timer.setSingleShot(True)
+        self._dashboard_refresh_timer.setInterval(75)
+        self._dashboard_refresh_timer.timeout.connect(
+            self._refresh_dashboard_summary
+        )
         self._start_runtime()
         self._start_api()
         self._module_scan_timer = QTimer(self)
@@ -298,6 +319,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, "unsaved"):
             self._refresh_config_revision_status()
 
+    def _schedule_dashboard_refresh(self) -> None:
+        timer = getattr(self, "_dashboard_refresh_timer", None)
+        if timer is None:
+            self._refresh_dashboard_summary()
+            return
+        timer.start()
+
     def _refresh_dashboard_summary(self) -> None:
         if not hasattr(self, "dashboard_health"):
             return
@@ -348,6 +376,519 @@ class MainWindow(QMainWindow):
             if difference.message:
                 item.setToolTip(3, difference.message)
             self.dashboard_diff.addTopLevelItem(item)
+
+    def _show_capability_report(self) -> None:
+        service = self._service
+        client = self._client
+        self._collect_settings()
+
+        action_types = configured_action_types(self.config)
+        audio_probe: dict[str, object] = {}
+        hdr_probe: dict[str, object] = {}
+        controller = None
+        if (
+            "app_audio_output" in action_types
+            or "windows_hdr" in action_types
+        ):
+            try:
+                controller = build_host_controller(self.config)
+            except Exception as exc:
+                detail = str(exc)
+                if "app_audio_output" in action_types:
+                    audio_probe = {
+                        "status": "error",
+                        "detail": detail,
+                    }
+                if "windows_hdr" in action_types:
+                    hdr_probe = {
+                        "status": "error",
+                        "detail": detail,
+                    }
+
+        if "app_audio_output" in action_types and controller is not None:
+            try:
+                executable = controller.audio_router.resolve_executable()
+                audio_probe = {
+                    "status": "ready",
+                    "detail": f"SoundVolumeView disponible : {executable}",
+                }
+            except Exception as exc:
+                audio_probe = {
+                    "status": "error",
+                    "detail": str(exc),
+                    "action": (
+                        "Configurez SoundVolumeView dans Paramètres > "
+                        "Contrôle Windows."
+                    ),
+                }
+
+        if "windows_hdr" in action_types and controller is not None:
+            try:
+                rows = controller.hdr_controller.status(scope="primary")
+                supported = [
+                    row for row in rows
+                    if bool(row.get("supported", False))
+                ]
+                if supported:
+                    enabled = any(
+                        bool(row.get("enabled", False))
+                        for row in supported
+                    )
+                    hdr_probe = {
+                        "status": "ready",
+                        "detail": (
+                            "HDR pris en charge sur l’écran principal · "
+                            + ("actuellement activé" if enabled else "actuellement désactivé")
+                        ),
+                    }
+                else:
+                    hdr_probe = {
+                        "status": "error",
+                        "detail": (
+                            "Aucun écran principal compatible HDR n’a été "
+                            "détecté par l’API Windows."
+                        ),
+                    }
+            except Exception as exc:
+                hdr_probe = {
+                    "status": "error",
+                    "detail": str(exc),
+                    "action": (
+                        "Vérifiez la prise en charge HDR de Windows et de "
+                        "l’écran ciblé."
+                    ),
+                }
+
+        catalog_status = (
+            service.obs_catalog_status()
+            if service is not None
+            else {"available": False, "stale": False}
+        )
+        report = build_capability_report(
+            self.config,
+            obs_enabled=bool(client and client.config.enabled),
+            obs_connected=bool(client and client.connected),
+            obs_error=str(client.last_error if client else ""),
+            catalog_status=catalog_status,
+            audio_probe=audio_probe,
+            hdr_probe=hdr_probe,
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Santé et capacités SSR")
+        dialog.resize(900, 620)
+        root = QVBoxLayout(dialog)
+
+        title = QLabel(report.summary)
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        capabilities = QTreeWidget()
+        capabilities.setColumnCount(4)
+        capabilities.setHeaderLabels(
+            ["Capacité", "État", "Détail", "Action recommandée"]
+        )
+        capabilities.setRootIsDecorated(False)
+        capabilities.setAlternatingRowColors(True)
+        for item in report.items:
+            capabilities.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        item.label,
+                        item.status_label,
+                        item.detail,
+                        item.action,
+                    ]
+                )
+            )
+        capabilities.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        capabilities.header().setStretchLastSection(True)
+        root.addWidget(capabilities, 1)
+
+        if report.findings:
+            findings_title = QLabel("Santé de la configuration")
+            findings_title.setObjectName("Section")
+            root.addWidget(findings_title)
+            findings = QTreeWidget()
+            findings.setColumnCount(4)
+            findings.setHeaderLabels(
+                ["Niveau", "Diagnostic", "Détail", "Action"]
+            )
+            findings.setRootIsDecorated(False)
+            findings.setAlternatingRowColors(True)
+            findings.setMaximumHeight(220)
+            severity_label = {
+                "error": "Erreur",
+                "warning": "À vérifier",
+                "info": "Information",
+            }
+            for finding in report.findings:
+                findings.addTopLevelItem(
+                    QTreeWidgetItem(
+                        [
+                            severity_label.get(
+                                finding.severity,
+                                finding.severity,
+                            ),
+                            finding.title,
+                            finding.detail,
+                            finding.action,
+                        ]
+                    )
+                )
+            findings.header().setSectionResizeMode(
+                QHeaderView.ResizeMode.ResizeToContents
+            )
+            findings.header().setStretchLastSection(True)
+            root.addWidget(findings)
+
+        actions = QHBoxLayout()
+        if service is not None and client is not None and client.connected:
+            sync_catalog = QPushButton("Synchroniser le catalogue OBS")
+            def sync_and_close() -> None:
+                try:
+                    request_id = service.request_catalog_sync()
+                except Exception as exc:
+                    QMessageBox.critical(
+                        dialog,
+                        "Catalogue OBS",
+                        str(exc),
+                    )
+                    return
+                self.statusBar().showMessage(
+                    f"Synchronisation catalogue OBS mise en file ({request_id[:8]}).",
+                    8000,
+                )
+                dialog.accept()
+            sync_catalog.clicked.connect(sync_and_close)
+            actions.addWidget(sync_catalog)
+
+        repair_refs = QPushButton("Réparer les références OBS…")
+        repair_refs.clicked.connect(dialog.accept)
+        repair_refs.clicked.connect(self._start_reference_repair)
+        actions.addWidget(repair_refs)
+
+        restore = QPushButton("Historique des sauvegardes…")
+        restore.clicked.connect(dialog.accept)
+        restore.clicked.connect(self._restore_config_backup)
+        actions.addWidget(restore)
+
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _show_effective_provenance(self) -> None:
+        service = self._service
+        if service is None:
+            QMessageBox.warning(
+                self,
+                "Provenance",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        try:
+            explanation = service.explain_decision()
+            rows = build_effective_provenance(
+                self.config,
+                explanation,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Provenance", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Qui contrôle quoi ?")
+        dialog.resize(1000, 520)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Cette vue explique d’où vient chaque profil effectif, son héritage "
+            "et les autres éléments de configuration qui le référencent."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(6)
+        tree.setHeaderLabels(
+            [
+                "Domaine",
+                "Profil effectif",
+                "Sélectionné par",
+                "Héritage",
+                "Contenu effectif",
+                "Utilisé par",
+            ]
+        )
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        for row in rows:
+            lineage = (
+                " ← ".join(row.lineage)
+                if row.lineage
+                else "—"
+            )
+            usage_text = " · ".join(
+                usage.owner for usage in row.usages
+            ) or "—"
+            item = QTreeWidgetItem(
+                [
+                    row.label,
+                    row.profile,
+                    row.selected_by,
+                    lineage,
+                    row.content_summary,
+                    usage_text,
+                ]
+            )
+            if len(row.usages) > 1:
+                item.setToolTip(
+                    5,
+                    (
+                        "Ce profil est partagé. Une modification peut affecter "
+                        "plusieurs règles, le fallback ou des profils enfants."
+                    ),
+                )
+            tree.addTopLevelItem(item)
+        tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setStretchLastSection(True)
+        root.addWidget(tree, 1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        expert = QPushButton("Ouvrir le mode Expert")
+        expert.clicked.connect(dialog.accept)
+        expert.clicked.connect(self._ensure_expert_mode)
+        actions.addWidget(expert)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _start_reference_repair(self) -> None:
+        service = self._service
+        client = self._client
+        if service is None:
+            QMessageBox.warning(
+                self,
+                "Références OBS",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        if (
+            client is None
+            or not client.config.enabled
+            or not client.connected
+        ):
+            QMessageBox.warning(
+                self,
+                "Références OBS",
+                "OBS doit être connecté pour analyser les références.",
+            )
+            return
+        try:
+            request_id = service.request_collection_import_preview(
+                include_layouts=False,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Références OBS", str(exc))
+            return
+        self._pending_collection_imports[request_id] = {
+            "mode": "reference_repair",
+            "domain": "",
+            "profile_name": "",
+            "options": {},
+        }
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Analyse des références OBS démarrée",
+            )
+        )
+        self.statusBar().showMessage(
+            "Analyse des références OBS en cours…",
+            8000,
+        )
+
+    def _show_reference_repair_dialog(self, snapshot) -> None:
+        issues = scan_obs_reference_repairs(self.config, snapshot)
+        if not issues:
+            QMessageBox.information(
+                self,
+                "Références OBS",
+                "Aucune référence OBS cassée n’a été détectée.",
+            )
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Good",
+                    "Références OBS vérifiées",
+                    "Aucune référence cassée détectée",
+                )
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Réparer les références OBS")
+        dialog.resize(1050, 620)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "SSR compare les noms stockés dans la configuration avec la "
+            "collection OBS actuelle. Les propositions floues ne sont jamais "
+            "appliquées automatiquement."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(6)
+        tree.setHeaderLabels(
+            [
+                "Appliquer",
+                "Type",
+                "Emplacement",
+                "Référence actuelle",
+                "Proposition",
+                "Confiance",
+            ]
+        )
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        for index, issue in enumerate(issues):
+            confidence = (
+                f"{issue.confidence * 100:.0f} %"
+                if issue.candidate
+                else "—"
+            )
+            item = QTreeWidgetItem(
+                [
+                    "",
+                    issue.kind,
+                    issue.location,
+                    issue.current,
+                    issue.candidate or "Aucune proposition sûre",
+                    confidence,
+                ]
+            )
+            item.setData(0, Qt.UserRole, index)
+            item.setToolTip(4, issue.reason)
+            if issue.repairable:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(
+                    0,
+                    Qt.Checked
+                    if issue.confidence >= 0.98
+                    else Qt.Unchecked,
+                )
+            else:
+                item.setFlags(
+                    item.flags() & ~Qt.ItemIsUserCheckable
+                )
+            tree.addTopLevelItem(item)
+        tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setStretchLastSection(True)
+        root.addWidget(tree, 1)
+
+        unresolved = sum(1 for item in issues if not item.repairable)
+        note = QLabel(
+            (
+                "Les corrections sélectionnées seront appliquées uniquement au "
+                "brouillon SSR. OBS et le runtime ne changeront qu’après "
+                "« Enregistrer et appliquer »."
+                + (
+                    f" · {unresolved} référence(s) restent sans proposition sûre."
+                    if unresolved
+                    else ""
+                )
+            )
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(dialog.reject)
+        actions.addWidget(cancel)
+        apply_button = QPushButton("Appliquer au brouillon")
+        apply_button.setObjectName("Primary")
+        actions.addWidget(apply_button)
+        root.addLayout(actions)
+
+        def apply_selected() -> None:
+            selected = []
+            for row in range(tree.topLevelItemCount()):
+                item = tree.topLevelItem(row)
+                if item.checkState(0) != Qt.Checked:
+                    continue
+                try:
+                    index = int(item.data(0, Qt.UserRole))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(issues):
+                    selected.append(issues[index])
+            if not selected:
+                QMessageBox.information(
+                    dialog,
+                    "Références OBS",
+                    "Sélectionnez au moins une proposition à appliquer.",
+                )
+                return
+            draft, applied = apply_reference_repairs(
+                self.config,
+                selected,
+            )
+            errors = validate_config(draft)
+            if errors:
+                QMessageBox.critical(
+                    dialog,
+                    "Références OBS",
+                    "Le brouillon réparé n’est pas valide :\n- "
+                    + "\n- ".join(errors),
+                )
+                return
+            if applied <= 0:
+                QMessageBox.information(
+                    dialog,
+                    "Références OBS",
+                    "Aucune référence n’a pu être modifiée.",
+                )
+                return
+
+            self.config = draft
+            self._load_config_into_ui()
+            self._mark_dirty()
+            self._refresh_dashboard_summary()
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Good",
+                    "Références OBS réparées dans le brouillon",
+                    f"{applied} remplacement(s)",
+                )
+            )
+            self.statusBar().showMessage(
+                (
+                    f"{applied} référence(s) réparée(s) dans le brouillon — "
+                    "enregistrez et appliquez pour activer les changements."
+                ),
+                10000,
+            )
+            dialog.accept()
+
+        apply_button.clicked.connect(apply_selected)
+        dialog.exec()
 
     def _card(self, title_text: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
@@ -408,6 +949,29 @@ class MainWindow(QMainWindow):
         summary_actions.addStretch(1)
         summary_lay.addLayout(summary_actions)
         root.addWidget(summary_card)
+
+        maintenance_card, maintenance_lay = self._card("Santé et maintenance")
+        maintenance_hint = QLabel(
+            "Vérifiez les capacités réellement utilisées, comprenez l’origine "
+            "des profils actifs et recherchez les références OBS devenues invalides."
+        )
+        maintenance_hint.setWordWrap(True)
+        maintenance_hint.setObjectName("Muted")
+        maintenance_lay.addWidget(maintenance_hint)
+        maintenance_actions = QHBoxLayout()
+        capabilities = QPushButton("Vérifier les capacités")
+        capabilities.setObjectName("Primary")
+        capabilities.clicked.connect(self._show_capability_report)
+        maintenance_actions.addWidget(capabilities)
+        provenance = QPushButton("Qui contrôle quoi ?")
+        provenance.clicked.connect(self._show_effective_provenance)
+        maintenance_actions.addWidget(provenance)
+        repair_refs = QPushButton("Réparer les références OBS…")
+        repair_refs.clicked.connect(self._start_reference_repair)
+        maintenance_actions.addWidget(repair_refs)
+        maintenance_actions.addStretch(1)
+        maintenance_lay.addLayout(maintenance_actions)
+        root.addWidget(maintenance_card)
 
         activity_card, activity_lay = self._card("Activité récente")
         activity_hint = QLabel(
@@ -545,6 +1109,9 @@ class MainWindow(QMainWindow):
         edit = QPushButton("Modifier les règles")
         edit.clicked.connect(self._open_rules_editor)
         actions.addWidget(edit)
+        simulate = QPushButton("Tester un scénario…")
+        simulate.clicked.connect(self._show_scenario_simulator)
+        actions.addWidget(simulate)
         actions.addStretch(1)
         root.addLayout(actions)
         return page
@@ -564,6 +1131,321 @@ class MainWindow(QMainWindow):
     def _open_rules_editor(self) -> None:
         self._ensure_expert_mode()
         self.tabs.setCurrentIndex(self.rules_tab_index)
+
+    def _show_scenario_simulator(self) -> None:
+        service = self._service
+        app = (
+            service.last_meaningful_app
+            if service is not None
+            else None
+        )
+        context: Mapping[str, object] = {}
+        if service is not None:
+            try:
+                explanation = service.explain_decision(app)
+                raw_plan = (
+                    explanation.get("obs_plan")
+                    if isinstance(explanation, Mapping)
+                    else None
+                )
+                raw_context = (
+                    raw_plan.get("context")
+                    if isinstance(raw_plan, Mapping)
+                    else None
+                )
+                if isinstance(raw_context, Mapping):
+                    context = raw_context
+            except Exception:
+                context = {}
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Simuler un scénario de routage")
+        dialog.resize(900, 650)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Le simulateur utilise exactement les règles et priorités du "
+            "moteur SSR, mais n’applique aucune commande à OBS."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        form = QFormLayout()
+        exe = QLineEdit(str(app.exe_name if app else ""))
+        path = QLineEdit(str(app.process_path if app else ""))
+        title = QLineEdit(str(app.window_title if app else ""))
+        scene = QLineEdit(str(context.get("program_scene") or ""))
+        running = QLineEdit(
+            ", ".join(
+                str(item)
+                for item in (
+                    context.get("running_processes")
+                    if isinstance(
+                        context.get("running_processes"),
+                        (list, tuple),
+                    )
+                    else ()
+                )
+            )
+        )
+
+        def bool_box(current) -> QComboBox:
+            box = QComboBox()
+            box.addItem("Inconnu / non spécifié", None)
+            box.addItem("Non", False)
+            box.addItem("Oui", True)
+            index = box.findData(current)
+            box.setCurrentIndex(max(0, index))
+            return box
+
+        streaming = bool_box(
+            context.get("streaming")
+            if isinstance(context.get("streaming"), bool)
+            else None
+        )
+        recording = bool_box(
+            context.get("recording")
+            if isinstance(context.get("recording"), bool)
+            else None
+        )
+        obs_enabled = bool_box(
+            bool(self._client and self._client.config.enabled)
+        )
+
+        form.addRow("Processus foreground", exe)
+        form.addRow("Chemin", path)
+        form.addRow("Titre de fenêtre", title)
+        form.addRow("Streaming", streaming)
+        form.addRow("Enregistrement", recording)
+        form.addRow("Scène programme", scene)
+        form.addRow("OBS activé", obs_enabled)
+        form.addRow(
+            "Processus actifs (séparés par des virgules)",
+            running,
+        )
+        root.addLayout(form)
+
+        result_label = QLabel("Résultat : —")
+        result_label.setStyleSheet("font-weight: 700;")
+        root.addWidget(result_label)
+
+        checks = QTreeWidget()
+        checks.setColumnCount(5)
+        checks.setHeaderLabels(
+            [
+                "Règle",
+                "Priorité",
+                "Comportement",
+                "Correspond",
+                "Détail",
+            ]
+        )
+        checks.setRootIsDecorated(False)
+        checks.setAlternatingRowColors(True)
+        checks.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        checks.header().setStretchLastSection(True)
+        root.addWidget(checks, 1)
+
+        actions = QHBoxLayout()
+        simulate = QPushButton("Simuler")
+        simulate.setObjectName("Primary")
+        actions.addWidget(simulate)
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+
+        def run_simulation() -> None:
+            processes = tuple(
+                item.strip()
+                for item in running.text().split(",")
+                if item.strip()
+            )
+            try:
+                report = simulate_rule_scenario(
+                    self.config,
+                    exe=exe.text().strip(),
+                    path=path.text().strip(),
+                    title=title.text(),
+                    streaming=streaming.currentData(),
+                    recording=recording.currentData(),
+                    program_scene=scene.text().strip(),
+                    obs_enabled=obs_enabled.currentData(),
+                    running_processes=processes,
+                )
+            except Exception as exc:
+                QMessageBox.critical(
+                    dialog,
+                    "Simulation",
+                    str(exc),
+                )
+                return
+
+            if report.kind == "match":
+                game = (
+                    str(report.state.get("Game") or "")
+                    if report.state is not None
+                    else ""
+                )
+                result_label.setText(
+                    f"Résultat : {report.rule_name} → {game or 'état MATCH'}"
+                )
+            elif report.kind == "fallback":
+                result_label.setText(
+                    "Résultat : configuration de secours"
+                )
+            elif report.kind == "ignore":
+                result_label.setText(
+                    f"Résultat : IGNORE ({report.rule_name})"
+                )
+            else:
+                result_label.setText(
+                    f"Résultat : {report.kind or '—'}"
+                )
+
+            checks.clear()
+            for check in report.checks:
+                checks.addTopLevelItem(
+                    QTreeWidgetItem(
+                        [
+                            check.name,
+                            str(check.priority),
+                            check.behavior,
+                            "Oui" if check.matched else "Non",
+                            check.reason,
+                        ]
+                    )
+                )
+
+        simulate.clicked.connect(run_simulation)
+        run_simulation()
+        dialog.exec()
+
+    def _show_profile_impact(
+        self,
+        domain: str,
+        profile_name: str,
+    ) -> None:
+        usages = profile_usages(
+            self.config,
+            domain,
+            profile_name,
+        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            f"Impact du profil {profile_name}"
+        )
+        dialog.resize(760, 440)
+        root = QVBoxLayout(dialog)
+
+        label = DOMAIN_LABELS.get(domain, domain)
+        title = QLabel(f"{label} · {profile_name}")
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        if usages:
+            intro = QLabel(
+                (
+                    f"{len(usages)} référence(s) utilisent ce profil. "
+                    "Une modification peut donc affecter les éléments "
+                    "ci-dessous."
+                )
+            )
+        else:
+            intro = QLabel(
+                "Ce profil n’est actuellement référencé ni par une règle, "
+                "ni par le fallback, ni par un profil enfant."
+            )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(
+            ["Type de dépendance", "Utilisateur", "Détail"]
+        )
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        kind_labels = {
+            "rule": "Règle",
+            "fallback": "Fallback",
+            "inheritance": "Héritage",
+        }
+        for usage in usages:
+            tree.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        kind_labels.get(usage.kind, usage.kind),
+                        usage.owner,
+                        usage.detail,
+                    ]
+                )
+            )
+        tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setStretchLastSection(True)
+        root.addWidget(tree, 1)
+
+        content_title = QLabel("Contenu effectif et origine")
+        content_title.setObjectName("Section")
+        root.addWidget(content_title)
+        content = QTreeWidget()
+        content.setColumnCount(5)
+        content.setHeaderLabels(
+            ["Origine", "Type", "Nom", "Cible", "Actif"]
+        )
+        content.setRootIsDecorated(False)
+        content.setAlternatingRowColors(True)
+        for entry in profile_content_entries(
+            self.config,
+            domain,
+            profile_name,
+        ):
+            content.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        entry.source_profile,
+                        entry.kind,
+                        entry.name,
+                        entry.target or "—",
+                        "Oui" if entry.enabled else "Non",
+                    ]
+                )
+            )
+        content.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        content.header().setStretchLastSection(True)
+        content.setMaximumHeight(220)
+        root.addWidget(content)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _show_current_profile_impact(self) -> None:
+        current = self._current_profile()
+        if current is None:
+            return
+        domain, name, _profile = current
+        self._show_profile_impact(domain, name)
+
+    def _show_current_layout_impact(self) -> None:
+        current = self._current_layout_profile()
+        if current is None:
+            return
+        name, _profile = current
+        self._show_profile_impact("layout", name)
 
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
@@ -633,6 +1515,7 @@ class MainWindow(QMainWindow):
             ("Renommer", self._rename_profile),
             ("Supprimer", self._delete_profile),
             ("Tester", self._test_profile),
+            ("Impact", self._show_current_profile_impact),
         ]:
             b = QPushButton(text)
             if text == "Nouveau":
@@ -649,10 +1532,17 @@ class MainWindow(QMainWindow):
         self.profile_parent.addItem("— Aucun —", "")
         self.profile_parent.currentIndexChanged.connect(self._profile_parent_changed)
         inheritance.addWidget(self.profile_parent, 1)
+        detach_profile = QPushButton("Détacher de la base")
+        detach_profile.clicked.connect(self._detach_current_profile)
+        inheritance.addWidget(detach_profile)
         hint = QLabel("Les actions du parent sont exécutées avant celles de ce profil.")
         hint.setObjectName("Muted")
         inheritance.addWidget(hint)
         root.addLayout(inheritance)
+        self.profile_inheritance_hint = QLabel("Héritage effectif : —")
+        self.profile_inheritance_hint.setWordWrap(True)
+        self.profile_inheritance_hint.setObjectName("Muted")
+        root.addWidget(self.profile_inheritance_hint)
 
         self.actions_table = QTableWidget(0, 4)
         self.actions_table.setHorizontalHeaderLabels(["Actif", "Type", "Nom", "Paramètres"])
@@ -726,6 +1616,7 @@ class MainWindow(QMainWindow):
             ("Capturer depuis OBS", self._capture_layout_profile),
             ("Appliquer maintenant", self._apply_layout_profile),
             ("Éditer dans OBS", self._edit_layout_in_obs),
+            ("Impact", self._show_current_layout_impact),
         ]:
             button = QPushButton(text)
             if text == "Capturer depuis OBS":
@@ -742,6 +1633,9 @@ class MainWindow(QMainWindow):
         self.layout_parent.addItem("— Aucune —", "")
         self.layout_parent.currentIndexChanged.connect(self._layout_option_changed)
         options.addWidget(self.layout_parent)
+        detach_layout = QPushButton("Détacher de la base")
+        detach_layout.clicked.connect(self._detach_current_layout_profile)
+        options.addWidget(detach_layout)
         options.addWidget(QLabel("Coordonnées"))
         self.layout_coordinate_mode = QComboBox()
         self.layout_coordinate_mode.addItem("Normalisées", "normalized")
@@ -761,6 +1655,10 @@ class MainWindow(QMainWindow):
         options.addWidget(self.layout_transition_ms)
         options.addStretch(1)
         root.addLayout(options)
+        self.layout_inheritance_hint = QLabel("Héritage effectif : —")
+        self.layout_inheritance_hint.setWordWrap(True)
+        self.layout_inheritance_hint.setObjectName("Muted")
+        root.addWidget(self.layout_inheritance_hint)
 
         tools = QHBoxLayout()
         for text, slot in [
@@ -834,10 +1732,15 @@ class MainWindow(QMainWindow):
         self.obs_port.setRange(1, 65535)
         self.obs_password = QLineEdit()
         self.obs_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.safe_live = QCheckBox(
+            "Safe Live : demander confirmation avant les opérations OBS "
+            "manuelles pendant un stream ou un enregistrement"
+        )
         form.addRow("", self.obs_enabled)
         form.addRow("Hôte", self.obs_host)
         form.addRow("Port", self.obs_port)
         form.addRow("Mot de passe", self.obs_password)
+        form.addRow("", self.safe_live)
         obs_lay.addLayout(form)
         test = QPushButton("Tester la connexion OBS")
         test.clicked.connect(self._test_obs)
@@ -926,12 +1829,182 @@ class MainWindow(QMainWindow):
             ("Enregistrer et appliquer", self.save_and_apply),
             ("Exporter la configuration…", self._export_config),
             ("Importer une configuration…", self._import_config),
-            ("Restaurer la dernière sauvegarde valide…", self._restore_config_backup),
+            ("Historique des sauvegardes…", self._restore_config_backup),
             ("Quitter", self._quit_app),
         ]:
             action = QAction(text, self)
             action.triggered.connect(slot)
             file_menu.addAction(action)
+
+        tools_menu = self.menuBar().addMenu("Outils")
+        palette = QAction("Palette de commandes…", self)
+        palette.setShortcut("Ctrl+K")
+        palette.triggered.connect(self._show_command_palette)
+        tools_menu.addAction(palette)
+        tools_menu.addSeparator()
+        for text, slot in [
+            ("Santé et capacités…", self._show_capability_report),
+            ("Qui contrôle quoi ?…", self._show_effective_provenance),
+            ("Réparer les références OBS…", self._start_reference_repair),
+            ("Tester un scénario…", self._show_scenario_simulator),
+        ]:
+            action = QAction(text, self)
+            action.triggered.connect(slot)
+            tools_menu.addAction(action)
+
+    def _show_command_palette(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Palette de commandes")
+        dialog.resize(720, 520)
+        root = QVBoxLayout(dialog)
+
+        search = QLineEdit()
+        search.setPlaceholderText(
+            "Rechercher une règle, un profil, un layout ou une commande…"
+        )
+        root.addWidget(search)
+
+        results = QListWidget()
+        root.addWidget(results, 1)
+
+        entries: list[tuple[str, object]] = []
+
+        def navigate_tab(index: int) -> None:
+            self.tabs.setCurrentIndex(index)
+
+        entries.extend(
+            [
+                (
+                    "Navigation · Dashboard",
+                    lambda: navigate_tab(self.dashboard_tab_index),
+                ),
+                (
+                    "Navigation · Automatisations",
+                    lambda: navigate_tab(self.automations_tab_index),
+                ),
+                (
+                    "Navigation · Paramètres",
+                    lambda: navigate_tab(self.settings_tab_index),
+                ),
+                (
+                    "Outil · Santé et capacités",
+                    self._show_capability_report,
+                ),
+                (
+                    "Outil · Qui contrôle quoi ?",
+                    self._show_effective_provenance,
+                ),
+                (
+                    "Outil · Réparer les références OBS",
+                    self._start_reference_repair,
+                ),
+                (
+                    "Outil · Tester un scénario de routage",
+                    self._show_scenario_simulator,
+                ),
+                (
+                    "Outil · Historique des sauvegardes",
+                    self._restore_config_backup,
+                ),
+            ]
+        )
+
+        raw_rules = self.config.get("rules")
+        if isinstance(raw_rules, list):
+            for index, rule in enumerate(raw_rules):
+                if not isinstance(rule, Mapping):
+                    continue
+                name = str(rule.get("name") or f"Règle {index + 1}")
+                def open_rule(
+                    rule_index=index,
+                ) -> None:
+                    self._ensure_expert_mode()
+                    self.tabs.setCurrentIndex(self.rules_tab_index)
+                    if 0 <= rule_index < self.rules_table.rowCount():
+                        self.rules_table.selectRow(rule_index)
+                        self.rules_table.scrollToItem(
+                            self.rules_table.item(rule_index, 1)
+                        )
+                entries.append(
+                    (f"Règle · {name}", open_rule)
+                )
+
+        profiles = self.config.get("profiles")
+        if isinstance(profiles, Mapping):
+            for domain, domain_profiles in profiles.items():
+                if not isinstance(domain_profiles, Mapping):
+                    continue
+                for name in domain_profiles:
+                    profile_name = str(name)
+                    domain_name = str(domain)
+                    def open_profile(
+                        wanted_domain=domain_name,
+                        wanted_name=profile_name,
+                    ) -> None:
+                        self._ensure_expert_mode()
+                        self.tabs.setCurrentIndex(self.profiles_tab_index)
+                        domain_index = self.profile_domain.findData(
+                            wanted_domain
+                        )
+                        if domain_index >= 0:
+                            self.profile_domain.setCurrentIndex(domain_index)
+                        self._refresh_profile_names()
+                        self.profile_name.setCurrentText(wanted_name)
+                    entries.append(
+                        (
+                            f"Profil {DOMAIN_LABELS.get(domain_name, domain_name)}"
+                            f" · {profile_name}",
+                            open_profile,
+                        )
+                    )
+
+        layouts = self.config.get("layout_profiles")
+        if isinstance(layouts, Mapping):
+            for name in layouts:
+                layout_name = str(name)
+                def open_layout(
+                    wanted_name=layout_name,
+                ) -> None:
+                    self._ensure_expert_mode()
+                    self.tabs.setCurrentIndex(self.layouts_tab_index)
+                    self.layout_profile_name.setCurrentText(wanted_name)
+                    self._refresh_layout_profile_view()
+                entries.append(
+                    (f"Layout · {layout_name}", open_layout)
+                )
+
+        visible_entries: list[tuple[str, object]] = []
+
+        def refresh() -> None:
+            query = search.text().strip().casefold()
+            tokens = [token for token in query.split() if token]
+            visible_entries.clear()
+            results.clear()
+            for label, callback in entries:
+                searchable = label.casefold()
+                if tokens and not all(
+                    token in searchable for token in tokens
+                ):
+                    continue
+                visible_entries.append((label, callback))
+                results.addItem(QListWidgetItem(label))
+            if results.count():
+                results.setCurrentRow(0)
+
+        def execute_current(*_args) -> None:
+            row = results.currentRow()
+            if not 0 <= row < len(visible_entries):
+                return
+            _label, callback = visible_entries[row]
+            dialog.accept()
+            callback()
+
+        search.textChanged.connect(refresh)
+        search.returnPressed.connect(execute_current)
+        results.itemDoubleClicked.connect(execute_current)
+        refresh()
+        search.setFocus()
+        dialog.exec()
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self)
@@ -974,6 +2047,7 @@ class MainWindow(QMainWindow):
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
         self.close_to_tray.setChecked(bool(ui.get("close_to_tray", True)))
+        self.safe_live.setChecked(bool(ui.get("safe_live", True)))
         self.auto_detect_modules.setChecked(bool(ui.get("auto_detect_modules", True)))
         self.module_scan_seconds.setValue(int(ui.get("module_scan_seconds", 5)))
         try:
@@ -991,7 +2065,14 @@ class MainWindow(QMainWindow):
     def _wire_dirty_signals(self) -> None:
         for widget in (self.poll_ms, self.debounce_ms, self.fallback_debounce_ms, self.obs_port, self.api_port, self.module_scan_seconds):
             widget.valueChanged.connect(self._mark_dirty)
-        for widget in (self.obs_enabled, self.close_to_tray, self.start_with_windows, self.api_enabled, self.auto_detect_modules):
+        for widget in (
+            self.obs_enabled,
+            self.close_to_tray,
+            self.start_with_windows,
+            self.api_enabled,
+            self.auto_detect_modules,
+            self.safe_live,
+        ):
             widget.toggled.connect(self._mark_dirty)
         for widget in (
             self.obs_host,
@@ -1021,6 +2102,7 @@ class MainWindow(QMainWindow):
         ui = self.config.setdefault("ui", {})
         ui["close_to_tray"] = self.close_to_tray.isChecked()
         ui["start_with_windows"] = self.start_with_windows.isChecked()
+        ui["safe_live"] = self.safe_live.isChecked()
         ui["auto_detect_modules"] = self.auto_detect_modules.isChecked()
         ui["module_scan_seconds"] = self.module_scan_seconds.value()
 
@@ -1185,12 +2267,12 @@ class MainWindow(QMainWindow):
             self.fg_exe.setText("Aucune fenêtre")
             self.fg_title.setText("—")
             self.fg_path.setText("—")
-            self._refresh_dashboard_summary()
+            self._schedule_dashboard_refresh()
             return
         self.fg_exe.setText(app.exe_name or f"PID {app.pid}")
         self.fg_title.setText(app.window_title or "(sans titre)")
         self.fg_path.setText(app.process_path or "(chemin indisponible)")
-        self._refresh_dashboard_summary()
+        self._schedule_dashboard_refresh()
 
     def _on_state_change(self, change: StateChange) -> None:
         values = change.current.as_variables()
@@ -1209,7 +2291,7 @@ class MainWindow(QMainWindow):
                 f"Règle : {change.rule_name}",
             )
         )
-        self._refresh_dashboard_summary()
+        self._schedule_dashboard_refresh()
 
     def _on_dispatch(self, result) -> None:
         self._update_obs_status()
@@ -1218,7 +2300,7 @@ class MainWindow(QMainWindow):
                 f"OBS : {result.executed} action(s) exécutée(s) · "
                 f"{', '.join(result.changed_domains)}"
             )
-        self._refresh_dashboard_summary()
+        self._schedule_dashboard_refresh()
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         self._log(f"{event.kind}: {event.message}")
@@ -1229,7 +2311,16 @@ class MainWindow(QMainWindow):
         )
         if activity is not None:
             self._record_user_activity(activity)
-        self._refresh_dashboard_summary()
+        if event.kind in {
+            "routing_rule",
+            "routing_result",
+            "pause",
+            "obs_connected",
+            "obs_disconnected",
+            "obs_error",
+            "obs_command_result",
+        }:
+            self._schedule_dashboard_refresh()
         if event.kind == "routing_rule" and isinstance(event.payload, dict):
             rule_name = str(event.payload.get("rule_name") or "—")
             reason = str(event.payload.get("reason") or "état inchangé")
@@ -1598,6 +2689,8 @@ class MainWindow(QMainWindow):
     def _apply_override(self) -> None:
         if not self._service:
             return
+        if not self._safe_live_confirm("Appliquer un override manuel"):
+            return
         state = StreamState(
             game=self.override_boxes["game"].currentText(),
             overlay_profile=self.override_boxes["overlay"].currentText(),
@@ -1629,6 +2722,37 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Réapplication OBS en cours…", 3000)
         except Exception as exc:
             QMessageBox.critical(self, "OBS", str(exc))
+
+    def _safe_live_confirm(self, operation: str) -> bool:
+        if not hasattr(self, "safe_live") or not self.safe_live.isChecked():
+            return True
+        dispatcher = self._dispatcher
+        context = (
+            dispatcher.cached_obs_context()
+            if dispatcher is not None
+            else {}
+        )
+        if not live_output_active(context):
+            return True
+        streaming = bool(context.get("streaming", False))
+        recording = bool(context.get("recording", False))
+        active = []
+        if streaming:
+            active.append("stream")
+        if recording:
+            active.append("enregistrement")
+        return QMessageBox.question(
+            self,
+            "Safe Live",
+            (
+                f"{operation}\n\n"
+                f"OBS est actuellement en {' + '.join(active)}. "
+                "Cette opération peut modifier visuellement ou techniquement "
+                "la sortie active. Continuer quand même ?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) == QMessageBox.Yes
 
     def _toggle_pause(self) -> None:
         if not self._service:
@@ -1834,6 +2958,35 @@ class MainWindow(QMainWindow):
                 idx = self.profile_parent.findData(str(profile.get("extends") or ""))
                 self.profile_parent.setCurrentIndex(max(0, idx))
             self.profile_parent.blockSignals(False)
+        if hasattr(self, "profile_inheritance_hint"):
+            if current:
+                domain, name, profile = current
+                lineage = profile_lineage(self.config, domain, name)
+                local_actions = profile.get("actions")
+                local_count = (
+                    len(local_actions)
+                    if isinstance(local_actions, list)
+                    else 0
+                )
+                inherited_count = 0
+                profiles = self._profiles_for_domain(domain)
+                for parent_name in lineage[1:]:
+                    parent = profiles.get(parent_name)
+                    if not isinstance(parent, Mapping):
+                        continue
+                    parent_actions = parent.get("actions")
+                    if isinstance(parent_actions, list):
+                        inherited_count += len(parent_actions)
+                chain = " ← ".join(lineage) if lineage else name
+                self.profile_inheritance_hint.setText(
+                    f"Héritage effectif : {chain} · "
+                    f"{local_count} action(s) locale(s) · "
+                    f"{inherited_count} héritée(s)"
+                )
+            else:
+                self.profile_inheritance_hint.setText(
+                    "Héritage effectif : —"
+                )
         actions = current[2].setdefault("actions", []) if current else []
         self.actions_table.setRowCount(len(actions))
         for row, action in enumerate(actions):
@@ -1847,6 +3000,60 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.actions_table.setItem(row, col, item)
+
+    def _detach_current_profile(self) -> None:
+        current = self._current_profile()
+        if current is None:
+            return
+        domain, name, profile = current
+        if not str(profile.get("extends") or "").strip():
+            QMessageBox.information(
+                self,
+                "Héritage",
+                "Ce profil n’hérite d’aucune base.",
+            )
+            return
+        if QMessageBox.question(
+            self,
+            "Détacher le profil",
+            (
+                f"Détacher « {name} » de sa base ?\n\n"
+                "Les actions et conditions héritées seront copiées dans le "
+                "profil afin de conserver le comportement effectif actuel."
+            ),
+        ) != QMessageBox.Yes:
+            return
+        draft, changed = detach_profile_inheritance(
+            self.config,
+            domain,
+            name,
+        )
+        if not changed:
+            return
+        errors = validate_config(draft)
+        if errors:
+            QMessageBox.critical(
+                self,
+                "Héritage",
+                "\n".join(errors),
+            )
+            return
+        self.config = draft
+        self._load_config_into_ui()
+        self.profile_domain.setCurrentIndex(
+            max(0, self.profile_domain.findData(domain))
+        )
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(name)
+        self._refresh_actions_table()
+        self._mark_dirty()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Profil détaché de sa base",
+                f"{domain}/{name}",
+            )
+        )
 
     def _profile_parent_changed(self, *_args) -> None:
         current = self._current_profile()
@@ -2675,6 +3882,21 @@ class MainWindow(QMainWindow):
             raw_snapshot
         )
 
+        if mode == "reference_repair":
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Muted",
+                    "Analyse des références OBS terminée",
+                    (
+                        f"{len(snapshot.scenes)} scène(s), "
+                        f"{len(snapshot.inputs)} input(s), "
+                        f"{len(snapshot.filters)} filtre(s)"
+                    ),
+                )
+            )
+            self._show_reference_repair_dialog(snapshot)
+            return
+
         if mode == "guided_current_state_capture":
             self._complete_guided_current_state_capture(
                 snapshot=snapshot,
@@ -3037,6 +4259,8 @@ class MainWindow(QMainWindow):
         current = self._current_profile()
         if not current:
             return
+        if not self._safe_live_confirm("Tester ce profil directement sur OBS"):
+            return
         self._collect_settings()
         try:
             client = OBSClientManager(build_obs_config(self.config))
@@ -3157,6 +4381,89 @@ class MainWindow(QMainWindow):
             self.layout_transition_ms.setValue(int(transition.get("duration_ms", 0)))
         for widget in (self.layout_parent, self.layout_coordinate_mode, self.layout_transition, self.layout_transition_ms):
             widget.blockSignals(False)
+        if hasattr(self, "layout_inheritance_hint"):
+            if current:
+                name, profile = current
+                lineage = profile_lineage(
+                    self.config,
+                    "layout",
+                    name,
+                )
+                local_modules = profile.get("modules")
+                local_count = (
+                    len(local_modules)
+                    if isinstance(local_modules, Mapping)
+                    else 0
+                )
+                inherited_count = 0
+                profiles = self._layout_profiles()
+                for parent_name in lineage[1:]:
+                    parent = profiles.get(parent_name)
+                    if not isinstance(parent, Mapping):
+                        continue
+                    parent_modules = parent.get("modules")
+                    if isinstance(parent_modules, Mapping):
+                        inherited_count += len(parent_modules)
+                chain = " ← ".join(lineage) if lineage else name
+                self.layout_inheritance_hint.setText(
+                    f"Héritage effectif : {chain} · "
+                    f"{local_count} module(s) local(aux) · "
+                    f"{inherited_count} hérité(s)"
+                )
+            else:
+                self.layout_inheritance_hint.setText(
+                    "Héritage effectif : —"
+                )
+
+    def _detach_current_layout_profile(self) -> None:
+        current = self._current_layout_profile()
+        if current is None:
+            return
+        name, profile = current
+        if not str(profile.get("extends") or "").strip():
+            QMessageBox.information(
+                self,
+                "Héritage layout",
+                "Ce LayoutProfile n’hérite d’aucune base.",
+            )
+            return
+        if QMessageBox.question(
+            self,
+            "Détacher le LayoutProfile",
+            (
+                f"Détacher « {name} » de sa base ?\n\n"
+                "Le layout résolu sera matérialisé dans ce profil afin de "
+                "conserver exactement son état effectif."
+            ),
+        ) != QMessageBox.Yes:
+            return
+        draft, changed = detach_profile_inheritance(
+            self.config,
+            "layout",
+            name,
+        )
+        if not changed:
+            return
+        errors = validate_config(draft)
+        if errors:
+            QMessageBox.critical(
+                self,
+                "Héritage layout",
+                "\n".join(errors),
+            )
+            return
+        self.config = draft
+        self._load_config_into_ui()
+        self.layout_profile_name.setCurrentText(name)
+        self._refresh_layout_profile_view()
+        self._mark_dirty()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "LayoutProfile détaché de sa base",
+                name,
+            )
+        )
 
     def _layout_option_changed(self, *_args) -> None:
         current = self._current_layout_profile()
@@ -3679,6 +4986,8 @@ class MainWindow(QMainWindow):
         current = self._current_layout_profile()
         if not current or self._service is None:
             return
+        if not self._safe_live_confirm("Appliquer ce layout maintenant"):
+            return
         self._collect_settings()
         try:
             request_id = self._service.request_layout("apply", current[0])
@@ -3702,6 +5011,8 @@ class MainWindow(QMainWindow):
         current = self._current_layout_profile()
         if not current or self._service is None:
             return
+        if not self._safe_live_confirm("Prévisualiser ce layout dans OBS"):
+            return
         try:
             request_id = self._service.request_layout("preview", current[0])
             self._log(f"Aperçu layout {current[0]} mis en file ({request_id[:8]}).")
@@ -3719,6 +5030,8 @@ class MainWindow(QMainWindow):
 
     def _undo_layout_obs(self) -> None:
         if self._service is None:
+            return
+        if not self._safe_live_confirm("Restaurer le layout précédent dans OBS"):
             return
         try:
             request_id = self._service.request_layout("undo")
@@ -3965,6 +5278,8 @@ class MainWindow(QMainWindow):
         current = self._current_layout_profile()
         if not current:
             return
+        if not self._safe_live_confirm("Passer ce layout en mode édition OBS"):
+            return
         try:
             if self._service is None:
                 raise RuntimeError("Runtime non disponible")
@@ -4055,24 +5370,112 @@ class MainWindow(QMainWindow):
 
     def _restore_config_backup(self) -> None:
         try:
-            found = latest_valid_backup()
+            backups = list_valid_backups(limit=20)
         except Exception as exc:
             QMessageBox.critical(self, "Sauvegarde", str(exc))
             return
-        if found is None:
-            QMessageBox.information(self, "Sauvegarde", "Aucune sauvegarde valide n'a été trouvée.")
+        if not backups:
+            QMessageBox.information(
+                self,
+                "Sauvegarde",
+                "Aucune sauvegarde valide n’a été trouvée.",
+            )
             return
-        incoming, path = found
-        if QMessageBox.question(
-            self,
-            "Restaurer une sauvegarde",
-            f"Charger « {path.name} » comme brouillon ?\n\n"
-            "La configuration active ne changera qu'après « Enregistrer et appliquer ».",
-        ) != QMessageBox.Yes:
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Historique des sauvegardes")
+        dialog.resize(760, 360)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "SSR conserve automatiquement les configurations précédentes. "
+            "La restauration charge uniquement un brouillon : le runtime ne "
+            "change qu’après « Enregistrer et appliquer »."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        selector = QComboBox()
+        for index, (_payload, path) in enumerate(backups):
+            try:
+                stamp = time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(path.stat().st_mtime),
+                )
+            except OSError:
+                stamp = path.name
+            selector.addItem(
+                f"{stamp} · {path.name}",
+                index,
+            )
+        root.addWidget(selector)
+
+        details = QLabel()
+        details.setWordWrap(True)
+        details.setObjectName("Muted")
+        root.addWidget(details)
+
+        def refresh_details() -> None:
+            try:
+                index = int(selector.currentData())
+            except (TypeError, ValueError):
+                index = 0
+            payload, path = backups[max(0, min(index, len(backups) - 1))]
+            rules = payload.get("rules")
+            rule_count = len(rules) if isinstance(rules, list) else 0
+            profiles = payload.get("profiles")
+            profile_count = 0
+            if isinstance(profiles, Mapping):
+                profile_count = sum(
+                    len(values)
+                    for values in profiles.values()
+                    if isinstance(values, Mapping)
+                )
+            layouts = payload.get("layout_profiles")
+            layout_count = (
+                len(layouts)
+                if isinstance(layouts, Mapping)
+                else 0
+            )
+            details.setText(
+                f"Révision {config_revision(payload)} · "
+                f"{rule_count} règle(s) · "
+                f"{profile_count} profil(s) · "
+                f"{layout_count} layout(s)\n{path}"
+            )
+
+        selector.currentIndexChanged.connect(refresh_details)
+        refresh_details()
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(dialog.reject)
+        actions.addWidget(cancel)
+        restore = QPushButton("Charger comme brouillon")
+        restore.setObjectName("Primary")
+        restore.clicked.connect(dialog.accept)
+        actions.addWidget(restore)
+        root.addLayout(actions)
+
+        if dialog.exec() != QDialog.Accepted:
             return
+        try:
+            index = int(selector.currentData())
+        except (TypeError, ValueError):
+            index = 0
+        incoming, path = backups[max(0, min(index, len(backups) - 1))]
         self.config = copy.deepcopy(incoming)
         self._load_config_into_ui()
         self._mark_dirty()
+        self._refresh_dashboard_summary()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Sauvegarde chargée comme brouillon",
+                path.name,
+            )
+        )
         self._log(f"Sauvegarde valide chargée en brouillon : {path}")
 
     def _refresh_config_revision_status(
