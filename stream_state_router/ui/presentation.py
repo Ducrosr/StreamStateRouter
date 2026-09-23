@@ -359,6 +359,58 @@ class UserActivityEntry:
     detail: str = ""
 
 
+def render_capability_report_text(
+    report,
+    *,
+    version: str = "",
+) -> str:
+    lines: list[str] = []
+    version = str(version or "").strip()
+    if version:
+        lines.append(f"Stream State Router {version}")
+    summary = str(getattr(report, "summary", "") or "").strip()
+    if summary:
+        lines.append(summary)
+
+    lines.extend(["", "Capacités"])
+    for item in tuple(getattr(report, "items", ()) or ()):
+        label = str(getattr(item, "label", "") or "").strip() or "Capacité"
+        status = str(getattr(item, "status_label", "") or "").strip() or "—"
+        lines.append(f"- {label}: {status}")
+        detail = str(getattr(item, "detail", "") or "").strip()
+        action = str(getattr(item, "action", "") or "").strip()
+        if detail:
+            lines.append(f"  Détail : {detail}")
+        if action:
+            lines.append(f"  Action : {action}")
+
+    findings = tuple(getattr(report, "findings", ()) or ())
+    if findings:
+        lines.extend(["", "Santé de la configuration"])
+        severity_labels = {
+            "error": "Erreur",
+            "warning": "À vérifier",
+            "info": "Information",
+        }
+        for finding in findings:
+            severity = str(
+                getattr(finding, "severity", "") or ""
+            ).strip().casefold()
+            title = str(getattr(finding, "title", "") or "").strip()
+            lines.append(
+                f"- {severity_labels.get(severity, severity or 'Information')} : "
+                f"{title or 'Diagnostic'}"
+            )
+            detail = str(getattr(finding, "detail", "") or "").strip()
+            action = str(getattr(finding, "action", "") or "").strip()
+            if detail:
+                lines.append(f"  Détail : {detail}")
+            if action:
+                lines.append(f"  Action : {action}")
+
+    return "\n".join(lines).strip()
+
+
 def _diagnostic_action(status: str, message: str) -> str:
     normalized = str(status or "").strip().casefold()
     text = str(message or "").casefold()
