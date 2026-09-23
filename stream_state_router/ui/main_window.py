@@ -746,6 +746,10 @@ class MainWindow(QMainWindow):
         repair_refs = QPushButton("Réparer les références OBS…")
         repair_refs.clicked.connect(dialog.accept)
         repair_refs.clicked.connect(self._start_reference_repair)
+        self._apply_obs_connected_control_state(
+            repair_refs,
+            requires_edit_mode=True,
+        )
         actions.addWidget(repair_refs)
 
         restore = QPushButton("Historique des sauvegardes…")
