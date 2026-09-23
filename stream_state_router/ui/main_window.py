@@ -78,6 +78,7 @@ from ..services.config import (
 from ..services.config_insights import (
     apply_reference_repairs,
     build_capability_report,
+    build_effective_dependency_tree,
     build_effective_provenance,
     configured_action_types,
     detach_profile_inheritance,
@@ -148,6 +149,8 @@ class MainWindow(QMainWindow):
         self._expert_mode = bool(
             self._window_settings.value("main_window/expert_mode", False, type=bool)
         )
+        self._edit_mode = False
+        self._edit_mode_owned_pause = False
         self.config = copy.deepcopy(config)
         self._last_saved_config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
@@ -223,6 +226,12 @@ class MainWindow(QMainWindow):
         self.mode_button = QPushButton()
         self.mode_button.clicked.connect(self._toggle_ui_mode)
         top.addWidget(self.mode_button)
+        self.edit_mode_button = QPushButton("Mode édition")
+        self.edit_mode_button.setToolTip(
+            "Geler le routage automatique pendant la configuration de SSR/OBS."
+        )
+        self.edit_mode_button.clicked.connect(self._toggle_edit_mode)
+        top.addWidget(self.edit_mode_button)
         self.pause_button = QPushButton("Suspendre")
         self.pause_button.clicked.connect(self._toggle_pause)
         top.addWidget(self.pause_button)
@@ -599,6 +608,70 @@ class MainWindow(QMainWindow):
         restore.clicked.connect(self._restore_config_backup)
         actions.addWidget(restore)
 
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _show_dependency_tree(self) -> None:
+        service = self._service
+        if service is None:
+            QMessageBox.warning(
+                self,
+                "Dépendances",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        try:
+            explanation = service.explain_decision()
+            root_node = build_effective_dependency_tree(
+                self.config,
+                explanation,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Dépendances", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Arbre des dépendances")
+        dialog.resize(980, 650)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Cette vue suit la décision courante jusqu’aux profils, bases "
+            "héritées et actions/modules qui composent l’état effectif."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(["Élément", "Valeur", "Détail"])
+        tree.setAlternatingRowColors(True)
+
+        def add_node(parent, node) -> None:
+            item = QTreeWidgetItem(
+                [node.label, node.value, node.detail]
+            )
+            if parent is None:
+                tree.addTopLevelItem(item)
+            else:
+                parent.addChild(item)
+            for child in node.children:
+                add_node(item, child)
+
+        add_node(None, root_node)
+        tree.expandAll()
+        tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setStretchLastSection(True)
+        root.addWidget(tree, 1)
+
+        actions = QHBoxLayout()
         actions.addStretch(1)
         close = QPushButton("Fermer")
         close.clicked.connect(dialog.accept)
@@ -1003,6 +1076,9 @@ class MainWindow(QMainWindow):
         provenance = QPushButton("Qui contrôle quoi ?")
         provenance.clicked.connect(self._show_effective_provenance)
         maintenance_actions.addWidget(provenance)
+        dependencies = QPushButton("Arbre des dépendances")
+        dependencies.clicked.connect(self._show_dependency_tree)
+        maintenance_actions.addWidget(dependencies)
         repair_refs = QPushButton("Réparer les références OBS…")
         repair_refs.clicked.connect(self._start_reference_repair)
         maintenance_actions.addWidget(repair_refs)
@@ -1906,6 +1982,7 @@ class MainWindow(QMainWindow):
         for text, slot in [
             ("Santé et capacités…", self._show_capability_report),
             ("Qui contrôle quoi ?…", self._show_effective_provenance),
+            ("Arbre des dépendances…", self._show_dependency_tree),
             ("Réparer les références OBS…", self._start_reference_repair),
             ("Tester un scénario…", self._show_scenario_simulator),
         ]:
@@ -2504,6 +2581,10 @@ class MainWindow(QMainWindow):
         self._service.on_dispatch = self.bridge.dispatch.emit
         self._service.on_event = self.bridge.runtime_event.emit
         self._service.start()
+        if self._edit_mode:
+            self._service.pause(True)
+            self.pause_button.setText("Suspendu (édition)")
+            self.pause_button.setEnabled(False)
         self._applied_revision = self._service.config_revision
         self._layout_sync_manager = None
         self._obs_module_catalog = {}
@@ -3105,8 +3186,63 @@ class MainWindow(QMainWindow):
             QMessageBox.No,
         ) == QMessageBox.Yes
 
+    def _toggle_edit_mode(self) -> None:
+        service = self._service
+        if service is None:
+            return
+
+        if not self._edit_mode:
+            self._edit_mode = True
+            self._edit_mode_owned_pause = not service.paused
+            if self._edit_mode_owned_pause:
+                service.pause(True)
+            self.edit_mode_button.setText("Quitter l’édition")
+            self.edit_mode_button.setObjectName("Primary")
+            self.edit_mode_button.style().unpolish(self.edit_mode_button)
+            self.edit_mode_button.style().polish(self.edit_mode_button)
+            self.pause_button.setText("Suspendu (édition)")
+            self.pause_button.setEnabled(False)
+            self.statusBar().showMessage(
+                "Mode édition actif — routage automatique gelé",
+                5000,
+            )
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Warn",
+                    "Mode édition activé",
+                    "Routage automatique gelé",
+                )
+            )
+            return
+
+        owned_pause = self._edit_mode_owned_pause
+        self._edit_mode = False
+        self._edit_mode_owned_pause = False
+        self.edit_mode_button.setText("Mode édition")
+        self.edit_mode_button.setObjectName("")
+        self.edit_mode_button.style().unpolish(self.edit_mode_button)
+        self.edit_mode_button.style().polish(self.edit_mode_button)
+        self.pause_button.setEnabled(True)
+        if owned_pause and service.paused:
+            service.pause(False)
+        self.pause_button.setText(
+            "Reprendre" if service.paused else "Suspendre"
+        )
+        self.statusBar().showMessage(
+            "Mode édition terminé",
+            3000,
+        )
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Mode édition terminé",
+            )
+        )
+
     def _toggle_pause(self) -> None:
         if not self._service:
+            return
+        if self._edit_mode:
             return
         new_value = not self._service.paused
         self._service.pause(new_value)
