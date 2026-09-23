@@ -50,6 +50,10 @@ class _AutomaticRoutingSuperseded(RuntimeError):
     """Interrupt long automatic OBS work after foreground routing became stale."""
 
 
+class _DriftProbeBudgetExceeded(BaseException):
+    """Abort a read-only drift probe once its cooperative budget is exhausted."""
+
+
 MANUAL_OVERRIDE_RELEASE_MODES = frozenset(
     {"manual", "duration", "foreground_change", "stream_end"}
 )
@@ -268,6 +272,7 @@ class RoutingService:
         obs_probe_seconds: float = 2.0,
         state_reconcile_seconds: float = 0.5,
         drift_probe_seconds: float = 10.0,
+        drift_probe_budget_seconds: float = 2.0,
         activation_policies: Mapping[str, TriggerPolicyConfig] | None = None,
         activation_scheduler: ActivationScheduler | None = None,
         activation_controller: OBSActivationController | None = None,
@@ -306,6 +311,10 @@ class RoutingService:
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
         self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
         self.drift_probe_seconds = max(2.0, float(drift_probe_seconds))
+        self.drift_probe_budget_seconds = max(
+            0.1,
+            float(drift_probe_budget_seconds),
+        )
         self.declarative_execution_enabled = bool(declarative_execution_enabled)
         policies = dict(activation_policies or {})
         transferred_cleanup = tuple(pending_activation_cleanup or ()) + tuple(pending_cleanup or ())
@@ -367,6 +376,7 @@ class RoutingService:
         self._last_obs_session_generation: int | None = None
         self._last_state_reconcile = 0.0
         self._last_drift_probe = 0.0
+        self._drift_probe_deadline = 0.0
         self._last_drift_status: dict[str, object] = {
             "available": False,
             "detected": False,
@@ -2096,10 +2106,26 @@ class RoutingService:
                 return
             state = self.engine.current_state
             generation = self._dispatch_generation
+            probe_app = self._last_app
+            manual_override_active = self.engine.manual_override is not None
         if state is None:
             return
 
         self._last_drift_probe = now
+        started_at = time.monotonic()
+        obs_before = self._obs_request_count()
+        preemption_armed = (
+            not manual_override_active
+            and self._arm_automatic_dispatch_preemption(probe_app)
+        )
+        with self._lock:
+            self._drift_probe_deadline = (
+                started_at + self.drift_probe_budget_seconds
+            )
+
+        report = None
+        probe_error: Exception | None = None
+        budget_error = ""
         try:
             with self._dispatch_lock:
                 report = self._build_current_declarative_plan(
@@ -2107,8 +2133,40 @@ class RoutingService:
                     planning,
                     refresh_catalog=False,
                 )
+        except _DriftProbeBudgetExceeded as exc:
+            budget_error = str(exc)
         except Exception as exc:
-            self.logger.debug("OBS drift probe unavailable: %s", exc)
+            probe_error = exc
+        finally:
+            with self._lock:
+                self._drift_probe_deadline = 0.0
+            superseded = (
+                self._clear_automatic_dispatch_preemption()
+                if preemption_armed
+                else False
+            )
+
+        duration_ms = max(
+            0.0,
+            (time.monotonic() - started_at) * 1000.0,
+        )
+        obs_requests = max(0, self._obs_request_count() - obs_before)
+
+        if superseded:
+            # A real foreground change has priority over this read-only
+            # maintenance task. Retry on the next eligible loop instead of
+            # publishing a transient warning caused by normal routing activity.
+            self._last_drift_probe = 0.0
+            return
+
+        unavailable_reason = budget_error or (
+            str(probe_error) if probe_error is not None else ""
+        )
+        if unavailable_reason:
+            self.logger.debug(
+                "OBS drift probe unavailable: %s",
+                unavailable_reason,
+            )
             with self._lock:
                 self._last_drift_status = {
                     "available": False,
@@ -2120,16 +2178,23 @@ class RoutingService:
                     "changes": [],
                     "checked_at": time.time(),
                     "generation": generation,
-                    "reason": str(exc),
+                    "duration_ms": round(duration_ms, 3),
+                    "obs_requests": obs_requests,
+                    "budget_seconds": self.drift_probe_budget_seconds,
+                    "reason": unavailable_reason,
                 }
             return
 
+        assert report is not None
         status = summarize_obs_drift(
             report,
             config_revision=self.config_revision,
             generation=generation,
             checked_at=time.time(),
         )
+        status["duration_ms"] = round(duration_ms, 3)
+        status["obs_requests"] = obs_requests
+        status["budget_seconds"] = self.drift_probe_budget_seconds
         with self._lock:
             previous = dict(self._last_drift_status)
             self._last_drift_status = status
@@ -2539,10 +2604,20 @@ class RoutingService:
         with self._lock:
             stopping = self._stopping
             baseline = self._automatic_dispatch_foreground_signature
+            superseded = self._automatic_dispatch_superseded
             next_probe = self._automatic_dispatch_next_foreground_probe
+            drift_deadline = self._drift_probe_deadline
         if stopping or self._stop.is_set():
             raise _RuntimeShutdownRequested(
                 "Arrêt du runtime demandé pendant une opération OBS"
+            )
+        if drift_deadline and now >= drift_deadline:
+            raise _DriftProbeBudgetExceeded(
+                "Budget du probe de dérive OBS dépassé"
+            )
+        if superseded:
+            raise _AutomaticRoutingSuperseded(
+                "Foreground modifié pendant l'opération automatique OBS"
             )
         if baseline is None or now < next_probe:
             return
