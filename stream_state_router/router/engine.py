@@ -60,6 +60,12 @@ class StateRouterEngine:
     def needs_process_context(self) -> bool:
         return bool(self._rules.needs_process_context)
 
+    def launcher_candidates(
+        self,
+        context: Mapping[str, Any] | None = None,
+    ):
+        return self._rules.launcher_candidates(context)
+
     @property
     def current_state(self) -> StreamState | None:
         return self._current_state
