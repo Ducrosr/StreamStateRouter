@@ -170,6 +170,8 @@ class MainWindow(QMainWindow):
         self._preview_active = False
         self._routing_incomplete = False
         self._runtime_restart_in_progress = False
+        self._last_runtime_restart_previous_stopped = False
+        self._last_runtime_restart_diagnostic = ""
         self._pending_collection_imports: dict[str, dict[str, object]] = {}
         self._user_activity_history: list[tuple[str, UserActivityEntry]] = []
 
@@ -2289,7 +2291,7 @@ class MainWindow(QMainWindow):
             recovery_error = ""
             previous_was_stopped = bool(
                 previous_service is not None
-                and previous_service.shutdown_result.worker_stopped
+                and self._last_runtime_restart_previous_stopped
             )
             if restart_error and previous_was_stopped:
                 recovered, recovery_error = self._recover_previous_runtime(
@@ -2309,9 +2311,15 @@ class MainWindow(QMainWindow):
             if restart_error:
                 parts.append(f"Nouvelle configuration : {restart_error}")
             else:
+                diagnostic = self._last_runtime_restart_diagnostic
                 parts.append(
                     "Le runtime précédent n’a pas pu être remplacé ; "
                     "il reste actif."
+                    + (
+                        f"\nDiagnostic : {diagnostic}"
+                        if diagnostic
+                        else ""
+                    )
                 )
             if rollback_ok:
                 parts.append(
@@ -2449,6 +2457,8 @@ class MainWindow(QMainWindow):
         *,
         config_data: Mapping[str, object] | None = None,
     ) -> bool:
+        self._last_runtime_restart_previous_stopped = False
+        self._last_runtime_restart_diagnostic = ""
         if self._runtime_restart_in_progress:
             self._log("Redémarrage runtime déjà en cours : demande ignorée.")
             return False
@@ -2479,17 +2489,12 @@ class MainWindow(QMainWindow):
                 diagnostic = result.diagnostic_summary()
                 self._log(f"runtime_stop: {diagnostic}")
                 if not result:
+                    self._last_runtime_restart_diagnostic = diagnostic
                     self._log(
                         "Runtime précédent toujours actif : redémarrage refusé pour éviter des écritures OBS concurrentes."
                     )
-                    QMessageBox.critical(
-                        self,
-                        "Runtime",
-                        "Le runtime précédent n'a pas pu être arrêté proprement. "
-                        "Le nouveau runtime n'a pas été démarré.\n\n"
-                        f"Diagnostic : {diagnostic}",
-                    )
                     return False
+                self._last_runtime_restart_previous_stopped = True
                 self._pending_cleanup_transfer = result.pending_cleanup
                 if not result.cleanup_complete:
                     self._log(
