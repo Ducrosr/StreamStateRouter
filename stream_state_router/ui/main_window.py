@@ -66,7 +66,7 @@ from ..services.config import (
     build_ruleset,
     export_config,
     import_config,
-    latest_valid_backup,
+    list_valid_backups,
     save_config,
     validate_config,
     push_layout_history,
@@ -551,7 +551,7 @@ class MainWindow(QMainWindow):
         repair_refs.clicked.connect(self._start_reference_repair)
         actions.addWidget(repair_refs)
 
-        restore = QPushButton("Restaurer la dernière sauvegarde…")
+        restore = QPushButton("Historique des sauvegardes…")
         restore.clicked.connect(dialog.accept)
         restore.clicked.connect(self._restore_config_backup)
         actions.addWidget(restore)
@@ -1758,7 +1758,7 @@ class MainWindow(QMainWindow):
             ("Enregistrer et appliquer", self.save_and_apply),
             ("Exporter la configuration…", self._export_config),
             ("Importer une configuration…", self._import_config),
-            ("Restaurer la dernière sauvegarde valide…", self._restore_config_backup),
+            ("Historique des sauvegardes…", self._restore_config_backup),
             ("Quitter", self._quit_app),
         ]:
             action = QAction(text, self)
@@ -4902,24 +4902,112 @@ class MainWindow(QMainWindow):
 
     def _restore_config_backup(self) -> None:
         try:
-            found = latest_valid_backup()
+            backups = list_valid_backups(limit=20)
         except Exception as exc:
             QMessageBox.critical(self, "Sauvegarde", str(exc))
             return
-        if found is None:
-            QMessageBox.information(self, "Sauvegarde", "Aucune sauvegarde valide n'a été trouvée.")
+        if not backups:
+            QMessageBox.information(
+                self,
+                "Sauvegarde",
+                "Aucune sauvegarde valide n’a été trouvée.",
+            )
             return
-        incoming, path = found
-        if QMessageBox.question(
-            self,
-            "Restaurer une sauvegarde",
-            f"Charger « {path.name} » comme brouillon ?\n\n"
-            "La configuration active ne changera qu'après « Enregistrer et appliquer ».",
-        ) != QMessageBox.Yes:
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Historique des sauvegardes")
+        dialog.resize(760, 360)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "SSR conserve automatiquement les configurations précédentes. "
+            "La restauration charge uniquement un brouillon : le runtime ne "
+            "change qu’après « Enregistrer et appliquer »."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        selector = QComboBox()
+        for index, (payload, path) in enumerate(backups):
+            try:
+                stamp = time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(path.stat().st_mtime),
+                )
+            except OSError:
+                stamp = path.name
+            selector.addItem(
+                f"{stamp} · {path.name}",
+                index,
+            )
+        root.addWidget(selector)
+
+        details = QLabel()
+        details.setWordWrap(True)
+        details.setObjectName("Muted")
+        root.addWidget(details)
+
+        def refresh_details() -> None:
+            try:
+                index = int(selector.currentData())
+            except (TypeError, ValueError):
+                index = 0
+            payload, path = backups[max(0, min(index, len(backups) - 1))]
+            rules = payload.get("rules")
+            rule_count = len(rules) if isinstance(rules, list) else 0
+            profiles = payload.get("profiles")
+            profile_count = 0
+            if isinstance(profiles, Mapping):
+                profile_count = sum(
+                    len(values)
+                    for values in profiles.values()
+                    if isinstance(values, Mapping)
+                )
+            layouts = payload.get("layout_profiles")
+            layout_count = (
+                len(layouts)
+                if isinstance(layouts, Mapping)
+                else 0
+            )
+            details.setText(
+                f"Révision {config_revision(payload)} · "
+                f"{rule_count} règle(s) · "
+                f"{profile_count} profil(s) · "
+                f"{layout_count} layout(s)\n{path}"
+            )
+
+        selector.currentIndexChanged.connect(refresh_details)
+        refresh_details()
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(dialog.reject)
+        actions.addWidget(cancel)
+        restore = QPushButton("Charger comme brouillon")
+        restore.setObjectName("Primary")
+        restore.clicked.connect(dialog.accept)
+        actions.addWidget(restore)
+        root.addLayout(actions)
+
+        if dialog.exec() != QDialog.Accepted:
             return
+        try:
+            index = int(selector.currentData())
+        except (TypeError, ValueError):
+            index = 0
+        incoming, path = backups[max(0, min(index, len(backups) - 1))]
         self.config = copy.deepcopy(incoming)
         self._load_config_into_ui()
         self._mark_dirty()
+        self._refresh_dashboard_summary()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Sauvegarde chargée comme brouillon",
+                path.name,
+            )
+        )
         self._log(f"Sauvegarde valide chargée en brouillon : {path}")
 
     def _refresh_config_revision_status(
