@@ -25,6 +25,40 @@ Usage recommandé :
 Le chemin SoundVolumeView est configurable dans **Paramètres > Contrôle Windows**.
 HDR ne dépend d'aucun utilitaire externe.
 
+### Override manuel temporaire
+
+L'override manuel peut préciser quand SSR doit rendre automatiquement la main au
+routage normal :
+
+- `manual` : jusqu'à désactivation explicite ;
+- `duration` : après `duration_seconds` ;
+- `foreground_change` : au prochain changement réel d'application externe ;
+- `stream_end` : après qu'un stream actif a été observé puis s'est terminé.
+
+Le focus de la propre fenêtre SSR est ignoré par le provider Win32 et ne compte
+donc pas comme un changement d'application. Le mode `stream_end` utilise le
+contexte OBS déjà mis en cache lorsqu'il est disponible, puis vérifie l'état du
+stream depuis le worker runtime ; aucune requête OBS n'est effectuée depuis le
+thread UI pour armer l'override.
+
+L'API locale accepte les mêmes champs dans l'action `override` :
+
+```json
+{
+  "state": {
+    "Game": "Overwatch",
+    "OverlayProfile": "FPS",
+    "CaptureProfile": "HDR",
+    "AudioProfile": "Game",
+    "LayoutProfile": "Overwatch"
+  },
+  "release_mode": "stream_end"
+}
+```
+
+Un appel historique contenant seulement un `duration_seconds > 0` conserve son
+comportement et devient implicitement un override temporisé.
+
 ### Préparation via launcher
 
 Une règle d'application peut déclarer un exécutable **Launcher** (par exemple
