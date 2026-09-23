@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from stream_state_router.ui.presentation import build_dashboard_snapshot
+from stream_state_router.ui.presentation import (
+    build_automation_rows,
+    build_dashboard_snapshot,
+    build_diagnostic_report,
+    build_simulation_report,
+    user_activity_from_runtime_event,
+)
 
 
 def _explanation(
@@ -197,6 +203,213 @@ class DashboardPresentationTests(unittest.TestCase):
 
         self.assertEqual(snapshot.health_text, "Configuration déjà conforme")
         self.assertEqual(snapshot.health_style, "Good")
+
+
+    def test_diagnostic_reports_disconnected_obs_and_dirty_config(self) -> None:
+        report = build_diagnostic_report(
+            _explanation(),
+            {},
+            obs_enabled=True,
+            obs_connected=False,
+            obs_last_error="timed out",
+            config_dirty=True,
+        )
+
+        self.assertEqual(report.status_text, "Problème détecté")
+        self.assertEqual(report.status_style, "Bad")
+        titles = [item.title for item in report.items]
+        self.assertIn("SSR n’est pas connecté à OBS", titles)
+        self.assertIn(
+            "Des modifications ne sont pas encore enregistrées",
+            titles,
+        )
+
+    def test_diagnostic_translates_failed_domain_into_action(self) -> None:
+        report = build_diagnostic_report(
+            _explanation(),
+            {
+                "rule_name": "Overwatch",
+                "success": False,
+                "failed_domains": ["layout"],
+                "domain_details": [
+                    {
+                        "domain": "layout",
+                        "desired_profile": "Overwatch",
+                        "applied_profile": "Vanilla",
+                        "status": "missing",
+                        "message": "LayoutProfile introuvable",
+                    }
+                ],
+            },
+            obs_enabled=True,
+            obs_connected=True,
+        )
+
+        self.assertEqual(report.status_text, "Problème détecté")
+        item = next(
+            item for item in report.items if item.title.startswith("Layout")
+        )
+        self.assertIn("introuvable", item.detail)
+        self.assertIn("même nom", item.action)
+
+    def test_diagnostic_fallback_is_information_not_failure(self) -> None:
+        report = build_diagnostic_report(
+            _explanation(
+                kind="fallback",
+                rule_name="fallback",
+                game="Vanilla",
+            ),
+            {
+                "rule_name": "fallback",
+                "success": True,
+                "domain_details": [],
+            },
+            obs_enabled=True,
+            obs_connected=True,
+        )
+
+        self.assertEqual(report.status_text, "Aucun problème détecté")
+        self.assertEqual(report.status_style, "Good")
+        self.assertTrue(
+            any("secours" in item.title for item in report.items)
+        )
+
+    def test_user_activity_filters_runtime_noise(self) -> None:
+        self.assertIsNone(
+            user_activity_from_runtime_event(
+                "routing_decision",
+                "internal routing detail",
+                {},
+            )
+        )
+        connected = user_activity_from_runtime_event(
+            "obs_connected",
+            "connected",
+            {},
+        )
+        self.assertIsNotNone(connected)
+        assert connected is not None
+        self.assertEqual(connected.message, "OBS connecté")
+
+    def test_user_activity_summarizes_incomplete_routing(self) -> None:
+        activity = user_activity_from_runtime_event(
+            "routing_result",
+            "Application OBS incomplète",
+            {
+                "success": False,
+                "failed_domains": ["layout"],
+                "blocked_domains": ["capture"],
+                "pending_domains": [],
+            },
+        )
+
+        self.assertIsNotNone(activity)
+        assert activity is not None
+        self.assertEqual(activity.style, "Bad")
+        self.assertEqual(activity.message, "Application incomplète")
+        self.assertIn("layout", activity.detail)
+        self.assertIn("capture", activity.detail)
+
+
+    def test_simulation_report_is_read_only_plan_summary(self) -> None:
+        report = build_simulation_report(
+            _explanation(
+                domains=[
+                    {
+                        "domain": "capture",
+                        "desired_profile": "HDR",
+                        "applied_profile": "Default",
+                        "status": "planned",
+                        "needs_apply": True,
+                        "operations": [
+                            {"type": "windows_hdr"},
+                            {"type": "source_filter_settings"},
+                        ],
+                    }
+                ]
+            )
+        )
+
+        self.assertTrue(report.would_change)
+        self.assertIn("Aucune commande", report.summary)
+        capture = next(
+            step for step in report.steps if step.domain == "capture"
+        )
+        self.assertEqual(capture.status_label, "À appliquer")
+        self.assertEqual(capture.operation_count, 2)
+
+    def test_simulation_report_ignore_never_claims_mutation(self) -> None:
+        explanation = _explanation(kind="ignore")
+        explanation["obs_plan"]["domains"] = [
+            {
+                "domain": "game",
+                "desired_profile": "Overwatch",
+                "applied_profile": "Vanilla",
+                "status": "planned",
+                "needs_apply": True,
+                "operations": [{"type": "set_program_scene"}],
+            }
+        ]
+
+        report = build_simulation_report(explanation)
+
+        self.assertFalse(report.would_change)
+        self.assertIn("conserverait", report.summary)
+
+
+    def test_automation_rows_translate_rules_and_fallback(self) -> None:
+        config = {
+            "rules": [
+                {
+                    "name": "Overwatch",
+                    "enabled": True,
+                    "priority": 100,
+                    "behavior": "match",
+                    "exe": "Overwatch.exe",
+                    "path": "C:\\Games\\Overwatch.exe",
+                    "title_regex": "^Overwatch$",
+                    "state": {
+                        "Game": "Overwatch",
+                        "OverlayProfile": "FPS",
+                        "CaptureProfile": "HDR",
+                        "AudioProfile": "Game",
+                        "LayoutProfile": "FPS",
+                    },
+                    "conditions": {},
+                },
+                {
+                    "name": "Launcher",
+                    "enabled": False,
+                    "priority": 200,
+                    "behavior": "ignore",
+                    "exe": "Launcher.exe",
+                    "conditions": {},
+                },
+            ],
+            "router": {
+                "fallback_state": {
+                    "Game": "Vanilla",
+                    "OverlayProfile": "Vanilla",
+                    "CaptureProfile": "Default",
+                    "AudioProfile": "Default",
+                    "LayoutProfile": "Vanilla",
+                }
+            },
+        }
+
+        rows = build_automation_rows(config)
+
+        self.assertEqual(rows[0].name, "Launcher")
+        self.assertEqual(rows[0].status, "Désactivée")
+        self.assertIn("Launcher.exe", rows[0].trigger)
+        self.assertEqual(rows[0].result, "Conserver l’état courant")
+        overwatch = next(row for row in rows if row.name == "Overwatch")
+        self.assertIn("Overwatch.exe", overwatch.trigger)
+        self.assertIn("C:\\Games\\Overwatch.exe", overwatch.trigger)
+        self.assertIn("^Overwatch$", overwatch.trigger)
+        self.assertIn("Jeu=Overwatch", overwatch.result)
+        self.assertEqual(rows[-1].name, "Configuration de secours")
+        self.assertIn("aucune règle", rows[-1].trigger)
 
     def test_translates_planned_and_manual_hold_statuses(self) -> None:
         snapshot = build_dashboard_snapshot(

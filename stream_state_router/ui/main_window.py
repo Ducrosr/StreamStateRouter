@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from typing import Mapping
 from PySide6.QtCore import QObject, Qt, Signal, QTimer, QSettings
 from PySide6.QtGui import QAction, QCloseEvent
@@ -79,7 +80,14 @@ from .dialogs import (
     ModuleLayoutDialog,
     RuleDialog,
 )
-from .presentation import build_dashboard_snapshot
+from .presentation import (
+    UserActivityEntry,
+    build_automation_rows,
+    build_dashboard_snapshot,
+    build_diagnostic_report,
+    build_simulation_report,
+    user_activity_from_runtime_event,
+)
 
 
 DOMAIN_LABELS = {
@@ -122,6 +130,7 @@ class MainWindow(QMainWindow):
         self.config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
         self._applied_revision = ""
+        self._draft_dirty = False
         self.logger = logger
         self.start_minimized = start_minimized
         self._runtime_marker = runtime_marker
@@ -141,6 +150,7 @@ class MainWindow(QMainWindow):
         self._routing_incomplete = False
         self._runtime_restart_in_progress = False
         self._pending_collection_imports: dict[str, dict[str, object]] = {}
+        self._user_activity_history: list[tuple[str, UserActivityEntry]] = []
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -192,6 +202,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs, 1)
         self.dashboard_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_dashboard()), "Dashboard"
+        )
+        self.automations_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_automations_tab()), "Automatisations"
         )
         self.rules_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_rules_tab()), "Règles"
@@ -260,7 +273,12 @@ class MainWindow(QMainWindow):
         )
         for index in expert_only:
             self.tabs.setTabVisible(index, self._expert_mode)
+        for widget_name in ("state_card", "override_card"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(self._expert_mode)
         self.tabs.setTabVisible(self.dashboard_tab_index, True)
+        self.tabs.setTabVisible(self.automations_tab_index, True)
         self.tabs.setTabVisible(self.settings_tab_index, True)
         self.mode_button.setText(
             "Mode simple" if self._expert_mode else "Mode expert"
@@ -272,6 +290,8 @@ class MainWindow(QMainWindow):
         )
         if not self._expert_mode and self.tabs.currentIndex() in expert_only:
             self.tabs.setCurrentIndex(self.dashboard_tab_index)
+        if hasattr(self, "unsaved"):
+            self._refresh_config_revision_status()
 
     def _refresh_dashboard_summary(self) -> None:
         if not hasattr(self, "dashboard_health"):
@@ -370,6 +390,12 @@ class MainWindow(QMainWindow):
         explain_summary = QPushButton("Pourquoi cette décision ?")
         explain_summary.clicked.connect(self._explain_current_decision)
         summary_actions.addWidget(explain_summary)
+        diagnose_summary = QPushButton("Pourquoi ça ne marche pas ?")
+        diagnose_summary.clicked.connect(self._show_guided_diagnostic)
+        summary_actions.addWidget(diagnose_summary)
+        preview_summary = QPushButton("Prévisualiser sans appliquer")
+        preview_summary.clicked.connect(self._show_routing_preview)
+        summary_actions.addWidget(preview_summary)
         repair_summary = QPushButton("Corriger les différences")
         repair_summary.setObjectName("Primary")
         repair_summary.clicked.connect(self._force_reapply)
@@ -378,7 +404,47 @@ class MainWindow(QMainWindow):
         summary_lay.addLayout(summary_actions)
         root.addWidget(summary_card)
 
+        activity_card, activity_lay = self._card("Activité récente")
+        activity_hint = QLabel(
+            "Les événements importants sont résumés ici. "
+            "Le journal technique complet reste disponible en mode Expert."
+        )
+        activity_hint.setWordWrap(True)
+        activity_hint.setObjectName("Muted")
+        activity_lay.addWidget(activity_hint)
+        self.user_activity_tree = QTreeWidget()
+        self.user_activity_tree.setColumnCount(3)
+        self.user_activity_tree.setHeaderLabels(["Heure", "Événement", "Détail"])
+        self.user_activity_tree.setRootIsDecorated(False)
+        self.user_activity_tree.setAlternatingRowColors(True)
+        self.user_activity_tree.setMaximumHeight(180)
+        self.user_activity_tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.user_activity_tree.header().setStretchLastSection(True)
+        activity_lay.addWidget(self.user_activity_tree)
+        root.addWidget(activity_card)
+
+        import_card, import_lay = self._card("Configurer SSR depuis OBS")
+        import_hint = QLabel(
+            "SSR peut analyser la collection OBS courante en lecture seule, "
+            "repérer les scènes, sources, filtres, layouts et automatisations "
+            "Advanced Scene Switcher compatibles, puis vous proposer la suite."
+        )
+        import_hint.setWordWrap(True)
+        import_hint.setObjectName("Muted")
+        import_lay.addWidget(import_hint)
+        import_actions = QHBoxLayout()
+        analyze_import = QPushButton("Analyser ma collection OBS")
+        analyze_import.setObjectName("Primary")
+        analyze_import.clicked.connect(self._guided_analyze_collection)
+        import_actions.addWidget(analyze_import)
+        import_actions.addStretch(1)
+        import_lay.addLayout(import_actions)
+        root.addWidget(import_card)
+
         app_card, app_lay = self._card("Application au premier plan")
+        self.app_card = app_card
         self.fg_exe = QLabel("—")
         self.fg_exe.setStyleSheet("font-size: 15pt; font-weight: 700;")
         self.fg_title = QLabel("—")
@@ -392,6 +458,7 @@ class MainWindow(QMainWindow):
         root.addWidget(app_card)
 
         state_card, state_lay = self._card("État logique courant")
+        self.state_card = state_card
         self.state_labels: dict[str, QLabel] = {}
         state_form = QFormLayout()
         for key in ("Game", "OverlayProfile", "CaptureProfile", "AudioProfile", "LayoutProfile"):
@@ -406,6 +473,7 @@ class MainWindow(QMainWindow):
         root.addWidget(state_card)
 
         override_card, override_lay = self._card("Override manuel")
+        self.override_card = override_card
         form = QFormLayout()
         self.override_boxes: dict[str, QComboBox] = {}
         for domain in STATE_DOMAINS:
@@ -434,6 +502,60 @@ class MainWindow(QMainWindow):
         root.addWidget(override_card)
         root.addStretch(1)
         return page
+
+    def _build_automations_tab(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setSpacing(12)
+
+        intro = QLabel(
+            "Cette vue décrit ce que SSR fera en langage utilisateur. "
+            "L’ordre suit la priorité des règles. L’édition détaillée reste "
+            "disponible en mode Expert."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        self.automations_tree = QTreeWidget()
+        self.automations_tree.setColumnCount(4)
+        self.automations_tree.setHeaderLabels(
+            ["Automatisation", "Quand", "Alors", "État"]
+        )
+        self.automations_tree.setRootIsDecorated(False)
+        self.automations_tree.setAlternatingRowColors(True)
+        self.automations_tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.automations_tree.header().setStretchLastSection(True)
+        root.addWidget(self.automations_tree, 1)
+
+        actions = QHBoxLayout()
+        refresh = QPushButton("Actualiser")
+        refresh.clicked.connect(self._refresh_automations_view)
+        actions.addWidget(refresh)
+        edit = QPushButton("Modifier les règles")
+        edit.clicked.connect(self._open_rules_editor)
+        actions.addWidget(edit)
+        actions.addStretch(1)
+        root.addLayout(actions)
+        return page
+
+    def _refresh_automations_view(self) -> None:
+        tree = getattr(self, "automations_tree", None)
+        if tree is None:
+            return
+        tree.clear()
+        for row in build_automation_rows(self.config):
+            tree.addTopLevelItem(
+                QTreeWidgetItem(
+                    [row.name, row.trigger, row.result, row.status]
+                )
+            )
+
+    def _open_rules_editor(self) -> None:
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.rules_tab_index)
 
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
@@ -852,6 +974,7 @@ class MainWindow(QMainWindow):
             actual_startup = bool(ui.get("start_with_windows", False))
         self.start_with_windows.setChecked(actual_startup)
         self._refresh_rules_table()
+        self._refresh_automations_view()
         self._refresh_profile_names()
         self._refresh_layout_profile_names()
         self._refresh_override_boxes()
@@ -906,8 +1029,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Enregistrement", str(exc))
             return
+        self._draft_dirty = False
         if not self._restart_runtime():
-            self.unsaved.setText("Configuration enregistrée, application runtime incomplète")
+            self._refresh_config_revision_status(draft_dirty=False)
             self.statusBar().showMessage(
                 "Configuration enregistrée — runtime précédent encore actif",
                 6000,
@@ -916,9 +1040,12 @@ class MainWindow(QMainWindow):
         self._restart_api()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
-        self._refresh_config_revision_status()
+        self._refresh_config_revision_status(draft_dirty=False)
         self.statusBar().showMessage("Configuration enregistrée et appliquée", 4000)
         self._log("Configuration enregistrée et appliquée.")
+        self._record_user_activity(
+            UserActivityEntry("Good", "Configuration enregistrée et appliquée")
+        )
 
     def _start_runtime(
         self,
@@ -1067,6 +1194,13 @@ class MainWindow(QMainWindow):
             f"{values['CaptureProfile']} / {values['AudioProfile']} / "
             f"{values['LayoutProfile']} [{change.rule_name}]"
         )
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                f"Configuration sélectionnée : {values['Game']}",
+                f"Règle : {change.rule_name}",
+            )
+        )
         self._refresh_dashboard_summary()
 
     def _on_dispatch(self, result) -> None:
@@ -1080,6 +1214,13 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         self._log(f"{event.kind}: {event.message}")
+        activity = user_activity_from_runtime_event(
+            event.kind,
+            event.message,
+            event.payload if isinstance(event.payload, Mapping) else None,
+        )
+        if activity is not None:
+            self._record_user_activity(activity)
         self._refresh_dashboard_summary()
         if event.kind == "routing_rule" and isinstance(event.payload, dict):
             rule_name = str(event.payload.get("rule_name") or "—")
@@ -1170,6 +1311,223 @@ class MainWindow(QMainWindow):
         self.obs_status.setObjectName(style)
         self.obs_status.style().unpolish(self.obs_status)
         self.obs_status.style().polish(self.obs_status)
+
+    def _record_user_activity(self, entry: UserActivityEntry) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        if self._user_activity_history:
+            _last_time, last_entry = self._user_activity_history[-1]
+            if (
+                last_entry.message == entry.message
+                and last_entry.detail == entry.detail
+            ):
+                self._user_activity_history[-1] = (timestamp, entry)
+                self._refresh_user_activity()
+                return
+        self._user_activity_history.append((timestamp, entry))
+        self._user_activity_history = self._user_activity_history[-8:]
+        self._refresh_user_activity()
+
+    def _refresh_user_activity(self) -> None:
+        tree = getattr(self, "user_activity_tree", None)
+        if tree is None:
+            return
+        tree.clear()
+        markers = {
+            "Good": "✓",
+            "Warn": "⚠",
+            "Bad": "✕",
+            "Muted": "•",
+        }
+        for timestamp, entry in reversed(self._user_activity_history):
+            item = QTreeWidgetItem(
+                [
+                    timestamp,
+                    f"{markers.get(entry.style, '•')} {entry.message}",
+                    entry.detail or "—",
+                ]
+            )
+            tree.addTopLevelItem(item)
+
+    def _show_routing_preview(self) -> None:
+        service = self._service
+        if service is None:
+            QMessageBox.information(
+                self,
+                "Prévisualisation",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        try:
+            explanation = service.explain_decision()
+        except Exception as exc:
+            QMessageBox.critical(self, "Prévisualisation", str(exc))
+            return
+
+        report = build_simulation_report(explanation)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Prévisualisation du routage")
+        dialog.resize(720, 430)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(report.summary)
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        table = QTreeWidget()
+        table.setColumnCount(5)
+        table.setHeaderLabels(
+            ["Élément", "Attendu", "Actuel", "État", "Opérations"]
+        )
+        table.setRootIsDecorated(False)
+        table.setAlternatingRowColors(True)
+        for step in report.steps:
+            table.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        step.label,
+                        step.desired,
+                        step.applied,
+                        step.status_label,
+                        str(step.operation_count),
+                    ]
+                )
+            )
+        table.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        table.header().setStretchLastSection(True)
+        root.addWidget(table, 1)
+
+        note = QLabel(
+            "Cette prévisualisation utilise le plan de routage courant et "
+            "n’envoie aucune mutation à OBS."
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        root.addWidget(note)
+
+        actions = QHBoxLayout()
+        if report.would_change:
+            apply_now = QPushButton("Appliquer maintenant")
+            apply_now.setObjectName("Primary")
+            apply_now.clicked.connect(dialog.accept)
+            apply_now.clicked.connect(self._force_reapply)
+            actions.addWidget(apply_now)
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _show_guided_diagnostic(self) -> None:
+        service = self._service
+        client = self._client
+        if service is None:
+            QMessageBox.information(
+                self,
+                "Diagnostic SSR",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        try:
+            explanation = service.explain_decision()
+            routing_status = service.routing_status()
+        except Exception as exc:
+            QMessageBox.critical(self, "Diagnostic SSR", str(exc))
+            return
+
+        config_dirty = self._draft_dirty
+        report = build_diagnostic_report(
+            explanation,
+            routing_status,
+            obs_enabled=bool(client and client.config.enabled),
+            obs_connected=bool(client and client.connected),
+            obs_last_error=(
+                str(client.last_error or "")
+                if client is not None
+                else ""
+            ),
+            config_dirty=config_dirty,
+            runtime_revision_mismatch=(
+                bool(self._saved_revision)
+                and bool(self._applied_revision)
+                and self._saved_revision != self._applied_revision
+            ),
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Pourquoi ça ne marche pas ?")
+        dialog.resize(780, 520)
+        root = QVBoxLayout(dialog)
+
+        status = QLabel(report.status_text)
+        status.setObjectName(report.status_style)
+        status.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(status)
+
+        summary = QLabel(report.summary)
+        summary.setWordWrap(True)
+        root.addWidget(summary)
+
+        diagnostics = QTreeWidget()
+        diagnostics.setColumnCount(3)
+        diagnostics.setHeaderLabels(
+            ["Diagnostic", "Détail", "Action recommandée"]
+        )
+        diagnostics.setRootIsDecorated(False)
+        diagnostics.setAlternatingRowColors(True)
+        diagnostics.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        diagnostics.header().setStretchLastSection(True)
+        markers = {
+            "error": "✕",
+            "warning": "⚠",
+            "info": "ℹ",
+        }
+        for item in report.items:
+            diagnostics.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        f"{markers.get(item.severity, '•')} {item.title}",
+                        item.detail or "—",
+                        item.action or "Aucune action nécessaire.",
+                    ]
+                )
+            )
+        if not report.items:
+            diagnostics.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        "✓ Aucun problème détecté",
+                        "SSR ne signale aucune anomalie.",
+                        "Aucune action nécessaire.",
+                    ]
+                )
+            )
+        root.addWidget(diagnostics, 1)
+
+        actions = QHBoxLayout()
+        repair = QPushButton("Corriger les différences")
+        repair.setObjectName("Primary")
+        repair.clicked.connect(dialog.accept)
+        repair.clicked.connect(self._force_reapply)
+        actions.addWidget(repair)
+        expert = QPushButton("Ouvrir le mode Expert")
+        expert.clicked.connect(dialog.accept)
+        expert.clicked.connect(self._ensure_expert_mode)
+        actions.addWidget(expert)
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _ensure_expert_mode(self) -> None:
+        if not self._expert_mode:
+            self._toggle_ui_mode()
 
     def _explain_current_decision(self) -> None:
         service = self._service
@@ -1326,6 +1684,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.rules_table.setItem(row, col, item)
+        self._refresh_automations_view()
 
     def _selected_rule_index(self) -> int | None:
         rows = self.rules_table.selectionModel().selectedRows()
@@ -1614,6 +1973,137 @@ class MainWindow(QMainWindow):
         self._refresh_profile_names()
         self._refresh_override_boxes()
 
+    def _guided_analyze_collection(self) -> None:
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Analyse collection OBS",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        try:
+            request_id = self._service.request_collection_import_preview(
+                include_layouts=True,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Analyse collection OBS",
+                str(exc),
+            )
+            return
+
+        self._pending_collection_imports[request_id] = {
+            "mode": "guided_analysis",
+            "domain": "",
+            "profile_name": "",
+            "options": {},
+        }
+        self._record_user_activity(
+            UserActivityEntry("Muted", "Analyse de la collection OBS démarrée")
+        )
+        self.statusBar().showMessage(
+            "Analyse de la collection OBS en cours…",
+            8000,
+        )
+
+    def _show_guided_collection_analysis(
+        self,
+        snapshot,
+        raw_result: Mapping[str, object],
+    ) -> None:
+        raw_layouts = raw_result.get("layouts")
+        layout_count = len(raw_layouts) if isinstance(raw_layouts, Mapping) else 0
+        raw_skipped = raw_result.get("layout_skipped")
+        skipped_layouts = (
+            len(raw_skipped)
+            if isinstance(raw_skipped, list)
+            else 0
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Analyse de la collection OBS")
+        dialog.resize(760, 500)
+        root = QVBoxLayout(dialog)
+
+        title = QLabel(
+            f"Collection : {snapshot.collection or '—'}"
+        )
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        scene = QLabel(
+            "Scène programme actuelle : "
+            f"{snapshot.current_program_scene or '—'}"
+        )
+        scene.setObjectName("Muted")
+        root.addWidget(scene)
+
+        summary = QTreeWidget()
+        summary.setColumnCount(2)
+        summary.setHeaderLabels(["Élément détecté", "Quantité"])
+        summary.setRootIsDecorated(False)
+        summary.setAlternatingRowColors(True)
+        rows = [
+            ("Scènes OBS", len(snapshot.scenes)),
+            ("Inputs / sources", len(snapshot.inputs)),
+            ("Filtres", len(snapshot.filters)),
+            ("Scene Items", len(snapshot.scene_items)),
+            ("Layouts importables", layout_count),
+            ("Layouts ignorés par sécurité", skipped_layouts),
+            ("Avertissements", len(snapshot.warnings)),
+        ]
+        for label, value in rows:
+            summary.addTopLevelItem(
+                QTreeWidgetItem([label, str(value)])
+            )
+        summary.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        summary.header().setStretchLastSection(True)
+        root.addWidget(summary, 1)
+
+        note = QLabel(
+            "Cette analyse n’a modifié ni OBS ni la configuration SSR. "
+            "La migration automatique reste conservatrice : une macro ou un "
+            "élément ambigu n’est jamais approximé."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        if snapshot.warnings:
+            warnings = QPlainTextEdit()
+            warnings.setReadOnly(True)
+            warnings.setMaximumHeight(110)
+            warnings.setPlainText(
+                "\n".join(f"• {item}" for item in snapshot.warnings)
+            )
+            root.addWidget(warnings)
+
+        actions = QHBoxLayout()
+        migrate = QPushButton("Migrer ce qui est sûr…")
+        migrate.setObjectName("Primary")
+        migrate.clicked.connect(dialog.accept)
+        migrate.clicked.connect(self._migrate_collection_logic)
+        actions.addWidget(migrate)
+
+        advanced = QPushButton("Ouvrir les outils d’import avancés")
+        advanced.clicked.connect(dialog.accept)
+        advanced.clicked.connect(self._open_import_tools)
+        actions.addWidget(advanced)
+        actions.addStretch(1)
+
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _open_import_tools(self) -> None:
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.profiles_tab_index)
+
     def _import_collection_to_profile(self) -> None:
         current = self._current_profile()
         if not current:
@@ -1754,6 +2244,21 @@ class MainWindow(QMainWindow):
         snapshot = SceneCollectionImporter.snapshot_from_mapping(
             raw_snapshot
         )
+
+        if mode == "guided_analysis":
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Good",
+                    "Analyse de la collection OBS terminée",
+                    (
+                        f"{len(snapshot.scenes)} scène(s), "
+                        f"{len(snapshot.inputs)} source(s), "
+                        f"{len(snapshot.filters)} filtre(s)"
+                    ),
+                )
+            )
+            self._show_guided_collection_analysis(snapshot, raw_result)
+            return
 
         previous = copy.deepcopy(self.config)
         asc_report = None
@@ -3132,19 +3637,37 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._log(f"Sauvegarde valide chargée en brouillon : {path}")
 
-    def _refresh_config_revision_status(self, *, draft_dirty: bool = False) -> None:
+    def _refresh_config_revision_status(
+        self,
+        *,
+        draft_dirty: bool | None = None,
+    ) -> None:
+        if draft_dirty is not None:
+            self._draft_dirty = bool(draft_dirty)
         saved = self._saved_revision or "—"
         applied = self._applied_revision or "—"
-        if draft_dirty:
-            self.unsaved.setText(
-                f"Brouillon modifié · enregistré {saved} · appliqué {applied}"
-            )
-        elif saved != applied:
-            self.unsaved.setText(
-                f"Enregistré {saved} · runtime encore sur {applied}"
-            )
+
+        if self._expert_mode:
+            if self._draft_dirty:
+                text = (
+                    f"Brouillon modifié · enregistré {saved} · "
+                    f"appliqué {applied}"
+                )
+            elif saved != applied:
+                text = f"Enregistré {saved} · runtime encore sur {applied}"
+            else:
+                text = f"Enregistré / appliqué {applied}"
         else:
-            self.unsaved.setText(f"Enregistré / appliqué {applied}")
+            if self._draft_dirty:
+                text = "Modifications non enregistrées"
+            elif saved != applied:
+                text = "Configuration enregistrée · application en attente"
+            else:
+                text = "Configuration à jour"
+        self.unsaved.setText(text)
+        self.unsaved.setToolTip(
+            f"Révision enregistrée : {saved}\nRévision runtime : {applied}"
+        )
 
     def _mark_dirty(self, *_args) -> None:
         self._refresh_config_revision_status(draft_dirty=True)
