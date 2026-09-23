@@ -2511,8 +2511,15 @@ class MainWindow(QMainWindow):
             return True
         finally:
             self._runtime_restart_in_progress = False
-            if not succeeded and timer_was_active:
-                self._configure_module_scan_timer()
+            if (
+                not succeeded
+                and timer_was_active
+                and timer is not None
+            ):
+                # Keep the previously applied scan cadence on a failed
+                # replacement. Draft UI settings become active only after a
+                # successful save/apply transaction.
+                timer.start()
 
     def _on_foreground(self, app: ForegroundApp | None) -> None:
         if app is None:
