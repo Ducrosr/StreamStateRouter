@@ -6166,6 +6166,59 @@ class MainWindow(QMainWindow):
         self._load_config_into_ui()
         self._mark_dirty()
 
+    def _load_backup_as_draft(
+        self,
+        incoming: Mapping[str, object],
+        *,
+        source_name: str,
+    ) -> bool:
+        current_review = build_config_change_review(
+            self._last_saved_config,
+            self.config,
+        )
+        if current_review.has_changes:
+            if QMessageBox.question(
+                self,
+                "Remplacer le brouillon actuel",
+                (
+                    f"Le brouillon actuel contient "
+                    f"{len(current_review.changes)} changement(s) non "
+                    "enregistré(s).\n\n"
+                    "Le chargement de la sauvegarde les remplacera. Continuer ?"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return False
+
+        self.config = copy.deepcopy(dict(incoming))
+        self._load_config_into_ui()
+        incoming_review = build_config_change_review(
+            self._last_saved_config,
+            self.config,
+        )
+        self._draft_dirty = incoming_review.has_changes
+        self._refresh_config_revision_status(
+            draft_dirty=incoming_review.has_changes
+        )
+        self._refresh_dashboard_summary()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Sauvegarde chargée comme brouillon",
+                source_name,
+            )
+        )
+        self.statusBar().showMessage(
+            (
+                "Sauvegarde chargée comme brouillon"
+                if incoming_review.has_changes
+                else "Sauvegarde identique à la configuration enregistrée"
+            ),
+            5000,
+        )
+        return True
+
     def _restore_config_backup(self) -> None:
         if not self._require_edit_mode("Restaurer une sauvegarde"):
             return
@@ -6184,13 +6237,15 @@ class MainWindow(QMainWindow):
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Historique des sauvegardes")
-        dialog.resize(760, 360)
+        dialog.resize(1050, 620)
         root = QVBoxLayout(dialog)
 
         intro = QLabel(
             "SSR conserve automatiquement les configurations précédentes. "
-            "La restauration charge uniquement un brouillon : le runtime ne "
-            "change qu’après « Enregistrer et appliquer »."
+            "Sélectionnez une sauvegarde pour voir précisément les différences "
+            "avec la configuration enregistrée actuelle. La restauration charge "
+            "uniquement un brouillon : le runtime ne change qu’après "
+            "« Enregistrer et appliquer »."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -6214,6 +6269,23 @@ class MainWindow(QMainWindow):
         details.setWordWrap(True)
         details.setObjectName("Muted")
         root.addWidget(details)
+
+        change_summary = QLabel()
+        change_summary.setStyleSheet("font-weight: 700;")
+        root.addWidget(change_summary)
+
+        change_tree = QTreeWidget()
+        change_tree.setColumnCount(5)
+        change_tree.setHeaderLabels(
+            ["Catégorie", "Élément", "Modification", "Détail", "Impact"]
+        )
+        change_tree.setRootIsDecorated(False)
+        change_tree.setAlternatingRowColors(True)
+        change_tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        change_tree.header().setStretchLastSection(True)
+        root.addWidget(change_tree, 1)
 
         def refresh_details() -> None:
             try:
@@ -6244,6 +6316,27 @@ class MainWindow(QMainWindow):
                 f"{layout_count} layout(s)\n{path}"
             )
 
+            review = build_config_change_review(
+                self._last_saved_config,
+                payload,
+            )
+            change_summary.setText(
+                "Effet du chargement : " + review.summary
+            )
+            change_tree.clear()
+            for change in review.changes:
+                change_tree.addTopLevelItem(
+                    QTreeWidgetItem(
+                        [
+                            change.category,
+                            change.target,
+                            change.kind,
+                            change.detail,
+                            change.impact,
+                        ]
+                    )
+                )
+
         selector.currentIndexChanged.connect(refresh_details)
         refresh_details()
 
@@ -6265,17 +6358,11 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             index = 0
         incoming, path = backups[max(0, min(index, len(backups) - 1))]
-        self.config = copy.deepcopy(incoming)
-        self._load_config_into_ui()
-        self._mark_dirty()
-        self._refresh_dashboard_summary()
-        self._record_user_activity(
-            UserActivityEntry(
-                "Muted",
-                "Sauvegarde chargée comme brouillon",
-                path.name,
-            )
-        )
+        if not self._load_backup_as_draft(
+            incoming,
+            source_name=path.name,
+        ):
+            return
         self._log(f"Sauvegarde valide chargée en brouillon : {path}")
 
     def _refresh_config_revision_status(
