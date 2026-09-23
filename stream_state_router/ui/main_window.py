@@ -46,6 +46,7 @@ from ..importers import (
     CurrentStateCaptureOptions,
     SceneCollectionImporter,
     build_current_state_capture_draft,
+    find_ignored_process_rules,
     find_process_rules,
     suggest_capture_name,
     neutralize_referenced_test_layout_profiles,
@@ -309,6 +310,28 @@ class MainWindow(QMainWindow):
             self.dashboard_decision.setText("Décision : —")
             self.dashboard_reason.setText("Pourquoi : le moteur de routage n’est pas actif.")
             self.dashboard_diff.clear()
+            return
+
+        ignored_rules = find_ignored_process_rules(
+            self.config,
+            process,
+        )
+        if ignored_rules:
+            names = ", ".join(
+                str(rule.get("name") or "règle sans nom")
+                for rule in ignored_rules
+            )
+            QMessageBox.warning(
+                self,
+                "Capture de l’état actuel",
+                (
+                    "Ce processus est explicitement ignoré par SSR : "
+                    f"{names}.\n\n"
+                    "L’assistant Simple ne transforme jamais une règle IGNORE "
+                    "en configuration active. Modifiez d’abord cette règle en "
+                    "mode Expert si ce comportement n’est plus souhaité."
+                ),
+            )
             return
 
         try:
