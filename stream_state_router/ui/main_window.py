@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -1778,6 +1780,176 @@ class MainWindow(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(slot)
             file_menu.addAction(action)
+
+        tools_menu = self.menuBar().addMenu("Outils")
+        palette = QAction("Palette de commandes…", self)
+        palette.setShortcut("Ctrl+K")
+        palette.triggered.connect(self._show_command_palette)
+        tools_menu.addAction(palette)
+        tools_menu.addSeparator()
+        for text, slot in [
+            ("Santé et capacités…", self._show_capability_report),
+            ("Qui contrôle quoi ?…", self._show_effective_provenance),
+            ("Réparer les références OBS…", self._start_reference_repair),
+            ("Tester un scénario…", self._show_scenario_simulator),
+        ]:
+            action = QAction(text, self)
+            action.triggered.connect(slot)
+            tools_menu.addAction(action)
+
+    def _show_command_palette(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Palette de commandes")
+        dialog.resize(720, 520)
+        root = QVBoxLayout(dialog)
+
+        search = QLineEdit()
+        search.setPlaceholderText(
+            "Rechercher une règle, un profil, un layout ou une commande…"
+        )
+        root.addWidget(search)
+
+        results = QListWidget()
+        root.addWidget(results, 1)
+
+        entries: list[tuple[str, object]] = []
+
+        def navigate_tab(index: int) -> None:
+            self.tabs.setCurrentIndex(index)
+
+        entries.extend(
+            [
+                (
+                    "Navigation · Dashboard",
+                    lambda: navigate_tab(self.dashboard_tab_index),
+                ),
+                (
+                    "Navigation · Automatisations",
+                    lambda: navigate_tab(self.automations_tab_index),
+                ),
+                (
+                    "Navigation · Paramètres",
+                    lambda: navigate_tab(self.settings_tab_index),
+                ),
+                (
+                    "Outil · Santé et capacités",
+                    self._show_capability_report,
+                ),
+                (
+                    "Outil · Qui contrôle quoi ?",
+                    self._show_effective_provenance,
+                ),
+                (
+                    "Outil · Réparer les références OBS",
+                    self._start_reference_repair,
+                ),
+                (
+                    "Outil · Tester un scénario de routage",
+                    self._show_scenario_simulator,
+                ),
+                (
+                    "Outil · Historique des sauvegardes",
+                    self._restore_config_backup,
+                ),
+            ]
+        )
+
+        raw_rules = self.config.get("rules")
+        if isinstance(raw_rules, list):
+            for index, rule in enumerate(raw_rules):
+                if not isinstance(rule, Mapping):
+                    continue
+                name = str(rule.get("name") or f"Règle {index + 1}")
+                def open_rule(
+                    rule_index=index,
+                ) -> None:
+                    self._ensure_expert_mode()
+                    self.tabs.setCurrentIndex(self.rules_tab_index)
+                    if 0 <= rule_index < self.rules_table.rowCount():
+                        self.rules_table.selectRow(rule_index)
+                        self.rules_table.scrollToItem(
+                            self.rules_table.item(rule_index, 1)
+                        )
+                entries.append(
+                    (f"Règle · {name}", open_rule)
+                )
+
+        profiles = self.config.get("profiles")
+        if isinstance(profiles, Mapping):
+            for domain, domain_profiles in profiles.items():
+                if not isinstance(domain_profiles, Mapping):
+                    continue
+                for name in domain_profiles:
+                    profile_name = str(name)
+                    domain_name = str(domain)
+                    def open_profile(
+                        wanted_domain=domain_name,
+                        wanted_name=profile_name,
+                    ) -> None:
+                        self._ensure_expert_mode()
+                        self.tabs.setCurrentIndex(self.profiles_tab_index)
+                        domain_index = self.profile_domain.findData(
+                            wanted_domain
+                        )
+                        if domain_index >= 0:
+                            self.profile_domain.setCurrentIndex(domain_index)
+                        self._refresh_profile_names()
+                        self.profile_name.setCurrentText(wanted_name)
+                    entries.append(
+                        (
+                            f"Profil {DOMAIN_LABELS.get(domain_name, domain_name)}"
+                            f" · {profile_name}",
+                            open_profile,
+                        )
+                    )
+
+        layouts = self.config.get("layout_profiles")
+        if isinstance(layouts, Mapping):
+            for name in layouts:
+                layout_name = str(name)
+                def open_layout(
+                    wanted_name=layout_name,
+                ) -> None:
+                    self._ensure_expert_mode()
+                    self.tabs.setCurrentIndex(self.layouts_tab_index)
+                    self.layout_profile_name.setCurrentText(wanted_name)
+                    self._refresh_layout_profile_view()
+                entries.append(
+                    (f"Layout · {layout_name}", open_layout)
+                )
+
+        visible_entries: list[tuple[str, object]] = []
+
+        def refresh() -> None:
+            query = search.text().strip().casefold()
+            tokens = [token for token in query.split() if token]
+            visible_entries.clear()
+            results.clear()
+            for label, callback in entries:
+                searchable = label.casefold()
+                if tokens and not all(
+                    token in searchable for token in tokens
+                ):
+                    continue
+                visible_entries.append((label, callback))
+                results.addItem(QListWidgetItem(label))
+            if results.count():
+                results.setCurrentRow(0)
+
+        def execute_current(*_args) -> None:
+            row = results.currentRow()
+            if not 0 <= row < len(visible_entries):
+                return
+            _label, callback = visible_entries[row]
+            dialog.accept()
+            callback()
+
+        search.textChanged.connect(refresh)
+        search.returnPressed.connect(execute_current)
+        results.itemDoubleClicked.connect(execute_current)
+        refresh()
+        search.setFocus()
+        dialog.exec()
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self)
