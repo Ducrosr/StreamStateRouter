@@ -43,7 +43,11 @@ from .. import __version__
 from ..activation import TriggerTargetIdentity
 from ..importers import (
     AdvancedSceneSwitcherImporter,
+    CurrentStateCaptureOptions,
     SceneCollectionImporter,
+    build_current_state_capture_draft,
+    find_process_rules,
+    suggest_capture_name,
     neutralize_referenced_test_layout_profiles,
     wire_windows_hdr_capture_profiles,
 )
@@ -76,6 +80,7 @@ from ..services.startup import is_startup_enabled, set_startup_enabled
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
+    CurrentStateCaptureDialog,
     CollectionLogicImportDialog,
     ModuleLayoutDialog,
     RuleDialog,
@@ -427,16 +432,19 @@ class MainWindow(QMainWindow):
 
         import_card, import_lay = self._card("Configurer SSR depuis OBS")
         import_hint = QLabel(
-            "SSR peut analyser la collection OBS courante en lecture seule, "
-            "repérer les scènes, sources, filtres, layouts et automatisations "
-            "Advanced Scene Switcher compatibles, puis vous proposer la suite."
+            "Pour configurer une application rapidement, capturez l’état actuel. "
+            "SSR peut aussi analyser la collection OBS complète en lecture seule "
+            "pour les migrations plus avancées."
         )
         import_hint.setWordWrap(True)
         import_hint.setObjectName("Muted")
         import_lay.addWidget(import_hint)
         import_actions = QHBoxLayout()
+        capture_current = QPushButton("Capturer l’état actuel")
+        capture_current.setObjectName("Primary")
+        capture_current.clicked.connect(self._guided_capture_current_state)
+        import_actions.addWidget(capture_current)
         analyze_import = QPushButton("Analyser ma collection OBS")
-        analyze_import.setObjectName("Primary")
         analyze_import.clicked.connect(self._guided_analyze_collection)
         import_actions.addWidget(analyze_import)
         import_actions.addStretch(1)
@@ -1973,6 +1981,428 @@ class MainWindow(QMainWindow):
         self._refresh_profile_names()
         self._refresh_override_boxes()
 
+    def _guided_capture_current_state(self) -> None:
+        service = self._service
+        client = self._client
+        if service is None:
+            QMessageBox.warning(
+                self,
+                "Capture de l’état actuel",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+
+        if (
+            self._draft_dirty
+            or (
+                bool(self._saved_revision)
+                and bool(self._applied_revision)
+                and self._saved_revision != self._applied_revision
+            )
+        ):
+            QMessageBox.information(
+                self,
+                "Capture de l’état actuel",
+                (
+                    "La configuration ouverte n’est pas encore synchronisée "
+                    "avec le runtime.\n\n"
+                    "Utilisez d’abord « Enregistrer et appliquer », puis "
+                    "relancez la capture afin que SSR parte d’un état cohérent."
+                ),
+            )
+            return
+
+        if (
+            client is None
+            or not client.config.enabled
+            or not client.connected
+        ):
+            QMessageBox.warning(
+                self,
+                "Capture de l’état actuel",
+                "OBS doit être connecté à SSR avant de capturer l’état actuel.",
+            )
+            return
+
+        app = service.last_app or service.last_meaningful_app
+        if app is None:
+            QMessageBox.information(
+                self,
+                "Capture de l’état actuel",
+                (
+                    "Aucune application exploitable n’est détectée. "
+                    "Placez l’application à configurer au premier plan au moins "
+                    "une fois, puis relancez la capture."
+                ),
+            )
+            return
+
+        process = str(app.exe_name or "").strip()
+        if not process:
+            process = os.path.basename(str(app.process_path or "").strip())
+        if not process:
+            QMessageBox.information(
+                self,
+                "Capture de l’état actuel",
+                "Le processus de l’application cible est inconnu.",
+            )
+            return
+
+        try:
+            explanation = service.explain_decision(app)
+            routing = (
+                explanation.get("routing", {})
+                if isinstance(explanation, Mapping)
+                else {}
+            )
+            routing_kind = (
+                str(routing.get("kind") or "").strip().casefold()
+                if isinstance(routing, Mapping)
+                else ""
+            )
+            routing_rule = (
+                str(routing.get("rule_name") or "").strip()
+                if isinstance(routing, Mapping)
+                else ""
+            )
+            if routing_kind == "ignore":
+                QMessageBox.warning(
+                    self,
+                    "Capture de l’état actuel",
+                    (
+                        "L’application cible est actuellement ignorée par "
+                        f"la règle « {routing_rule or 'IGNORE'} ».\n\n"
+                        "L’assistant Simple ne remplace jamais une règle IGNORE. "
+                        "Modifiez d’abord cette règle en mode Expert."
+                    ),
+                )
+                return
+
+            exact_matches = find_process_rules(self.config, process)
+            exact_names = {
+                str(rule.get("name") or "").strip()
+                for rule in exact_matches
+            }
+            if (
+                routing_kind == "match"
+                and routing_rule
+                and routing_rule not in exact_names
+            ):
+                raw_rules = self.config.get("rules")
+                configured_rules = (
+                    raw_rules if isinstance(raw_rules, list) else []
+                )
+                active_rule = next(
+                    (
+                        rule
+                        for rule in configured_rules
+                        if isinstance(rule, Mapping)
+                        and str(rule.get("name") or "").strip() == routing_rule
+                    ),
+                    None,
+                )
+                if isinstance(active_rule, Mapping):
+                    QMessageBox.warning(
+                        self,
+                        "Capture de l’état actuel",
+                        (
+                            "Cette application est déjà pilotée par la règle "
+                            f"« {routing_rule} », mais cette règle n’est pas une "
+                            "règle simple liée exactement au processus détecté.\n\n"
+                            "Pour éviter de créer ou modifier une règle concurrente, "
+                            "utilisez le mode Expert pour cette configuration."
+                        ),
+                    )
+                    return
+
+            logical_state = (
+                dict(routing.get("effective_state") or {})
+                if isinstance(routing, Mapping)
+                and isinstance(routing.get("effective_state"), Mapping)
+                else {}
+            )
+            request_id = service.request_collection_import_preview(
+                include_layouts=True,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Capture de l’état actuel",
+                str(exc),
+            )
+            return
+
+        self._pending_collection_imports[request_id] = {
+            "mode": "guided_current_state_capture",
+            "app": {
+                "process": process,
+                "path": str(app.process_path or ""),
+                "title": str(app.window_title or ""),
+            },
+            "logical_state": logical_state,
+        }
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Capture de l’état actuel démarrée",
+                process,
+            )
+        )
+        self.statusBar().showMessage(
+            "Lecture de la scène OBS courante…",
+            8000,
+        )
+
+    def _complete_guided_current_state_capture(
+        self,
+        *,
+        snapshot,
+        raw_result: Mapping[str, object],
+        context: Mapping[str, object],
+    ) -> None:
+        raw_app = context.get("app")
+        app = dict(raw_app) if isinstance(raw_app, Mapping) else {}
+        process = str(app.get("process") or "").strip()
+        process_path = str(app.get("path") or "").strip()
+        window_title = str(app.get("title") or "").strip()
+        if not process:
+            QMessageBox.critical(
+                self,
+                "Capture de l’état actuel",
+                "Le processus capturé n’est plus disponible.",
+            )
+            return
+
+        matches = find_process_rules(self.config, process)
+        base_name = os.path.splitext(os.path.basename(process))[0].strip()
+        suggested_name = (
+            str(matches[0].get("name") or "").strip()
+            if matches
+            else suggest_capture_name(self.config, base_name)
+        )
+        dialog = CurrentStateCaptureDialog(
+            self,
+            process=process,
+            process_path=process_path,
+            window_title=window_title,
+            current_scene=str(snapshot.current_program_scene or ""),
+            suggested_name=suggested_name,
+            matching_rules=matches,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Muted",
+                    "Capture de l’état actuel annulée",
+                    process,
+                )
+            )
+            return
+
+        raw_options = dialog.options()
+        options = CurrentStateCaptureOptions(
+            name=str(raw_options.get("name") or "").strip(),
+            process=str(raw_options.get("process") or "").strip(),
+            existing_rule_name=str(
+                raw_options.get("existing_rule_name") or ""
+            ).strip(),
+            include_input_settings=bool(
+                raw_options.get("include_input_settings", True)
+            ),
+            include_audio_state=bool(
+                raw_options.get("include_audio_state", True)
+            ),
+            include_filters=bool(
+                raw_options.get("include_filters", True)
+            ),
+            include_visibility=bool(
+                raw_options.get("include_visibility", True)
+            ),
+            include_layout=bool(
+                raw_options.get("include_layout", True)
+            ),
+        )
+        raw_layouts = raw_result.get("layouts")
+        layouts = raw_layouts if isinstance(raw_layouts, Mapping) else {}
+        logical_raw = context.get("logical_state")
+        logical_state = (
+            dict(logical_raw)
+            if isinstance(logical_raw, Mapping)
+            else {}
+        )
+
+        try:
+            draft = build_current_state_capture_draft(
+                self.config,
+                snapshot=snapshot,
+                raw_layouts=layouts,
+                logical_state=logical_state,
+                options=options,
+            )
+            errors = validate_config(draft.config)
+            if errors:
+                raise ValueError(
+                    "Le brouillon généré n’est pas valide :\n- "
+                    + "\n- ".join(errors)
+                )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Capture de l’état actuel",
+                str(exc),
+            )
+            return
+
+        if not self._confirm_current_state_capture_draft(draft):
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Muted",
+                    "Brouillon de capture refusé",
+                    process,
+                )
+            )
+            return
+
+        self.config = copy.deepcopy(draft.config)
+        self._load_config_into_ui()
+        self._mark_dirty()
+        self._refresh_dashboard_summary()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Brouillon créé depuis l’état actuel",
+                draft.report.rule_name,
+            )
+        )
+        self.statusBar().showMessage(
+            (
+                "Brouillon prêt — vérifiez-le puis utilisez "
+                "« Enregistrer et appliquer »"
+            ),
+            10000,
+        )
+
+    def _confirm_current_state_capture_draft(self, draft) -> bool:
+        report = draft.report
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Aperçu du brouillon")
+        dialog.resize(760, 560)
+        root = QVBoxLayout(dialog)
+
+        title = QLabel(
+            (
+                f"Mettre à jour « {report.rule_name} »"
+                if report.mode == "update"
+                else f"Créer « {report.rule_name} »"
+            )
+        )
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        automation = next(
+            (
+                row
+                for row in build_automation_rows(draft.config)
+                if row.name == report.rule_name
+            ),
+            None,
+        )
+        if automation is not None:
+            sentence = QLabel(
+                f"{automation.trigger}\n→ {automation.result}"
+            )
+            sentence.setWordWrap(True)
+            root.addWidget(sentence)
+
+        summary = QTreeWidget()
+        summary.setColumnCount(2)
+        summary.setHeaderLabels(["Modification", "Valeur"])
+        summary.setRootIsDecorated(False)
+        summary.setAlternatingRowColors(True)
+        rows = [
+            ("Processus détecté", report.process),
+            ("Scène OBS", report.scene or "—"),
+            ("GameProfile", report.game_profile),
+            (
+                "Actions GameProfile",
+                (
+                    f"{report.added_actions} ajoutée(s), "
+                    f"{report.replaced_actions} remplacée(s)"
+                ),
+            ),
+            (
+                "Sources de la scène",
+                str(report.captured_inputs),
+            ),
+            (
+                "Filtres de la scène",
+                str(report.captured_filters),
+            ),
+            (
+                "Scene Items",
+                str(report.captured_scene_items),
+            ),
+            (
+                "LayoutProfile",
+                (
+                    report.layout_profile
+                    if report.layout_captured
+                    else "inchangé"
+                ),
+            ),
+        ]
+        for label, value in rows:
+            summary.addTopLevelItem(
+                QTreeWidgetItem([str(label), str(value)])
+            )
+        summary.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        summary.header().setStretchLastSection(True)
+        root.addWidget(summary, 1)
+
+        if report.notes:
+            notes = QLabel("\n".join(f"• {item}" for item in report.notes))
+            notes.setWordWrap(True)
+            notes.setObjectName("Muted")
+            root.addWidget(notes)
+
+        if report.warnings:
+            warnings_title = QLabel(
+                f"Avertissements ({len(report.warnings)})"
+            )
+            warnings_title.setObjectName("Warn")
+            root.addWidget(warnings_title)
+            warnings = QPlainTextEdit()
+            warnings.setReadOnly(True)
+            warnings.setMaximumHeight(120)
+            warnings.setPlainText(
+                "\n".join(f"• {item}" for item in report.warnings)
+            )
+            root.addWidget(warnings)
+
+        note = QLabel(
+            "« Créer le brouillon » modifie uniquement la configuration ouverte "
+            "dans SSR. OBS et le runtime courant restent inchangés jusqu’à "
+            "« Enregistrer et appliquer »."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(dialog.reject)
+        actions.addWidget(cancel)
+        accept = QPushButton("Créer le brouillon")
+        accept.setObjectName("Primary")
+        accept.clicked.connect(dialog.accept)
+        actions.addWidget(accept)
+        root.addLayout(actions)
+
+        return dialog.exec() == QDialog.Accepted
+
     def _guided_analyze_collection(self) -> None:
         if self._service is None:
             QMessageBox.warning(
@@ -2244,6 +2674,14 @@ class MainWindow(QMainWindow):
         snapshot = SceneCollectionImporter.snapshot_from_mapping(
             raw_snapshot
         )
+
+        if mode == "guided_current_state_capture":
+            self._complete_guided_current_state_capture(
+                snapshot=snapshot,
+                raw_result=raw_result,
+                context=context,
+            )
+            return
 
         if mode == "guided_analysis":
             self._record_user_activity(

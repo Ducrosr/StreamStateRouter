@@ -1,3 +1,11 @@
+from .current_state_capture import (
+    CurrentStateCaptureDraft,
+    CurrentStateCaptureOptions,
+    CurrentStateCaptureReport,
+    build_current_state_capture_draft,
+    find_process_rules,
+    suggest_capture_name,
+)
 from .advanced_scene_switcher import (
     AdvancedSceneSwitcherImportReport,
     AdvancedSceneSwitcherImporter,
@@ -20,6 +28,12 @@ from .scene_collection import (
 )
 
 __all__ = [
+    "CurrentStateCaptureDraft",
+    "CurrentStateCaptureOptions",
+    "CurrentStateCaptureReport",
+    "build_current_state_capture_draft",
+    "find_process_rules",
+    "suggest_capture_name",
     "AdvancedSceneSwitcherImportReport",
     "AdvancedSceneSwitcherImporter",
     "RejectedAdvancedSceneSwitcherMacro",
