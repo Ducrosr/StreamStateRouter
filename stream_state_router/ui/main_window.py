@@ -1203,6 +1203,7 @@ class MainWindow(QMainWindow):
         repair_summary.setObjectName("Primary")
         repair_summary.clicked.connect(self._force_reapply)
         summary_actions.addWidget(repair_summary)
+        self._register_obs_connected_control(repair_summary)
         summary_actions.addStretch(1)
         summary_lay.addLayout(summary_actions)
         root.addWidget(summary_card)
@@ -1231,6 +1232,10 @@ class MainWindow(QMainWindow):
             self._start_reference_repair
         )
         maintenance_actions.addWidget(self.repair_refs_button)
+        self._register_obs_connected_control(
+            self.repair_refs_button,
+            requires_edit_mode=True,
+        )
         maintenance_actions.addStretch(1)
         maintenance_lay.addLayout(maintenance_actions)
         root.addWidget(maintenance_card)
@@ -1272,9 +1277,14 @@ class MainWindow(QMainWindow):
             self._guided_capture_current_state
         )
         import_actions.addWidget(self.capture_current_button)
+        self._register_obs_connected_control(
+            self.capture_current_button,
+            requires_edit_mode=True,
+        )
         analyze_import = QPushButton("Analyser ma collection OBS")
         analyze_import.clicked.connect(self._guided_analyze_collection)
         import_actions.addWidget(analyze_import)
+        self._register_obs_connected_control(analyze_import)
         import_actions.addStretch(1)
         import_lay.addLayout(import_actions)
         root.addWidget(import_card)
@@ -1354,6 +1364,7 @@ class MainWindow(QMainWindow):
         clear_button.clicked.connect(self._clear_override)
         reapply_button = QPushButton("Réappliquer à OBS")
         reapply_button.clicked.connect(self._force_reapply)
+        self._register_obs_connected_control(reapply_button)
         actions.addWidget(apply_button)
         actions.addWidget(clear_button)
         actions.addWidget(reapply_button)
@@ -1840,6 +1851,11 @@ class MainWindow(QMainWindow):
             if text == "Supprimer":
                 b.setObjectName("Danger")
             b.clicked.connect(slot)
+            if text in {
+                "Importer collection OBS…",
+                "Migrer logique collection / ASC…",
+            }:
+                self._register_obs_connected_control(b)
             buttons.addWidget(b)
         buttons.addStretch(1)
         root.addLayout(buttons)
@@ -1874,6 +1890,8 @@ class MainWindow(QMainWindow):
             if text == "Supprimer":
                 b.setObjectName("Danger")
             b.clicked.connect(slot)
+            if text == "Tester":
+                self._register_obs_connected_control(b)
             top.addWidget(b)
         root.addLayout(top)
 
@@ -1952,6 +1970,7 @@ class MainWindow(QMainWindow):
         sync.setObjectName("Primary")
         sync.clicked.connect(self._sync_obs_modules)
         obs_row.addWidget(sync)
+        self._register_obs_connected_control(sync)
         root.addLayout(obs_row)
 
         profile_row = QHBoxLayout()
@@ -1975,6 +1994,12 @@ class MainWindow(QMainWindow):
             elif text == "Supprimer":
                 button.setObjectName("Danger")
             button.clicked.connect(slot)
+            if text in {
+                "Capturer depuis OBS",
+                "Appliquer maintenant",
+                "Éditer dans OBS",
+            }:
+                self._register_obs_connected_control(button)
             profile_row.addWidget(button)
         root.addLayout(profile_row)
 
@@ -2023,6 +2048,14 @@ class MainWindow(QMainWindow):
         ]:
             button = QPushButton(text)
             button.clicked.connect(slot)
+            if text in {
+                "Prévisualiser",
+                "Annuler aperçu",
+                "Undo OBS",
+                "Comparer à OBS",
+                "Valider",
+            }:
+                self._register_obs_connected_control(button)
             tools.addWidget(button)
         tools.addStretch(1)
         root.addLayout(tools)
@@ -2211,6 +2244,10 @@ class MainWindow(QMainWindow):
             tools_menu.addAction(action)
             if text.startswith("Réparer les références OBS"):
                 self._repair_refs_action = action
+                self._register_obs_connected_control(
+                    action,
+                    requires_edit_mode=True,
+                )
 
     def _show_command_palette(self) -> None:
         dialog = QDialog(self)
@@ -3282,6 +3319,7 @@ class MainWindow(QMainWindow):
             apply_now.setObjectName("Primary")
             apply_now.clicked.connect(dialog.accept)
             apply_now.clicked.connect(self._force_reapply)
+            self._apply_obs_connected_control_state(apply_now)
             actions.addWidget(apply_now)
         actions.addStretch(1)
         close = QPushButton("Fermer")
@@ -3383,6 +3421,7 @@ class MainWindow(QMainWindow):
         repair.setObjectName("Primary")
         repair.clicked.connect(dialog.accept)
         repair.clicked.connect(self._force_reapply)
+        self._apply_obs_connected_control_state(repair)
         actions.addWidget(repair)
         expert = QPushButton("Ouvrir le mode Expert")
         expert.clicked.connect(dialog.accept)
@@ -4599,6 +4638,7 @@ class MainWindow(QMainWindow):
         migrate.setObjectName("Primary")
         migrate.clicked.connect(dialog.accept)
         migrate.clicked.connect(self._migrate_collection_logic)
+        self._apply_obs_connected_control_state(migrate)
         actions.addWidget(migrate)
 
         advanced = QPushButton("Ouvrir les outils d’import avancés")
