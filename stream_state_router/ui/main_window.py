@@ -409,6 +409,12 @@ class MainWindow(QMainWindow):
             if action is not None:
                 action.setEnabled(enabled)
 
+    @staticmethod
+    def _collection_import_requires_edit_mode(mode: str) -> bool:
+        # Only the guided collection analysis is guaranteed read-only. Treat
+        # every other current/future completion mode conservatively.
+        return str(mode or "").strip().casefold() != "guided_analysis"
+
     def _require_edit_mode(self, operation: str) -> bool:
         if self._config_edit_enabled:
             return True
@@ -4336,6 +4342,27 @@ class MainWindow(QMainWindow):
             return
 
         mode = str(context.get("mode") or "snapshot_profile")
+        if (
+            self._collection_import_requires_edit_mode(mode)
+            and not self._config_edit_enabled
+        ):
+            self._log(
+                "Résultat d’import OBS ignoré : configuration verrouillée."
+            )
+            self.statusBar().showMessage(
+                "Import terminé mais non appliqué : configuration verrouillée",
+                8000,
+            )
+            QMessageBox.information(
+                self,
+                "Configuration verrouillée",
+                (
+                    "La lecture OBS s’est terminée après le verrouillage de "
+                    "la configuration. Aucun changement n’a été appliqué au "
+                    "brouillon. Réactivez l’édition puis relancez l’opération."
+                ),
+            )
+            return
         domain = str(context.get("domain") or "")
         profile_name = str(context.get("profile_name") or "")
         raw_options = context.get("options")
