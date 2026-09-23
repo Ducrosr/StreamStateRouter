@@ -3224,6 +3224,32 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(status["release_mode"], "duration")
         self.assertGreater(status["remaining_seconds"], 0)
 
+    def test_explain_decision_exposes_timed_override_remaining_seconds(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = DiagnosticDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+        service.set_manual_override(
+            StreamState(game="Manual"),
+            duration_seconds=60,
+        )
+
+        explanation = service.explain_decision()
+        routing = explanation["routing"]
+
+        self.assertEqual(routing["kind"], "manual_override")
+        self.assertEqual(
+            routing["override_release_mode"],
+            "duration",
+        )
+        self.assertGreater(
+            routing["override_remaining_seconds"],
+            0,
+        )
+
     def test_clear_manual_override_runs_on_worker_while_paused(self):
         automatic_app = ForegroundApp(1, 1, "automatic.exe")
         automatic = StreamState(game="Automatic")
