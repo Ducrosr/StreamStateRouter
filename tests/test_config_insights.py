@@ -363,6 +363,21 @@ class ConfigInsightsTests(unittest.TestCase):
             findings,
         )
 
+    def test_live_output_active_for_stream_or_recording(self) -> None:
+        self.assertFalse(live_output_active({}))
+        self.assertFalse(
+            live_output_active(
+                {"streaming": False, "recording": False}
+            )
+        )
+        self.assertTrue(live_output_active({"streaming": True}))
+        self.assertTrue(live_output_active({"recording": True}))
+        self.assertTrue(
+            live_output_active(
+                {"streaming": True, "recording": True}
+            )
+        )
+
     def test_capability_report_reflects_used_host_features(self) -> None:
         config = _config()
         config["profiles"]["audio"]["Game"]["actions"] = [
