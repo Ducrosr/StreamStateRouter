@@ -22,7 +22,6 @@ STATE_KEYS = {
 
 _OK_STATUSES = {"", "current", "unchanged", "applied", "noop", "complete", "ok"}
 _BAD_STATUSES = {"failed", "missing", "error"}
-_WARN_STATUSES = {"blocked", "partial", "pending", "queued", "planned"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,12 +185,33 @@ def build_dashboard_snapshot(
             )
         )
 
+    plan_requires_apply = any(
+        bool(row.get("needs_apply"))
+        or str(row.get("status") or "").strip().casefold() == "planned"
+        for row in plan_details.values()
+    )
+    plan_has_problem = any(
+        str(row.get("status") or "").strip().casefold()
+        in {"failed", "missing", "blocked", "partial"}
+        for row in plan_details.values()
+    )
+
     if not obs_enabled:
         health_text, health_style = "OBS désactivé", "Muted"
     elif not obs_connected:
         health_text, health_style = "OBS déconnecté", "Bad"
     elif routing_status and not status_is_current:
-        health_text, health_style = "Nouvelle décision · application en attente", "Warn"
+        if (
+            routing.get("would_change") is False
+            and not plan_requires_apply
+            and not plan_has_problem
+        ):
+            health_text, health_style = "Configuration déjà conforme", "Good"
+        else:
+            health_text, health_style = (
+                "Nouvelle décision · application en attente",
+                "Warn",
+            )
     elif routing_status:
         if bool(routing_status.get("success", False)):
             health_text, health_style = "Configuration appliquée", "Good"
