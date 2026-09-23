@@ -3,6 +3,7 @@ from .current_state_capture import (
     CurrentStateCaptureOptions,
     CurrentStateCaptureReport,
     build_current_state_capture_draft,
+    find_ignored_process_rules,
     find_process_rules,
     suggest_capture_name,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "CurrentStateCaptureOptions",
     "CurrentStateCaptureReport",
     "build_current_state_capture_draft",
+    "find_ignored_process_rules",
     "find_process_rules",
     "suggest_capture_name",
     "AdvancedSceneSwitcherImportReport",
