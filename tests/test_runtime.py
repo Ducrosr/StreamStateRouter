@@ -37,6 +37,15 @@ class FakeProcessProvider:
         return self._names
 
 
+class FakeHostController:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, kind, params):
+        self.calls.append((kind, dict(params)))
+        return True
+
+
 class FakeProvider:
     def __init__(self, app):
         self.app = app
@@ -3052,6 +3061,124 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.profile_threads,
                 [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+
+    def test_launcher_preparation_persists_over_fallback_and_restores_on_close(self):
+        fallback = StreamState(capture_profile="SDR")
+        target = StreamState(
+            game="Overwatch",
+            capture_profile="HDR",
+        )
+        rules = RuleSet(
+            [
+                AppRule(
+                    "Overwatch",
+                    target,
+                    priority=100,
+                    exe="Overwatch.exe",
+                    launcher="Battle.net.exe",
+                )
+            ],
+            fallback=fallback,
+        )
+        engine = StateRouterEngine(
+            rules,
+            debounce_ms=0,
+            fallback_debounce_ms=0,
+        )
+        profiles = profile_map_from_raw(
+            {
+                "capture": {
+                    "SDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "params": {
+                                    "enabled": False,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                    "HDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": True,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        host = FakeHostController()
+        client = SimpleNamespace(
+            config=SimpleNamespace(enabled=False),
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            profiles,
+            host_controller=host,
+        )
+        process_provider = FakeProcessProvider(("Battle.net.exe",))
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(
+                ForegroundApp(1, 1, "explorer.exe")
+            ),
+            process_provider=process_provider,
+        )
+
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while not host.calls and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertTrue(host.calls)
+            self.assertEqual(
+                host.calls[0],
+                (
+                    "windows_hdr",
+                    {"enabled": True, "display": "primary"},
+                ),
+            )
+            self.assertFalse(
+                any(
+                    kind == "windows_hdr"
+                    and params.get("enabled") is False
+                    for kind, params in host.calls
+                )
+            )
+
+            process_provider._names = frozenset()
+            service._wake.set()
+            deadline = time.monotonic() + 1.0
+            while (
+                not any(
+                    kind == "windows_hdr"
+                    and params.get("enabled") is False
+                    for kind, params in host.calls
+                )
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            self.assertTrue(
+                any(
+                    kind == "windows_hdr"
+                    and params.get("enabled") is False
+                    for kind, params in host.calls
+                )
             )
         finally:
             self.assertTrue(service.stop())
