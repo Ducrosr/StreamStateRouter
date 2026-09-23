@@ -85,6 +85,16 @@ class RuleDialog(QDialog):
             source_running if background_process_rule else source_exe
         )
         self.exe.setPlaceholderText("ex. Overwatch.exe ou Dofus.exe")
+        self.launcher = QLineEdit(
+            str(self._source.get("launcher") or "")
+        )
+        self.launcher.setPlaceholderText(
+            "facultatif, ex. Battle.net.exe ou Ankama Launcher.exe"
+        )
+        self.launcher.setToolTip(
+            "Processus launcher pouvant préparer les actions marquées avant "
+            "le démarrage de l'application."
+        )
         self.require_foreground = QCheckBox("Doit être au premier plan")
         self.require_foreground.setChecked(not background_process_rule)
         self.path = QLineEdit(source_path)
@@ -112,6 +122,7 @@ class RuleDialog(QDialog):
         form.addRow("Priorité", self.priority)
         form.addRow("", self.enabled)
         form.addRow("Processus", self.exe)
+        form.addRow("Launcher", self.launcher)
         form.addRow("", self.require_foreground)
         form.addRow("Chemin", self.path)
         form.addRow("Titre fenêtre", self.title_regex)
@@ -253,6 +264,7 @@ class RuleDialog(QDialog):
             "priority": self.priority.value(),
             "enabled": self.enabled.isChecked(),
             "exe": process if foreground else "",
+            "launcher": self.launcher.text().strip(),
             "path": self.path.text().strip() if foreground else "",
             "title_regex": (
                 self.title_regex.text().strip() if foreground else ""
@@ -1141,6 +1153,17 @@ class ActionDialog(QDialog):
         self.name = QLineEdit(source.name)
         self.enabled = QCheckBox("Action active")
         self.enabled.setChecked(source.enabled)
+        self.preapply_on_launcher = QCheckBox(
+            "Préparer cette action dès le launcher"
+        )
+        self.preapply_on_launcher.setChecked(
+            source.preapply_on_launcher
+        )
+        self.preapply_on_launcher.setToolTip(
+            "Si la règle de l'application définit un Launcher, cette action "
+            "est appliquée dès que ce launcher est détecté et reste prioritaire "
+            "jusqu'au démarrage de l'application ou à la fermeture du launcher."
+        )
         self.kind = QComboBox()
         for label, value in self.ACTION_TYPES:
             self.kind.addItem(label, value)
@@ -1150,6 +1173,7 @@ class ActionDialog(QDialog):
         form.addRow("Nom facultatif", self.name)
         form.addRow("Type", self.kind)
         form.addRow("", self.enabled)
+        form.addRow("", self.preapply_on_launcher)
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
@@ -1332,5 +1356,8 @@ class ActionDialog(QDialog):
             "type": kind,
             "name": self.name.text().strip(),
             "enabled": self.enabled.isChecked(),
+            "preapply_on_launcher": (
+                self.preapply_on_launcher.isChecked()
+            ),
             "params": params,
         }
