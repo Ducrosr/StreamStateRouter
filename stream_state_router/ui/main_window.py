@@ -1385,7 +1385,7 @@ class MainWindow(QMainWindow):
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Simuler un scénario de routage")
-        dialog.resize(900, 650)
+        dialog.resize(1050, 780)
         root = QVBoxLayout(dialog)
 
         intro = QLabel(
@@ -1455,6 +1455,31 @@ class MainWindow(QMainWindow):
         result_label.setStyleSheet("font-weight: 700;")
         root.addWidget(result_label)
 
+        profile_title = QLabel("État logique et contenu effectif")
+        profile_title.setObjectName("Section")
+        root.addWidget(profile_title)
+        profiles_tree = QTreeWidget()
+        profiles_tree.setColumnCount(5)
+        profiles_tree.setHeaderLabels(
+            [
+                "Domaine",
+                "Profil / élément",
+                "Origine / héritage",
+                "Contenu / cible",
+                "État",
+            ]
+        )
+        profiles_tree.setAlternatingRowColors(True)
+        profiles_tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        profiles_tree.header().setStretchLastSection(True)
+        profiles_tree.setMaximumHeight(280)
+        root.addWidget(profiles_tree)
+
+        checks_title = QLabel("Évaluation des règles")
+        checks_title.setObjectName("Section")
+        root.addWidget(checks_title)
         checks = QTreeWidget()
         checks.setColumnCount(5)
         checks.setHeaderLabels(
@@ -1531,6 +1556,44 @@ class MainWindow(QMainWindow):
                 result_label.setText(
                     f"Résultat : {report.kind or '—'}"
                 )
+
+            profiles_tree.clear()
+            for domain in report.domains:
+                lineage = (
+                    " ← ".join(domain.lineage)
+                    if domain.lineage
+                    else "—"
+                )
+                domain_item = QTreeWidgetItem(
+                    [
+                        domain.label,
+                        domain.profile,
+                        lineage,
+                        domain.content_summary,
+                        "Disponible" if domain.exists else "Introuvable",
+                    ]
+                )
+                profiles_tree.addTopLevelItem(domain_item)
+                for entry in domain.entries:
+                    domain_item.addChild(
+                        QTreeWidgetItem(
+                            [
+                                "",
+                                entry.name,
+                                entry.source_profile,
+                                (
+                                    f"{entry.kind}"
+                                    + (
+                                        f" · {entry.target}"
+                                        if entry.target
+                                        else ""
+                                    )
+                                ),
+                                "Actif" if entry.enabled else "Désactivé",
+                            ]
+                        )
+                    )
+            profiles_tree.expandAll()
 
             checks.clear()
             for check in report.checks:
