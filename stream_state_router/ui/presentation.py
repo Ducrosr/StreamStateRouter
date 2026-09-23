@@ -107,7 +107,29 @@ def _reason_text(routing: Mapping[str, object]) -> str:
 
     kind = str(routing.get("kind") or "").strip().casefold()
     if kind == "manual_override":
-        return "Une configuration manuelle remplace temporairement le routage automatique."
+        mode = str(
+            routing.get("override_release_mode") or "manual"
+        ).strip().casefold()
+        remaining = routing.get("override_remaining_seconds")
+        if mode == "duration" and isinstance(remaining, (int, float)):
+            return (
+                "Une configuration manuelle remplace le routage automatique · "
+                f"retour automatique dans {max(0, int(round(float(remaining))))} s."
+            )
+        if mode == "foreground_change":
+            return (
+                "Une configuration manuelle remplace le routage automatique "
+                "jusqu’au prochain changement d’application."
+            )
+        if mode == "stream_end":
+            return (
+                "Une configuration manuelle remplace le routage automatique "
+                "jusqu’à la fin du stream."
+            )
+        return (
+            "Une configuration manuelle remplace le routage automatique "
+            "jusqu’à sa désactivation."
+        )
     if kind == "fallback":
         return "Aucune règle prioritaire ne correspond ; la configuration de secours est utilisée."
     if kind == "ignore":
@@ -489,6 +511,20 @@ def user_activity_from_runtime_event(
         )
     if kind == "obs_error":
         return UserActivityEntry("Bad", "Erreur OBS", str(message or "").strip())
+    if kind == "manual_override":
+        active = bool(payload.get("active", False))
+        mode = str(payload.get("release_mode") or "").strip()
+        return UserActivityEntry(
+            "Warn" if active else "Good",
+            "Override manuel activé" if active else "Override manuel désactivé",
+            mode,
+        )
+    if kind == "manual_override_released":
+        return UserActivityEntry(
+            "Good",
+            "Override manuel terminé",
+            str(payload.get("reason") or message or "").strip(),
+        )
     if kind == "pause":
         paused = "suspendu" in str(message or "").casefold()
         return UserActivityEntry(
