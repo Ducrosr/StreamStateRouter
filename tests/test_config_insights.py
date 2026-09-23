@@ -14,6 +14,7 @@ from stream_state_router.importers.scene_collection import (
 from stream_state_router.services.config_insights import (
     apply_reference_repairs,
     build_capability_report,
+    build_config_change_review,
     build_effective_dependency_tree,
     build_effective_provenance,
     build_static_health_findings,
@@ -264,6 +265,108 @@ class ConfigInsightsTests(unittest.TestCase):
         )
         self.assertEqual(entries[0].target, "In Game")
         self.assertEqual(entries[1].target, "25 ms")
+
+    def test_change_review_reports_rules_profiles_layouts_and_settings(self) -> None:
+        saved = _config()
+        draft = copy.deepcopy(saved)
+
+        draft["router"]["debounce_ms"] = 250
+        draft["obs"]["password"] = "super-secret"
+        draft["rules"][0]["priority"] = 999
+        draft["profiles"]["game"]["Overwatch"]["actions"] = [
+            {
+                "type": "wait_ms",
+                "name": "Delay",
+                "enabled": True,
+                "params": {"duration_ms": 25},
+            }
+        ]
+        draft["layout_profiles"]["Vanilla"]["scene"] = "In Game"
+
+        review = build_config_change_review(saved, draft)
+
+        self.assertTrue(review.has_changes)
+        categories = {item.category for item in review.changes}
+        self.assertIn("Routage", categories)
+        self.assertIn("OBS", categories)
+        self.assertIn("Règles", categories)
+        self.assertIn("Profils", categories)
+        self.assertIn("Layouts", categories)
+        password = next(
+            item
+            for item in review.changes
+            if item.target == "Mot de passe WebSocket"
+        )
+        self.assertIn("sensible", password.detail)
+        self.assertNotIn("super-secret", password.detail)
+
+    def test_change_review_reports_shared_profile_impact(self) -> None:
+        saved = _config()
+        draft = copy.deepcopy(saved)
+        draft["rules"].append(
+            {
+                **copy.deepcopy(draft["rules"][0]),
+                "name": "Overwatch secondary",
+                "priority": 50,
+            }
+        )
+        draft["profiles"]["game"]["Overwatch"]["actions"] = [
+            {
+                "type": "wait_ms",
+                "name": "Delay",
+                "enabled": True,
+                "params": {"duration_ms": 10},
+            }
+        ]
+
+        review = build_config_change_review(saved, draft)
+
+        profile_change = next(
+            item
+            for item in review.changes
+            if item.target == "Jeu / Overwatch"
+        )
+        self.assertIn("Overwatch", profile_change.impact)
+        self.assertIn("Overwatch secondary", profile_change.impact)
+
+    def test_change_review_noop_is_empty(self) -> None:
+        saved = _config()
+
+        review = build_config_change_review(
+            saved,
+            copy.deepcopy(saved),
+        )
+
+        self.assertFalse(review.has_changes)
+        self.assertEqual(review.changes, ())
+        self.assertIn("Aucune modification", review.summary)
+
+    def test_change_review_surfaces_draft_validation_errors(self) -> None:
+        saved = _config()
+        draft = copy.deepcopy(saved)
+        draft["rules"][0]["state"]["Game"] = "Missing profile"
+
+        review = build_config_change_review(saved, draft)
+
+        self.assertTrue(review.validation_errors)
+        self.assertIn("erreur", review.summary)
+
+    def test_change_review_does_not_expose_control_variable_values(self) -> None:
+        saved = _config()
+        draft = copy.deepcopy(saved)
+        saved["control_variables"] = {"TokenLike": "old-secret"}
+        draft["control_variables"] = {"TokenLike": "new-secret"}
+
+        review = build_config_change_review(saved, draft)
+
+        change = next(
+            item
+            for item in review.changes
+            if item.target == "Variables de contrôle"
+        )
+        self.assertIn("TokenLike", change.detail)
+        self.assertNotIn("old-secret", change.detail)
+        self.assertNotIn("new-secret", change.detail)
 
     def test_dependency_tree_tracks_decision_domains_and_content_origin(self) -> None:
         config = _config()

@@ -91,6 +91,26 @@ class DependencyNode:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigChange:
+    category: str
+    target: str
+    kind: str
+    detail: str
+    impact: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigChangeReview:
+    summary: str
+    changes: tuple[ConfigChange, ...]
+    validation_errors: tuple[str, ...]
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(self.changes)
+
+
+@dataclass(frozen=True, slots=True)
 class ScenarioCheck:
     name: str
     priority: int
@@ -478,6 +498,492 @@ def build_effective_provenance(
             )
         )
     return tuple(rows)
+
+
+def _json_equal(left: object, right: object) -> bool:
+    return json.dumps(
+        left,
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    ) == json.dumps(
+        right,
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _count_list(value: object) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _named_rules(config: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    raw = config.get("rules")
+    if not isinstance(raw, list):
+        return {}
+    result: dict[str, Mapping[str, Any]] = {}
+    for index, rule in enumerate(raw):
+        if not isinstance(rule, Mapping):
+            continue
+        name = str(rule.get("name") or f"Règle {index + 1}").strip()
+        key = name
+        suffix = 2
+        while key in result:
+            key = f"{name} #{suffix}"
+            suffix += 1
+        result[key] = rule
+    return result
+
+
+def _state_changes(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> tuple[str, ...]:
+    changed: list[str] = []
+    for domain, key in STATE_KEYS.items():
+        old = str(before.get(key) or "").strip()
+        new = str(after.get(key) or "").strip()
+        if old != new:
+            changed.append(
+                f"{DOMAIN_LABELS[domain]}: {old or '—'} → {new or '—'}"
+            )
+    return tuple(changed)
+
+
+def _rule_change_detail(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> str:
+    parts: list[str] = []
+    if bool(before.get("enabled", True)) != bool(after.get("enabled", True)):
+        parts.append(
+            "activation: "
+            + ("activée" if bool(after.get("enabled", True)) else "désactivée")
+        )
+    try:
+        old_priority = int(before.get("priority", 0))
+        new_priority = int(after.get("priority", 0))
+    except (TypeError, ValueError, OverflowError):
+        old_priority = before.get("priority")
+        new_priority = after.get("priority")
+    if old_priority != new_priority:
+        parts.append(f"priorité: {old_priority} → {new_priority}")
+
+    if str(before.get("behavior") or "match") != str(
+        after.get("behavior") or "match"
+    ):
+        parts.append(
+            "comportement: "
+            f"{before.get('behavior', 'match')} → {after.get('behavior', 'match')}"
+        )
+
+    selector_keys = ("exe", "path", "title_regex")
+    if any(
+        str(before.get(key) or "") != str(after.get(key) or "")
+        for key in selector_keys
+    ):
+        parts.append("déclencheur modifié")
+    if not _json_equal(before.get("conditions"), after.get("conditions")):
+        parts.append("conditions modifiées")
+
+    state_before = _mapping(before.get("state"))
+    state_after = _mapping(after.get("state"))
+    state_diff = _state_changes(state_before, state_after)
+    if state_diff:
+        parts.append(" · ".join(state_diff))
+
+    old_delay = before.get("apply_delay_ms", 0)
+    new_delay = after.get("apply_delay_ms", 0)
+    if old_delay != new_delay:
+        parts.append(f"délai OBS: {old_delay} → {new_delay} ms")
+    return " ; ".join(parts) or "contenu modifié"
+
+
+def _profile_change_detail(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    *,
+    layout: bool,
+) -> str:
+    parts: list[str] = []
+    old_parent = str(before.get("extends") or "").strip()
+    new_parent = str(after.get("extends") or "").strip()
+    if old_parent != new_parent:
+        parts.append(f"base: {old_parent or 'aucune'} → {new_parent or 'aucune'}")
+
+    if layout:
+        old_scene = str(before.get("scene") or "").strip()
+        new_scene = str(after.get("scene") or "").strip()
+        if old_scene != new_scene:
+            parts.append(f"scène: {old_scene or '—'} → {new_scene or '—'}")
+        old_modules = _mapping(before.get("modules"))
+        new_modules = _mapping(after.get("modules"))
+        if not _json_equal(old_modules, new_modules):
+            parts.append(
+                f"modules: {len(old_modules)} → {len(new_modules)}"
+            )
+        if not _json_equal(before.get("transition"), after.get("transition")):
+            parts.append("transition modifiée")
+        if str(before.get("coordinate_mode") or "") != str(
+            after.get("coordinate_mode") or ""
+        ):
+            parts.append("mode de coordonnées modifié")
+    else:
+        old_actions = before.get("actions")
+        new_actions = after.get("actions")
+        if not _json_equal(old_actions, new_actions):
+            parts.append(
+                "actions: "
+                f"{_count_list(old_actions)} → {_count_list(new_actions)}"
+            )
+
+    if not _json_equal(before.get("conditions"), after.get("conditions")):
+        parts.append("conditions modifiées")
+    return " ; ".join(parts) or "contenu modifié"
+
+
+def _usage_impact(
+    config: Mapping[str, Any],
+    domain: str,
+    profile_name: str,
+) -> str:
+    usages = profile_usages(config, domain, profile_name)
+    if not usages:
+        return "Aucune dépendance référencée"
+    owners = [usage.owner for usage in usages]
+    if len(owners) <= 3:
+        return "Utilisé par " + ", ".join(owners)
+    return (
+        f"Utilisé par {len(owners)} dépendances · "
+        + ", ".join(owners[:3])
+        + ", …"
+    )
+
+
+def _simple_settings_changes(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> list[ConfigChange]:
+    changes: list[ConfigChange] = []
+
+    specs = (
+        ("Routage", "Intervalle de détection", ("router", "poll_ms"), False),
+        ("Routage", "Debounce", ("router", "debounce_ms"), False),
+        (
+            "Routage",
+            "Debounce fallback",
+            ("router", "fallback_debounce_ms"),
+            False,
+        ),
+        ("OBS", "Pilotage OBS", ("obs", "enabled"), False),
+        ("OBS", "Hôte WebSocket", ("obs", "host"), False),
+        ("OBS", "Port WebSocket", ("obs", "port"), False),
+        ("OBS", "Mot de passe WebSocket", ("obs", "password"), True),
+        (
+            "Contrôle Windows",
+            "Chemin SoundVolumeView",
+            ("host_control", "soundvolumeview_path"),
+            True,
+        ),
+        (
+            "Contrôle Windows",
+            "Timeout audio",
+            ("host_control", "audio_timeout_seconds"),
+            False,
+        ),
+        ("API locale", "API active", ("api", "enabled"), False),
+        ("API locale", "Port", ("api", "port"), False),
+        ("API locale", "Jeton", ("api", "token"), True),
+        ("Interface", "Réduire dans le tray", ("ui", "close_to_tray"), False),
+        (
+            "Interface",
+            "Démarrer avec Windows",
+            ("ui", "start_with_windows"),
+            False,
+        ),
+        (
+            "Interface",
+            "Détection automatique des modules",
+            ("ui", "auto_detect_modules"),
+            False,
+        ),
+        (
+            "Interface",
+            "Intervalle de scan modules",
+            ("ui", "module_scan_seconds"),
+            False,
+        ),
+        ("Interface", "Safe Live", ("ui", "safe_live"), False),
+    )
+
+    for category, target, path, secret in specs:
+        old: object = before
+        new: object = after
+        for key in path:
+            old = _mapping(old).get(key)
+            new = _mapping(new).get(key)
+        if _json_equal(old, new):
+            continue
+        detail = (
+            "valeur sensible modifiée"
+            if secret
+            else f"{old!r} → {new!r}"
+        )
+        changes.append(
+            ConfigChange(category, target, "Modifié", detail)
+        )
+
+    old_fallback = _mapping(_mapping(before.get("router")).get("fallback_state"))
+    new_fallback = _mapping(_mapping(after.get("router")).get("fallback_state"))
+    fallback_diff = _state_changes(old_fallback, new_fallback)
+    if fallback_diff:
+        changes.append(
+            ConfigChange(
+                "Routage",
+                "Configuration de secours",
+                "Modifié",
+                " · ".join(fallback_diff),
+            )
+        )
+
+    old_variables = _mapping(before.get("control_variables"))
+    new_variables = _mapping(after.get("control_variables"))
+    if not _json_equal(old_variables, new_variables):
+        added = sorted(set(new_variables) - set(old_variables), key=str.casefold)
+        removed = sorted(set(old_variables) - set(new_variables), key=str.casefold)
+        changed = sorted(
+            {
+                key
+                for key in set(old_variables) & set(new_variables)
+                if not _json_equal(old_variables[key], new_variables[key])
+            },
+            key=str.casefold,
+        )
+        detail_parts = []
+        if added:
+            detail_parts.append("ajoutées: " + ", ".join(added))
+        if removed:
+            detail_parts.append("supprimées: " + ", ".join(removed))
+        if changed:
+            detail_parts.append("modifiées: " + ", ".join(changed))
+        changes.append(
+            ConfigChange(
+                "Variables",
+                "Variables de contrôle",
+                "Modifié",
+                " ; ".join(detail_parts) or "contenu modifié",
+            )
+        )
+
+    return changes
+
+
+def build_config_change_review(
+    saved_config: Mapping[str, Any],
+    draft_config: Mapping[str, Any],
+) -> ConfigChangeReview:
+    before = saved_config if isinstance(saved_config, Mapping) else {}
+    after = draft_config if isinstance(draft_config, Mapping) else {}
+    changes = _simple_settings_changes(before, after)
+
+    before_rules = _named_rules(before)
+    after_rules = _named_rules(after)
+    for name in sorted(set(before_rules) | set(after_rules), key=str.casefold):
+        old = before_rules.get(name)
+        new = after_rules.get(name)
+        if old is None and new is not None:
+            changes.append(
+                ConfigChange(
+                    "Règles",
+                    name,
+                    "Ajouté",
+                    _rule_change_detail({}, new),
+                )
+            )
+        elif old is not None and new is None:
+            changes.append(
+                ConfigChange("Règles", name, "Supprimé", "règle supprimée")
+            )
+        elif old is not None and new is not None and not _json_equal(old, new):
+            changes.append(
+                ConfigChange(
+                    "Règles",
+                    name,
+                    "Modifié",
+                    _rule_change_detail(old, new),
+                )
+            )
+
+    before_profiles = _mapping(before.get("profiles"))
+    after_profiles = _mapping(after.get("profiles"))
+    for domain in ("game", "overlay", "capture", "audio"):
+        old_profiles = _mapping(before_profiles.get(domain))
+        new_profiles = _mapping(after_profiles.get(domain))
+        for name in sorted(
+            set(old_profiles) | set(new_profiles),
+            key=str.casefold,
+        ):
+            old = old_profiles.get(name)
+            new = new_profiles.get(name)
+            if old is None and isinstance(new, Mapping):
+                changes.append(
+                    ConfigChange(
+                        "Profils",
+                        f"{DOMAIN_LABELS[domain]} / {name}",
+                        "Ajouté",
+                        _profile_change_detail({}, new, layout=False),
+                        _usage_impact(after, domain, str(name)),
+                    )
+                )
+            elif isinstance(old, Mapping) and new is None:
+                changes.append(
+                    ConfigChange(
+                        "Profils",
+                        f"{DOMAIN_LABELS[domain]} / {name}",
+                        "Supprimé",
+                        "profil supprimé",
+                        _usage_impact(before, domain, str(name)),
+                    )
+                )
+            elif (
+                isinstance(old, Mapping)
+                and isinstance(new, Mapping)
+                and not _json_equal(old, new)
+            ):
+                changes.append(
+                    ConfigChange(
+                        "Profils",
+                        f"{DOMAIN_LABELS[domain]} / {name}",
+                        "Modifié",
+                        _profile_change_detail(old, new, layout=False),
+                        _usage_impact(after, domain, str(name)),
+                    )
+                )
+
+    old_layouts = _mapping(before.get("layout_profiles"))
+    new_layouts = _mapping(after.get("layout_profiles"))
+    for name in sorted(set(old_layouts) | set(new_layouts), key=str.casefold):
+        old = old_layouts.get(name)
+        new = new_layouts.get(name)
+        if old is None and isinstance(new, Mapping):
+            changes.append(
+                ConfigChange(
+                    "Layouts",
+                    str(name),
+                    "Ajouté",
+                    _profile_change_detail({}, new, layout=True),
+                    _usage_impact(after, "layout", str(name)),
+                )
+            )
+        elif isinstance(old, Mapping) and new is None:
+            changes.append(
+                ConfigChange(
+                    "Layouts",
+                    str(name),
+                    "Supprimé",
+                    "LayoutProfile supprimé",
+                    _usage_impact(before, "layout", str(name)),
+                )
+            )
+        elif (
+            isinstance(old, Mapping)
+            and isinstance(new, Mapping)
+            and not _json_equal(old, new)
+        ):
+            changes.append(
+                ConfigChange(
+                    "Layouts",
+                    str(name),
+                    "Modifié",
+                    _profile_change_detail(old, new, layout=True),
+                    _usage_impact(after, "layout", str(name)),
+                )
+            )
+
+    old_policies = _mapping(before.get("activation_policies"))
+    new_policies = _mapping(after.get("activation_policies"))
+    for name in sorted(
+        set(old_policies) | set(new_policies),
+        key=str.casefold,
+    ):
+        old = old_policies.get(name)
+        new = new_policies.get(name)
+        if old is None:
+            kind = "Ajouté"
+            detail = "politique d’activation ajoutée"
+        elif new is None:
+            kind = "Supprimé"
+            detail = "politique d’activation supprimée"
+        elif not _json_equal(old, new):
+            kind = "Modifié"
+            detail = "déclenchement, éligibilité ou cibles modifiés"
+        else:
+            continue
+        changes.append(
+            ConfigChange(
+                "Activations",
+                str(name),
+                kind,
+                detail,
+            )
+        )
+
+    known_sections = {
+        "schema_version",
+        "router",
+        "obs",
+        "host_control",
+        "control_variables",
+        "ui",
+        "rules",
+        "profiles",
+        "layout_profiles",
+        "api",
+        "layout_history",
+        "activation_policies",
+    }
+    other_changed = sorted(
+        {
+            key
+            for key in set(before) | set(after)
+            if key not in known_sections
+            and not _json_equal(before.get(key), after.get(key))
+        },
+        key=str.casefold,
+    )
+    for key in other_changed:
+        changes.append(
+            ConfigChange(
+                "Autres",
+                str(key),
+                "Modifié",
+                "section de configuration modifiée",
+            )
+        )
+
+    validation_errors = tuple(validate_config(after))
+    counts: dict[str, int] = {}
+    for change in changes:
+        counts[change.kind] = counts.get(change.kind, 0) + 1
+    if not changes:
+        summary = "Aucune modification du brouillon."
+    else:
+        order = ("Ajouté", "Modifié", "Supprimé")
+        pieces = [
+            f"{counts[kind]} {kind.lower()}(s)"
+            for kind in order
+            if counts.get(kind)
+        ]
+        summary = f"{len(changes)} changement(s) · " + " · ".join(pieces)
+        if validation_errors:
+            summary += f" · {len(validation_errors)} erreur(s) de validation"
+
+    return ConfigChangeReview(
+        summary=summary,
+        changes=tuple(changes),
+        validation_errors=validation_errors,
+    )
 
 
 def _conditions_can_overlap(
