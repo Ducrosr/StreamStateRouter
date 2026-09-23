@@ -3051,12 +3051,21 @@ class MainWindow(QMainWindow):
         )
 
     def _clear_override(self) -> None:
-        if self._service:
-            self._service.clear_manual_override()
-            self._log("Override manuel désactivé.")
+        if not self._service:
+            return
+        if not self._safe_live_confirm(
+            "Revenir au routage automatique"
+        ):
+            return
+        self._service.clear_manual_override()
+        self._log("Override manuel désactivé.")
 
     def _force_reapply(self) -> None:
         if not self._service:
+            return
+        if not self._safe_live_confirm(
+            "Réappliquer la configuration courante à OBS"
+        ):
             return
         try:
             request_id = self._service.request_force_reapply()
