@@ -369,6 +369,22 @@ def build_current_state_capture_draft(
             layout_profile = current_layout_name
     else:
         rule_name = requested_name
+        existing_rule_names = {
+            str(rule.get("name") or "").strip().casefold()
+            for rule in _rules(draft)
+            if str(rule.get("name") or "").strip()
+        }
+        profiles = _mapping(draft.get("profiles"))
+        games = _mapping(profiles.get("game"))
+        layouts = _mapping(draft.get("layout_profiles"))
+        if rule_name.casefold() in existing_rule_names:
+            raise ValueError(
+                f"Une règle nommée '{rule_name}' existe déjà."
+            )
+        if rule_name in games or rule_name in layouts:
+            raise ValueError(
+                f"Le nom '{rule_name}' est déjà utilisé par un profil SSR."
+            )
         game_profile = requested_name
         layout_profile = requested_name
 
@@ -397,7 +413,11 @@ def build_current_state_capture_draft(
             )
         else:
             if not layout_profile:
-                layout_profile = requested_name
+                layout_profile = (
+                    suggest_capture_name(draft, f"{rule_name} · Layout")
+                    if existing_rule is not None
+                    else requested_name
+                )
             layouts = draft.setdefault("layout_profiles", {})
             if not isinstance(layouts, dict):
                 raise ValueError("config.layout_profiles doit être un objet.")
@@ -411,8 +431,6 @@ def build_current_state_capture_draft(
             state["LayoutProfile"] = layout_profile
         existing_rule["state"] = state
         existing_rule["behavior"] = "match"
-        if not str(existing_rule.get("exe") or "").strip():
-            existing_rule["exe"] = process
     else:
         overlay = _logical_value(
             logical,
@@ -446,7 +464,10 @@ def build_current_state_capture_draft(
             "AudioProfile": audio,
             "LayoutProfile": layout_profile,
         }
-        draft.setdefault("rules", []).append(
+        raw_rules = draft.setdefault("rules", [])
+        if not isinstance(raw_rules, list):
+            raise ValueError("config.rules doit être une liste.")
+        raw_rules.append(
             {
                 "name": rule_name,
                 "behavior": "match",
