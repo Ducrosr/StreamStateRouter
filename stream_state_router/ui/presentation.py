@@ -22,7 +22,7 @@ STATE_KEYS = {
 
 _OK_STATUSES = {"", "current", "unchanged", "applied", "noop", "complete", "ok"}
 _BAD_STATUSES = {"failed", "missing", "error"}
-_WARN_STATUSES = {"blocked", "partial", "pending", "queued"}
+_WARN_STATUSES = {"blocked", "partial", "pending", "queued", "planned"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +53,14 @@ def _status_label(status: str, *, desired: str, applied: str) -> str:
     normalized = str(status or "").strip().casefold()
     if normalized in _BAD_STATUSES:
         return "Erreur"
-    if normalized in _WARN_STATUSES:
-        return "À corriger" if normalized != "pending" else "À appliquer"
+    if normalized in {"pending", "queued", "planned"}:
+        return "À appliquer"
+    if normalized in {"blocked", "partial"}:
+        return "À corriger"
+    if normalized == "held":
+        return "Maintenu manuellement"
+    if normalized == "unmanaged":
+        return "Non géré"
     if desired and applied and desired != applied:
         return "À appliquer"
     if desired and not applied and normalized in _OK_STATUSES:
