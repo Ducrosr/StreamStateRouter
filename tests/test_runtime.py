@@ -20,6 +20,7 @@ from stream_state_router.obs.dispatcher import (
     OBSDispatcher,
     profile_map_from_raw,
 )
+from stream_state_router.obs.layouts import CatalogElement
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
@@ -172,6 +173,40 @@ class CommandDispatcher(FakeDispatcher):
             (profile_name, bool(preview), threading.current_thread().name)
         )
         return SimpleNamespace(warnings=(), missing_sources=())
+
+
+class WorkerLayoutCatalogManager:
+    def __init__(self):
+        self.thread_names = []
+
+    def set_cooperative_yield(self, _callback):
+        return
+
+    def discover_scene(self, scene):
+        self.thread_names.append(threading.current_thread().name)
+        return {
+            "[Webcam] Avatar": [
+                CatalogElement(
+                    scene=scene,
+                    container=scene,
+                    path=(scene,),
+                    container_kind="scene",
+                    module="Webcam",
+                    element="Avatar",
+                    source="[Webcam] Avatar",
+                    enabled=True,
+                    transform={"positionX": 42.0},
+                    source_type="scene",
+                    flags=frozenset({"novis"}),
+                )
+            ]
+        }
+
+
+class LayoutCatalogDispatcher(CommandDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.layout_manager = WorkerLayoutCatalogManager()
 
 
 class BlockingLayoutDispatcher(CommandDispatcher):
@@ -1105,6 +1140,38 @@ class RuntimeTests(unittest.TestCase):
                 dispatcher.profile_threads,
                 [("game", "Vanilla", "SSR-Router")],
             )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_layout_catalog_scan_runs_on_runtime_worker_and_serializes_snapshot(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = LayoutCatalogDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_layout_catalog("In Game")
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(
+                dispatcher.layout_manager.thread_names,
+                ["SSR-Router"],
+            )
+            self.assertEqual(result.result["scene"], "In Game")
+            row = result.result["catalog"]["[Webcam] Avatar"][0]
+            self.assertEqual(row["source"], "[Webcam] Avatar")
+            self.assertEqual(row["container"], "In Game")
+            self.assertEqual(row["path"], ["In Game"])
+            self.assertEqual(row["transform"], {"positionX": 42.0})
+            self.assertEqual(row["flags"], ["novis"])
         finally:
             self.assertTrue(service.stop())
 
