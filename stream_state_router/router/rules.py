@@ -64,6 +64,7 @@ class AppRule:
     state: StreamState | None = None
     priority: int = 0
     exe: str = ""
+    launcher: str = ""
     path: str = ""
     title_regex: str = ""
     enabled: bool = True
@@ -184,10 +185,46 @@ class RuleSet:
     @property
     def needs_process_context(self) -> bool:
         return any(
-            bool(str(rule.conditions.get("process_running") or "").strip())
+            (
+                bool(str(rule.conditions.get("process_running") or "").strip())
+                or bool(str(rule.launcher or "").strip())
+            )
             for rule in self._rules
             if rule.enabled
         )
+
+    def launcher_candidates(
+        self,
+        context: Mapping[str, Any] | None = None,
+    ) -> tuple[AppRule, ...]:
+        """Return MATCH rules whose configured launcher is currently running."""
+        raw_running = (context or {}).get("running_processes")
+        if raw_running is None or isinstance(raw_running, (str, bytes)):
+            return ()
+        try:
+            running = {
+                str(item).strip().casefold()
+                for item in raw_running
+                if str(item).strip()
+            }
+        except TypeError:
+            return ()
+
+        matches: list[AppRule] = []
+        for rule in self._rules:
+            launcher = str(rule.launcher or "").strip()
+            if (
+                not rule.enabled
+                or rule.behavior is not ResolutionKind.MATCH
+                or rule.state is None
+                or not launcher
+                or launcher.casefold() not in running
+            ):
+                continue
+            conditions_ok, _reason = rule._conditions_result(context or {})
+            if conditions_ok:
+                matches.append(rule)
+        return tuple(matches)
 
     def resolve(
         self,
