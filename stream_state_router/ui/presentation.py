@@ -517,6 +517,7 @@ def build_diagnostic_report(
     obs_last_error: str = "",
     config_dirty: bool = False,
     runtime_revision_mismatch: bool = False,
+    drift_status: Mapping[str, object] | None = None,
 ) -> DiagnosticReport:
     explanation = _mapping(explanation)
     routing_status = _mapping(routing_status)
@@ -545,6 +546,54 @@ def build_diagnostic_report(
                 ),
             )
         )
+
+    drift = _mapping(drift_status)
+    try:
+        drift_checked_at = float(drift.get("checked_at", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        drift_checked_at = 0.0
+    if obs_enabled and obs_connected and drift_checked_at > 0.0:
+        duration = drift.get("duration_ms")
+        requests = drift.get("obs_requests")
+        metrics = []
+        if isinstance(duration, (int, float)):
+            metrics.append(f"{float(duration):.0f} ms")
+        if isinstance(requests, int):
+            metrics.append(f"{requests} requête(s) OBS")
+        metric_text = f" · {' · '.join(metrics)}" if metrics else ""
+
+        if not bool(drift.get("available", False)):
+            reason = str(drift.get("reason") or "").strip()
+            items.append(
+                DiagnosticItem(
+                    "warning",
+                    "Surveillance de dérive OBS indisponible",
+                    (
+                        (reason or "Le dernier contrôle read-only n’a pas pu aboutir.")
+                        + metric_text
+                    ),
+                    (
+                        "Laissez SSR refaire un contrôle. Si le problème persiste, "
+                        "consultez le journal technique et la santé des capacités."
+                    ),
+                )
+            )
+        elif bool(drift.get("coverage_limited", False)):
+            unknown_count = int(drift.get("unknown_count", 0) or 0)
+            items.append(
+                DiagnosticItem(
+                    "warning",
+                    "Surveillance de dérive OBS partielle",
+                    (
+                        f"{unknown_count} propriété(s) gérée(s) n’ont pas pu être "
+                        f"vérifiée(s){metric_text}."
+                    ),
+                    (
+                        "Vérifiez les actions classic-only ou non observables dans "
+                        "le mode Expert si vous avez besoin d’une couverture complète."
+                    ),
+                )
+            )
 
     if config_dirty:
         items.append(
