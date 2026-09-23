@@ -3200,9 +3200,11 @@ class MainWindow(QMainWindow):
             self.obs_status.setObjectName("Bad")
             self.obs_status.style().unpolish(self.obs_status)
             self.obs_status.style().polish(self.obs_status)
+            self._refresh_obs_connected_controls()
 
     def _update_obs_status(self) -> None:
         if not self._client:
+            self._refresh_obs_connected_controls()
             return
         if not self._client.config.enabled:
             text, style = "OBS : désactivé", "Muted"
@@ -3218,6 +3220,7 @@ class MainWindow(QMainWindow):
         self.obs_status.setObjectName(style)
         self.obs_status.style().unpolish(self.obs_status)
         self.obs_status.style().polish(self.obs_status)
+        self._refresh_obs_connected_controls()
 
     def _record_user_activity(self, entry: UserActivityEntry) -> None:
         timestamp = time.strftime("%H:%M:%S")
