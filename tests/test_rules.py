@@ -167,5 +167,51 @@ class RuleSetTests(unittest.TestCase):
         self.assertEqual(result.kind, ResolutionKind.IGNORE)
 
 
+
+    def test_launcher_candidates_are_process_context_not_routing_selectors(self):
+        game = AppRule(
+            "overwatch",
+            StreamState(game="Overwatch"),
+            priority=100,
+            exe="Overwatch.exe",
+            launcher="Battle.net.exe",
+        )
+        rules = RuleSet([game], fallback=StreamState(game="Vanilla"))
+
+        self.assertTrue(rules.needs_process_context)
+        candidates = rules.launcher_candidates(
+            {"running_processes": ("battle.net.exe", "explorer.exe")}
+        )
+
+        self.assertEqual(candidates, (game,))
+        routed = rules.resolve(
+            ForegroundApp(1, 2, "explorer.exe"),
+            {"running_processes": ("battle.net.exe", "explorer.exe")},
+        )
+        self.assertEqual(routed.kind, ResolutionKind.FALLBACK)
+
+    def test_launcher_candidates_ignore_disabled_and_ignore_rules(self):
+        match = AppRule(
+            "game",
+            StreamState(game="Game"),
+            exe="game.exe",
+            launcher="launcher.exe",
+            enabled=False,
+        )
+        ignored = AppRule(
+            "ignored",
+            exe="ignored.exe",
+            launcher="launcher.exe",
+            behavior=ResolutionKind.IGNORE,
+        )
+        rules = RuleSet([match, ignored])
+
+        self.assertEqual(
+            rules.launcher_candidates(
+                {"running_processes": ("launcher.exe",)}
+            ),
+            (),
+        )
+
 if __name__ == "__main__":
     unittest.main()
