@@ -150,3 +150,31 @@ def test_dashboard_snapshot_does_not_reuse_previous_rule_success() -> None:
     assert game.desired == "League of Legends"
     assert game.applied == "—"
     assert game.status_label == "À vérifier"
+
+
+def test_dashboard_snapshot_accepts_new_rule_when_state_is_already_converged() -> None:
+    explanation = _explanation(rule_name="Dofus background", game="Dofus")
+    explanation["routing"]["would_change"] = False
+    explanation["obs_plan"]["domains"] = [
+        {
+            "domain": "game",
+            "desired_profile": "Dofus",
+            "applied_profile": "Dofus",
+            "status": "noop",
+            "needs_apply": False,
+        }
+    ]
+
+    snapshot = build_dashboard_snapshot(
+        explanation,
+        {
+            "rule_name": "Dofus foreground",
+            "success": True,
+            "domain_details": [],
+        },
+        obs_enabled=True,
+        obs_connected=True,
+    )
+
+    assert snapshot.health_text == "Configuration déjà conforme"
+    assert snapshot.health_style == "Good"
