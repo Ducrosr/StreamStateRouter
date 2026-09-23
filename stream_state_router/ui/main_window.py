@@ -109,6 +109,7 @@ from .presentation import (
     build_diagnostic_report,
     build_manual_override_presentation,
     build_simulation_report,
+    render_capability_report_text,
     user_activity_from_runtime_event,
 )
 
@@ -748,12 +749,31 @@ class MainWindow(QMainWindow):
         repair_refs = QPushButton("Réparer les références OBS…")
         repair_refs.clicked.connect(dialog.accept)
         repair_refs.clicked.connect(self._start_reference_repair)
+        self._apply_obs_connected_control_state(
+            repair_refs,
+            requires_edit_mode=True,
+        )
         actions.addWidget(repair_refs)
 
         restore = QPushButton("Historique des sauvegardes…")
         restore.clicked.connect(dialog.accept)
         restore.clicked.connect(self._restore_config_backup)
         actions.addWidget(restore)
+
+        copy_diagnostic = QPushButton("Copier le diagnostic")
+        def copy_diagnostic_text() -> None:
+            QApplication.clipboard().setText(
+                render_capability_report_text(
+                    report,
+                    version=__version__,
+                )
+            )
+            self.statusBar().showMessage(
+                "Diagnostic SSR copié dans le presse-papiers",
+                4000,
+            )
+        copy_diagnostic.clicked.connect(copy_diagnostic_text)
+        actions.addWidget(copy_diagnostic)
 
         actions.addStretch(1)
         close = QPushButton("Fermer")
