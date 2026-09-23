@@ -183,6 +183,10 @@ class MainWindow(QMainWindow):
         self._last_runtime_restart_diagnostic = ""
         self._pending_collection_imports: dict[str, dict[str, object]] = {}
         self._pending_obs_controls: dict[str, tuple[object, str]] = {}
+        self._manual_undo: dict[str, object] | None = None
+        self._manual_undo_controls: list[object] = []
+        self._pending_layout_manual_apply: dict[str, str] = {}
+        self._manual_undo_request_id = ""
         self._user_activity_history: list[
             tuple[str, UserActivityEntry, int, float]
         ] = []
@@ -437,6 +441,187 @@ class MainWindow(QMainWindow):
                 control,
                 requires_edit_mode=requires_edit_mode,
             )
+        self._refresh_manual_undo_controls()
+
+    def _register_manual_undo_control(self, control) -> None:
+        self._manual_undo_controls.append(control)
+        self._refresh_manual_undo_controls()
+
+    def _refresh_manual_undo_controls(self) -> None:
+        checkpoint = self._manual_undo
+        for control in tuple(self._manual_undo_controls):
+            if checkpoint is None:
+                control.setEnabled(False)
+                control.setToolTip(
+                    "Aucune opération manuelle réversible disponible."
+                )
+                continue
+
+            kind = str(checkpoint.get("kind") or "")
+            label = str(checkpoint.get("label") or "dernière opération")
+            if kind == "config":
+                enabled = bool(self._edit_mode)
+                tooltip = (
+                    f"Annuler : {label}"
+                    if enabled
+                    else (
+                        "Activez Mode édition pour restaurer le brouillon "
+                        f"précédent ({label})."
+                    )
+                )
+            elif kind == "layout_obs":
+                enabled = self._obs_connection_available()
+                tooltip = (
+                    f"Annuler : {label}"
+                    if enabled
+                    else (
+                        "Connexion OBS requise pour restaurer le layout "
+                        f"précédent ({label})."
+                    )
+                )
+            else:
+                enabled = False
+                tooltip = "Cette opération ne possède pas de rollback sûr."
+
+            control.setEnabled(enabled)
+            control.setToolTip(tooltip)
+
+    def _set_config_undo_checkpoint(
+        self,
+        label: str,
+        previous_config: Mapping[str, object],
+    ) -> None:
+        previous = copy.deepcopy(dict(previous_config))
+        if config_revision(previous) == config_revision(self.config):
+            return
+        self._manual_undo = {
+            "kind": "config",
+            "label": str(label),
+            "previous_config": previous,
+            "after_revision": config_revision(self.config),
+        }
+        self._refresh_manual_undo_controls()
+
+    def _set_layout_undo_checkpoint(self, label: str) -> None:
+        self._manual_undo = {
+            "kind": "layout_obs",
+            "label": str(label),
+        }
+        self._refresh_manual_undo_controls()
+
+    def _clear_manual_undo_checkpoint(self) -> None:
+        self._manual_undo = None
+        self._manual_undo_request_id = ""
+        self._refresh_manual_undo_controls()
+
+    def _invalidate_layout_undo_checkpoint(self) -> None:
+        checkpoint = self._manual_undo
+        if (
+            isinstance(checkpoint, Mapping)
+            and str(checkpoint.get("kind") or "") == "layout_obs"
+        ):
+            self._clear_manual_undo_checkpoint()
+
+    def _undo_last_manual_operation(self) -> None:
+        checkpoint = self._manual_undo
+        if checkpoint is None:
+            QMessageBox.information(
+                self,
+                "Annuler la dernière opération",
+                "Aucune opération manuelle réversible n’est disponible.",
+            )
+            return
+
+        kind = str(checkpoint.get("kind") or "")
+        label = str(checkpoint.get("label") or "dernière opération")
+
+        if kind == "config":
+            if not self._require_edit_mode("Annuler la dernière opération"):
+                return
+            previous = checkpoint.get("previous_config")
+            if not isinstance(previous, Mapping):
+                self._clear_manual_undo_checkpoint()
+                return
+
+            self._collect_settings()
+            expected_revision = str(
+                checkpoint.get("after_revision") or ""
+            )
+            current_revision = config_revision(self.config)
+            if (
+                expected_revision
+                and current_revision != expected_revision
+                and QMessageBox.question(
+                    self,
+                    "Annuler la dernière opération",
+                    (
+                        "Le brouillon a été modifié depuis cette opération.\n\n"
+                        "L’annuler restaurera son snapshot précédent et "
+                        "supprimera les modifications effectuées ensuite. "
+                        "Continuer ?"
+                    ),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                != QMessageBox.Yes
+            ):
+                return
+
+            self.config = copy.deepcopy(dict(previous))
+            self._load_config_into_ui()
+            dirty = config_revision(self.config) != self._saved_revision
+            self._refresh_config_revision_status(draft_dirty=dirty)
+            self._refresh_dashboard_summary()
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Good",
+                    "Dernière opération annulée",
+                    label,
+                )
+            )
+            self.statusBar().showMessage(
+                f"Rollback du brouillon effectué : {label}",
+                6000,
+            )
+            self._clear_manual_undo_checkpoint()
+            return
+
+        if kind == "layout_obs":
+            if self._service is None or not self._obs_connection_available():
+                QMessageBox.warning(
+                    self,
+                    "Annuler la dernière opération",
+                    "OBS doit être connecté pour restaurer le layout précédent.",
+                )
+                return
+            if not self._safe_live_confirm(
+                "Restaurer le layout OBS précédent"
+            ):
+                return
+            try:
+                request_id = self._service.request_layout("undo")
+                self._manual_undo_request_id = request_id
+                self._track_obs_request(
+                    request_id,
+                    busy_text="Restauration…",
+                )
+                self.statusBar().showMessage(
+                    "Restauration du layout OBS précédent…",
+                    4000,
+                )
+            except Exception as exc:
+                QMessageBox.critical(
+                    self,
+                    "Annuler la dernière opération",
+                    str(exc),
+                )
+            return
+
+        QMessageBox.information(
+            self,
+            "Annuler la dernière opération",
+            "Cette opération ne possède pas de rollback sûr.",
+        )
 
     def _track_obs_request(
         self,
@@ -1219,6 +1404,7 @@ class MainWindow(QMainWindow):
                     "Sélectionnez au moins une proposition à appliquer.",
                 )
                 return
+            previous_config = copy.deepcopy(self.config)
             draft, applied = apply_reference_repairs(
                 self.config,
                 selected,
@@ -1243,6 +1429,10 @@ class MainWindow(QMainWindow):
             self.config = draft
             self._load_config_into_ui()
             self._mark_dirty()
+            self._set_config_undo_checkpoint(
+                f"Réparation de {applied} référence(s) OBS",
+                previous_config,
+            )
             self._refresh_dashboard_summary()
             self._record_user_activity(
                 UserActivityEntry(
@@ -1388,6 +1578,14 @@ class MainWindow(QMainWindow):
         dependencies = QPushButton("Arbre des dépendances")
         dependencies.clicked.connect(self._show_dependency_tree)
         maintenance_actions.addWidget(dependencies)
+        self.manual_undo_button = QPushButton(
+            "Annuler la dernière opération"
+        )
+        self.manual_undo_button.clicked.connect(
+            self._undo_last_manual_operation
+        )
+        maintenance_actions.addWidget(self.manual_undo_button)
+        self._register_manual_undo_control(self.manual_undo_button)
         self.repair_refs_button = QPushButton("Réparer les références OBS…")
         self.repair_refs_button.clicked.connect(
             self._start_reference_repair
@@ -2397,13 +2595,20 @@ class MainWindow(QMainWindow):
             ("Santé et capacités…", self._show_capability_report),
             ("Qui contrôle quoi ?…", self._show_effective_provenance),
             ("Arbre des dépendances…", self._show_dependency_tree),
+            (
+                "Annuler la dernière opération…",
+                self._undo_last_manual_operation,
+            ),
             ("Réparer les références OBS…", self._start_reference_repair),
             ("Tester un scénario…", self._show_scenario_simulator),
         ]:
             action = QAction(text, self)
             action.triggered.connect(slot)
             tools_menu.addAction(action)
-            if text.startswith("Réparer les références OBS"):
+            if text.startswith("Annuler la dernière opération"):
+                self._manual_undo_action = action
+                self._register_manual_undo_control(action)
+            elif text.startswith("Réparer les références OBS"):
                 self._repair_refs_action = action
                 self._register_obs_connected_control(
                     action,
@@ -2459,6 +2664,10 @@ class MainWindow(QMainWindow):
                 (
                     "Outil · Tester un scénario de routage",
                     self._show_scenario_simulator,
+                ),
+                (
+                    "Outil · Annuler la dernière opération",
+                    self._undo_last_manual_operation,
                 ),
                 (
                     "Configuration · Revoir les changements du brouillon",
@@ -3262,6 +3471,14 @@ class MainWindow(QMainWindow):
         self._schedule_dashboard_refresh()
 
     def _on_dispatch(self, result) -> None:
+        changed_domains = tuple(
+            str(item)
+            for item in (
+                getattr(result, "changed_domains", ()) or ()
+            )
+        )
+        if "layout" in changed_domains:
+            self._invalidate_layout_undo_checkpoint()
         self._update_obs_status()
         if result.executed:
             self._log(
@@ -3309,10 +3526,52 @@ class MainWindow(QMainWindow):
             payload = event.payload
             action = str(getattr(payload, "action", "") or "")
             request_id = str(getattr(payload, "request_id", "") or "")
+            command_success = bool(
+                getattr(payload, "success", False)
+            )
             self._finish_obs_request_feedback(
                 request_id,
-                success=bool(getattr(payload, "success", False)),
+                success=command_success,
             )
+
+            applied_layout = self._pending_layout_manual_apply.pop(
+                request_id,
+                "",
+            )
+            if applied_layout and command_success:
+                self._set_layout_undo_checkpoint(
+                    f"Application du layout « {applied_layout} »"
+                )
+            elif (
+                command_success
+                and action == "layout.apply"
+                and not applied_layout
+            ):
+                self._invalidate_layout_undo_checkpoint()
+
+            if (
+                request_id
+                and request_id == self._manual_undo_request_id
+            ):
+                if command_success:
+                    checkpoint = self._manual_undo
+                    label = (
+                        str(checkpoint.get("label") or "")
+                        if isinstance(checkpoint, Mapping)
+                        else ""
+                    )
+                    self._record_user_activity(
+                        UserActivityEntry(
+                            "Good",
+                            "Dernière opération annulée",
+                            label or "Layout OBS restauré",
+                        )
+                    )
+                    self._clear_manual_undo_checkpoint()
+                else:
+                    self._manual_undo_request_id = ""
+                    self._refresh_manual_undo_controls()
+
             if (
                 action == "collection.import.preview"
                 and request_id in self._pending_collection_imports
@@ -4582,9 +4841,14 @@ class MainWindow(QMainWindow):
             )
             return
 
+        previous_config = copy.deepcopy(self.config)
         self.config = copy.deepcopy(draft.config)
         self._load_config_into_ui()
         self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            f"Capture de l’état OBS pour « {draft.report.rule_name} »",
+            previous_config,
+        )
         self._refresh_dashboard_summary()
         self._record_user_activity(
             UserActivityEntry(
@@ -5189,6 +5453,14 @@ class MainWindow(QMainWindow):
             return
 
         self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            (
+                f"Import collection OBS vers {domain}/{profile_name}"
+                if mode == "snapshot_profile"
+                else "Migration logique collection OBS / ASC"
+            ),
+            previous,
+        )
         self._refresh_rules_table()
         self._refresh_profile_names()
         self._refresh_layout_profile_names()
@@ -6149,6 +6421,7 @@ class MainWindow(QMainWindow):
         self._collect_settings()
         try:
             request_id = self._service.request_layout("apply", current[0])
+            self._pending_layout_manual_apply[request_id] = current[0]
             self._track_obs_request(
                 request_id,
                 busy_text="Application…",
@@ -6205,6 +6478,11 @@ class MainWindow(QMainWindow):
             return
         try:
             request_id = self._service.request_layout("undo")
+            if (
+                isinstance(self._manual_undo, Mapping)
+                and str(self._manual_undo.get("kind") or "") == "layout_obs"
+            ):
+                self._manual_undo_request_id = request_id
             self._track_obs_request(
                 request_id,
                 busy_text="Restauration…",
