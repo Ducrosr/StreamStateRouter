@@ -80,6 +80,7 @@ from ..services.config_insights import (
     build_capability_report,
     build_effective_provenance,
     configured_action_types,
+    profile_content_entries,
     profile_lineage,
     profile_usages,
     scan_obs_reference_repairs,
@@ -1375,6 +1376,39 @@ class MainWindow(QMainWindow):
         )
         tree.header().setStretchLastSection(True)
         root.addWidget(tree, 1)
+
+        content_title = QLabel("Contenu effectif et origine")
+        content_title.setObjectName("Section")
+        root.addWidget(content_title)
+        content = QTreeWidget()
+        content.setColumnCount(5)
+        content.setHeaderLabels(
+            ["Origine", "Type", "Nom", "Cible", "Actif"]
+        )
+        content.setRootIsDecorated(False)
+        content.setAlternatingRowColors(True)
+        for entry in profile_content_entries(
+            self.config,
+            domain,
+            profile_name,
+        ):
+            content.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        entry.source_profile,
+                        entry.kind,
+                        entry.name,
+                        entry.target or "—",
+                        "Oui" if entry.enabled else "Non",
+                    ]
+                )
+            )
+        content.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        content.header().setStretchLastSection(True)
+        content.setMaximumHeight(220)
+        root.addWidget(content)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
