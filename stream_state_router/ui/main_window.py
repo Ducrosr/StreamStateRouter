@@ -1851,11 +1851,6 @@ class MainWindow(QMainWindow):
             if text == "Supprimer":
                 b.setObjectName("Danger")
             b.clicked.connect(slot)
-            if text in {
-                "Importer collection OBS…",
-                "Migrer logique collection / ASC…",
-            }:
-                self._register_obs_connected_control(b)
             buttons.addWidget(b)
         buttons.addStretch(1)
         root.addLayout(buttons)
@@ -1941,6 +1936,11 @@ class MainWindow(QMainWindow):
             if text == "Supprimer":
                 b.setObjectName("Danger")
             b.clicked.connect(slot)
+            if text in {
+                "Importer collection OBS…",
+                "Migrer logique collection / ASC…",
+            }:
+                self._register_obs_connected_control(b)
             buttons.addWidget(b)
         buttons.addStretch(1)
         root.addLayout(buttons)
