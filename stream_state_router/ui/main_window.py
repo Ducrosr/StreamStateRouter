@@ -413,6 +413,24 @@ class MainWindow(QMainWindow):
         activity_lay.addWidget(self.user_activity_tree)
         root.addWidget(activity_card)
 
+        import_card, import_lay = self._card("Configurer SSR depuis OBS")
+        import_hint = QLabel(
+            "SSR peut analyser la collection OBS courante en lecture seule, "
+            "repérer les scènes, sources, filtres, layouts et automatisations "
+            "Advanced Scene Switcher compatibles, puis vous proposer la suite."
+        )
+        import_hint.setWordWrap(True)
+        import_hint.setObjectName("Muted")
+        import_lay.addWidget(import_hint)
+        import_actions = QHBoxLayout()
+        analyze_import = QPushButton("Analyser ma collection OBS")
+        analyze_import.setObjectName("Primary")
+        analyze_import.clicked.connect(self._guided_analyze_collection)
+        import_actions.addWidget(analyze_import)
+        import_actions.addStretch(1)
+        import_lay.addLayout(import_actions)
+        root.addWidget(import_card)
+
         app_card, app_lay = self._card("Application au premier plan")
         self.app_card = app_card
         self.fg_exe = QLabel("—")
@@ -1814,6 +1832,137 @@ class MainWindow(QMainWindow):
         self._refresh_profile_names()
         self._refresh_override_boxes()
 
+    def _guided_analyze_collection(self) -> None:
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Analyse collection OBS",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        try:
+            request_id = self._service.request_collection_import_preview(
+                include_layouts=True,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Analyse collection OBS",
+                str(exc),
+            )
+            return
+
+        self._pending_collection_imports[request_id] = {
+            "mode": "guided_analysis",
+            "domain": "",
+            "profile_name": "",
+            "options": {},
+        }
+        self._record_user_activity(
+            UserActivityEntry("Muted", "Analyse de la collection OBS démarrée")
+        )
+        self.statusBar().showMessage(
+            "Analyse de la collection OBS en cours…",
+            8000,
+        )
+
+    def _show_guided_collection_analysis(
+        self,
+        snapshot,
+        raw_result: Mapping[str, object],
+    ) -> None:
+        raw_layouts = raw_result.get("layouts")
+        layout_count = len(raw_layouts) if isinstance(raw_layouts, Mapping) else 0
+        raw_skipped = raw_result.get("layout_skipped")
+        skipped_layouts = (
+            len(raw_skipped)
+            if isinstance(raw_skipped, list)
+            else 0
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Analyse de la collection OBS")
+        dialog.resize(760, 500)
+        root = QVBoxLayout(dialog)
+
+        title = QLabel(
+            f"Collection : {snapshot.collection or '—'}"
+        )
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        scene = QLabel(
+            "Scène programme actuelle : "
+            f"{snapshot.current_program_scene or '—'}"
+        )
+        scene.setObjectName("Muted")
+        root.addWidget(scene)
+
+        summary = QTreeWidget()
+        summary.setColumnCount(2)
+        summary.setHeaderLabels(["Élément détecté", "Quantité"])
+        summary.setRootIsDecorated(False)
+        summary.setAlternatingRowColors(True)
+        rows = [
+            ("Scènes OBS", len(snapshot.scenes)),
+            ("Inputs / sources", len(snapshot.inputs)),
+            ("Filtres", len(snapshot.filters)),
+            ("Scene Items", len(snapshot.scene_items)),
+            ("Layouts importables", layout_count),
+            ("Layouts ignorés par sécurité", skipped_layouts),
+            ("Avertissements", len(snapshot.warnings)),
+        ]
+        for label, value in rows:
+            summary.addTopLevelItem(
+                QTreeWidgetItem([label, str(value)])
+            )
+        summary.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        summary.header().setStretchLastSection(True)
+        root.addWidget(summary, 1)
+
+        note = QLabel(
+            "Cette analyse n’a modifié ni OBS ni la configuration SSR. "
+            "La migration automatique reste conservatrice : une macro ou un "
+            "élément ambigu n’est jamais approximé."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        if snapshot.warnings:
+            warnings = QPlainTextEdit()
+            warnings.setReadOnly(True)
+            warnings.setMaximumHeight(110)
+            warnings.setPlainText(
+                "\n".join(f"• {item}" for item in snapshot.warnings)
+            )
+            root.addWidget(warnings)
+
+        actions = QHBoxLayout()
+        migrate = QPushButton("Migrer ce qui est sûr…")
+        migrate.setObjectName("Primary")
+        migrate.clicked.connect(dialog.accept)
+        migrate.clicked.connect(self._migrate_collection_logic)
+        actions.addWidget(migrate)
+
+        advanced = QPushButton("Ouvrir les outils d’import avancés")
+        advanced.clicked.connect(dialog.accept)
+        advanced.clicked.connect(self._open_import_tools)
+        actions.addWidget(advanced)
+        actions.addStretch(1)
+
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _open_import_tools(self) -> None:
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.profiles_tab_index)
+
     def _import_collection_to_profile(self) -> None:
         current = self._current_profile()
         if not current:
@@ -1954,6 +2103,21 @@ class MainWindow(QMainWindow):
         snapshot = SceneCollectionImporter.snapshot_from_mapping(
             raw_snapshot
         )
+
+        if mode == "guided_analysis":
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Good",
+                    "Analyse de la collection OBS terminée",
+                    (
+                        f"{len(snapshot.scenes)} scène(s), "
+                        f"{len(snapshot.inputs)} source(s), "
+                        f"{len(snapshot.filters)} filtre(s)"
+                    ),
+                )
+            )
+            self._show_guided_collection_analysis(snapshot, raw_result)
+            return
 
         previous = copy.deepcopy(self.config)
         asc_report = None
