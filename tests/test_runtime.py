@@ -252,6 +252,35 @@ class CooperativeLayoutDispatcher(CommandDispatcher):
             self.in_layout = False
 
 
+class PreemptibleAutomaticDispatcher(FakeDispatcher):
+    def __init__(self):
+        super().__init__()
+        self._yield = None
+        self.dispatch_entered = threading.Event()
+        self.first_dispatch_exited = threading.Event()
+        self.games = []
+
+    def set_cooperative_yield(self, callback):
+        self._yield = callback
+
+    def pending_domains(self, state=None):
+        del state
+        return ("game",)
+
+    def dispatch_change(self, change):
+        self.games.append(change.current.game)
+        if len(self.games) > 1:
+            return DispatchResult(1, 0, ("game",))
+        self.dispatch_entered.set()
+        try:
+            while True:
+                if self._yield is not None:
+                    self._yield()
+                time.sleep(0.01)
+        finally:
+            self.first_dispatch_exited.set()
+
+
 class BlockingDispatcher(FakeDispatcher):
     def __init__(self):
         super().__init__()
@@ -1878,6 +1907,116 @@ class RuntimeTests(unittest.TestCase):
             service_a.stop()
             if service_b is not None:
                 self.assertTrue(service_b.stop())
+
+    def test_foreground_change_preempts_long_automatic_dispatch(self):
+        app_a = ForegroundApp(
+            1,
+            101,
+            "a.exe",
+            process_path=r"C:\\Games\\A\\a.exe",
+            window_title="Game A",
+        )
+        app_b = ForegroundApp(
+            2,
+            202,
+            "b.exe",
+            process_path=r"C:\\Games\\B\\b.exe",
+            window_title="Game B",
+        )
+        provider = FakeProvider(app_a)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "A",
+                        StreamState(game="A"),
+                        priority=100,
+                        exe="a.exe",
+                    ),
+                    AppRule(
+                        "B",
+                        StreamState(game="B"),
+                        priority=100,
+                        exe="b.exe",
+                    ),
+                ]
+            ),
+            debounce_ms=0,
+        )
+        dispatcher = PreemptibleAutomaticDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=provider,
+        )
+        events = []
+        service.on_event = events.append
+        service.start()
+        try:
+            self.assertTrue(dispatcher.dispatch_entered.wait(1.0))
+
+            provider.app = app_b
+
+            self.assertTrue(
+                dispatcher.first_dispatch_exited.wait(0.5),
+                "stale automatic dispatch was not cooperatively preempted",
+            )
+            deadline = time.monotonic() + 1.0
+            while dispatcher.games[-1:] != ["B"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(dispatcher.games[:2], ["A", "B"])
+            self.assertTrue(
+                any(
+                    event.kind == "routing_result"
+                    and "foreground a changé" in event.message
+                    for event in events
+                ),
+                [getattr(event, "message", "") for event in events],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_foreground_change_does_not_preempt_manual_layout_command(self):
+        app_a = ForegroundApp(
+            1,
+            101,
+            "a.exe",
+            process_path=r"C:\\Games\\A\\a.exe",
+            window_title="Game A",
+        )
+        app_b = ForegroundApp(
+            2,
+            202,
+            "b.exe",
+            process_path=r"C:\\Games\\B\\b.exe",
+            window_title="Game B",
+        )
+        provider = FakeProvider(app_a)
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CooperativeLayoutDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=provider,
+        )
+        service.start()
+        try:
+            service.request_layout("apply", "Manual")
+            self.assertTrue(dispatcher.layout_entered.wait(1.0))
+
+            provider.app = app_b
+            time.sleep(0.12)
+
+            self.assertTrue(
+                dispatcher.in_layout,
+                "manual layout command was incorrectly foreground-preempted",
+            )
+        finally:
+            shutdown = service.stop(timeout=1.0)
+            self.assertTrue(shutdown, shutdown.diagnostic_summary())
 
     def test_shutdown_interrupts_cooperative_background_reconciliation(self):
         app = ForegroundApp(1, 1, "game.exe")
