@@ -307,8 +307,115 @@ class MainWindow(QMainWindow):
             self.dashboard_health.setText("Runtime indisponible")
             self.dashboard_health.setObjectName("Bad")
             self.dashboard_decision.setText("Décision : —")
-            self.dashboard_reason.setText("Pourquoi : le moteur de routage n’est pas actif.")
+            self.dashboard_reason.setText(
+                "Pourquoi : le moteur de routage n’est pas actif."
+            )
             self.dashboard_diff.clear()
+            return
+
+        try:
+            explanation = service.explain_decision()
+            routing_status = service.routing_status()
+        except Exception as exc:
+            self.dashboard_health.setText("Diagnostic indisponible")
+            self.dashboard_health.setObjectName("Warn")
+            self.dashboard_decision.setText("Décision : —")
+            self.dashboard_reason.setText(f"Pourquoi : {exc}")
+            self.dashboard_diff.clear()
+            return
+
+        snapshot = build_dashboard_snapshot(
+            explanation,
+            routing_status,
+            obs_enabled=bool(client and client.config.enabled),
+            obs_connected=bool(client and client.connected),
+        )
+        self.dashboard_health.setText(snapshot.health_text)
+        self.dashboard_health.setObjectName(snapshot.health_style)
+        self.dashboard_health.style().unpolish(self.dashboard_health)
+        self.dashboard_health.style().polish(self.dashboard_health)
+        self.dashboard_decision.setText(f"Décision : {snapshot.decision}")
+        self.dashboard_reason.setText(f"Pourquoi : {snapshot.reason}")
+
+        self.dashboard_diff.clear()
+        for difference in snapshot.differences:
+            item = QTreeWidgetItem(
+                [
+                    difference.label,
+                    difference.desired,
+                    difference.applied,
+                    difference.status_label,
+                ]
+            )
+            if difference.message:
+                item.setToolTip(3, difference.message)
+            self.dashboard_diff.addTopLevelItem(item)
+
+    def _guided_capture_current_state(self) -> None:
+        service = self._service
+        client = self._client
+        if service is None:
+            QMessageBox.warning(
+                self,
+                "Capture de l’état actuel",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+
+        if (
+            self._draft_dirty
+            or (
+                bool(self._saved_revision)
+                and bool(self._applied_revision)
+                and self._saved_revision != self._applied_revision
+            )
+        ):
+            QMessageBox.information(
+                self,
+                "Capture de l’état actuel",
+                (
+                    "La configuration ouverte n’est pas encore synchronisée "
+                    "avec le runtime.\n\n"
+                    "Utilisez d’abord « Enregistrer et appliquer », puis "
+                    "relancez la capture afin que SSR parte d’un état cohérent."
+                ),
+            )
+            return
+
+        if (
+            client is None
+            or not client.config.enabled
+            or not client.connected
+        ):
+            QMessageBox.warning(
+                self,
+                "Capture de l’état actuel",
+                "OBS doit être connecté à SSR avant de capturer l’état actuel.",
+            )
+            return
+
+        app = service.last_app or service.last_meaningful_app
+        if app is None:
+            QMessageBox.information(
+                self,
+                "Capture de l’état actuel",
+                (
+                    "Aucune application exploitable n’est détectée. "
+                    "Placez l’application à configurer au premier plan au moins "
+                    "une fois, puis relancez la capture."
+                ),
+            )
+            return
+
+        process = str(app.exe_name or "").strip()
+        if not process:
+            process = os.path.basename(str(app.process_path or "").strip())
+        if not process:
+            QMessageBox.information(
+                self,
+                "Capture de l’état actuel",
+                "Le processus de l’application cible est inconnu.",
+            )
             return
 
         try:
@@ -333,7 +440,7 @@ class MainWindow(QMainWindow):
                     self,
                     "Capture de l’état actuel",
                     (
-                        "L’application courante est actuellement ignorée par "
+                        "L’application cible est actuellement ignorée par "
                         f"la règle « {routing_rule or 'IGNORE'} ».\n\n"
                         "L’assistant Simple ne remplace jamais une règle IGNORE. "
                         "Modifiez d’abord cette règle en mode Expert."
@@ -342,7 +449,15 @@ class MainWindow(QMainWindow):
                 return
 
             exact_matches = find_process_rules(self.config, process)
-            if routing_kind == "match" and routing_rule and not exact_matches:
+            exact_names = {
+                str(rule.get("name") or "").strip()
+                for rule in exact_matches
+            }
+            if (
+                routing_kind == "match"
+                and routing_rule
+                and routing_rule not in exact_names
+            ):
                 raw_rules = self.config.get("rules")
                 configured_rules = (
                     raw_rules if isinstance(raw_rules, list) else []
@@ -362,10 +477,10 @@ class MainWindow(QMainWindow):
                         "Capture de l’état actuel",
                         (
                             "Cette application est déjà pilotée par la règle "
-                            f"« {routing_rule} », mais cette règle utilise des "
-                            "sélecteurs avancés plutôt qu’un processus exact.\n\n"
-                            "Pour éviter de créer une règle concurrente, "
-                            "modifiez cette configuration en mode Expert."
+                            f"« {routing_rule} », mais cette règle n’est pas une "
+                            "règle simple liée exactement au processus détecté.\n\n"
+                            "Pour éviter de créer ou modifier une règle concurrente, "
+                            "utilisez le mode Expert pour cette configuration."
                         ),
                     )
                     return
