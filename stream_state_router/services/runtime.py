@@ -1343,7 +1343,17 @@ class RoutingService:
                             routing_app.window_title if routing_app else "",
                         )
                     if not paused:
-                        routing_context = None
+                        release_reason, release_context = (
+                            self._manual_override_release_probe(
+                                routing_app,
+                                now=time.monotonic(),
+                            )
+                        )
+                        routing_context = (
+                            dict(release_context)
+                            if isinstance(release_context, Mapping)
+                            else None
+                        )
                         needs_context = bool(
                             getattr(self.engine, "needs_context", False)
                         )
@@ -1352,29 +1362,75 @@ class RoutingService:
                         )
                         if needs_context or needs_process_context:
                             self._worker_phase = "routing_context"
-                            routing_context = {}
-                            if needs_context:
-                                try:
-                                    routing_context.update(
-                                        self.dispatcher.obs_context()
-                                    )
-                                except Exception:
-                                    pass
+                            if routing_context is None:
+                                routing_context = {}
+                                if needs_context:
+                                    try:
+                                        routing_context.update(
+                                            self.dispatcher.obs_context()
+                                        )
+                                    except Exception:
+                                        pass
                             routing_context = self._with_process_context(
                                 routing_context
                             )
+
+                        override_released_reason = ""
                         self._worker_phase = "observe"
                         with self._lock:
                             previous_rule = self.engine.current_rule
-                            change = self.engine.observe(
-                                routing_app,
-                                force=bootstrap_routing or resume_revalidation,
-                                context=routing_context,
-                                use_context_provider=False,
+                            override_before = (
+                                self.engine.manual_override is not None
                             )
+                            if release_reason:
+                                change = self.engine.clear_manual_override(
+                                    routing_app,
+                                    context=routing_context,
+                                    use_context_provider=False,
+                                )
+                                self._reset_manual_override_release_locked()
+                                override_released_reason = release_reason
+                            else:
+                                change = self.engine.observe(
+                                    routing_app,
+                                    force=(
+                                        bootstrap_routing
+                                        or resume_revalidation
+                                    ),
+                                    context=routing_context,
+                                    use_context_provider=False,
+                                )
+                                if (
+                                    override_before
+                                    and self.engine.manual_override is None
+                                ):
+                                    self._reset_manual_override_release_locked()
+                                    override_released_reason = "durée écoulée"
                             resolved_rule = self.engine.current_rule
+
+                        if override_released_reason:
+                            self._emit(
+                                RuntimeEvent(
+                                    "manual_override_released",
+                                    (
+                                        "Override manuel terminé : "
+                                        + override_released_reason
+                                    ),
+                                    payload={
+                                        "reason": override_released_reason,
+                                        "rule_name": resolved_rule,
+                                    },
+                                )
+                            )
                         if change:
-                            self._apply_change(change)
+                            self._apply_change(
+                                change,
+                                origin=(
+                                    "manual_override_auto_clear"
+                                    if override_released_reason
+                                    else None
+                                ),
+                            )
                         else:
                             if (
                                 changed_app
