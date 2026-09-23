@@ -130,6 +130,7 @@ class MainWindow(QMainWindow):
         self.config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
         self._applied_revision = ""
+        self._draft_dirty = False
         self.logger = logger
         self.start_minimized = start_minimized
         self._runtime_marker = runtime_marker
@@ -289,6 +290,8 @@ class MainWindow(QMainWindow):
         )
         if not self._expert_mode and self.tabs.currentIndex() in expert_only:
             self.tabs.setCurrentIndex(self.dashboard_tab_index)
+        if hasattr(self, "unsaved"):
+            self._refresh_config_revision_status()
 
     def _refresh_dashboard_summary(self) -> None:
         if not hasattr(self, "dashboard_health"):
@@ -1026,8 +1029,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Enregistrement", str(exc))
             return
+        self._draft_dirty = False
         if not self._restart_runtime():
-            self.unsaved.setText("Configuration enregistrée, application runtime incomplète")
+            self._refresh_config_revision_status(draft_dirty=False)
             self.statusBar().showMessage(
                 "Configuration enregistrée — runtime précédent encore actif",
                 6000,
@@ -1036,7 +1040,7 @@ class MainWindow(QMainWindow):
         self._restart_api()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
-        self._refresh_config_revision_status()
+        self._refresh_config_revision_status(draft_dirty=False)
         self.statusBar().showMessage("Configuration enregistrée et appliquée", 4000)
         self._log("Configuration enregistrée et appliquée.")
         self._record_user_activity(
@@ -1433,7 +1437,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Diagnostic SSR", str(exc))
             return
 
-        config_dirty = self.unsaved.text().startswith("Brouillon modifié")
+        config_dirty = self._draft_dirty
         report = build_diagnostic_report(
             explanation,
             routing_status,
@@ -3633,19 +3637,37 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._log(f"Sauvegarde valide chargée en brouillon : {path}")
 
-    def _refresh_config_revision_status(self, *, draft_dirty: bool = False) -> None:
+    def _refresh_config_revision_status(
+        self,
+        *,
+        draft_dirty: bool | None = None,
+    ) -> None:
+        if draft_dirty is not None:
+            self._draft_dirty = bool(draft_dirty)
         saved = self._saved_revision or "—"
         applied = self._applied_revision or "—"
-        if draft_dirty:
-            self.unsaved.setText(
-                f"Brouillon modifié · enregistré {saved} · appliqué {applied}"
-            )
-        elif saved != applied:
-            self.unsaved.setText(
-                f"Enregistré {saved} · runtime encore sur {applied}"
-            )
+
+        if self._expert_mode:
+            if self._draft_dirty:
+                text = (
+                    f"Brouillon modifié · enregistré {saved} · "
+                    f"appliqué {applied}"
+                )
+            elif saved != applied:
+                text = f"Enregistré {saved} · runtime encore sur {applied}"
+            else:
+                text = f"Enregistré / appliqué {applied}"
         else:
-            self.unsaved.setText(f"Enregistré / appliqué {applied}")
+            if self._draft_dirty:
+                text = "Modifications non enregistrées"
+            elif saved != applied:
+                text = "Configuration enregistrée · application en attente"
+            else:
+                text = "Configuration à jour"
+        self.unsaved.setText(text)
+        self.unsaved.setToolTip(
+            f"Révision enregistrée : {saved}\nRévision runtime : {applied}"
+        )
 
     def _mark_dirty(self, *_args) -> None:
         self._refresh_config_revision_status(draft_dirty=True)
