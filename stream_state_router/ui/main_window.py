@@ -105,6 +105,7 @@ from .presentation import (
     build_automation_rows,
     build_dashboard_snapshot,
     build_diagnostic_report,
+    build_manual_override_presentation,
     build_simulation_report,
     user_activity_from_runtime_event,
 )
@@ -339,6 +340,7 @@ class MainWindow(QMainWindow):
             self.dashboard_health.setObjectName("Bad")
             self.dashboard_decision.setText("Décision : —")
             self.dashboard_reason.setText("Pourquoi : le moteur de routage n’est pas actif.")
+            self.dashboard_override_row.setVisible(False)
             self.dashboard_diff.clear()
             return
 
@@ -350,6 +352,7 @@ class MainWindow(QMainWindow):
             self.dashboard_health.setObjectName("Warn")
             self.dashboard_decision.setText("Décision : —")
             self.dashboard_reason.setText(f"Pourquoi : {exc}")
+            self.dashboard_override_row.setVisible(False)
             self.dashboard_diff.clear()
             return
 
@@ -365,6 +368,24 @@ class MainWindow(QMainWindow):
         self.dashboard_health.style().polish(self.dashboard_health)
         self.dashboard_decision.setText(f"Décision : {snapshot.decision}")
         self.dashboard_reason.setText(f"Pourquoi : {snapshot.reason}")
+
+        override_view = build_manual_override_presentation(
+            service.manual_override_status()
+        )
+        self.dashboard_override_row.setVisible(override_view.active)
+        if override_view.active:
+            self.dashboard_override_label.setText(
+                f"{override_view.title} · {override_view.detail}"
+            )
+            self.dashboard_override_label.setObjectName(
+                override_view.style
+            )
+            self.dashboard_override_label.style().unpolish(
+                self.dashboard_override_label
+            )
+            self.dashboard_override_label.style().polish(
+                self.dashboard_override_label
+            )
 
         self.dashboard_diff.clear()
         for difference in snapshot.differences:
@@ -919,6 +940,19 @@ class MainWindow(QMainWindow):
         summary_lay.addWidget(self.dashboard_health)
         summary_lay.addWidget(self.dashboard_decision)
         summary_lay.addWidget(self.dashboard_reason)
+
+        self.dashboard_override_row = QWidget()
+        override_row_lay = QHBoxLayout(self.dashboard_override_row)
+        override_row_lay.setContentsMargins(0, 4, 0, 4)
+        self.dashboard_override_label = QLabel("")
+        self.dashboard_override_label.setWordWrap(True)
+        self.dashboard_override_label.setObjectName("Warn")
+        override_row_lay.addWidget(self.dashboard_override_label, 1)
+        dashboard_auto = QPushButton("Revenir au routage automatique")
+        dashboard_auto.clicked.connect(self._clear_override)
+        override_row_lay.addWidget(dashboard_auto)
+        self.dashboard_override_row.setVisible(False)
+        summary_lay.addWidget(self.dashboard_override_row)
 
         self.dashboard_diff = QTreeWidget()
         self.dashboard_diff.setColumnCount(4)
@@ -5500,6 +5534,11 @@ class MainWindow(QMainWindow):
                 "applied": self._applied_revision,
             },
             "routing": service.routing_status() if service else {},
+            "manual_override": (
+                service.manual_override_status()
+                if service
+                else {"active": False}
+            ),
             "obs_catalog": (
                 service.obs_catalog_status()
                 if service
@@ -5558,10 +5597,26 @@ class MainWindow(QMainWindow):
             request_id = self._service.request_force_reapply()
             return {"request_id": request_id, "status": "accepted"}
         if action == "override":
-            state = StreamState.from_mapping(payload.get("state") if isinstance(payload.get("state"), dict) else {})
-            duration = float(payload.get("duration_seconds", 0) or 0)
-            self._service.set_manual_override(state, duration_seconds=duration or None)
-            return {"state": state.as_variables()}
+            state = StreamState.from_mapping(
+                payload.get("state")
+                if isinstance(payload.get("state"), dict)
+                else {}
+            )
+            duration = float(
+                payload.get("duration_seconds", 0) or 0
+            )
+            release_mode = str(
+                payload.get("release_mode") or "manual"
+            ).strip().casefold()
+            self._service.set_manual_override(
+                state,
+                duration_seconds=duration or None,
+                release_mode=release_mode,
+            )
+            return {
+                "state": state.as_variables(),
+                "manual_override": self._service.manual_override_status(),
+            }
         if action == "layout.apply":
             name = str(payload.get("name") or "").strip()
             if not name:
