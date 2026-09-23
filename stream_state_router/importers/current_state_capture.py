@@ -15,6 +15,15 @@ _STATE_KEYS = {
     "layout": "LayoutProfile",
 }
 
+_ACTION_DOMAINS = ("game", "overlay", "capture", "audio")
+_DOMAIN_LABELS = {
+    "game": "Jeu",
+    "overlay": "Overlay",
+    "capture": "Capture",
+    "audio": "Audio",
+    "layout": "Layout",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class CurrentStateCaptureOptions:
@@ -26,6 +35,13 @@ class CurrentStateCaptureOptions:
     include_filters: bool = True
     include_visibility: bool = True
     include_layout: bool = True
+    # Keep programmatic callers backward-compatible: historically every
+    # captured OBS action was stored in GameProfile. The guided UI supplies
+    # explicit, more semantic destinations.
+    input_settings_domain: str = "game"
+    audio_state_domain: str = "game"
+    filters_domain: str = "game"
+    visibility_domain: str = "game"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +60,7 @@ class CurrentStateCaptureReport:
     captured_scene_items: int
     warnings: tuple[str, ...]
     notes: tuple[str, ...]
+    owned_profiles: tuple[tuple[str, str], ...] = ()
 
     def summary_lines(self) -> tuple[str, ...]:
         mode = "mise à jour" if self.mode == "update" else "création"
@@ -71,6 +88,12 @@ class CurrentStateCaptureReport:
                 else "Layout courant : non capturé"
             ),
         ]
+        if self.owned_profiles:
+            ownership = " · ".join(
+                f"{_DOMAIN_LABELS.get(domain, domain)} → {profile}"
+                for domain, profile in self.owned_profiles
+            )
+            lines.append(f"Prise de contrôle SSR : {ownership}")
         lines.extend(self.notes)
         if self.warnings:
             lines.append(f"Avertissements : {len(self.warnings)}")
@@ -129,8 +152,14 @@ def suggest_capture_name(
             and str(rule.get("name") or "").strip()
         )
     profiles = _mapping(config.get("profiles"))
-    games = _mapping(profiles.get("game"))
-    used.update(str(name).strip().casefold() for name in games)
+    for domain_profiles in profiles.values():
+        if not isinstance(domain_profiles, Mapping):
+            continue
+        used.update(
+            str(name).strip().casefold()
+            for name in domain_profiles
+            if str(name).strip()
+        )
     layouts = _mapping(config.get("layout_profiles"))
     used.update(str(name).strip().casefold() for name in layouts)
 
@@ -248,6 +277,98 @@ def _ensure_profile(
     return profile
 
 
+def _normalize_action_domain(value: str, *, field: str) -> str:
+    domain = str(value or "").strip().casefold()
+    if domain not in _ACTION_DOMAINS:
+        raise ValueError(
+            f"{field} doit cibler game, overlay, capture ou audio."
+        )
+    return domain
+
+
+def _clone_action_profile(
+    config: dict[str, Any],
+    *,
+    domain: str,
+    source_name: str,
+    target_name: str,
+) -> dict[str, Any]:
+    profiles = config.setdefault("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError("config.profiles doit être un objet.")
+    domain_profiles = profiles.setdefault(domain, {})
+    if not isinstance(domain_profiles, dict):
+        raise ValueError(f"config.profiles.{domain} doit être un objet.")
+
+    source = domain_profiles.get(source_name)
+    if isinstance(source, Mapping):
+        profile = copy.deepcopy(dict(source))
+    else:
+        profile = {
+            "actions": [],
+            "extends": "",
+            "conditions": {},
+        }
+    domain_profiles[target_name] = profile
+    return profile
+
+
+def _capture_groups(
+    options: CurrentStateCaptureOptions,
+) -> dict[str, dict[str, bool]]:
+    groups: dict[str, dict[str, bool]] = {}
+
+    def add(
+        *,
+        included: bool,
+        domain_value: str,
+        flag: str,
+        field: str,
+    ) -> None:
+        if not included:
+            return
+        domain = _normalize_action_domain(
+            domain_value,
+            field=field,
+        )
+        group = groups.setdefault(
+            domain,
+            {
+                "include_input_settings": False,
+                "include_audio_state": False,
+                "include_filters": False,
+                "include_visibility": False,
+            },
+        )
+        group[flag] = True
+
+    add(
+        included=bool(options.include_input_settings),
+        domain_value=options.input_settings_domain,
+        flag="include_input_settings",
+        field="input_settings_domain",
+    )
+    add(
+        included=bool(options.include_audio_state),
+        domain_value=options.audio_state_domain,
+        flag="include_audio_state",
+        field="audio_state_domain",
+    )
+    add(
+        included=bool(options.include_filters),
+        domain_value=options.filters_domain,
+        flag="include_filters",
+        field="filters_domain",
+    )
+    add(
+        included=bool(options.include_visibility),
+        domain_value=options.visibility_domain,
+        flag="include_visibility",
+        field="visibility_domain",
+    )
+    return groups
+
+
 def _scene_snapshot(snapshot: SceneCollectionSnapshot) -> SceneCollectionSnapshot:
     scene = str(snapshot.current_program_scene or "").strip()
     if not scene:
@@ -340,60 +461,25 @@ def build_current_state_capture_draft(
     fallback = _fallback_state(draft)
     notes: list[str] = []
     warnings: list[str] = []
+    ownership: list[tuple[str, str]] = []
 
-    existing_rule = _find_rule_mutable(draft, options.existing_rule_name)
+    existing_rule = _find_rule_mutable(
+        draft,
+        options.existing_rule_name,
+    )
     mode = "update" if existing_rule is not None else "create"
     if options.existing_rule_name and existing_rule is None:
         raise ValueError(
             f"Règle à mettre à jour introuvable : {options.existing_rule_name}"
         )
 
-    layout_shared = False
     if existing_rule is not None:
-        rule_name = str(existing_rule.get("name") or requested_name).strip()
-        existing_state = _mapping(existing_rule.get("state"))
-        original_game_profile = (
-            str(existing_state.get("Game") or "").strip() or requested_name
-        )
-        game_profile = original_game_profile
-        if _profile_referenced_elsewhere(
-            draft,
-            domain="game",
-            profile_name=original_game_profile,
-            rule_name=rule_name,
-        ):
-            game_profile = suggest_capture_name(draft, f"{rule_name} · Jeu")
-            profiles = draft.setdefault("profiles", {})
-            if not isinstance(profiles, dict):
-                raise ValueError("config.profiles doit être un objet.")
-            games = profiles.setdefault("game", {})
-            if not isinstance(games, dict):
-                raise ValueError("config.profiles.game doit être un objet.")
-            original = games.get(original_game_profile)
-            games[game_profile] = (
-                copy.deepcopy(dict(original))
-                if isinstance(original, Mapping)
-                else {
-                    "actions": [],
-                    "extends": "",
-                    "conditions": {},
-                }
-            )
-            notes.append(
-                "Le GameProfile existant était partagé : une copie dédiée "
-                "a été créée avant la capture."
-            )
-
-        current_layout_name = str(existing_state.get("LayoutProfile") or "").strip()
-        layout_profile = current_layout_name
-        layout_shared = bool(
-            current_layout_name
-            and _profile_referenced_elsewhere(
-                draft,
-                domain="layout",
-                profile_name=current_layout_name,
-                rule_name=rule_name,
-            )
+        rule_name = str(
+            existing_rule.get("name") or requested_name
+        ).strip()
+        state = dict(_mapping(existing_rule.get("state")))
+        state["Game"] = (
+            str(state.get("Game") or "").strip() or requested_name
         )
     else:
         rule_name = requested_name
@@ -402,109 +488,230 @@ def build_current_state_capture_draft(
             for rule in _rules(draft)
             if str(rule.get("name") or "").strip()
         }
-        profiles = _mapping(draft.get("profiles"))
-        games = _mapping(profiles.get("game"))
-        layouts = _mapping(draft.get("layout_profiles"))
         if rule_name.casefold() in existing_rule_names:
             raise ValueError(
                 f"Une règle nommée '{rule_name}' existe déjà."
             )
-        used_profiles = {
+
+        profiles = _mapping(draft.get("profiles"))
+        layouts = _mapping(draft.get("layout_profiles"))
+        used_profiles: set[str] = {
             str(name).strip().casefold()
-            for name in (*games.keys(), *layouts.keys())
+            for name in layouts
+            if str(name).strip()
         }
+        for domain_profiles in profiles.values():
+            if not isinstance(domain_profiles, Mapping):
+                continue
+            used_profiles.update(
+                str(name).strip().casefold()
+                for name in domain_profiles
+                if str(name).strip()
+            )
         if rule_name.casefold() in used_profiles:
             raise ValueError(
                 f"Le nom '{rule_name}' est déjà utilisé par un profil SSR."
             )
-        game_profile = requested_name
-        layout_profile = requested_name
 
-    _ensure_profile(draft, "game", game_profile)
+        state = {
+            "Game": requested_name,
+            "OverlayProfile": _logical_value(
+                logical,
+                fallback,
+                "OverlayProfile",
+                "Vanilla",
+            ),
+            "CaptureProfile": _logical_value(
+                logical,
+                fallback,
+                "CaptureProfile",
+                "Default",
+            ),
+            "AudioProfile": _logical_value(
+                logical,
+                fallback,
+                "AudioProfile",
+                "Default",
+            ),
+            "LayoutProfile": _logical_value(
+                logical,
+                fallback,
+                "LayoutProfile",
+                "Vanilla",
+            ),
+        }
+        _ensure_profile(draft, "game", requested_name)
+
+    groups = _capture_groups(options)
     scoped = _scene_snapshot(snapshot)
-    import_report = SceneCollectionImporter.merge_actions_into_profile(
-        draft,
-        domain="game",
-        profile_name=game_profile,
-        snapshot=scoped,
-        include_input_settings=bool(options.include_input_settings),
-        include_audio_state=bool(options.include_audio_state),
-        include_filters=bool(options.include_filters),
-        include_visibility=bool(options.include_visibility),
-    )
-    warnings.extend(import_report.skipped)
+    added_actions = 0
+    replaced_actions = 0
 
-    current_scene = str(snapshot.current_program_scene or "").strip()
+    for domain in _ACTION_DOMAINS:
+        flags = groups.get(domain)
+        if flags is None:
+            continue
+
+        key = _STATE_KEYS[domain]
+        source_profile = str(state.get(key) or "").strip()
+        target_profile = source_profile
+
+        if existing_rule is None:
+            if domain == "game":
+                target_profile = requested_name
+                _ensure_profile(
+                    draft,
+                    domain,
+                    target_profile,
+                )
+            else:
+                target_profile = suggest_capture_name(
+                    draft,
+                    f"{rule_name} · {_DOMAIN_LABELS[domain]}",
+                )
+                _clone_action_profile(
+                    draft,
+                    domain=domain,
+                    source_name=source_profile,
+                    target_name=target_profile,
+                )
+                notes.append(
+                    f"{_DOMAIN_LABELS[domain]} : un profil dédié "
+                    "a été créé afin de ne pas modifier le profil "
+                    "logique actuellement partagé."
+                )
+        else:
+            shared = bool(
+                source_profile
+                and _profile_referenced_elsewhere(
+                    draft,
+                    domain=domain,
+                    profile_name=source_profile,
+                    rule_name=rule_name,
+                )
+            )
+            if not source_profile or shared:
+                target_profile = suggest_capture_name(
+                    draft,
+                    f"{rule_name} · {_DOMAIN_LABELS[domain]}",
+                )
+                _clone_action_profile(
+                    draft,
+                    domain=domain,
+                    source_name=source_profile,
+                    target_name=target_profile,
+                )
+                if shared:
+                    notes.append(
+                        f"{_DOMAIN_LABELS[domain]} : le profil existant "
+                        "était partagé ; une copie dédiée a été créée "
+                        "avant la capture."
+                    )
+                else:
+                    notes.append(
+                        f"{_DOMAIN_LABELS[domain]} : aucun profil cible "
+                        "n’était défini ; un profil dédié a été créé."
+                    )
+            else:
+                _ensure_profile(
+                    draft,
+                    domain,
+                    target_profile,
+                )
+
+        state[key] = target_profile
+        report = SceneCollectionImporter.merge_actions_into_profile(
+            draft,
+            domain=domain,
+            profile_name=target_profile,
+            snapshot=scoped,
+            include_input_settings=bool(
+                flags["include_input_settings"]
+            ),
+            include_audio_state=bool(
+                flags["include_audio_state"]
+            ),
+            include_filters=bool(
+                flags["include_filters"]
+            ),
+            include_visibility=bool(
+                flags["include_visibility"]
+            ),
+        )
+        added_actions += report.added_actions
+        replaced_actions += report.replaced_actions
+        warnings.extend(report.skipped)
+        ownership.append((domain, target_profile))
+
+    game_profile = str(state.get("Game") or "").strip() or requested_name
+    _ensure_profile(draft, "game", game_profile)
+
+    current_scene = str(
+        snapshot.current_program_scene or ""
+    ).strip()
+    layout_profile = str(
+        state.get("LayoutProfile") or ""
+    ).strip()
     captured_layout = False
+
     if options.include_layout:
-        layout = _find_current_layout(raw_layouts, current_scene)
+        layout = _find_current_layout(
+            raw_layouts,
+            current_scene,
+        )
         if layout is None:
             warnings.append(
                 "Layout de la scène courante indisponible ou ambigu : "
                 "le LayoutProfile n’a pas été modifié."
             )
         else:
-            if existing_rule is not None and layout_shared:
-                layout_profile = suggest_capture_name(
-                    draft,
-                    f"{rule_name} · Layout",
+            if existing_rule is None:
+                layout_profile = requested_name
+            else:
+                layout_shared = bool(
+                    layout_profile
+                    and _profile_referenced_elsewhere(
+                        draft,
+                        domain="layout",
+                        profile_name=layout_profile,
+                        rule_name=rule_name,
+                    )
                 )
-                notes.append(
-                    "Le LayoutProfile existant était partagé : un profil "
-                    "dédié a été créé depuis la scène courante."
-                )
-            elif not layout_profile:
-                layout_profile = (
-                    suggest_capture_name(draft, f"{rule_name} · Layout")
-                    if existing_rule is not None
-                    else requested_name
-                )
-            layouts = draft.setdefault("layout_profiles", {})
+                if layout_shared or not layout_profile:
+                    layout_profile = suggest_capture_name(
+                        draft,
+                        f"{rule_name} · Layout",
+                    )
+                    notes.append(
+                        (
+                            "Layout : le profil existant était partagé ; "
+                            "une copie dédiée a été créée depuis la scène "
+                            "courante."
+                        )
+                        if layout_shared
+                        else (
+                            "Layout : aucun profil cible n’était défini ; "
+                            "un profil dédié a été créé."
+                        )
+                    )
+
+            layouts = draft.setdefault(
+                "layout_profiles",
+                {},
+            )
             if not isinstance(layouts, dict):
-                raise ValueError("config.layout_profiles doit être un objet.")
+                raise ValueError(
+                    "config.layout_profiles doit être un objet."
+                )
             layouts[layout_profile] = copy.deepcopy(dict(layout))
+            state["LayoutProfile"] = layout_profile
             captured_layout = True
+            ownership.append(("layout", layout_profile))
 
     if existing_rule is not None:
-        state = dict(_mapping(existing_rule.get("state")))
-        state["Game"] = game_profile
-        if captured_layout:
-            state["LayoutProfile"] = layout_profile
         existing_rule["state"] = state
         existing_rule["behavior"] = "match"
     else:
-        overlay = _logical_value(
-            logical,
-            fallback,
-            "OverlayProfile",
-            "Vanilla",
-        )
-        capture = _logical_value(
-            logical,
-            fallback,
-            "CaptureProfile",
-            "Default",
-        )
-        audio = _logical_value(
-            logical,
-            fallback,
-            "AudioProfile",
-            "Default",
-        )
-        if not captured_layout:
-            layout_profile = _logical_value(
-                logical,
-                fallback,
-                "LayoutProfile",
-                "Vanilla",
-            )
-        state = {
-            "Game": game_profile,
-            "OverlayProfile": overlay,
-            "CaptureProfile": capture,
-            "AudioProfile": audio,
-            "LayoutProfile": layout_profile,
-        }
         raw_rules = draft.setdefault("rules", [])
         if not isinstance(raw_rules, list):
             raise ValueError("config.rules doit être une liste.")
@@ -524,10 +731,12 @@ def build_current_state_capture_draft(
             }
         )
         notes.append(
-            "Overlay/Capture/Audio reprennent l’état logique courant ; "
-            "l’assistant ne les devine pas."
+            "Les domaines non capturés conservent l’état logique courant ; "
+            "SSR ne prend aucun réglage OBS supplémentaire sous contrôle."
         )
 
+    unique_warnings = tuple(dict.fromkeys(warnings))
+    unique_ownership = tuple(dict.fromkeys(ownership))
     return CurrentStateCaptureDraft(
         config=draft,
         report=CurrentStateCaptureReport(
@@ -537,13 +746,14 @@ def build_current_state_capture_draft(
             scene=current_scene,
             game_profile=game_profile,
             layout_profile=layout_profile,
-            added_actions=import_report.added_actions,
-            replaced_actions=import_report.replaced_actions,
+            added_actions=added_actions,
+            replaced_actions=replaced_actions,
             layout_captured=captured_layout,
             captured_inputs=len(scoped.inputs),
             captured_filters=len(scoped.filters),
             captured_scene_items=len(scoped.scene_items),
-            warnings=tuple(warnings),
+            warnings=unique_warnings,
             notes=tuple(notes),
+            owned_profiles=unique_ownership,
         ),
     )
