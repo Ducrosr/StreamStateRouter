@@ -624,6 +624,8 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         behavior = str(raw.get("behavior", "match")).casefold()
         if behavior not in {"match", "ignore"}:
             errors.append(f"{prefix}.behavior doit être match ou ignore")
+        if "launcher" in raw and not isinstance(raw.get("launcher"), str):
+            errors.append(f"{prefix}.launcher doit être une chaîne")
         conditions_raw = raw.get("conditions", {})
         has_process_selector = (
             isinstance(conditions_raw, Mapping)
@@ -868,6 +870,13 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     continue
                 if "enabled" in action and not isinstance(action.get("enabled"), bool):
                     errors.append(f"{aprefix}.enabled doit être booléen")
+                if (
+                    "preapply_on_launcher" in action
+                    and not isinstance(action.get("preapply_on_launcher"), bool)
+                ):
+                    errors.append(
+                        f"{aprefix}.preapply_on_launcher doit être booléen"
+                    )
 
                 def required_text(
                     key: str,
@@ -1181,6 +1190,7 @@ def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
                 name=str(raw.get("name") or "Unnamed rule"),
                 priority=int(raw.get("priority", 0)),
                 exe=str(raw.get("exe") or ""),
+                launcher=str(raw.get("launcher") or ""),
                 path=str(raw.get("path") or ""),
                 title_regex=str(raw.get("title_regex") or ""),
                 enabled=bool(raw.get("enabled", True)),
