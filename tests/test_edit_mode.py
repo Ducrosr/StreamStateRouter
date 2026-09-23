@@ -114,6 +114,15 @@ class EditModeTests(unittest.TestCase):
         repair_action = Mock()
         window = SimpleNamespace(
             _edit_mode=False,
+            _client=SimpleNamespace(
+                config=SimpleNamespace(enabled=True),
+                connected=True,
+            ),
+            _obs_connected_controls=[
+                (capture, True),
+                (repair, True),
+                (repair_action, True),
+            ],
             tabs=tabs,
             rules_tab_index=2,
             profiles_tab_index=3,
