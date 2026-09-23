@@ -29,7 +29,8 @@
     "close_to_tray": true,
     "start_with_windows": false,
     "auto_detect_modules": true,
-    "module_scan_seconds": 5
+    "module_scan_seconds": 5,
+    "safe_live": true
   },
   "rules": [
     {
