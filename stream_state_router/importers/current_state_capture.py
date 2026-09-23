@@ -114,6 +114,33 @@ def find_process_rules(
     )
 
 
+def find_ignored_process_rules(
+    config: Mapping[str, Any],
+    process: str,
+) -> tuple[Mapping[str, Any], ...]:
+    wanted = str(process or "").strip().casefold()
+    if not wanted:
+        return ()
+    raw_rules = config.get("rules")
+    rules = raw_rules if isinstance(raw_rules, list) else []
+    matches = [
+        rule
+        for rule in rules
+        if isinstance(rule, Mapping)
+        and str(rule.get("behavior") or "match").strip().casefold() == "ignore"
+        and str(rule.get("exe") or "").strip().casefold() == wanted
+    ]
+    return tuple(
+        sorted(
+            matches,
+            key=lambda rule: int(rule.get("priority", 0))
+            if str(rule.get("priority", 0)).lstrip("-").isdigit()
+            else 0,
+            reverse=True,
+        )
+    )
+
+
 def suggest_capture_name(
     config: Mapping[str, Any],
     base_name: str,
@@ -202,15 +229,24 @@ def _profile_referenced_elsewhere(
         return True
 
     raw_rules = config.get("rules")
-    if not isinstance(raw_rules, list):
-        return False
-    for rule in raw_rules:
-        if not isinstance(rule, Mapping):
+    if isinstance(raw_rules, list):
+        for rule in raw_rules:
+            if not isinstance(rule, Mapping):
+                continue
+            if str(rule.get("name") or "").strip().casefold() == wanted_rule:
+                continue
+            state = _mapping(rule.get("state"))
+            if str(state.get(key) or "").strip() == wanted_profile:
+                return True
+
+    if domain == "layout":
+        domain_profiles = _mapping(config.get("layout_profiles"))
+    else:
+        domain_profiles = _mapping(_mapping(config.get("profiles")).get(domain))
+    for child_name, child in domain_profiles.items():
+        if str(child_name) == wanted_profile or not isinstance(child, Mapping):
             continue
-        if str(rule.get("name") or "").strip().casefold() == wanted_rule:
-            continue
-        state = _mapping(rule.get("state"))
-        if str(state.get(key) or "").strip() == wanted_profile:
+        if str(child.get("extends") or "").strip() == wanted_profile:
             return True
     return False
 
@@ -339,34 +375,53 @@ def build_current_state_capture_draft(
             f"Règle à mettre à jour introuvable : {options.existing_rule_name}"
         )
 
+    layout_shared = False
     if existing_rule is not None:
         rule_name = str(existing_rule.get("name") or requested_name).strip()
         existing_state = _mapping(existing_rule.get("state"))
-        game_profile = str(existing_state.get("Game") or "").strip() or requested_name
+        original_game_profile = (
+            str(existing_state.get("Game") or "").strip() or requested_name
+        )
+        game_profile = original_game_profile
         if _profile_referenced_elsewhere(
             draft,
             domain="game",
-            profile_name=game_profile,
+            profile_name=original_game_profile,
             rule_name=rule_name,
         ):
             game_profile = suggest_capture_name(draft, f"{rule_name} · Jeu")
+            profiles = draft.setdefault("profiles", {})
+            if not isinstance(profiles, dict):
+                raise ValueError("config.profiles doit être un objet.")
+            games = profiles.setdefault("game", {})
+            if not isinstance(games, dict):
+                raise ValueError("config.profiles.game doit être un objet.")
+            original = games.get(original_game_profile)
+            games[game_profile] = (
+                copy.deepcopy(dict(original))
+                if isinstance(original, Mapping)
+                else {
+                    "actions": [],
+                    "extends": "",
+                    "conditions": {},
+                }
+            )
             notes.append(
-                "Le GameProfile existant était partagé : un profil dédié a été créé."
+                "Le GameProfile existant était partagé : une copie dédiée "
+                "a été créée avant la capture."
             )
 
         current_layout_name = str(existing_state.get("LayoutProfile") or "").strip()
-        if current_layout_name and _profile_referenced_elsewhere(
-            draft,
-            domain="layout",
-            profile_name=current_layout_name,
-            rule_name=rule_name,
-        ):
-            layout_profile = suggest_capture_name(draft, f"{rule_name} · Layout")
-            notes.append(
-                "Le LayoutProfile existant était partagé : un profil dédié a été créé."
+        layout_profile = current_layout_name
+        layout_shared = bool(
+            current_layout_name
+            and _profile_referenced_elsewhere(
+                draft,
+                domain="layout",
+                profile_name=current_layout_name,
+                rule_name=rule_name,
             )
-        else:
-            layout_profile = current_layout_name
+        )
     else:
         rule_name = requested_name
         existing_rule_names = {
@@ -381,7 +436,11 @@ def build_current_state_capture_draft(
             raise ValueError(
                 f"Une règle nommée '{rule_name}' existe déjà."
             )
-        if rule_name in games or rule_name in layouts:
+        used_profiles = {
+            str(name).strip().casefold()
+            for name in (*games.keys(), *layouts.keys())
+        }
+        if rule_name.casefold() in used_profiles:
             raise ValueError(
                 f"Le nom '{rule_name}' est déjà utilisé par un profil SSR."
             )
@@ -412,7 +471,16 @@ def build_current_state_capture_draft(
                 "le LayoutProfile n’a pas été modifié."
             )
         else:
-            if not layout_profile:
+            if existing_rule is not None and layout_shared:
+                layout_profile = suggest_capture_name(
+                    draft,
+                    f"{rule_name} · Layout",
+                )
+                notes.append(
+                    "Le LayoutProfile existant était partagé : un profil "
+                    "dédié a été créé depuis la scène courante."
+                )
+            elif not layout_profile:
                 layout_profile = (
                     suggest_capture_name(draft, f"{rule_name} · Layout")
                     if existing_rule is not None
