@@ -78,6 +78,7 @@ from ..services.config_insights import (
     build_capability_report,
     build_effective_provenance,
     configured_action_types,
+    profile_lineage,
     profile_usages,
     scan_obs_reference_repairs,
     simulate_rule_scenario,
@@ -1484,6 +1485,10 @@ class MainWindow(QMainWindow):
         hint.setObjectName("Muted")
         inheritance.addWidget(hint)
         root.addLayout(inheritance)
+        self.profile_inheritance_hint = QLabel("Héritage effectif : —")
+        self.profile_inheritance_hint.setWordWrap(True)
+        self.profile_inheritance_hint.setObjectName("Muted")
+        root.addWidget(self.profile_inheritance_hint)
 
         self.actions_table = QTableWidget(0, 4)
         self.actions_table.setHorizontalHeaderLabels(["Actif", "Type", "Nom", "Paramètres"])
@@ -1593,6 +1598,10 @@ class MainWindow(QMainWindow):
         options.addWidget(self.layout_transition_ms)
         options.addStretch(1)
         root.addLayout(options)
+        self.layout_inheritance_hint = QLabel("Héritage effectif : —")
+        self.layout_inheritance_hint.setWordWrap(True)
+        self.layout_inheritance_hint.setObjectName("Muted")
+        root.addWidget(self.layout_inheritance_hint)
 
         tools = QHBoxLayout()
         for text, slot in [
@@ -2713,6 +2722,35 @@ class MainWindow(QMainWindow):
                 idx = self.profile_parent.findData(str(profile.get("extends") or ""))
                 self.profile_parent.setCurrentIndex(max(0, idx))
             self.profile_parent.blockSignals(False)
+        if hasattr(self, "profile_inheritance_hint"):
+            if current:
+                domain, name, profile = current
+                lineage = profile_lineage(self.config, domain, name)
+                local_actions = profile.get("actions")
+                local_count = (
+                    len(local_actions)
+                    if isinstance(local_actions, list)
+                    else 0
+                )
+                inherited_count = 0
+                profiles = self._profiles_for_domain(domain)
+                for parent_name in lineage[1:]:
+                    parent = profiles.get(parent_name)
+                    if not isinstance(parent, Mapping):
+                        continue
+                    parent_actions = parent.get("actions")
+                    if isinstance(parent_actions, list):
+                        inherited_count += len(parent_actions)
+                chain = " ← ".join(lineage) if lineage else name
+                self.profile_inheritance_hint.setText(
+                    f"Héritage effectif : {chain} · "
+                    f"{local_count} action(s) locale(s) · "
+                    f"{inherited_count} héritée(s)"
+                )
+            else:
+                self.profile_inheritance_hint.setText(
+                    "Héritage effectif : —"
+                )
         actions = current[2].setdefault("actions", []) if current else []
         self.actions_table.setRowCount(len(actions))
         for row, action in enumerate(actions):
@@ -4053,6 +4091,39 @@ class MainWindow(QMainWindow):
             self.layout_transition_ms.setValue(int(transition.get("duration_ms", 0)))
         for widget in (self.layout_parent, self.layout_coordinate_mode, self.layout_transition, self.layout_transition_ms):
             widget.blockSignals(False)
+        if hasattr(self, "layout_inheritance_hint"):
+            if current:
+                name, profile = current
+                lineage = profile_lineage(
+                    self.config,
+                    "layout",
+                    name,
+                )
+                local_modules = profile.get("modules")
+                local_count = (
+                    len(local_modules)
+                    if isinstance(local_modules, Mapping)
+                    else 0
+                )
+                inherited_count = 0
+                profiles = self._layout_profiles()
+                for parent_name in lineage[1:]:
+                    parent = profiles.get(parent_name)
+                    if not isinstance(parent, Mapping):
+                        continue
+                    parent_modules = parent.get("modules")
+                    if isinstance(parent_modules, Mapping):
+                        inherited_count += len(parent_modules)
+                chain = " ← ".join(lineage) if lineage else name
+                self.layout_inheritance_hint.setText(
+                    f"Héritage effectif : {chain} · "
+                    f"{local_count} module(s) local(aux) · "
+                    f"{inherited_count} hérité(s)"
+                )
+            else:
+                self.layout_inheritance_hint.setText(
+                    "Héritage effectif : —"
+                )
 
     def _layout_option_changed(self, *_args) -> None:
         current = self._current_layout_profile()
