@@ -59,6 +59,25 @@ L'API locale accepte les mêmes champs dans l'action `override` :
 Un appel historique contenant seulement un `duration_seconds > 0` conserve son
 comportement et devient implicitement un override temporisé.
 
+### Mode édition
+
+SSR distingue désormais l’exploitation normale et la modification du brouillon.
+Hors **Mode édition**, les écrans Règles, Profils, Layouts et Paramètres restent
+consultables mais leurs contrôles de modification sont figés. Les captures,
+imports, restaurations et réparations susceptibles de modifier le brouillon
+demandent également le Mode édition.
+
+Entrer en Mode édition utilise la pause runtime existante pour geler le routage
+automatique. Si SSR était déjà suspendu avant l’entrée en édition, quitter le
+mode ne reprend pas le routage de manière inattendue. Un runtime remplacé par
+**Enregistrer et appliquer** reste lui aussi suspendu tant que le Mode édition
+est actif.
+
+Les analyses purement en lecture seule restent accessibles. Si une lecture OBS
+asynchrone a été lancée pendant l’édition mais se termine après la sortie du
+mode, son résultat mutateur est ignoré : aucun changement tardif n’est appliqué
+au brouillon.
+
 ### Préparation via launcher
 
 Une règle d'application peut déclarer un exécutable **Launcher** (par exemple
