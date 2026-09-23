@@ -34,6 +34,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Afficher le rapport read-only de couverture déclarative en JSON puis quitter",
     )
+    system_check = parser.add_mutually_exclusive_group()
+    system_check.add_argument(
+        "--system-check",
+        action="store_true",
+        help=(
+            "Vérifier en lecture seule la configuration et les capacités "
+            "OBS/audio/HDR puis quitter"
+        ),
+    )
+    system_check.add_argument(
+        "--system-check-json",
+        action="store_true",
+        help=(
+            "Afficher le diagnostic système read-only en JSON puis quitter"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -123,6 +139,26 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("Configuration valide.")
         return 0
+
+    if args.system_check or args.system_check_json:
+        from stream_state_router.services.system_check import (
+            render_system_check,
+            run_system_check,
+        )
+
+        report = run_system_check(config)
+        if args.system_check_json:
+            print(
+                json.dumps(
+                    report.as_mapping(),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(render_system_check(report))
+        return 0 if report.success else 1
 
     if args.declarative_coverage or args.declarative_coverage_json:
         from stream_state_router.planning import (
