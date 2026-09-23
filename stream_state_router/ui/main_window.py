@@ -109,6 +109,7 @@ from .presentation import (
     build_diagnostic_report,
     build_manual_override_presentation,
     build_simulation_report,
+    render_capability_report_text,
     user_activity_from_runtime_event,
 )
 
@@ -179,7 +180,9 @@ class MainWindow(QMainWindow):
         self._last_runtime_restart_previous_stopped = False
         self._last_runtime_restart_diagnostic = ""
         self._pending_collection_imports: dict[str, dict[str, object]] = {}
-        self._user_activity_history: list[tuple[str, UserActivityEntry]] = []
+        self._user_activity_history: list[
+            tuple[str, UserActivityEntry, int, float]
+        ] = []
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -756,6 +759,21 @@ class MainWindow(QMainWindow):
         restore.clicked.connect(dialog.accept)
         restore.clicked.connect(self._restore_config_backup)
         actions.addWidget(restore)
+
+        copy_diagnostic = QPushButton("Copier le diagnostic")
+        def copy_diagnostic_text() -> None:
+            QApplication.clipboard().setText(
+                render_capability_report_text(
+                    report,
+                    version=__version__,
+                )
+            )
+            self.statusBar().showMessage(
+                "Diagnostic SSR copié dans le presse-papiers",
+                4000,
+            )
+        copy_diagnostic.clicked.connect(copy_diagnostic_text)
+        actions.addWidget(copy_diagnostic)
 
         actions.addStretch(1)
         close = QPushButton("Fermer")
@@ -3228,16 +3246,29 @@ class MainWindow(QMainWindow):
 
     def _record_user_activity(self, entry: UserActivityEntry) -> None:
         timestamp = time.strftime("%H:%M:%S")
-        if self._user_activity_history:
-            _last_time, last_entry = self._user_activity_history[-1]
+        now = time.monotonic()
+        for index in range(len(self._user_activity_history) - 1, -1, -1):
+            (
+                _previous_timestamp,
+                previous_entry,
+                repeat_count,
+                previous_seen,
+            ) = self._user_activity_history[index]
+            if now - previous_seen > 5.0:
+                break
             if (
-                last_entry.message == entry.message
-                and last_entry.detail == entry.detail
+                previous_entry.style == entry.style
+                and previous_entry.message == entry.message
+                and previous_entry.detail == entry.detail
             ):
-                self._user_activity_history[-1] = (timestamp, entry)
+                self._user_activity_history.pop(index)
+                self._user_activity_history.append(
+                    (timestamp, entry, repeat_count + 1, now)
+                )
                 self._refresh_user_activity()
                 return
-        self._user_activity_history.append((timestamp, entry))
+
+        self._user_activity_history.append((timestamp, entry, 1, now))
         self._user_activity_history = self._user_activity_history[-8:]
         self._refresh_user_activity()
 
@@ -3252,11 +3283,14 @@ class MainWindow(QMainWindow):
             "Bad": "✕",
             "Muted": "•",
         }
-        for timestamp, entry in reversed(self._user_activity_history):
+        for timestamp, entry, repeat_count, _seen_at in reversed(
+            self._user_activity_history
+        ):
+            repeat = f" ×{repeat_count}" if repeat_count > 1 else ""
             item = QTreeWidgetItem(
                 [
                     timestamp,
-                    f"{markers.get(entry.style, '•')} {entry.message}",
+                    f"{markers.get(entry.style, '•')} {entry.message}{repeat}",
                     entry.detail or "—",
                 ]
             )
