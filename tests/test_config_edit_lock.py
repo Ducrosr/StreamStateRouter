@@ -75,6 +75,24 @@ class ConfigEditLockTests(unittest.TestCase):
             "Configuration verrouillée"
         )
 
+    def test_collection_import_edit_requirement_is_conservative(self) -> None:
+        self.assertFalse(
+            MainWindow._collection_import_requires_edit_mode(
+                "guided_analysis"
+            )
+        )
+        for mode in (
+            "snapshot_profile",
+            "logic_migration",
+            "reference_repair",
+            "guided_current_state_capture",
+            "future_unknown_mode",
+        ):
+            self.assertTrue(
+                MainWindow._collection_import_requires_edit_mode(mode),
+                mode,
+            )
+
     def test_toggle_edit_mode_persists_and_reapplies(self) -> None:
         settings = Mock()
         apply_mode = Mock()
