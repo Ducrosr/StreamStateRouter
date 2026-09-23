@@ -4164,6 +4164,18 @@ class MainWindow(QMainWindow):
             include_layout=bool(
                 raw_options.get("include_layout", True)
             ),
+            input_settings_domain=str(
+                raw_options.get("input_settings_domain") or "game"
+            ),
+            audio_state_domain=str(
+                raw_options.get("audio_state_domain") or "game"
+            ),
+            filters_domain=str(
+                raw_options.get("filters_domain") or "game"
+            ),
+            visibility_domain=str(
+                raw_options.get("visibility_domain") or "game"
+            ),
         )
         raw_layouts = raw_result.get("layouts")
         layouts = raw_layouts if isinstance(raw_layouts, Mapping) else {}
