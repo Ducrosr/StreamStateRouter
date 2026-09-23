@@ -78,6 +78,7 @@ from ..services.config import (
 from ..services.config_insights import (
     apply_reference_repairs,
     build_capability_report,
+    build_config_change_review,
     build_effective_dependency_tree,
     build_effective_provenance,
     configured_action_types,
@@ -267,6 +268,14 @@ class MainWindow(QMainWindow):
         self.unsaved.setObjectName("Warn")
         footer.addWidget(self.unsaved)
         footer.addStretch(1)
+        self.review_draft_button = QPushButton("Revoir les changements…")
+        self.review_draft_button.clicked.connect(
+            self._show_draft_change_review
+        )
+        footer.addWidget(self.review_draft_button)
+        self.discard_draft_button = QPushButton("Abandonner le brouillon")
+        self.discard_draft_button.clicked.connect(self._discard_draft)
+        footer.addWidget(self.discard_draft_button)
         self.save_button = QPushButton("Enregistrer et appliquer")
         self.save_button.setObjectName("Primary")
         self.save_button.clicked.connect(self.save_and_apply)
@@ -2043,6 +2052,8 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("Fichier")
         for text, slot in [
             ("Enregistrer et appliquer", self.save_and_apply),
+            ("Revoir les changements…", self._show_draft_change_review),
+            ("Abandonner le brouillon…", self._discard_draft),
             ("Exporter la configuration…", self._export_config),
             ("Importer une configuration…", self._import_config),
             ("Historique des sauvegardes…", self._restore_config_backup),
@@ -2124,6 +2135,18 @@ class MainWindow(QMainWindow):
                 (
                     "Outil · Tester un scénario de routage",
                     self._show_scenario_simulator,
+                ),
+                (
+                    "Configuration · Revoir les changements du brouillon",
+                    self._show_draft_change_review,
+                ),
+                (
+                    "Configuration · Abandonner le brouillon",
+                    self._discard_draft,
+                ),
+                (
+                    "Configuration · Enregistrer et appliquer",
+                    self.save_and_apply,
                 ),
                 (
                     "Outil · Historique des sauvegardes",
@@ -2410,6 +2433,143 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             return False, str(exc)
         return True, ""
+
+    def _show_draft_change_review(self) -> None:
+        self._collect_settings()
+        report = build_config_change_review(
+            self._last_saved_config,
+            self.config,
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Revue du brouillon")
+        dialog.resize(1050, 650)
+        root = QVBoxLayout(dialog)
+
+        title = QLabel(report.summary)
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        intro = QLabel(
+            "Cette vue compare le brouillon actuellement affiché avec la "
+            "dernière configuration enregistrée. Aucune commande OBS n’est "
+            "envoyée pendant cette revue."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        if report.validation_errors:
+            validation = QLabel(
+                "Le brouillon contient des erreurs et ne doit pas être "
+                "appliqué en l’état :\n• "
+                + "\n• ".join(report.validation_errors)
+            )
+            validation.setWordWrap(True)
+            validation.setObjectName("Bad")
+            root.addWidget(validation)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(5)
+        tree.setHeaderLabels(
+            ["Catégorie", "Élément", "Modification", "Détail", "Impact"]
+        )
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        for change in report.changes:
+            tree.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        change.category,
+                        change.target,
+                        change.kind,
+                        change.detail,
+                        change.impact,
+                    ]
+                )
+            )
+        tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setStretchLastSection(True)
+        root.addWidget(tree, 1)
+
+        if not report.changes:
+            empty = QLabel(
+                "Le brouillon et la configuration enregistrée sont identiques."
+            )
+            empty.setObjectName("Good")
+            root.addWidget(empty)
+
+        actions = QHBoxLayout()
+        discard = QPushButton("Abandonner le brouillon")
+        discard.setEnabled(report.has_changes)
+        actions.addWidget(discard)
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.reject)
+        actions.addWidget(close)
+        apply_button = QPushButton("Enregistrer et appliquer")
+        apply_button.setObjectName("Primary")
+        apply_button.setEnabled(
+            report.has_changes and not report.validation_errors
+        )
+        actions.addWidget(apply_button)
+        root.addLayout(actions)
+
+        def discard_from_review() -> None:
+            dialog.reject()
+            self._discard_draft()
+
+        def apply_from_review() -> None:
+            dialog.accept()
+            self.save_and_apply()
+
+        discard.clicked.connect(discard_from_review)
+        apply_button.clicked.connect(apply_from_review)
+        dialog.exec()
+
+    def _discard_draft(self) -> None:
+        self._collect_settings()
+        report = build_config_change_review(
+            self._last_saved_config,
+            self.config,
+        )
+        if not report.has_changes:
+            self._draft_dirty = False
+            self._refresh_config_revision_status(draft_dirty=False)
+            return
+
+        if QMessageBox.question(
+            self,
+            "Abandonner le brouillon",
+            (
+                f"{len(report.changes)} changement(s) non enregistré(s) "
+                "seront abandonnés.\n\n"
+                "La configuration actuellement appliquée au runtime n’est "
+                "pas modifiée. Continuer ?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
+        self.config = copy.deepcopy(self._last_saved_config)
+        self._load_config_into_ui()
+        self._draft_dirty = False
+        self._refresh_config_revision_status(draft_dirty=False)
+        self._refresh_dashboard_summary()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Brouillon abandonné",
+                f"{len(report.changes)} changement(s) annulé(s)",
+            )
+        )
+        self.statusBar().showMessage(
+            "Brouillon abandonné — configuration enregistrée rechargée",
+            5000,
+        )
 
     def save_and_apply(self) -> None:
         self._collect_settings()
@@ -6137,6 +6297,10 @@ class MainWindow(QMainWindow):
         self.unsaved.setToolTip(
             f"Révision enregistrée : {saved}\nRévision runtime : {applied}"
         )
+        if hasattr(self, "review_draft_button"):
+            self.review_draft_button.setEnabled(self._draft_dirty)
+        if hasattr(self, "discard_draft_button"):
+            self.discard_draft_button.setEnabled(self._draft_dirty)
 
     def _mark_dirty(self, *_args) -> None:
         self._refresh_config_revision_status(draft_dirty=True)
