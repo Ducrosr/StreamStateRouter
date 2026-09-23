@@ -188,6 +188,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_ui_mode()
         self._build_menu()
+        self._apply_edit_mode_surfaces()
         self._build_tray()
         self._load_config_into_ui()
         self._wire_dirty_signals()
@@ -331,6 +332,77 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(self.dashboard_tab_index)
         if hasattr(self, "unsaved"):
             self._refresh_config_revision_status()
+
+    def _apply_edit_mode_surfaces(self) -> None:
+        enabled = bool(self._edit_mode)
+        for index in (
+            getattr(self, "rules_tab_index", -1),
+            getattr(self, "profiles_tab_index", -1),
+            getattr(self, "layouts_tab_index", -1),
+            getattr(self, "settings_tab_index", -1),
+        ):
+            if index < 0 or not hasattr(self, "tabs"):
+                continue
+            scroll = self.tabs.widget(index)
+            page = (
+                scroll.widget()
+                if isinstance(scroll, QScrollArea)
+                else scroll
+            )
+            if page is not None:
+                page.setEnabled(enabled)
+            self.tabs.setTabToolTip(
+                index,
+                ""
+                if enabled
+                else (
+                    "Lecture seule hors Mode édition. "
+                    "Activez Mode édition pour modifier ce contenu."
+                ),
+            )
+
+        for name in (
+            "capture_current_button",
+            "repair_refs_button",
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
+                widget.setToolTip(
+                    ""
+                    if enabled
+                    else "Activez Mode édition pour modifier le brouillon."
+                )
+
+        for name in (
+            "_import_config_action",
+            "_restore_backup_action",
+            "_repair_refs_action",
+        ):
+            action = getattr(self, name, None)
+            if action is not None:
+                action.setEnabled(enabled)
+
+    def _require_edit_mode(self, operation: str) -> bool:
+        if self._edit_mode:
+            return True
+        QMessageBox.information(
+            self,
+            "Mode édition requis",
+            (
+                f"{operation}\n\n"
+                "Activez « Mode édition » en haut de la fenêtre. "
+                "SSR gèlera alors le routage automatique pendant que vous "
+                "modifiez le brouillon."
+            ),
+        )
+        return False
+
+    @staticmethod
+    def _collection_import_requires_edit_mode(mode: str) -> bool:
+        # The guided collection analysis is read-only. Every other current or
+        # future completion mode is treated conservatively as draft-mutating.
+        return str(mode or "").strip().casefold() != "guided_analysis"
 
     def _schedule_dashboard_refresh(self) -> None:
         timer = getattr(self, "_dashboard_refresh_timer", None)
@@ -772,6 +844,8 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _start_reference_repair(self) -> None:
+        if not self._require_edit_mode("Réparer les références OBS"):
+            return
         service = self._service
         client = self._client
         if service is None:
@@ -1079,9 +1153,11 @@ class MainWindow(QMainWindow):
         dependencies = QPushButton("Arbre des dépendances")
         dependencies.clicked.connect(self._show_dependency_tree)
         maintenance_actions.addWidget(dependencies)
-        repair_refs = QPushButton("Réparer les références OBS…")
-        repair_refs.clicked.connect(self._start_reference_repair)
-        maintenance_actions.addWidget(repair_refs)
+        self.repair_refs_button = QPushButton("Réparer les références OBS…")
+        self.repair_refs_button.clicked.connect(
+            self._start_reference_repair
+        )
+        maintenance_actions.addWidget(self.repair_refs_button)
         maintenance_actions.addStretch(1)
         maintenance_lay.addLayout(maintenance_actions)
         root.addWidget(maintenance_card)
@@ -1117,10 +1193,12 @@ class MainWindow(QMainWindow):
         import_hint.setObjectName("Muted")
         import_lay.addWidget(import_hint)
         import_actions = QHBoxLayout()
-        capture_current = QPushButton("Capturer l’état actuel")
-        capture_current.setObjectName("Primary")
-        capture_current.clicked.connect(self._guided_capture_current_state)
-        import_actions.addWidget(capture_current)
+        self.capture_current_button = QPushButton("Capturer l’état actuel")
+        self.capture_current_button.setObjectName("Primary")
+        self.capture_current_button.clicked.connect(
+            self._guided_capture_current_state
+        )
+        import_actions.addWidget(self.capture_current_button)
         analyze_import = QPushButton("Analyser ma collection OBS")
         analyze_import.clicked.connect(self._guided_analyze_collection)
         import_actions.addWidget(analyze_import)
@@ -1972,6 +2050,10 @@ class MainWindow(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(slot)
             file_menu.addAction(action)
+            if text.startswith("Importer une configuration"):
+                self._import_config_action = action
+            elif text.startswith("Historique des sauvegardes"):
+                self._restore_backup_action = action
 
         tools_menu = self.menuBar().addMenu("Outils")
         palette = QAction("Palette de commandes…", self)
@@ -1989,6 +2071,8 @@ class MainWindow(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(slot)
             tools_menu.addAction(action)
+            if text.startswith("Réparer les références OBS"):
+                self._repair_refs_action = action
 
     def _show_command_palette(self) -> None:
         dialog = QDialog(self)
@@ -3202,6 +3286,7 @@ class MainWindow(QMainWindow):
             self.edit_mode_button.style().polish(self.edit_mode_button)
             self.pause_button.setText("Suspendu (édition)")
             self.pause_button.setEnabled(False)
+            self._apply_edit_mode_surfaces()
             self.statusBar().showMessage(
                 "Mode édition actif — routage automatique gelé",
                 5000,
@@ -3223,6 +3308,7 @@ class MainWindow(QMainWindow):
         self.edit_mode_button.style().unpolish(self.edit_mode_button)
         self.edit_mode_button.style().polish(self.edit_mode_button)
         self.pause_button.setEnabled(True)
+        self._apply_edit_mode_surfaces()
         if owned_pause and service.paused:
             service.pause(False)
         self.pause_button.setText(
@@ -3676,6 +3762,8 @@ class MainWindow(QMainWindow):
         self._refresh_override_boxes()
 
     def _guided_capture_current_state(self) -> None:
+        if not self._require_edit_mode("Capturer l’état actuel"):
+            return
         service = self._service
         client = self._client
         if service is None:
@@ -4283,6 +4371,8 @@ class MainWindow(QMainWindow):
         )
 
     def _migrate_collection_logic(self) -> None:
+        if not self._require_edit_mode("Migrer la collection OBS"):
+            return
         if self._service is None:
             QMessageBox.warning(
                 self,
@@ -4357,6 +4447,28 @@ class MainWindow(QMainWindow):
             return
 
         mode = str(context.get("mode") or "snapshot_profile")
+        if (
+            self._collection_import_requires_edit_mode(mode)
+            and not self._edit_mode
+        ):
+            self._log(
+                "Résultat d’import OBS ignoré : Mode édition terminé."
+            )
+            self.statusBar().showMessage(
+                "Import terminé mais non appliqué : Mode édition inactif",
+                8000,
+            )
+            QMessageBox.information(
+                self,
+                "Mode édition terminé",
+                (
+                    "La lecture OBS s’est terminée après la sortie du "
+                    "Mode édition. Aucun changement n’a été appliqué au "
+                    "brouillon. Réactivez Mode édition puis relancez "
+                    "l’opération."
+                ),
+            )
+            return
         domain = str(context.get("domain") or "")
         profile_name = str(context.get("profile_name") or "")
         raw_options = context.get("options")
@@ -5861,6 +5973,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export", str(exc))
 
     def _import_config(self) -> None:
+        if not self._require_edit_mode("Importer une configuration"):
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Importer une configuration", "", "JSON (*.json)")
         if not path:
             return
@@ -5880,6 +5994,8 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
 
     def _restore_config_backup(self) -> None:
+        if not self._require_edit_mode("Restaurer une sauvegarde"):
+            return
         try:
             backups = list_valid_backups(limit=20)
         except Exception as exc:
