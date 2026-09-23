@@ -148,6 +148,7 @@ class MainWindow(QMainWindow):
             self._window_settings.value("main_window/expert_mode", False, type=bool)
         )
         self.config = copy.deepcopy(config)
+        self._last_saved_config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
         self._applied_revision = ""
         self._draft_dirty = False
@@ -2106,51 +2107,292 @@ class MainWindow(QMainWindow):
         ui["auto_detect_modules"] = self.auto_detect_modules.isChecked()
         ui["module_scan_seconds"] = self.module_scan_seconds.value()
 
+    def _preflight_runtime_config(
+        self,
+        config_data: Mapping[str, object],
+    ) -> None:
+        rules, _poll_ms, debounce_ms, fallback_ms = build_ruleset(
+            config_data
+        )
+        client = OBSClientManager(build_obs_config(config_data))
+        dispatcher = OBSDispatcher(
+            client,
+            build_profiles(config_data),
+            build_layout_profiles(config_data),
+            host_controller=build_host_controller(config_data),
+        )
+        StateRouterEngine(
+            rules,
+            debounce_ms=debounce_ms,
+            fallback_debounce_ms=fallback_ms,
+            context_provider=dispatcher.obs_context,
+        )
+        build_activation_policies(config_data)
+
+    def _rollback_persisted_apply(
+        self,
+        previous_config: Mapping[str, object],
+        previous_startup: bool,
+    ) -> tuple[bool, str]:
+        errors: list[str] = []
+        config_restored = False
+        try:
+            save_config(previous_config)
+            config_restored = True
+            self._last_saved_config = copy.deepcopy(
+                dict(previous_config)
+            )
+            self._saved_revision = config_revision(previous_config)
+        except Exception as exc:
+            errors.append(f"configuration : {exc}")
+        try:
+            set_startup_enabled(bool(previous_startup))
+        except Exception as exc:
+            errors.append(f"démarrage Windows : {exc}")
+        return config_restored and not errors, " · ".join(errors)
+
+    def _recover_previous_runtime(
+        self,
+        previous_config: Mapping[str, object],
+        *,
+        bootstrap_foreground: ForegroundApp | None,
+        startup_layout_profile: str,
+        startup_layout_routing_baseline: str,
+    ) -> tuple[bool, str]:
+        current = self._service
+        if current is not None:
+            try:
+                result = current.stop()
+            except Exception as exc:
+                return False, f"arrêt du runtime incomplet : {exc}"
+            if not result:
+                return (
+                    False,
+                    "le runtime partiellement démarré n’a pas pu être arrêté",
+                )
+            if result.pending_cleanup:
+                merged = list(self._pending_cleanup_transfer)
+                for item in result.pending_cleanup:
+                    if item not in merged:
+                        merged.append(dict(item))
+                self._pending_cleanup_transfer = tuple(merged)
+        try:
+            self._start_runtime(
+                config_data=previous_config,
+                bootstrap_foreground=bootstrap_foreground,
+                startup_layout_profile=startup_layout_profile,
+                startup_layout_routing_baseline=(
+                    startup_layout_routing_baseline
+                ),
+            )
+        except Exception as exc:
+            return False, str(exc)
+        return True, ""
+
     def save_and_apply(self) -> None:
         self._collect_settings()
-        errors = validate_config(self.config)
+        draft = copy.deepcopy(self.config)
+        errors = validate_config(draft)
         if errors:
-            QMessageBox.critical(self, "Configuration invalide", "\n".join(errors))
-            return
-        try:
-            save_config(self.config)
-            self._saved_revision = config_revision(self.config)
-            set_startup_enabled(self.start_with_windows.isChecked())
-        except Exception as exc:
-            QMessageBox.critical(self, "Enregistrement", str(exc))
-            return
-        self._draft_dirty = False
-        if not self._restart_runtime():
-            self._refresh_config_revision_status(draft_dirty=False)
-            self.statusBar().showMessage(
-                "Configuration enregistrée — runtime précédent encore actif",
-                6000,
+            QMessageBox.critical(
+                self,
+                "Configuration invalide",
+                "\n".join(errors),
             )
             return
+
+        try:
+            self._preflight_runtime_config(draft)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Préparation du runtime",
+                (
+                    "La configuration est valide mais le runtime ne peut pas "
+                    f"être construit :\n\n{exc}\n\n"
+                    "Aucun fichier ni runtime n’a été modifié."
+                ),
+            )
+            return
+
+        previous_config = copy.deepcopy(self._last_saved_config)
+        try:
+            previous_startup = is_startup_enabled()
+        except Exception:
+            previous_ui = previous_config.get("ui")
+            previous_startup = bool(
+                previous_ui.get("start_with_windows", False)
+                if isinstance(previous_ui, Mapping)
+                else False
+            )
+
+        previous_service = self._service
+        bootstrap_foreground = (
+            previous_service.last_meaningful_app
+            if previous_service is not None
+            else None
+        )
+        startup_layout_profile = (
+            previous_service.active_layout_apply_profile
+            if previous_service is not None
+            else ""
+        )
+        startup_layout_routing_baseline = ""
+        if startup_layout_profile and previous_service is not None:
+            previous_state = previous_service.engine.current_state
+            if previous_state is not None:
+                startup_layout_routing_baseline = (
+                    previous_state.profile_name("layout")
+                )
+
+        new_saved = False
+        try:
+            save_config(draft)
+            new_saved = True
+            self._saved_revision = config_revision(draft)
+            set_startup_enabled(self.start_with_windows.isChecked())
+        except Exception as exc:
+            rollback_detail = ""
+            if new_saved:
+                _ok, rollback_detail = self._rollback_persisted_apply(
+                    previous_config,
+                    previous_startup,
+                )
+            self._draft_dirty = True
+            self._refresh_config_revision_status(draft_dirty=True)
+            detail = (
+                f"\n\nRollback : {rollback_detail}"
+                if rollback_detail
+                else ""
+            )
+            QMessageBox.critical(
+                self,
+                "Enregistrement",
+                f"{exc}{detail}",
+            )
+            return
+
+        restart_error = ""
+        try:
+            restarted = self._restart_runtime(config_data=draft)
+        except Exception as exc:
+            restarted = False
+            restart_error = str(exc)
+
+        if not restarted:
+            rollback_ok, rollback_detail = self._rollback_persisted_apply(
+                previous_config,
+                previous_startup,
+            )
+
+            recovered = False
+            recovery_error = ""
+            previous_was_stopped = bool(
+                previous_service is not None
+                and previous_service.shutdown_result.worker_stopped
+            )
+            if restart_error and previous_was_stopped:
+                recovered, recovery_error = self._recover_previous_runtime(
+                    previous_config,
+                    bootstrap_foreground=bootstrap_foreground,
+                    startup_layout_profile=startup_layout_profile,
+                    startup_layout_routing_baseline=(
+                        startup_layout_routing_baseline
+                    ),
+                )
+
+            self._draft_dirty = True
+            self._refresh_config_revision_status(draft_dirty=True)
+            self._refresh_dashboard_summary()
+
+            parts = []
+            if restart_error:
+                parts.append(f"Nouvelle configuration : {restart_error}")
+            else:
+                parts.append(
+                    "Le runtime précédent n’a pas pu être remplacé ; "
+                    "il reste actif."
+                )
+            if rollback_ok:
+                parts.append(
+                    "La configuration persistée précédente a été restaurée."
+                )
+            elif rollback_detail:
+                parts.append(f"Rollback persistant incomplet : {rollback_detail}")
+            if restart_error and previous_was_stopped:
+                parts.append(
+                    "Runtime précédent restauré."
+                    if recovered
+                    else (
+                        "Récupération du runtime précédent impossible : "
+                        f"{recovery_error}"
+                    )
+                )
+            parts.append(
+                "La nouvelle configuration reste ouverte comme brouillon "
+                "non enregistré."
+            )
+
+            self.statusBar().showMessage(
+                "Application annulée — brouillon conservé",
+                8000,
+            )
+            QMessageBox.critical(
+                self,
+                "Application annulée",
+                "\n\n".join(parts),
+            )
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Warn",
+                    "Application annulée et rollback déclenché",
+                    (
+                        "runtime récupéré"
+                        if recovered
+                        else "runtime précédent conservé ou récupération requise"
+                    ),
+                )
+            )
+            return
+
+        self._last_saved_config = copy.deepcopy(draft)
+        self._draft_dirty = False
         self._restart_api()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
         self._refresh_config_revision_status(draft_dirty=False)
-        self.statusBar().showMessage("Configuration enregistrée et appliquée", 4000)
+        self.statusBar().showMessage(
+            "Configuration enregistrée et appliquée",
+            4000,
+        )
         self._log("Configuration enregistrée et appliquée.")
         self._record_user_activity(
-            UserActivityEntry("Good", "Configuration enregistrée et appliquée")
+            UserActivityEntry(
+                "Good",
+                "Configuration enregistrée et appliquée",
+            )
         )
 
     def _start_runtime(
         self,
         *,
+        config_data: Mapping[str, object] | None = None,
         bootstrap_foreground: ForegroundApp | None = None,
         startup_layout_profile: str = "",
         startup_layout_routing_baseline: str = "",
     ) -> None:
-        rules, poll_ms, debounce_ms, fallback_ms = build_ruleset(self.config)
-        self._client = OBSClientManager(build_obs_config(self.config))
+        runtime_config = (
+            config_data if config_data is not None else self.config
+        )
+        rules, poll_ms, debounce_ms, fallback_ms = build_ruleset(
+            runtime_config
+        )
+        self._client = OBSClientManager(build_obs_config(runtime_config))
         self._dispatcher = OBSDispatcher(
             self._client,
-            build_profiles(self.config),
-            build_layout_profiles(self.config),
-            host_controller=build_host_controller(self.config),
+            build_profiles(runtime_config),
+            build_layout_profiles(runtime_config),
+            host_controller=build_host_controller(runtime_config),
         )
         if startup_layout_profile:
             self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
@@ -2165,9 +2407,9 @@ class MainWindow(QMainWindow):
             self._dispatcher,
             poll_ms=poll_ms,
             logger=self.logger,
-            activation_policies=build_activation_policies(self.config),
+            activation_policies=build_activation_policies(runtime_config),
             pending_cleanup=self._pending_cleanup_transfer,
-            config_revision=config_revision(self.config),
+            config_revision=config_revision(runtime_config),
             bootstrap_foreground=bootstrap_foreground,
             startup_layout_profile=startup_layout_profile,
             declarative_execution_enabled=(
@@ -2180,13 +2422,13 @@ class MainWindow(QMainWindow):
                 in {"1", "true", "yes", "on"}
             ),
             control_variables=(
-                self.config.get("control_variables", {})
-                if isinstance(self.config.get("control_variables"), Mapping)
+                runtime_config.get("control_variables", {})
+                if isinstance(runtime_config.get("control_variables"), Mapping)
                 else {}
             ),
             control_store=ControlVariableStore.persistent(
-                self.config.get("control_variables", {})
-                if isinstance(self.config.get("control_variables"), Mapping)
+                runtime_config.get("control_variables", {})
+                if isinstance(runtime_config.get("control_variables"), Mapping)
                 else {}
             ),
         )
@@ -2202,7 +2444,11 @@ class MainWindow(QMainWindow):
         self._update_obs_status()
         self._refresh_config_revision_status()
 
-    def _restart_runtime(self) -> bool:
+    def _restart_runtime(
+        self,
+        *,
+        config_data: Mapping[str, object] | None = None,
+    ) -> bool:
         if self._runtime_restart_in_progress:
             self._log("Redémarrage runtime déjà en cours : demande ignorée.")
             return False
@@ -2251,6 +2497,7 @@ class MainWindow(QMainWindow):
                         "au nouveau runtime."
                     )
             self._start_runtime(
+                config_data=config_data,
                 bootstrap_foreground=bootstrap_foreground,
                 startup_layout_profile=resume_layout_profile,
                 startup_layout_routing_baseline=resume_layout_routing_baseline,
