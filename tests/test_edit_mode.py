@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 from stream_state_router.ui.main_window import MainWindow
 
@@ -64,12 +65,112 @@ def _window(service: _FakeService):
         pause_button=_FakeButton(),
         statusBar=lambda: status,
         _record_user_activity=activity.append,
+        _apply_edit_mode_surfaces=Mock(),
         _test_status=status,
         _test_activity=activity,
     )
 
 
+class _FakeScroll:
+    def __init__(self, page) -> None:
+        self._page = page
+
+    def widget(self):
+        return self._page
+
+
+class _FakeTabs:
+    def __init__(self, pages) -> None:
+        self.pages = dict(pages)
+        self.tooltips = {}
+
+    def widget(self, index):
+        return self.pages.get(index)
+
+    def setTabToolTip(self, index, text) -> None:
+        self.tooltips[index] = text
+
+
 class EditModeTests(unittest.TestCase):
+    def test_mutating_surfaces_are_read_only_outside_edit_mode(self) -> None:
+        pages = {
+            index: Mock()
+            for index in (2, 3, 4, 5)
+        }
+        tabs = _FakeTabs(
+            {
+                index: _FakeScroll(page)
+                for index, page in pages.items()
+            }
+        )
+        capture = Mock()
+        repair = Mock()
+        import_action = Mock()
+        restore_action = Mock()
+        repair_action = Mock()
+        window = SimpleNamespace(
+            _edit_mode=False,
+            tabs=tabs,
+            rules_tab_index=2,
+            profiles_tab_index=3,
+            layouts_tab_index=4,
+            settings_tab_index=5,
+            capture_current_button=capture,
+            repair_refs_button=repair,
+            _import_config_action=import_action,
+            _restore_backup_action=restore_action,
+            _repair_refs_action=repair_action,
+        )
+
+        MainWindow._apply_edit_mode_surfaces(window)
+
+        for page in pages.values():
+            page.setEnabled.assert_called_once_with(False)
+        capture.setEnabled.assert_called_once_with(False)
+        repair.setEnabled.assert_called_once_with(False)
+        import_action.setEnabled.assert_called_once_with(False)
+        restore_action.setEnabled.assert_called_once_with(False)
+        repair_action.setEnabled.assert_called_once_with(False)
+        self.assertTrue(
+            all("Mode édition" in value for value in tabs.tooltips.values())
+        )
+
+    def test_require_edit_mode_blocks_outside_edit_session(self) -> None:
+        window = SimpleNamespace(_edit_mode=False)
+
+        with patch(
+            "stream_state_router.ui.main_window.QMessageBox.information"
+        ) as information:
+            allowed = MainWindow._require_edit_mode(
+                window,
+                "Importer une configuration",
+            )
+
+        self.assertFalse(allowed)
+        information.assert_called_once()
+        self.assertIn(
+            "Importer une configuration",
+            information.call_args.args[2],
+        )
+
+    def test_collection_completion_policy_allows_only_read_only_analysis(self) -> None:
+        self.assertFalse(
+            MainWindow._collection_import_requires_edit_mode(
+                "guided_analysis"
+            )
+        )
+        for mode in (
+            "snapshot_profile",
+            "logic_migration",
+            "reference_repair",
+            "guided_current_state_capture",
+            "future_mode",
+        ):
+            self.assertTrue(
+                MainWindow._collection_import_requires_edit_mode(mode),
+                mode,
+            )
+
     def test_edit_mode_owns_and_releases_pause_when_runtime_was_running(self) -> None:
         service = _FakeService(paused=False)
         window = _window(service)
