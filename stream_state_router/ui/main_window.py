@@ -79,6 +79,7 @@ from .dialogs import (
     ModuleLayoutDialog,
     RuleDialog,
 )
+from .presentation import build_dashboard_snapshot
 
 
 DOMAIN_LABELS = {
@@ -115,6 +116,9 @@ class MainWindow(QMainWindow):
         saved_geometry = self._window_settings.value("main_window/geometry")
         if saved_geometry is not None:
             self.restoreGeometry(saved_geometry)
+        self._expert_mode = bool(
+            self._window_settings.value("main_window/expert_mode", False, type=bool)
+        )
         self.config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
         self._applied_revision = ""
@@ -145,6 +149,7 @@ class MainWindow(QMainWindow):
         self.bridge.runtime_event.connect(self._on_runtime_event)
 
         self._build_ui()
+        self._apply_ui_mode()
         self._build_menu()
         self._build_tray()
         self._load_config_into_ui()
@@ -154,6 +159,7 @@ class MainWindow(QMainWindow):
         self._module_scan_timer = QTimer(self)
         self._module_scan_timer.timeout.connect(self._auto_scan_modules)
         self._configure_module_scan_timer()
+        self._refresh_dashboard_summary()
 
         if start_minimized and self.tray.isVisible():
             self.hide()
@@ -174,6 +180,9 @@ class MainWindow(QMainWindow):
         self.obs_status = QLabel("OBS : —")
         self.obs_status.setObjectName("Muted")
         top.addWidget(self.obs_status)
+        self.mode_button = QPushButton()
+        self.mode_button.clicked.connect(self._toggle_ui_mode)
+        top.addWidget(self.mode_button)
         self.pause_button = QPushButton("Suspendre")
         self.pause_button.clicked.connect(self._toggle_pause)
         top.addWidget(self.pause_button)
@@ -181,12 +190,24 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
-        self.tabs.addTab(self._scrollable_tab(self._build_dashboard()), "Dashboard")
-        self.tabs.addTab(self._scrollable_tab(self._build_rules_tab()), "Règles")
-        self.tabs.addTab(self._scrollable_tab(self._build_profiles_tab()), "Profils")
-        self.tabs.addTab(self._scrollable_tab(self._build_layouts_tab()), "Layouts")
-        self.tabs.addTab(self._scrollable_tab(self._build_settings_tab()), "Paramètres")
-        self.tabs.addTab(self._scrollable_tab(self._build_logs_tab()), "Journal")
+        self.dashboard_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_dashboard()), "Dashboard"
+        )
+        self.rules_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_rules_tab()), "Règles"
+        )
+        self.profiles_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_profiles_tab()), "Profils"
+        )
+        self.layouts_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_layouts_tab()), "Layouts"
+        )
+        self.settings_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_settings_tab()), "Paramètres"
+        )
+        self.logs_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_logs_tab()), "Journal"
+        )
 
         footer = QHBoxLayout()
         self.unsaved = QLabel("")
@@ -219,6 +240,90 @@ class MainWindow(QMainWindow):
         )
         self._window_settings.sync()
 
+    def _toggle_ui_mode(self) -> None:
+        self._expert_mode = not self._expert_mode
+        self._window_settings.setValue(
+            "main_window/expert_mode",
+            self._expert_mode,
+        )
+        self._window_settings.sync()
+        self._apply_ui_mode()
+
+    def _apply_ui_mode(self) -> None:
+        if not hasattr(self, "tabs"):
+            return
+        expert_only = (
+            self.rules_tab_index,
+            self.profiles_tab_index,
+            self.layouts_tab_index,
+            self.logs_tab_index,
+        )
+        for index in expert_only:
+            self.tabs.setTabVisible(index, self._expert_mode)
+        self.tabs.setTabVisible(self.dashboard_tab_index, True)
+        self.tabs.setTabVisible(self.settings_tab_index, True)
+        self.mode_button.setText(
+            "Mode simple" if self._expert_mode else "Mode expert"
+        )
+        self.mode_button.setToolTip(
+            "Masquer les écrans techniques."
+            if self._expert_mode
+            else "Afficher les règles, profils, layouts et le journal technique."
+        )
+        if not self._expert_mode and self.tabs.currentIndex() in expert_only:
+            self.tabs.setCurrentIndex(self.dashboard_tab_index)
+
+    def _refresh_dashboard_summary(self) -> None:
+        if not hasattr(self, "dashboard_health"):
+            return
+        service = self._service
+        client = self._client
+        if service is None:
+            self.dashboard_health.setText("Runtime indisponible")
+            self.dashboard_health.setObjectName("Bad")
+            self.dashboard_decision.setText("Décision : —")
+            self.dashboard_reason.setText("Pourquoi : le moteur de routage n’est pas actif.")
+            self.dashboard_diff.clear()
+            return
+
+        try:
+            explanation = service.explain_decision()
+            routing_status = service.routing_status()
+        except Exception as exc:
+            self.dashboard_health.setText("Diagnostic indisponible")
+            self.dashboard_health.setObjectName("Warn")
+            self.dashboard_decision.setText("Décision : —")
+            self.dashboard_reason.setText(f"Pourquoi : {exc}")
+            self.dashboard_diff.clear()
+            return
+
+        snapshot = build_dashboard_snapshot(
+            explanation,
+            routing_status,
+            obs_enabled=bool(client and client.config.enabled),
+            obs_connected=bool(client and client.connected),
+        )
+        self.dashboard_health.setText(snapshot.health_text)
+        self.dashboard_health.setObjectName(snapshot.health_style)
+        self.dashboard_health.style().unpolish(self.dashboard_health)
+        self.dashboard_health.style().polish(self.dashboard_health)
+        self.dashboard_decision.setText(f"Décision : {snapshot.decision}")
+        self.dashboard_reason.setText(f"Pourquoi : {snapshot.reason}")
+
+        self.dashboard_diff.clear()
+        for difference in snapshot.differences:
+            item = QTreeWidgetItem(
+                [
+                    difference.label,
+                    difference.desired,
+                    difference.applied,
+                    difference.status_label,
+                ]
+            )
+            if difference.message:
+                item.setToolTip(3, difference.message)
+            self.dashboard_diff.addTopLevelItem(item)
+
     def _card(self, title_text: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("Card")
@@ -233,6 +338,45 @@ class MainWindow(QMainWindow):
         page = QWidget()
         root = QVBoxLayout(page)
         root.setSpacing(12)
+
+        summary_card, summary_lay = self._card("Vue d’ensemble")
+        self.dashboard_health = QLabel("Initialisation…")
+        self.dashboard_health.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        self.dashboard_decision = QLabel("Décision : —")
+        self.dashboard_decision.setStyleSheet("font-weight: 700;")
+        self.dashboard_reason = QLabel("Pourquoi : —")
+        self.dashboard_reason.setWordWrap(True)
+        self.dashboard_reason.setObjectName("Muted")
+        summary_lay.addWidget(self.dashboard_health)
+        summary_lay.addWidget(self.dashboard_decision)
+        summary_lay.addWidget(self.dashboard_reason)
+
+        self.dashboard_diff = QTreeWidget()
+        self.dashboard_diff.setColumnCount(4)
+        self.dashboard_diff.setHeaderLabels(["Élément", "Attendu", "Actuel", "État"])
+        self.dashboard_diff.setRootIsDecorated(False)
+        self.dashboard_diff.setAlternatingRowColors(True)
+        self.dashboard_diff.setMaximumHeight(190)
+        self.dashboard_diff.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.dashboard_diff.header().setStretchLastSection(True)
+        summary_lay.addWidget(self.dashboard_diff)
+
+        summary_actions = QHBoxLayout()
+        refresh_summary = QPushButton("Actualiser")
+        refresh_summary.clicked.connect(self._refresh_dashboard_summary)
+        summary_actions.addWidget(refresh_summary)
+        explain_summary = QPushButton("Pourquoi cette décision ?")
+        explain_summary.clicked.connect(self._explain_current_decision)
+        summary_actions.addWidget(explain_summary)
+        repair_summary = QPushButton("Corriger les différences")
+        repair_summary.setObjectName("Primary")
+        repair_summary.clicked.connect(self._force_reapply)
+        summary_actions.addWidget(repair_summary)
+        summary_actions.addStretch(1)
+        summary_lay.addLayout(summary_actions)
+        root.addWidget(summary_card)
 
         app_card, app_lay = self._card("Application au premier plan")
         self.fg_exe = QLabel("—")
@@ -259,9 +403,6 @@ class MainWindow(QMainWindow):
         self.rule_label.setObjectName("Muted")
         state_lay.addLayout(state_form)
         state_lay.addWidget(self.rule_label)
-        explain_button = QPushButton("Expliquer cette décision")
-        explain_button.clicked.connect(self._explain_current_decision)
-        state_lay.addWidget(explain_button, 0, Qt.AlignLeft)
         root.addWidget(state_card)
 
         override_card, override_lay = self._card("Override manuel")
@@ -909,10 +1050,12 @@ class MainWindow(QMainWindow):
             self.fg_exe.setText("Aucune fenêtre")
             self.fg_title.setText("—")
             self.fg_path.setText("—")
+            self._refresh_dashboard_summary()
             return
         self.fg_exe.setText(app.exe_name or f"PID {app.pid}")
         self.fg_title.setText(app.window_title or "(sans titre)")
         self.fg_path.setText(app.process_path or "(chemin indisponible)")
+        self._refresh_dashboard_summary()
 
     def _on_state_change(self, change: StateChange) -> None:
         values = change.current.as_variables()
@@ -924,6 +1067,7 @@ class MainWindow(QMainWindow):
             f"{values['CaptureProfile']} / {values['AudioProfile']} / "
             f"{values['LayoutProfile']} [{change.rule_name}]"
         )
+        self._refresh_dashboard_summary()
 
     def _on_dispatch(self, result) -> None:
         self._update_obs_status()
@@ -932,9 +1076,11 @@ class MainWindow(QMainWindow):
                 f"OBS : {result.executed} action(s) exécutée(s) · "
                 f"{', '.join(result.changed_domains)}"
             )
+        self._refresh_dashboard_summary()
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         self._log(f"{event.kind}: {event.message}")
+        self._refresh_dashboard_summary()
         if event.kind == "routing_rule" and isinstance(event.payload, dict):
             rule_name = str(event.payload.get("rule_name") or "—")
             reason = str(event.payload.get("reason") or "état inchangé")
