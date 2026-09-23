@@ -64,13 +64,13 @@ class AppRule:
     state: StreamState | None = None
     priority: int = 0
     exe: str = ""
-    launcher: str = ""
     path: str = ""
     title_regex: str = ""
     enabled: bool = True
     behavior: ResolutionKind = ResolutionKind.MATCH
     conditions: Mapping[str, Any] = field(default_factory=dict)
     apply_delay_ms: int = 0
+    launcher: str = ""
 
     def matches(
         self,
