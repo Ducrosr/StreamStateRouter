@@ -46,6 +46,10 @@ class _RuntimeShutdownRequested(BaseException):
     """Internal cooperative-cancellation signal for the runtime worker."""
 
 
+class _AutomaticRoutingSuperseded(RuntimeError):
+    """Interrupt long automatic OBS work after foreground routing became stale."""
+
+
 MANUAL_OVERRIDE_RELEASE_MODES = frozenset(
     {"manual", "duration", "foreground_change", "stream_end"}
 )
@@ -355,6 +359,9 @@ class RoutingService:
         self._manual_override_stream_seen_active = False
         self._manual_override_next_stream_probe = 0.0
         self._dispatch_generation = 0
+        self._automatic_dispatch_foreground_signature: tuple[str, str, str] | None = None
+        self._automatic_dispatch_superseded = False
+        self._automatic_dispatch_next_foreground_probe = 0.0
         self._last_obs_probe = 0.0
         self._last_obs_connected: bool | None = None
         self._last_obs_session_generation: int | None = None
@@ -1991,10 +1998,46 @@ class RoutingService:
         decision_id = f"reconcile-{uuid.uuid4().hex}"
         started_at = time.monotonic()
         obs_before = self._obs_request_count()
+        with self._lock:
+            reconcile_app = self._last_app
+            manual_override_active = self.engine.manual_override is not None
+        preemption_armed = (
+            not manual_override_active
+            and self._arm_automatic_dispatch_preemption(reconcile_app)
+        )
+        result = None
+        reconcile_error: Exception | None = None
         try:
             result = self.dispatcher.dispatch_state(state)
         except Exception as exc:
-            self.logger.error("OBS reconciliation failed: %s", exc)
+            reconcile_error = exc
+        finally:
+            superseded = (
+                self._clear_automatic_dispatch_preemption()
+                if preemption_armed
+                else False
+            )
+
+        if superseded:
+            self._last_state_reconcile = 0.0
+            self._emit(
+                RuntimeEvent(
+                    "routing_preempted",
+                    "Réconciliation OBS interrompue après changement de foreground",
+                    request_id=decision_id,
+                    payload={
+                        "generation": generation,
+                        "rule_name": rule_name,
+                    },
+                    success=False,
+                )
+            )
+            return
+        if reconcile_error is not None:
+            self.logger.error(
+                "OBS reconciliation failed: %s",
+                reconcile_error,
+            )
             self._publish_routing_result(
                 decision_id=decision_id,
                 origin="reconcile",
@@ -2004,10 +2047,17 @@ class RoutingService:
                 result=None,
                 started_at=started_at,
                 obs_requests_before=obs_before,
-                error=str(exc),
+                error=str(reconcile_error),
             )
-            self._emit(RuntimeEvent("obs_error", str(exc), request_id=decision_id))
+            self._emit(
+                RuntimeEvent(
+                    "obs_error",
+                    str(reconcile_error),
+                    request_id=decision_id,
+                )
+            )
             return
+        assert result is not None
         if self.on_dispatch:
             self.on_dispatch(result)
         self._publish_routing_result(
@@ -2436,24 +2486,92 @@ class RoutingService:
             self._runtime_commands.put(command)
         return should_stop
 
-    def _cooperative_obs_yield(self) -> None:
-        """Pure cancellation checkpoint used inside potentially long OBS work.
+    @staticmethod
+    def _routing_foreground_signature(
+        app: ForegroundApp | None,
+    ) -> tuple[str, str, str] | None:
+        if app is None:
+            return None
+        return (
+            str(app.exe_name or "").strip().casefold(),
+            str(app.process_path or "").strip().casefold(),
+            str(app.window_title or "").strip().casefold(),
+        )
 
-        It must never start probes, scheduler ticks, cleanup or other OBS I/O:
-        doing so makes the checkpoint re-entrant and can recursively re-enter the
-        operation that called it. Orderly cleanup is performed only by the outer
-        runtime loop after the interrupted operation has unwound.
+    def _arm_automatic_dispatch_preemption(
+        self,
+        app: ForegroundApp | None,
+    ) -> bool:
+        signature = self._routing_foreground_signature(app)
+        if signature is None:
+            return False
+        with self._lock:
+            if self.engine.manual_override is not None:
+                return False
+            self._automatic_dispatch_foreground_signature = signature
+            self._automatic_dispatch_superseded = False
+            self._automatic_dispatch_next_foreground_probe = 0.0
+        return True
+
+    def _clear_automatic_dispatch_preemption(self) -> bool:
+        with self._lock:
+            superseded = self._automatic_dispatch_superseded
+            self._automatic_dispatch_foreground_signature = None
+            self._automatic_dispatch_superseded = False
+            self._automatic_dispatch_next_foreground_probe = 0.0
+        return superseded
+
+    def _cooperative_obs_yield(self) -> None:
+        """Cancellation checkpoint used inside potentially long OBS work.
+
+        The checkpoint never starts OBS probes, scheduler ticks, cleanup or any
+        other WebSocket I/O. During automatic foreground-driven routing only, it
+        may perform a lightweight foreground Win32 read so an obsolete long
+        transition can unwind before the normal routing loop observes the new
+        application. Explicit/manual OBS commands never arm this guard.
         """
         if self._thread is None or threading.current_thread() is not self._thread:
             return
         if self._shutdown_cleanup_active:
             return
+
+        now = time.monotonic()
         with self._lock:
             stopping = self._stopping
+            baseline = self._automatic_dispatch_foreground_signature
+            next_probe = self._automatic_dispatch_next_foreground_probe
         if stopping or self._stop.is_set():
             raise _RuntimeShutdownRequested(
                 "Arrêt du runtime demandé pendant une opération OBS"
             )
+        if baseline is None or now < next_probe:
+            return
+
+        with self._lock:
+            if self._automatic_dispatch_foreground_signature != baseline:
+                return
+            self._automatic_dispatch_next_foreground_probe = (
+                now + max(0.02, min(0.05, self.poll_seconds))
+            )
+
+        try:
+            current = self.provider.get()
+        except Exception:
+            return
+        current_signature = self._routing_foreground_signature(current)
+        # WindowsForegroundProvider deliberately returns None while SSR itself
+        # owns the foreground. Treat this as transient rather than cancelling a
+        # valid automatic transition.
+        if current_signature is None or current_signature == baseline:
+            return
+
+        with self._lock:
+            if self._automatic_dispatch_foreground_signature != baseline:
+                return
+            self._automatic_dispatch_superseded = True
+        raise _AutomaticRoutingSuperseded(
+            "Foreground modifié pendant l'application automatique OBS"
+        )
 
     def _resolve_current_declarative_plan(
         self,
@@ -3510,30 +3628,74 @@ class RoutingService:
                     return
             started_at = time.monotonic()
             obs_before = self._obs_request_count()
+            preemption_armed = (
+                pending.origin == "foreground"
+                and self._arm_automatic_dispatch_preemption(change.app)
+            )
+            result = None
+            dispatch_error: Exception | None = None
             try:
                 result = self.dispatcher.dispatch_change(change)
-                if self.on_dispatch:
-                    self.on_dispatch(result)
-                if result.executed:
-                    self.logger.info(
-                        "OBS dispatch: %d action(s), domains=%s",
-                        result.executed,
-                        ",".join(result.changed_domains),
-                    )
-                for warning in result.warnings:
-                    self.logger.warning("OBS: %s", warning)
-                self._publish_routing_result(
+            except Exception as exc:
+                dispatch_error = exc
+            finally:
+                superseded = (
+                    self._clear_automatic_dispatch_preemption()
+                    if preemption_armed
+                    else False
+                )
+
+            if superseded:
+                pending_domains: tuple[str, ...] = ()
+                if hasattr(self.dispatcher, "pending_domains"):
+                    try:
+                        pending_domains = tuple(
+                            self.dispatcher.pending_domains(change.current)
+                        )
+                    except Exception:
+                        pending_domains = ()
+                status = RoutingDecisionStatus(
                     decision_id=pending.decision_id,
                     origin=pending.origin,
                     generation=pending.generation,
+                    config_revision=self.config_revision,
                     rule_name=change.rule_name,
-                    state=change.current,
-                    result=result,
-                    started_at=started_at,
-                    obs_requests_before=obs_before,
+                    requested_domains=pending_domains,
+                    applied_domains=(),
+                    blocked_domains=(),
+                    failed_domains=(),
+                    pending_domains=pending_domains,
+                    domain_details=(),
+                    duration_ms=max(
+                        0.0,
+                        (time.monotonic() - started_at) * 1000.0,
+                    ),
+                    obs_requests=max(
+                        0,
+                        self._obs_request_count() - obs_before,
+                    ),
+                    success=False,
+                    message=(
+                        "Décision OBS interrompue : "
+                        "le foreground a changé pendant l'application"
+                    ),
                 )
-            except Exception as exc:
-                self.logger.error("OBS dispatch failed: %s", exc)
+                with self._lock:
+                    self._last_routing_status = status
+                    self._routing_diagnostics.append(status)
+                self._emit(
+                    RuntimeEvent(
+                        "routing_result",
+                        status.message,
+                        request_id=status.decision_id,
+                        payload=status.as_mapping(),
+                        success=False,
+                    )
+                )
+                return
+
+            if dispatch_error is not None:
+                self.logger.error("OBS dispatch failed: %s", dispatch_error)
                 self._publish_routing_result(
                     decision_id=pending.decision_id,
                     origin=pending.origin,
@@ -3543,9 +3705,38 @@ class RoutingService:
                     result=None,
                     started_at=started_at,
                     obs_requests_before=obs_before,
-                    error=str(exc),
+                    error=str(dispatch_error),
                 )
-                self._emit(RuntimeEvent("obs_error", str(exc), request_id=pending.decision_id))
+                self._emit(
+                    RuntimeEvent(
+                        "obs_error",
+                        str(dispatch_error),
+                        request_id=pending.decision_id,
+                    )
+                )
+                return
+
+            assert result is not None
+            if self.on_dispatch:
+                self.on_dispatch(result)
+            if result.executed:
+                self.logger.info(
+                    "OBS dispatch: %d action(s), domains=%s",
+                    result.executed,
+                    ",".join(result.changed_domains),
+                )
+            for warning in result.warnings:
+                self.logger.warning("OBS: %s", warning)
+            self._publish_routing_result(
+                decision_id=pending.decision_id,
+                origin=pending.origin,
+                generation=pending.generation,
+                rule_name=change.rule_name,
+                state=change.current,
+                result=result,
+                started_at=started_at,
+                obs_requests_before=obs_before,
+            )
 
     def _wait_for_dispatch_quiescence(self, timeout: float) -> bool:
         acquired = self._dispatch_lock.acquire(timeout=max(0.0, float(timeout)))
