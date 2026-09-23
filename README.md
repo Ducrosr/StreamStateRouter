@@ -59,6 +59,22 @@ L'API locale accepte les mêmes champs dans l'action `override` :
 Un appel historique contenant seulement un `duration_seconds > 0` conserve son
 comportement et devient implicitement un override temporisé.
 
+### Verrouillage de l’édition
+
+Le bouton **Édition active / Configuration verrouillée** fige uniquement le
+brouillon de configuration. Lorsqu’il est verrouillé, SSR bloque les écrans
+Règles, Profils, Layouts et Paramètres ainsi que les imports, restaurations,
+captures guidées et réparations de références qui modifieraient ce brouillon.
+
+Le verrouillage ne suspend pas le runtime : Dashboard, diagnostics, simulation,
+overrides manuels, réapplications OBS, export et **Enregistrer et appliquer**
+restent disponibles. Un brouillon déjà modifié peut donc être verrouillé puis
+enregistré sans permettre de nouvelles modifications accidentelles.
+
+L’état du verrouillage est mémorisé entre les sessions. Pour préserver le
+comportement historique, l’édition reste active par défaut lors de la première
+utilisation.
+
 ### Préparation via launcher
 
 Une règle d'application peut déclarer un exécutable **Launcher** (par exemple
