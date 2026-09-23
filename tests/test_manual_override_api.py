@@ -70,6 +70,30 @@ class ManualOverrideAPITests(unittest.TestCase):
         self.assertEqual(kwargs["release_mode"], "manual")
         self.assertEqual(kwargs["duration_seconds"], 60.0)
 
+    def test_manual_clear_respects_safe_live_refusal(self) -> None:
+        service = Mock()
+        window = SimpleNamespace(
+            _service=service,
+            _safe_live_confirm=Mock(return_value=False),
+            _log=Mock(),
+        )
+
+        MainWindow._clear_override(window)
+
+        service.clear_manual_override.assert_not_called()
+        window._log.assert_not_called()
+
+    def test_force_reapply_respects_safe_live_refusal(self) -> None:
+        service = Mock()
+        window = SimpleNamespace(
+            _service=service,
+            _safe_live_confirm=Mock(return_value=False),
+        )
+
+        MainWindow._force_reapply(window)
+
+        service.request_force_reapply.assert_not_called()
+
     def test_override_action_requires_runtime(self) -> None:
         window = SimpleNamespace(
             _service=None,
