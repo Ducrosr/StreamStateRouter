@@ -1666,10 +1666,15 @@ class MainWindow(QMainWindow):
         self.obs_port.setRange(1, 65535)
         self.obs_password = QLineEdit()
         self.obs_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.safe_live = QCheckBox(
+            "Safe Live : demander confirmation avant les opérations OBS "
+            "manuelles pendant un stream ou un enregistrement"
+        )
         form.addRow("", self.obs_enabled)
         form.addRow("Hôte", self.obs_host)
         form.addRow("Port", self.obs_port)
         form.addRow("Mot de passe", self.obs_password)
+        form.addRow("", self.safe_live)
         obs_lay.addLayout(form)
         test = QPushButton("Tester la connexion OBS")
         test.clicked.connect(self._test_obs)
@@ -1806,6 +1811,7 @@ class MainWindow(QMainWindow):
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
         self.close_to_tray.setChecked(bool(ui.get("close_to_tray", True)))
+        self.safe_live.setChecked(bool(ui.get("safe_live", True)))
         self.auto_detect_modules.setChecked(bool(ui.get("auto_detect_modules", True)))
         self.module_scan_seconds.setValue(int(ui.get("module_scan_seconds", 5)))
         try:
@@ -1823,7 +1829,14 @@ class MainWindow(QMainWindow):
     def _wire_dirty_signals(self) -> None:
         for widget in (self.poll_ms, self.debounce_ms, self.fallback_debounce_ms, self.obs_port, self.api_port, self.module_scan_seconds):
             widget.valueChanged.connect(self._mark_dirty)
-        for widget in (self.obs_enabled, self.close_to_tray, self.start_with_windows, self.api_enabled, self.auto_detect_modules):
+        for widget in (
+            self.obs_enabled,
+            self.close_to_tray,
+            self.start_with_windows,
+            self.api_enabled,
+            self.auto_detect_modules,
+            self.safe_live,
+        ):
             widget.toggled.connect(self._mark_dirty)
         for widget in (
             self.obs_host,
@@ -1853,6 +1866,7 @@ class MainWindow(QMainWindow):
         ui = self.config.setdefault("ui", {})
         ui["close_to_tray"] = self.close_to_tray.isChecked()
         ui["start_with_windows"] = self.start_with_windows.isChecked()
+        ui["safe_live"] = self.safe_live.isChecked()
         ui["auto_detect_modules"] = self.auto_detect_modules.isChecked()
         ui["module_scan_seconds"] = self.module_scan_seconds.value()
 
@@ -2430,6 +2444,8 @@ class MainWindow(QMainWindow):
     def _apply_override(self) -> None:
         if not self._service:
             return
+        if not self._safe_live_confirm("Appliquer un override manuel"):
+            return
         state = StreamState(
             game=self.override_boxes["game"].currentText(),
             overlay_profile=self.override_boxes["overlay"].currentText(),
@@ -2461,6 +2477,37 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Réapplication OBS en cours…", 3000)
         except Exception as exc:
             QMessageBox.critical(self, "OBS", str(exc))
+
+    def _safe_live_confirm(self, operation: str) -> bool:
+        if not hasattr(self, "safe_live") or not self.safe_live.isChecked():
+            return True
+        dispatcher = self._dispatcher
+        context = (
+            dispatcher.cached_obs_context()
+            if dispatcher is not None
+            else {}
+        )
+        streaming = bool(context.get("streaming", False))
+        recording = bool(context.get("recording", False))
+        if not streaming and not recording:
+            return True
+        active = []
+        if streaming:
+            active.append("stream")
+        if recording:
+            active.append("enregistrement")
+        return QMessageBox.question(
+            self,
+            "Safe Live",
+            (
+                f"{operation}\n\n"
+                f"OBS est actuellement en {' + '.join(active)}. "
+                "Cette opération peut modifier visuellement ou techniquement "
+                "la sortie active. Continuer quand même ?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) == QMessageBox.Yes
 
     def _toggle_pause(self) -> None:
         if not self._service:
@@ -3884,6 +3931,8 @@ class MainWindow(QMainWindow):
         current = self._current_profile()
         if not current:
             return
+        if not self._safe_live_confirm("Tester ce profil directement sur OBS"):
+            return
         self._collect_settings()
         try:
             client = OBSClientManager(build_obs_config(self.config))
@@ -4526,6 +4575,8 @@ class MainWindow(QMainWindow):
         current = self._current_layout_profile()
         if not current or self._service is None:
             return
+        if not self._safe_live_confirm("Appliquer ce layout maintenant"):
+            return
         self._collect_settings()
         try:
             request_id = self._service.request_layout("apply", current[0])
@@ -4549,6 +4600,8 @@ class MainWindow(QMainWindow):
         current = self._current_layout_profile()
         if not current or self._service is None:
             return
+        if not self._safe_live_confirm("Prévisualiser ce layout dans OBS"):
+            return
         try:
             request_id = self._service.request_layout("preview", current[0])
             self._log(f"Aperçu layout {current[0]} mis en file ({request_id[:8]}).")
@@ -4566,6 +4619,8 @@ class MainWindow(QMainWindow):
 
     def _undo_layout_obs(self) -> None:
         if self._service is None:
+            return
+        if not self._safe_live_confirm("Restaurer le layout précédent dans OBS"):
             return
         try:
             request_id = self._service.request_layout("undo")
@@ -4811,6 +4866,8 @@ class MainWindow(QMainWindow):
     def _edit_layout_in_obs(self) -> None:
         current = self._current_layout_profile()
         if not current:
+            return
+        if not self._safe_live_confirm("Passer ce layout en mode édition OBS"):
             return
         try:
             if self._service is None:
