@@ -700,5 +700,49 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(any(".conditions.streaming doit être booléen" in error for error in errors), errors)
 
 
+
+    def test_launcher_and_preapply_flag_round_trip_through_config(self):
+        data = self.sample()
+        data["rules"][1]["launcher"] = "Battle.net.exe"
+        data["profiles"]["game"]["Game"]["actions"] = [
+            {
+                "type": "wait_ms",
+                "name": "pre-launch",
+                "enabled": True,
+                "preapply_on_launcher": True,
+                "params": {"duration_ms": 0},
+            }
+        ]
+
+        self.assertEqual(validate_config(data), [])
+        rules, _poll, _debounce, _fallback = build_ruleset(data)
+        game_rule = next(rule for rule in rules.rules if rule.name == "Game")
+        self.assertEqual(game_rule.launcher, "Battle.net.exe")
+
+    def test_launcher_and_preapply_types_are_validated(self):
+        data = self.sample()
+        data["rules"][1]["launcher"] = 123
+        data["profiles"]["game"]["Game"]["actions"] = [
+            {
+                "type": "wait_ms",
+                "preapply_on_launcher": "yes",
+                "params": {"duration_ms": 0},
+            }
+        ]
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(".launcher doit être une chaîne" in error for error in errors),
+            errors,
+        )
+        self.assertTrue(
+            any(
+                ".preapply_on_launcher doit être booléen" in error
+                for error in errors
+            ),
+            errors,
+        )
+
 if __name__ == "__main__":
     unittest.main()
