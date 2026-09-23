@@ -5571,7 +5571,10 @@ class MainWindow(QMainWindow):
         if action == "auto":
             self._service.pause(False)
             self._service.clear_manual_override()
-            return {"paused": False}
+            return {
+                "paused": False,
+                "manual_override": self._service.manual_override_status(),
+            }
         if action == "catalog.sync":
             request_id = self._service.request_catalog_sync()
             return {"request_id": request_id, "status": "accepted"}
