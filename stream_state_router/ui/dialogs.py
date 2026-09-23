@@ -935,6 +935,183 @@ class ModuleLayoutDialog(QDialog):
         }
 
 
+class CurrentStateCaptureDialog(QDialog):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        process: str,
+        process_path: str,
+        window_title: str,
+        current_scene: str,
+        suggested_name: str,
+        matching_rules: Sequence[Mapping[str, object]] = (),
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Capturer l’état actuel")
+        self.resize(680, 560)
+        self._matching_rules = [
+            dict(rule) for rule in matching_rules if isinstance(rule, Mapping)
+        ]
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "SSR va préparer un brouillon à partir de l’application au premier "
+            "plan et de la scène OBS courante. Rien ne sera enregistré ni "
+            "appliqué avant votre confirmation."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        context = QFormLayout()
+        process_label = QLabel(process or "—")
+        process_label.setStyleSheet("font-weight: 700;")
+        context.addRow("Processus détecté", process_label)
+        path_label = QLabel(process_path or "—")
+        path_label.setWordWrap(True)
+        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        context.addRow("Chemin", path_label)
+        title_label = QLabel(window_title or "—")
+        title_label.setWordWrap(True)
+        context.addRow("Fenêtre", title_label)
+        scene_label = QLabel(current_scene or "—")
+        scene_label.setStyleSheet("font-weight: 700;")
+        context.addRow("Scène OBS", scene_label)
+        root.addLayout(context)
+
+        target_title = QLabel("Configuration cible")
+        target_title.setObjectName("Section")
+        root.addWidget(target_title)
+
+        target_form = QFormLayout()
+        self.target_rule = QComboBox()
+        if self._matching_rules:
+            for rule in self._matching_rules:
+                name = str(rule.get("name") or "Règle sans nom")
+                self.target_rule.addItem(f"Mettre à jour « {name} »", name)
+            target_form.addRow("Action", self.target_rule)
+
+        self.name = QLineEdit(suggested_name)
+        self.name.setPlaceholderText("Nom de la configuration")
+        if self._matching_rules:
+            self.name.setReadOnly(True)
+            self._sync_rule_name()
+            self.target_rule.currentIndexChanged.connect(self._sync_rule_name)
+        target_form.addRow(
+            "Nom" if not self._matching_rules else "Configuration",
+            self.name,
+        )
+        root.addLayout(target_form)
+
+        capture_title = QLabel("Éléments à capturer")
+        capture_title.setObjectName("Section")
+        root.addWidget(capture_title)
+
+        self.input_settings = QCheckBox(
+            "Réglages des sources présentes dans la scène courante"
+        )
+        self.input_settings.setChecked(True)
+        self.audio_state = QCheckBox(
+            "Mute et volume des sources audio présentes dans la scène"
+        )
+        self.audio_state.setChecked(True)
+        self.filters = QCheckBox(
+            "État et paramètres des filtres des sources de la scène"
+        )
+        self.filters.setChecked(True)
+        self.visibility = QCheckBox(
+            "Visibilité des Scene Items non ambigus de la scène courante"
+        )
+        self.visibility.setChecked(bool(current_scene))
+        self.visibility.setEnabled(bool(current_scene))
+        self.layout = QCheckBox(
+            "Disposition des modules de la scène courante"
+        )
+        self.layout.setChecked(bool(current_scene))
+        self.layout.setEnabled(bool(current_scene))
+
+        for widget in (
+            self.input_settings,
+            self.audio_state,
+            self.filters,
+            self.visibility,
+            self.layout,
+        ):
+            root.addWidget(widget)
+
+        scope_note = QLabel(
+            "Périmètre sûr : l’assistant ne capture pas toute la collection OBS. "
+            "Il limite les réglages aux sources directement présentes dans la "
+            "scène programme courante. Overlay/Capture/Audio ne sont jamais "
+            "devinés : une nouvelle règle reprend l’état logique déjà actif."
+        )
+        scope_note.setWordWrap(True)
+        scope_note.setObjectName("Muted")
+        root.addWidget(scope_note)
+
+        if len(self._matching_rules) > 1:
+            warning = QLabel(
+                "Plusieurs règles ciblent ce processus. Choisissez explicitement "
+                "celle à mettre à jour ; l’assistant ne créera pas une règle "
+                "concurrente supplémentaire."
+            )
+            warning.setWordWrap(True)
+            warning.setObjectName("Warn")
+            root.addWidget(warning)
+
+        root.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Préparer le brouillon"
+        )
+        buttons.accepted.connect(self._accept_checked)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self._process = str(process or "").strip()
+
+    def _sync_rule_name(self) -> None:
+        name = str(self.target_rule.currentData() or "").strip()
+        if name:
+            self.name.setText(name)
+
+    def _accept_checked(self) -> None:
+        if not self._process:
+            QMessageBox.warning(
+                self,
+                "Capture",
+                "Aucun processus n’a été détecté.",
+            )
+            return
+        if not self.name.text().strip():
+            QMessageBox.warning(
+                self,
+                "Capture",
+                "Le nom de la configuration est requis.",
+            )
+            return
+        self.accept()
+
+    def options(self) -> dict[str, object]:
+        return {
+            "name": self.name.text().strip(),
+            "process": self._process,
+            "existing_rule_name": (
+                str(self.target_rule.currentData() or "").strip()
+                if self._matching_rules
+                else ""
+            ),
+            "include_input_settings": self.input_settings.isChecked(),
+            "include_audio_state": self.audio_state.isChecked(),
+            "include_filters": self.filters.isChecked(),
+            "include_visibility": self.visibility.isChecked(),
+            "include_layout": self.layout.isChecked(),
+        }
+
+
 class CollectionImportDialog(QDialog):
     def __init__(
         self,
