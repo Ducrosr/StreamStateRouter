@@ -397,8 +397,29 @@ class DashboardPresentationTests(unittest.TestCase):
         assert activity is not None
         self.assertEqual(activity.style, "Bad")
         self.assertEqual(activity.message, "Application incomplète")
-        self.assertIn("layout", activity.detail)
-        self.assertIn("capture", activity.detail)
+        self.assertEqual(
+            activity.detail,
+            "Échec : Layout · Bloqué : Capture",
+        )
+
+    def test_user_activity_deduplicates_pending_failed_domains(self) -> None:
+        activity = user_activity_from_runtime_event(
+            "routing_result",
+            "Application OBS incomplète",
+            {
+                "success": False,
+                "failed_domains": ["game", "capture", "game"],
+                "blocked_domains": [],
+                "pending_domains": ["game", "capture", "layout", "layout"],
+            },
+        )
+
+        self.assertIsNotNone(activity)
+        assert activity is not None
+        self.assertEqual(
+            activity.detail,
+            "Échec : Jeu, Capture · En attente : Layout",
+        )
 
 
     def test_simulation_report_is_read_only_plan_summary(self) -> None:
