@@ -346,7 +346,8 @@ class MainWindow(QMainWindow):
             scroll = self.tabs.widget(index)
             page = (
                 scroll.widget()
-                if isinstance(scroll, QScrollArea)
+                if scroll is not None
+                and callable(getattr(scroll, "widget", None))
                 else scroll
             )
             if page is not None:
