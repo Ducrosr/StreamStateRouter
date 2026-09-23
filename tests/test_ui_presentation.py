@@ -8,6 +8,7 @@ from stream_state_router.ui.presentation import (
     build_dashboard_snapshot,
     build_diagnostic_report,
     build_manual_override_presentation,
+    build_obs_drift_presentation,
     build_simulation_report,
     render_capability_report_text,
     user_activity_from_runtime_event,
@@ -478,6 +479,73 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIn("HDR Windows: Prêt", text)
         self.assertIn("Santé de la configuration", text)
         self.assertIn("À vérifier : LayoutProfile non référencé", text)
+
+    def test_drift_presentation_surfaces_partial_verified_change(self) -> None:
+        view = build_obs_drift_presentation(
+            {
+                "available": True,
+                "detected": True,
+                "signature": "sig",
+                "count": 2,
+                "unknown_count": 1,
+                "changes": [
+                    {
+                        "property": {
+                            "kind": "input_mute",
+                            "source": "Mic",
+                        }
+                    },
+                    {
+                        "property": {
+                            "kind": "filter_enabled",
+                            "source": "Avatar",
+                            "filter": "Glitch",
+                        }
+                    },
+                ],
+            }
+        )
+
+        self.assertTrue(view.visible)
+        self.assertEqual(view.signature, "sig")
+        self.assertIn("2 propriétés", view.title)
+        self.assertIn("input_mute · Mic", view.detail)
+        self.assertIn("filter_enabled · Avatar/Glitch", view.detail)
+        self.assertIn("Détection partielle", view.detail)
+
+    def test_drift_presentation_hides_ignored_signature(self) -> None:
+        view = build_obs_drift_presentation(
+            {
+                "available": True,
+                "detected": True,
+                "signature": "sig",
+                "count": 1,
+                "changes": [],
+            },
+            ignored_signature="sig",
+        )
+
+        self.assertFalse(view.visible)
+
+    def test_user_activity_surfaces_drift_lifecycle(self) -> None:
+        detected = user_activity_from_runtime_event(
+            "obs_drift",
+            "Écart détecté",
+            {"count": 2},
+        )
+        cleared = user_activity_from_runtime_event(
+            "obs_drift_cleared",
+            "Écart résolu",
+            {},
+        )
+
+        self.assertIsNotNone(detected)
+        self.assertIsNotNone(cleared)
+        assert detected is not None
+        assert cleared is not None
+        self.assertEqual(detected.style, "Warn")
+        self.assertIn("2 propriété", detected.detail)
+        self.assertEqual(cleared.style, "Good")
 
     def test_user_activity_summarizes_incomplete_routing(self) -> None:
         activity = user_activity_from_runtime_event(

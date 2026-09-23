@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import logging
 import queue
 import sys
@@ -56,6 +58,67 @@ class RuntimeEvent:
     request_id: str = ""
     payload: object | None = None
     success: bool = True
+
+
+def summarize_obs_drift(
+    report: Mapping[str, object],
+    *,
+    config_revision: str,
+    generation: int,
+    checked_at: float,
+) -> dict[str, object]:
+    plan = report.get("plan")
+    plan_map = plan if isinstance(plan, Mapping) else {}
+    raw_diff = plan_map.get("diff")
+    diff = raw_diff if isinstance(raw_diff, list) else []
+
+    changes: list[dict[str, object]] = []
+    unknown_count = 0
+    for raw in diff:
+        if not isinstance(raw, Mapping):
+            continue
+        status = str(raw.get("status") or "")
+        if status == "change":
+            prop = raw.get("property")
+            changes.append(
+                {
+                    "property": dict(prop) if isinstance(prop, Mapping) else {},
+                    "observed": raw.get("observed"),
+                    "desired": raw.get("desired"),
+                    "provenance": list(raw.get("provenance") or []),
+                }
+            )
+        elif status in {"unknown", "unsupported", "blocked"}:
+            unknown_count += 1
+
+    signature = ""
+    if changes:
+        payload = {
+            "config_revision": str(config_revision or ""),
+            "generation": int(generation),
+            "changes": changes,
+        }
+        signature = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    return {
+        "available": bool(report.get("available", False)),
+        "detected": bool(changes),
+        "signature": signature,
+        "count": len(changes),
+        "unknown_count": unknown_count,
+        "coverage_limited": bool(unknown_count),
+        "changes": changes[:20],
+        "checked_at": float(checked_at),
+        "generation": int(generation),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +263,7 @@ class RoutingService:
         logger: logging.Logger | None = None,
         obs_probe_seconds: float = 2.0,
         state_reconcile_seconds: float = 0.5,
+        drift_probe_seconds: float = 10.0,
         activation_policies: Mapping[str, TriggerPolicyConfig] | None = None,
         activation_scheduler: ActivationScheduler | None = None,
         activation_controller: OBSActivationController | None = None,
@@ -237,6 +301,7 @@ class RoutingService:
             )
         self.obs_probe_seconds = max(0.5, float(obs_probe_seconds))
         self.state_reconcile_seconds = max(0.1, float(state_reconcile_seconds))
+        self.drift_probe_seconds = max(2.0, float(drift_probe_seconds))
         self.declarative_execution_enabled = bool(declarative_execution_enabled)
         policies = dict(activation_policies or {})
         transferred_cleanup = tuple(pending_activation_cleanup or ()) + tuple(pending_cleanup or ())
@@ -294,6 +359,18 @@ class RoutingService:
         self._last_obs_connected: bool | None = None
         self._last_obs_session_generation: int | None = None
         self._last_state_reconcile = 0.0
+        self._last_drift_probe = 0.0
+        self._last_drift_status: dict[str, object] = {
+            "available": False,
+            "detected": False,
+            "signature": "",
+            "count": 0,
+            "unknown_count": 0,
+            "coverage_limited": False,
+            "changes": [],
+            "checked_at": 0.0,
+            "generation": 0,
+        }
         self._active_launcher_preparation_signature = ""
         self._active_launcher_preparation_domains: tuple[str, ...] = ()
         self._active_launcher_preparation_sources: tuple[str, ...] = ()
@@ -1172,6 +1249,11 @@ class RoutingService:
             rows = list(self._routing_diagnostics)[-max(1, int(limit)) :]
         return [row.as_mapping() for row in rows]
 
+    def drift_status(self) -> dict[str, object]:
+        """Return the last read-only OBS drift snapshot without issuing I/O."""
+        with self._lock:
+            return copy.deepcopy(self._last_drift_status)
+
     def _obs_request_count(self) -> int:
         client = getattr(self.dispatcher, "client", None)
         value = getattr(client, "request_count", 0) if client is not None else 0
@@ -1529,6 +1611,11 @@ class RoutingService:
                             continue
                     self._worker_phase = "reconcile"
                     self._reconcile_desired_state_if_due()
+                    with self._lock:
+                        if self._stopping:
+                            continue
+                    self._worker_phase = "drift_probe"
+                    self._probe_obs_drift_if_due()
                     with self._lock:
                         if self._stopping:
                             continue
@@ -1924,6 +2011,98 @@ class RoutingService:
             started_at=started_at,
             obs_requests_before=obs_before,
         )
+
+    def _probe_obs_drift_if_due(self) -> None:
+        if self._last_obs_connected is not True:
+            return
+        planning = self._declarative_planning
+        if planning is None:
+            return
+
+        now = time.monotonic()
+        if (
+            self._last_drift_probe
+            and now - self._last_drift_probe < self.drift_probe_seconds
+        ):
+            return
+
+        with self._lock:
+            if (
+                self._stopping
+                or self._paused
+                or self._resume_revalidation_pending
+                or self._pending_dispatch is not None
+                or self._active_obs_command is not None
+            ):
+                return
+            state = self.engine.current_state
+            generation = self._dispatch_generation
+        if state is None:
+            return
+
+        self._last_drift_probe = now
+        try:
+            with self._dispatch_lock:
+                report = self._build_current_declarative_plan(
+                    state,
+                    planning,
+                    refresh_catalog=False,
+                )
+        except Exception as exc:
+            self.logger.debug("OBS drift probe unavailable: %s", exc)
+            with self._lock:
+                self._last_drift_status = {
+                    "available": False,
+                    "detected": False,
+                    "signature": "",
+                    "count": 0,
+                    "unknown_count": 0,
+                    "coverage_limited": False,
+                    "changes": [],
+                    "checked_at": time.time(),
+                    "generation": generation,
+                    "reason": str(exc),
+                }
+            return
+
+        status = summarize_obs_drift(
+            report,
+            config_revision=self.config_revision,
+            generation=generation,
+            checked_at=time.time(),
+        )
+        with self._lock:
+            previous = dict(self._last_drift_status)
+            self._last_drift_status = status
+
+        previous_detected = bool(previous.get("detected", False))
+        previous_signature = str(previous.get("signature") or "")
+        detected = bool(status.get("detected", False))
+        signature = str(status.get("signature") or "")
+
+        if detected and (
+            not previous_detected or signature != previous_signature
+        ):
+            count = int(status.get("count", 0) or 0)
+            self._emit(
+                RuntimeEvent(
+                    "obs_drift",
+                    (
+                        f"Écart OBS détecté : {count} propriété(s) gérée(s) "
+                        "diffèrent de la cible SSR"
+                    ),
+                    payload=copy.deepcopy(status),
+                    success=False,
+                )
+            )
+        elif previous_detected and not detected:
+            self._emit(
+                RuntimeEvent(
+                    "obs_drift_cleared",
+                    "Écart OBS résolu",
+                    payload=copy.deepcopy(status),
+                )
+            )
 
     def _reconcile_activation(self, reason: str) -> bool:
         scheduler = self.activation_scheduler

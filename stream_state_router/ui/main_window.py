@@ -108,6 +108,7 @@ from .presentation import (
     build_dashboard_snapshot,
     build_diagnostic_report,
     build_manual_override_presentation,
+    build_obs_drift_presentation,
     build_simulation_report,
     render_capability_report_text,
     user_activity_from_runtime_event,
@@ -176,6 +177,7 @@ class MainWindow(QMainWindow):
         self._obs_connected_controls: list[tuple[object, bool]] = []
         self._preview_active = False
         self._routing_incomplete = False
+        self._ignored_drift_signature = ""
         self._runtime_restart_in_progress = False
         self._last_runtime_restart_previous_stopped = False
         self._last_runtime_restart_diagnostic = ""
@@ -475,6 +477,8 @@ class MainWindow(QMainWindow):
             self.dashboard_reason.setText("Pourquoi : le moteur de routage n’est pas actif.")
             self.dashboard_override_row.setVisible(False)
             self.dashboard_diff.clear()
+            if hasattr(self, "drift_card"):
+                self.drift_card.setVisible(False)
             return
 
         try:
@@ -487,6 +491,8 @@ class MainWindow(QMainWindow):
             self.dashboard_reason.setText(f"Pourquoi : {exc}")
             self.dashboard_override_row.setVisible(False)
             self.dashboard_diff.clear()
+            if hasattr(self, "drift_card"):
+                self.drift_card.setVisible(False)
             return
 
         snapshot = build_dashboard_snapshot(
@@ -533,6 +539,39 @@ class MainWindow(QMainWindow):
             if difference.message:
                 item.setToolTip(3, difference.message)
             self.dashboard_diff.addTopLevelItem(item)
+
+        drift_view = build_obs_drift_presentation(
+            service.drift_status(),
+            ignored_signature=self._ignored_drift_signature,
+        )
+        self.drift_card.setVisible(drift_view.visible)
+        if drift_view.visible:
+            self.drift_title.setText(drift_view.title)
+            self.drift_detail.setText(
+                drift_view.detail
+                or (
+                    "OBS ne correspond plus à une partie de la cible gérée "
+                    "par SSR."
+                )
+            )
+
+    def _ignore_current_obs_drift(self) -> None:
+        service = self._service
+        if service is None:
+            return
+        status = service.drift_status()
+        signature = str(status.get("signature") or "")
+        if not signature:
+            return
+        self._ignored_drift_signature = signature
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Écart OBS ignoré",
+                "Masqué jusqu’au prochain changement détecté.",
+            )
+        )
+        self._schedule_dashboard_refresh()
 
     def _show_capability_report(self) -> None:
         service = self._service
@@ -1229,6 +1268,38 @@ class MainWindow(QMainWindow):
         summary_actions.addStretch(1)
         summary_lay.addLayout(summary_actions)
         root.addWidget(summary_card)
+
+        self.drift_card, drift_lay = self._card("Écart OBS détecté")
+        self.drift_title = QLabel("")
+        self.drift_title.setStyleSheet("font-weight: 700;")
+        self.drift_detail = QLabel("")
+        self.drift_detail.setWordWrap(True)
+        self.drift_detail.setObjectName("Muted")
+        drift_lay.addWidget(self.drift_title)
+        drift_lay.addWidget(self.drift_detail)
+
+        drift_actions = QHBoxLayout()
+        drift_reapply = QPushButton("Réappliquer SSR")
+        drift_reapply.setObjectName("Primary")
+        drift_reapply.clicked.connect(self._force_reapply)
+        self._register_obs_connected_control(drift_reapply)
+        drift_actions.addWidget(drift_reapply)
+
+        drift_adopt = QPushButton("Adopter l’état OBS…")
+        drift_adopt.clicked.connect(self._guided_capture_current_state)
+        self._register_obs_connected_control(
+            drift_adopt,
+            requires_edit_mode=True,
+        )
+        drift_actions.addWidget(drift_adopt)
+
+        drift_ignore = QPushButton("Ignorer cet écart")
+        drift_ignore.clicked.connect(self._ignore_current_obs_drift)
+        drift_actions.addWidget(drift_ignore)
+        drift_actions.addStretch(1)
+        drift_lay.addLayout(drift_actions)
+        self.drift_card.setVisible(False)
+        root.addWidget(self.drift_card)
 
         maintenance_card, maintenance_lay = self._card("Santé et maintenance")
         maintenance_hint = QLabel(
@@ -3103,6 +3174,7 @@ class MainWindow(QMainWindow):
         self._schedule_dashboard_refresh()
 
     def _on_state_change(self, change: StateChange) -> None:
+        self._ignored_drift_signature = ""
         values = change.current.as_variables()
         for key, label in self.state_labels.items():
             label.setText(values.get(key, "—"))
@@ -3149,8 +3221,12 @@ class MainWindow(QMainWindow):
             "obs_command_result",
             "manual_override",
             "manual_override_released",
+            "obs_drift",
+            "obs_drift_cleared",
         }:
             self._schedule_dashboard_refresh()
+        if event.kind == "obs_drift_cleared":
+            self._ignored_drift_signature = ""
         if event.kind == "routing_rule" and isinstance(event.payload, dict):
             rule_name = str(event.payload.get("rule_name") or "—")
             reason = str(event.payload.get("reason") or "état inchangé")
