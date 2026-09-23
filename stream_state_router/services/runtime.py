@@ -1181,6 +1181,15 @@ class RoutingService:
             options["name"] = str(profile_name)
         return self.submit_obs_command(f"layout.{action}", options=options)
 
+    def request_layout_catalog(self, scene: str) -> str:
+        scene_name = str(scene or "").strip()
+        if not scene_name:
+            raise ValueError("scene requise")
+        return self.submit_obs_command(
+            "layout.catalog",
+            options={"scene": scene_name},
+        )
+
     def explain_decision(
         self,
         app: ForegroundApp | None = None,
@@ -2866,6 +2875,34 @@ class RoutingService:
                         str(command.options.get("domain") or ""),
                         str(command.options.get("name") or ""),
                     )
+                elif command.action == "layout.catalog":
+                    scene = str(command.options.get("scene") or "").strip()
+                    if not scene:
+                        raise ValueError("scene requise")
+                    manager = self.dispatcher.layout_manager
+                    catalog = manager.discover_scene(scene)
+                    result = {
+                        "scene": scene,
+                        "catalog": {
+                            str(module_name): [
+                                {
+                                    "scene": str(element.scene),
+                                    "container": str(element.container),
+                                    "path": list(element.path),
+                                    "container_kind": str(element.container_kind),
+                                    "module": str(element.module),
+                                    "element": str(element.element),
+                                    "source": str(element.source),
+                                    "enabled": bool(element.enabled),
+                                    "transform": dict(element.transform),
+                                    "source_type": str(element.source_type),
+                                    "flags": sorted(str(flag) for flag in element.flags),
+                                }
+                                for element in elements
+                            ]
+                            for module_name, elements in catalog.items()
+                        },
+                    }
                 elif command.action == "layout.apply":
                     result = self.dispatcher.execute_layout_profile(
                         str(command.options.get("name") or "")
