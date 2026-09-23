@@ -164,6 +164,50 @@ class ConfigInsightsTests(unittest.TestCase):
             )
         )
 
+    def test_static_health_finds_same_priority_overlap(self) -> None:
+        config = _config()
+        left = copy.deepcopy(config["rules"][0])
+        left["name"] = "Overwatch streaming"
+        left["priority"] = 100
+        left["conditions"] = {"streaming": True}
+        right = copy.deepcopy(config["rules"][0])
+        right["name"] = "Overwatch scene"
+        right["priority"] = 100
+        right["conditions"] = {"program_scene": "In Game"}
+        config["rules"] = [left, right]
+
+        findings = build_static_health_findings(config)
+
+        self.assertTrue(
+            any(
+                item.title == "Règles concurrentes à même priorité"
+                for item in findings
+            ),
+            findings,
+        )
+
+    def test_static_health_does_not_flag_mutually_exclusive_conditions(self) -> None:
+        config = _config()
+        left = copy.deepcopy(config["rules"][0])
+        left["name"] = "Streaming"
+        left["priority"] = 100
+        left["conditions"] = {"streaming": True}
+        right = copy.deepcopy(config["rules"][0])
+        right["name"] = "Not streaming"
+        right["priority"] = 100
+        right["conditions"] = {"streaming": False}
+        config["rules"] = [left, right]
+
+        findings = build_static_health_findings(config)
+
+        self.assertFalse(
+            any(
+                item.title == "Règles concurrentes à même priorité"
+                for item in findings
+            ),
+            findings,
+        )
+
     def test_capability_report_reflects_used_host_features(self) -> None:
         config = _config()
         config["profiles"]["audio"]["Game"]["actions"] = [
