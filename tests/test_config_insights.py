@@ -14,6 +14,7 @@ from stream_state_router.importers.scene_collection import (
 from stream_state_router.services.config_insights import (
     apply_reference_repairs,
     build_capability_report,
+    build_effective_dependency_tree,
     build_effective_provenance,
     build_static_health_findings,
     detach_profile_inheritance,
@@ -263,6 +264,45 @@ class ConfigInsightsTests(unittest.TestCase):
         )
         self.assertEqual(entries[0].target, "In Game")
         self.assertEqual(entries[1].target, "25 ms")
+
+    def test_dependency_tree_tracks_decision_domains_and_content_origin(self) -> None:
+        config = _config()
+        config["profiles"]["game"]["Base"] = {
+            "actions": [
+                {
+                    "type": "wait_ms",
+                    "name": "Base delay",
+                    "enabled": True,
+                    "params": {"duration_ms": 10},
+                }
+            ],
+            "extends": "",
+            "conditions": {},
+        }
+        config["profiles"]["game"]["Overwatch"]["extends"] = "Base"
+        explanation = {
+            "routing": {
+                "kind": "match",
+                "rule_name": "Overwatch",
+                "effective_state": config["rules"][0]["state"],
+            }
+        }
+
+        tree = build_effective_dependency_tree(config, explanation)
+
+        self.assertEqual(tree.label, "Décision courante")
+        self.assertEqual(tree.value, "Règle « Overwatch »")
+        game = next(node for node in tree.children if node.label == "Jeu")
+        self.assertEqual(game.value, "Overwatch")
+        origins = {node.value: node for node in game.children}
+        self.assertIn("Base", origins)
+        self.assertIn("Overwatch", origins)
+        self.assertTrue(
+            any(
+                child.value == "Base delay"
+                for child in origins["Base"].children
+            )
+        )
 
     def test_effective_provenance_includes_lineage_and_selection_source(self) -> None:
         config = _config()
