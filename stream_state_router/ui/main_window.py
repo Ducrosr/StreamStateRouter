@@ -3825,6 +3825,7 @@ class MainWindow(QMainWindow):
                 and bool(self._applied_revision)
                 and self._saved_revision != self._applied_revision
             ),
+            drift_status=service.drift_status(),
         )
 
         dialog = QDialog(self)
