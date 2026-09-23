@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from stream_state_router.ui.presentation import (
+    build_automation_rows,
     build_dashboard_snapshot,
     build_diagnostic_report,
     build_simulation_report,
@@ -354,6 +355,57 @@ class DashboardPresentationTests(unittest.TestCase):
 
         self.assertFalse(report.would_change)
         self.assertIn("conserverait", report.summary)
+
+
+    def test_automation_rows_translate_rules_and_fallback(self) -> None:
+        config = {
+            "rules": [
+                {
+                    "name": "Overwatch",
+                    "enabled": True,
+                    "priority": 100,
+                    "behavior": "match",
+                    "exe": "Overwatch.exe",
+                    "state": {
+                        "Game": "Overwatch",
+                        "OverlayProfile": "FPS",
+                        "CaptureProfile": "HDR",
+                        "AudioProfile": "Game",
+                        "LayoutProfile": "FPS",
+                    },
+                    "conditions": {},
+                },
+                {
+                    "name": "Launcher",
+                    "enabled": False,
+                    "priority": 200,
+                    "behavior": "ignore",
+                    "exe": "Launcher.exe",
+                    "conditions": {},
+                },
+            ],
+            "router": {
+                "fallback_state": {
+                    "Game": "Vanilla",
+                    "OverlayProfile": "Vanilla",
+                    "CaptureProfile": "Default",
+                    "AudioProfile": "Default",
+                    "LayoutProfile": "Vanilla",
+                }
+            },
+        }
+
+        rows = build_automation_rows(config)
+
+        self.assertEqual(rows[0].name, "Launcher")
+        self.assertEqual(rows[0].status, "Désactivée")
+        self.assertIn("Launcher.exe", rows[0].trigger)
+        self.assertEqual(rows[0].result, "Conserver l’état courant")
+        overwatch = next(row for row in rows if row.name == "Overwatch")
+        self.assertIn("Overwatch.exe", overwatch.trigger)
+        self.assertIn("Jeu=Overwatch", overwatch.result)
+        self.assertEqual(rows[-1].name, "Configuration de secours")
+        self.assertIn("aucune règle", rows[-1].trigger)
 
     def test_translates_planned_and_manual_hold_statuses(self) -> None:
         snapshot = build_dashboard_snapshot(
