@@ -626,14 +626,11 @@ def _rule_trigger_text(rule: Mapping[str, object]) -> str:
 
     if exe:
         parts.append(f"{exe} au premier plan")
-    elif path:
-        parts.append(f"application au chemin {path}")
-    elif title_regex:
-        parts.append(f"titre de fenêtre correspondant à /{title_regex}/")
-    elif process_running:
-        parts.append(f"{process_running} lancé")
-
-    if exe and process_running:
+    if path:
+        parts.append(f"chemin {path}")
+    if title_regex:
+        parts.append(f"titre correspondant à /{title_regex}/")
+    if process_running:
         parts.append(f"{process_running} lancé")
     if conditions.get("streaming") is True:
         parts.append("stream actif")
