@@ -1300,6 +1300,7 @@ def build_capability_report(
     catalog_status: Mapping[str, Any] | None = None,
     audio_probe: Mapping[str, Any] | None = None,
     hdr_probe: Mapping[str, Any] | None = None,
+    include_catalog: bool = True,
 ) -> CapabilityReport:
     action_types = configured_action_types(config)
     findings = build_static_health_findings(config)
@@ -1335,40 +1336,41 @@ def build_capability_report(
             )
         )
 
-    catalog = _mapping(catalog_status)
-    if not obs_enabled:
-        catalog_status_name = "disabled"
-        catalog_detail = "Catalogue indisponible tant qu’OBS est désactivé."
-    elif not obs_connected:
-        catalog_status_name = "warning"
-        catalog_detail = "Catalogue non vérifiable sans connexion OBS."
-    elif not bool(catalog.get("available", False)):
-        catalog_status_name = "warning"
-        catalog_detail = "Le catalogue OBS n’a pas encore été synchronisé."
-    elif bool(catalog.get("stale", False)):
-        catalog_status_name = "warning"
-        catalog_detail = (
-            "Catalogue OBS périmé : "
-            + str(catalog.get("stale_reason") or "resynchronisation requise")
+    if include_catalog:
+        catalog = _mapping(catalog_status)
+        if not obs_enabled:
+            catalog_status_name = "disabled"
+            catalog_detail = "Catalogue indisponible tant qu’OBS est désactivé."
+        elif not obs_connected:
+            catalog_status_name = "warning"
+            catalog_detail = "Catalogue non vérifiable sans connexion OBS."
+        elif not bool(catalog.get("available", False)):
+            catalog_status_name = "warning"
+            catalog_detail = "Le catalogue OBS n’a pas encore été synchronisé."
+        elif bool(catalog.get("stale", False)):
+            catalog_status_name = "warning"
+            catalog_detail = (
+                "Catalogue OBS périmé : "
+                + str(catalog.get("stale_reason") or "resynchronisation requise")
+            )
+        else:
+            catalog_status_name = "ready"
+            catalog_detail = (
+                f"{int(catalog.get('scenes', 0) or 0)} scène(s), "
+                f"{int(catalog.get('inputs', 0) or 0)} input(s), "
+                f"{int(catalog.get('scene_items', 0) or 0)} Scene Item(s)."
+            )
+        items.append(
+            _capability_item(
+                "catalog",
+                "Catalogue OBS",
+                catalog_status_name,
+                catalog_detail,
+                "Synchronisez le catalogue OBS si des références ont changé."
+                if catalog_status_name == "warning"
+                else "",
+            )
         )
-    else:
-        catalog_status_name = "ready"
-        catalog_detail = (
-            f"{int(catalog.get('scenes', 0) or 0)} scène(s), "
-            f"{int(catalog.get('inputs', 0) or 0)} input(s), "
-            f"{int(catalog.get('scene_items', 0) or 0)} Scene Item(s)."
-        )
-    items.append(
-        _capability_item(
-            "catalog",
-            "Catalogue OBS",
-            catalog_status_name,
-            catalog_detail,
-            "Synchronisez le catalogue OBS si des références ont changé."
-            if catalog_status_name == "warning"
-            else "",
-        )
-    )
 
     audio_used = "app_audio_output" in action_types
     audio = _mapping(audio_probe)
