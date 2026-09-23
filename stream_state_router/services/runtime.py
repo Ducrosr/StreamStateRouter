@@ -695,6 +695,21 @@ class RoutingService:
         else:
             duration = None
 
+        stream_seen_active = False
+        if (
+            mode == "stream_end"
+            and hasattr(self.dispatcher, "cached_obs_context")
+        ):
+            try:
+                cached_context = self.dispatcher.cached_obs_context()
+                stream_seen_active = (
+                    cached_context.get("streaming") is True
+                    if isinstance(cached_context, Mapping)
+                    else False
+                )
+            except Exception:
+                stream_seen_active = False
+
         with self._lock:
             baseline = self._last_meaningful_app
             if mode == "foreground_change" and baseline is None:
@@ -708,7 +723,10 @@ class RoutingService:
                 if mode == "foreground_change"
                 else None
             )
-            self._manual_override_stream_seen_active = False
+            # cached_obs_context() is deliberately read-only: it prevents a
+            # very short live session from being missed without issuing OBS I/O
+            # from the caller/UI thread.
+            self._manual_override_stream_seen_active = stream_seen_active
             self._manual_override_next_stream_probe = (
                 time.monotonic()
                 if mode == "stream_end"
