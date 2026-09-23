@@ -7,6 +7,7 @@ import json
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from ..obs.layouts import resolve_layout_profile
 from ..router.models import ForegroundApp
 from .config import build_ruleset, validate_config
 
@@ -337,6 +338,57 @@ def profile_content_entries(
                 )
             )
     return tuple(entries)
+
+
+def detach_profile_inheritance(
+    config: Mapping[str, Any],
+    domain: str,
+    profile_name: str,
+) -> tuple[dict[str, Any], bool]:
+    name = str(profile_name or "").strip()
+    if not name:
+        return copy.deepcopy(dict(config)), False
+
+    draft = copy.deepcopy(dict(config))
+    profiles = _profile_maps(draft, domain)
+    raw = profiles.get(name)
+    if not isinstance(raw, dict):
+        return draft, False
+    parent = str(raw.get("extends") or "").strip()
+    if not parent:
+        return draft, False
+
+    if domain == "layout":
+        resolved = resolve_layout_profile(
+            name,
+            _mapping(draft.get("layout_profiles")),
+        )
+        resolved["extends"] = ""
+        layout_profiles = draft.get("layout_profiles")
+        if not isinstance(layout_profiles, dict):
+            raise ValueError("config.layout_profiles doit être un objet.")
+        layout_profiles[name] = resolved
+        return draft, True
+
+    lineage = profile_lineage(draft, domain, name)
+    domain_profiles = _mapping(_mapping(draft.get("profiles")).get(domain))
+    actions: list[object] = []
+    conditions: dict[str, object] = {}
+    for source_name in reversed(lineage):
+        source = domain_profiles.get(source_name)
+        if not isinstance(source, Mapping):
+            continue
+        source_actions = source.get("actions")
+        if isinstance(source_actions, list):
+            actions.extend(copy.deepcopy(source_actions))
+        source_conditions = source.get("conditions")
+        if isinstance(source_conditions, Mapping):
+            conditions.update(copy.deepcopy(dict(source_conditions)))
+
+    raw["actions"] = actions
+    raw["conditions"] = conditions
+    raw["extends"] = ""
+    return draft, True
 
 
 def _profile_content_summary(
