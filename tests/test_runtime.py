@@ -83,15 +83,23 @@ class StreamingContextDispatcher(ThreadRecordingDispatcher):
         super().__init__()
         self.streaming = bool(streaming)
         self.context_calls = 0
+        self.cached_context_calls = 0
 
-    def obs_context(self, *, force_refresh=False):
-        self.context_calls += 1
+    def _context(self):
         return {
             "obs_enabled": True,
             "streaming": self.streaming,
             "recording": False,
             "program_scene": "In Game",
         }
+
+    def obs_context(self, *, force_refresh=False):
+        self.context_calls += 1
+        return self._context()
+
+    def cached_obs_context(self):
+        self.cached_context_calls += 1
+        return self._context()
 
 
 class DiagnosticDispatcher(FakeDispatcher):
@@ -3095,6 +3103,25 @@ class RuntimeTests(unittest.TestCase):
                 StreamState(game="Manual"),
                 release_mode="foreground_change",
             )
+
+    def test_stream_end_override_seeds_active_state_from_cache_without_obs_io(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = StreamingContextDispatcher(streaming=True)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+
+        service.set_manual_override(
+            StreamState(game="Manual"),
+            release_mode="stream_end",
+        )
+
+        status = service.manual_override_status()
+        self.assertTrue(status["stream_seen_active"])
+        self.assertEqual(dispatcher.cached_context_calls, 1)
+        self.assertEqual(dispatcher.context_calls, 0)
 
     def test_stream_end_override_waits_for_active_then_releases(self):
         app = ForegroundApp(1, 101, "game.exe")
