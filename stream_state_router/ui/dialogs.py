@@ -1007,43 +1007,80 @@ class CurrentStateCaptureDialog(QDialog):
         capture_title.setObjectName("Section")
         root.addWidget(capture_title)
 
-        self.input_settings = QCheckBox(
-            "Réglages des sources présentes dans la scène courante"
-        )
+        def ownership_combo(default_domain: str) -> QComboBox:
+            box = QComboBox()
+            box.addItem("GameProfile", "game")
+            box.addItem("OverlayProfile", "overlay")
+            box.addItem("CaptureProfile", "capture")
+            box.addItem("AudioProfile", "audio")
+            index = box.findData(default_domain)
+            box.setCurrentIndex(max(0, index))
+            return box
+
+        ownership_form = QFormLayout()
+
+        self.input_settings = QCheckBox("Prendre sous contrôle")
         self.input_settings.setChecked(True)
-        self.audio_state = QCheckBox(
-            "Mute et volume des sources audio présentes dans la scène"
-        )
+        self.input_settings_domain = ownership_combo("game")
+        input_row = QHBoxLayout()
+        input_row.addWidget(self.input_settings)
+        input_row.addWidget(QLabel("→"))
+        input_row.addWidget(self.input_settings_domain, 1)
+        ownership_form.addRow("Réglages des sources", input_row)
+
+        self.audio_state = QCheckBox("Prendre sous contrôle")
         self.audio_state.setChecked(True)
-        self.filters = QCheckBox(
-            "État et paramètres des filtres des sources de la scène"
-        )
+        self.audio_state_domain = ownership_combo("audio")
+        audio_row = QHBoxLayout()
+        audio_row.addWidget(self.audio_state)
+        audio_row.addWidget(QLabel("→"))
+        audio_row.addWidget(self.audio_state_domain, 1)
+        ownership_form.addRow("Mute et volume OBS", audio_row)
+
+        self.filters = QCheckBox("Prendre sous contrôle")
         self.filters.setChecked(True)
-        self.visibility = QCheckBox(
-            "Visibilité des Scene Items non ambigus de la scène courante"
-        )
+        self.filters_domain = ownership_combo("capture")
+        filters_row = QHBoxLayout()
+        filters_row.addWidget(self.filters)
+        filters_row.addWidget(QLabel("→"))
+        filters_row.addWidget(self.filters_domain, 1)
+        ownership_form.addRow("Filtres OBS", filters_row)
+
+        self.visibility = QCheckBox("Prendre sous contrôle")
         self.visibility.setChecked(bool(current_scene))
         self.visibility.setEnabled(bool(current_scene))
+        self.visibility_domain = ownership_combo("overlay")
+        self.visibility_domain.setEnabled(bool(current_scene))
+        visibility_row = QHBoxLayout()
+        visibility_row.addWidget(self.visibility)
+        visibility_row.addWidget(QLabel("→"))
+        visibility_row.addWidget(self.visibility_domain, 1)
+        ownership_form.addRow("Visibilité des Scene Items", visibility_row)
+
         self.layout = QCheckBox(
-            "Disposition des modules de la scène courante"
+            "Prendre la disposition des modules sous contrôle → LayoutProfile"
         )
         self.layout.setChecked(bool(current_scene))
         self.layout.setEnabled(bool(current_scene))
+        ownership_form.addRow("Disposition", self.layout)
 
-        for widget in (
-            self.input_settings,
-            self.audio_state,
-            self.filters,
-            self.visibility,
-            self.layout,
+        root.addLayout(ownership_form)
+
+        for checkbox, combo in (
+            (self.input_settings, self.input_settings_domain),
+            (self.audio_state, self.audio_state_domain),
+            (self.filters, self.filters_domain),
+            (self.visibility, self.visibility_domain),
         ):
-            root.addWidget(widget)
+            checkbox.toggled.connect(combo.setEnabled)
+            combo.setEnabled(checkbox.isChecked())
 
         scope_note = QLabel(
-            "Périmètre sûr : l’assistant ne capture pas toute la collection OBS. "
-            "Il limite les réglages aux sources directement présentes dans la "
-            "scène programme courante. Overlay/Capture/Audio ne sont jamais "
-            "devinés : une nouvelle règle reprend l’état logique déjà actif."
+            "Périmètre sûr : chaque ligne cochée devient explicitement gérée "
+            "par le domaine choisi. Pour une nouvelle règle, SSR crée un profil "
+            "dédié lorsqu’il faudrait sinon modifier un profil Overlay/Capture/"
+            "Audio déjà utilisé ailleurs. Les lignes décochées restent hors du "
+            "contrôle de la capture."
         )
         scope_note.setWordWrap(True)
         scope_note.setObjectName("Muted")
@@ -1109,6 +1146,18 @@ class CurrentStateCaptureDialog(QDialog):
             "include_filters": self.filters.isChecked(),
             "include_visibility": self.visibility.isChecked(),
             "include_layout": self.layout.isChecked(),
+            "input_settings_domain": str(
+                self.input_settings_domain.currentData() or "game"
+            ),
+            "audio_state_domain": str(
+                self.audio_state_domain.currentData() or "audio"
+            ),
+            "filters_domain": str(
+                self.filters_domain.currentData() or "capture"
+            ),
+            "visibility_domain": str(
+                self.visibility_domain.currentData() or "overlay"
+            ),
         }
 
 
