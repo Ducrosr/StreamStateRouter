@@ -611,15 +611,50 @@ def user_activity_from_runtime_event(
                 "Configuration appliquée",
                 str(payload.get("rule_name") or "").strip(),
             )
-        details = (
-            list(payload.get("failed_domains") or [])
-            + list(payload.get("blocked_domains") or [])
-            + list(payload.get("pending_domains") or [])
-        )
+
+        def normalized_domains(value: object) -> list[tuple[str, str]]:
+            raw = value if isinstance(value, (list, tuple)) else ()
+            seen: set[str] = set()
+            result: list[tuple[str, str]] = []
+            for item in raw:
+                domain = str(item or "").strip()
+                if not domain:
+                    continue
+                key = domain.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append((key, DOMAIN_LABELS.get(key, domain)))
+            return result
+
+        failed = normalized_domains(payload.get("failed_domains"))
+        blocked = normalized_domains(payload.get("blocked_domains"))
+        pending = normalized_domains(payload.get("pending_domains"))
+        claimed = {key for key, _label in failed + blocked}
+        pending = [
+            (key, label)
+            for key, label in pending
+            if key not in claimed
+        ]
+
+        parts: list[str] = []
+        if failed:
+            parts.append(
+                "Échec : " + ", ".join(label for _key, label in failed)
+            )
+        if blocked:
+            parts.append(
+                "Bloqué : " + ", ".join(label for _key, label in blocked)
+            )
+        if pending:
+            parts.append(
+                "En attente : " + ", ".join(label for _key, label in pending)
+            )
+
         return UserActivityEntry(
-            "Bad" if payload.get("failed_domains") else "Warn",
+            "Bad" if failed else "Warn",
             "Application incomplète",
-            ", ".join(str(item) for item in details if str(item).strip()),
+            " · ".join(parts),
         )
     return None
 
