@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 import unittest
 
 from stream_state_router.ui.presentation import (
@@ -8,6 +9,7 @@ from stream_state_router.ui.presentation import (
     build_diagnostic_report,
     build_manual_override_presentation,
     build_simulation_report,
+    render_capability_report_text,
     user_activity_from_runtime_event,
 )
 
@@ -437,6 +439,45 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIsNotNone(connected)
         assert connected is not None
         self.assertEqual(connected.message, "OBS connecté")
+
+    def test_capability_report_text_is_readable_and_complete(self) -> None:
+        report = SimpleNamespace(
+            summary="1 erreur · 1 avertissement",
+            items=(
+                SimpleNamespace(
+                    label="OBS WebSocket",
+                    status_label="Erreur",
+                    detail="timed out",
+                    action="Vérifiez OBS.",
+                ),
+                SimpleNamespace(
+                    label="HDR Windows",
+                    status_label="Prêt",
+                    detail="HDR activé",
+                    action="",
+                ),
+            ),
+            findings=(
+                SimpleNamespace(
+                    severity="warning",
+                    title="LayoutProfile non référencé",
+                    detail="Test A",
+                    action="Conservez-le ou nettoyez-le.",
+                ),
+            ),
+        )
+
+        text = render_capability_report_text(
+            report,
+            version="2.1.0",
+        )
+
+        self.assertIn("Stream State Router 2.1.0", text)
+        self.assertIn("OBS WebSocket: Erreur", text)
+        self.assertIn("Détail : timed out", text)
+        self.assertIn("HDR Windows: Prêt", text)
+        self.assertIn("Santé de la configuration", text)
+        self.assertIn("À vérifier : LayoutProfile non référencé", text)
 
     def test_user_activity_summarizes_incomplete_routing(self) -> None:
         activity = user_activity_from_runtime_event(
