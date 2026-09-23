@@ -356,6 +356,519 @@ class MainWindow(QMainWindow):
                 item.setToolTip(3, difference.message)
             self.dashboard_diff.addTopLevelItem(item)
 
+    def _show_capability_report(self) -> None:
+        service = self._service
+        client = self._client
+        self._collect_settings()
+
+        action_types = configured_action_types(self.config)
+        audio_probe: dict[str, object] = {}
+        hdr_probe: dict[str, object] = {}
+        controller = None
+        if (
+            "app_audio_output" in action_types
+            or "windows_hdr" in action_types
+        ):
+            try:
+                controller = build_host_controller(self.config)
+            except Exception as exc:
+                detail = str(exc)
+                if "app_audio_output" in action_types:
+                    audio_probe = {
+                        "status": "error",
+                        "detail": detail,
+                    }
+                if "windows_hdr" in action_types:
+                    hdr_probe = {
+                        "status": "error",
+                        "detail": detail,
+                    }
+
+        if "app_audio_output" in action_types and controller is not None:
+            try:
+                executable = controller.audio_router.resolve_executable()
+                audio_probe = {
+                    "status": "ready",
+                    "detail": f"SoundVolumeView disponible : {executable}",
+                }
+            except Exception as exc:
+                audio_probe = {
+                    "status": "error",
+                    "detail": str(exc),
+                    "action": (
+                        "Configurez SoundVolumeView dans Paramètres > "
+                        "Contrôle Windows."
+                    ),
+                }
+
+        if "windows_hdr" in action_types and controller is not None:
+            try:
+                rows = controller.hdr_controller.status(scope="primary")
+                supported = [
+                    row for row in rows
+                    if bool(row.get("supported", False))
+                ]
+                if supported:
+                    enabled = any(
+                        bool(row.get("enabled", False))
+                        for row in supported
+                    )
+                    hdr_probe = {
+                        "status": "ready",
+                        "detail": (
+                            "HDR pris en charge sur l’écran principal · "
+                            + ("actuellement activé" if enabled else "actuellement désactivé")
+                        ),
+                    }
+                else:
+                    hdr_probe = {
+                        "status": "error",
+                        "detail": (
+                            "Aucun écran principal compatible HDR n’a été "
+                            "détecté par l’API Windows."
+                        ),
+                    }
+            except Exception as exc:
+                hdr_probe = {
+                    "status": "error",
+                    "detail": str(exc),
+                    "action": (
+                        "Vérifiez la prise en charge HDR de Windows et de "
+                        "l’écran ciblé."
+                    ),
+                }
+
+        catalog_status = (
+            service.obs_catalog_status()
+            if service is not None
+            else {"available": False, "stale": False}
+        )
+        report = build_capability_report(
+            self.config,
+            obs_enabled=bool(client and client.config.enabled),
+            obs_connected=bool(client and client.connected),
+            obs_error=str(client.last_error if client else ""),
+            catalog_status=catalog_status,
+            audio_probe=audio_probe,
+            hdr_probe=hdr_probe,
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Santé et capacités SSR")
+        dialog.resize(900, 620)
+        root = QVBoxLayout(dialog)
+
+        title = QLabel(report.summary)
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        capabilities = QTreeWidget()
+        capabilities.setColumnCount(4)
+        capabilities.setHeaderLabels(
+            ["Capacité", "État", "Détail", "Action recommandée"]
+        )
+        capabilities.setRootIsDecorated(False)
+        capabilities.setAlternatingRowColors(True)
+        for item in report.items:
+            capabilities.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        item.label,
+                        item.status_label,
+                        item.detail,
+                        item.action,
+                    ]
+                )
+            )
+        capabilities.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        capabilities.header().setStretchLastSection(True)
+        root.addWidget(capabilities, 1)
+
+        if report.findings:
+            findings_title = QLabel("Santé de la configuration")
+            findings_title.setObjectName("Section")
+            root.addWidget(findings_title)
+            findings = QTreeWidget()
+            findings.setColumnCount(4)
+            findings.setHeaderLabels(
+                ["Niveau", "Diagnostic", "Détail", "Action"]
+            )
+            findings.setRootIsDecorated(False)
+            findings.setAlternatingRowColors(True)
+            findings.setMaximumHeight(220)
+            severity_label = {
+                "error": "Erreur",
+                "warning": "À vérifier",
+                "info": "Information",
+            }
+            for finding in report.findings:
+                findings.addTopLevelItem(
+                    QTreeWidgetItem(
+                        [
+                            severity_label.get(
+                                finding.severity,
+                                finding.severity,
+                            ),
+                            finding.title,
+                            finding.detail,
+                            finding.action,
+                        ]
+                    )
+                )
+            findings.header().setSectionResizeMode(
+                QHeaderView.ResizeMode.ResizeToContents
+            )
+            findings.header().setStretchLastSection(True)
+            root.addWidget(findings)
+
+        actions = QHBoxLayout()
+        if service is not None and client is not None and client.connected:
+            sync_catalog = QPushButton("Synchroniser le catalogue OBS")
+            def sync_and_close() -> None:
+                try:
+                    request_id = service.request_catalog_sync()
+                except Exception as exc:
+                    QMessageBox.critical(
+                        dialog,
+                        "Catalogue OBS",
+                        str(exc),
+                    )
+                    return
+                self.statusBar().showMessage(
+                    f"Synchronisation catalogue OBS mise en file ({request_id[:8]}).",
+                    8000,
+                )
+                dialog.accept()
+            sync_catalog.clicked.connect(sync_and_close)
+            actions.addWidget(sync_catalog)
+
+        repair_refs = QPushButton("Réparer les références OBS…")
+        repair_refs.clicked.connect(dialog.accept)
+        repair_refs.clicked.connect(self._start_reference_repair)
+        actions.addWidget(repair_refs)
+
+        restore = QPushButton("Restaurer la dernière sauvegarde…")
+        restore.clicked.connect(dialog.accept)
+        restore.clicked.connect(self._restore_config_backup)
+        actions.addWidget(restore)
+
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _show_effective_provenance(self) -> None:
+        service = self._service
+        if service is None:
+            QMessageBox.warning(
+                self,
+                "Provenance",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        try:
+            explanation = service.explain_decision()
+            rows = build_effective_provenance(
+                self.config,
+                explanation,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Provenance", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Qui contrôle quoi ?")
+        dialog.resize(1000, 520)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Cette vue explique d’où vient chaque profil effectif, son héritage "
+            "et les autres éléments de configuration qui le référencent."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(6)
+        tree.setHeaderLabels(
+            [
+                "Domaine",
+                "Profil effectif",
+                "Sélectionné par",
+                "Héritage",
+                "Contenu effectif",
+                "Utilisé par",
+            ]
+        )
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        for row in rows:
+            lineage = (
+                " ← ".join(row.lineage)
+                if row.lineage
+                else "—"
+            )
+            usage_text = " · ".join(
+                usage.owner for usage in row.usages
+            ) or "—"
+            item = QTreeWidgetItem(
+                [
+                    row.label,
+                    row.profile,
+                    row.selected_by,
+                    lineage,
+                    row.content_summary,
+                    usage_text,
+                ]
+            )
+            if len(row.usages) > 1:
+                item.setToolTip(
+                    5,
+                    (
+                        "Ce profil est partagé. Une modification peut affecter "
+                        "plusieurs règles, le fallback ou des profils enfants."
+                    ),
+                )
+            tree.addTopLevelItem(item)
+        tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setStretchLastSection(True)
+        root.addWidget(tree, 1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        expert = QPushButton("Ouvrir le mode Expert")
+        expert.clicked.connect(dialog.accept)
+        expert.clicked.connect(self._ensure_expert_mode)
+        actions.addWidget(expert)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _start_reference_repair(self) -> None:
+        service = self._service
+        client = self._client
+        if service is None:
+            QMessageBox.warning(
+                self,
+                "Références OBS",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        if (
+            client is None
+            or not client.config.enabled
+            or not client.connected
+        ):
+            QMessageBox.warning(
+                self,
+                "Références OBS",
+                "OBS doit être connecté pour analyser les références.",
+            )
+            return
+        try:
+            request_id = service.request_collection_import_preview(
+                include_layouts=False,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Références OBS", str(exc))
+            return
+        self._pending_collection_imports[request_id] = {
+            "mode": "reference_repair",
+            "domain": "",
+            "profile_name": "",
+            "options": {},
+        }
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Analyse des références OBS démarrée",
+            )
+        )
+        self.statusBar().showMessage(
+            "Analyse des références OBS en cours…",
+            8000,
+        )
+
+    def _show_reference_repair_dialog(self, snapshot) -> None:
+        issues = scan_obs_reference_repairs(self.config, snapshot)
+        if not issues:
+            QMessageBox.information(
+                self,
+                "Références OBS",
+                "Aucune référence OBS cassée n’a été détectée.",
+            )
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Good",
+                    "Références OBS vérifiées",
+                    "Aucune référence cassée détectée",
+                )
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Réparer les références OBS")
+        dialog.resize(1050, 620)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "SSR compare les noms stockés dans la configuration avec la "
+            "collection OBS actuelle. Les propositions floues ne sont jamais "
+            "appliquées automatiquement."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(6)
+        tree.setHeaderLabels(
+            [
+                "Appliquer",
+                "Type",
+                "Emplacement",
+                "Référence actuelle",
+                "Proposition",
+                "Confiance",
+            ]
+        )
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        for index, issue in enumerate(issues):
+            confidence = (
+                f"{issue.confidence * 100:.0f} %"
+                if issue.candidate
+                else "—"
+            )
+            item = QTreeWidgetItem(
+                [
+                    "",
+                    issue.kind,
+                    issue.location,
+                    issue.current,
+                    issue.candidate or "Aucune proposition sûre",
+                    confidence,
+                ]
+            )
+            item.setData(0, Qt.UserRole, index)
+            item.setToolTip(4, issue.reason)
+            if issue.repairable:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(
+                    0,
+                    Qt.Checked
+                    if issue.confidence >= 0.98
+                    else Qt.Unchecked,
+                )
+            else:
+                item.setFlags(
+                    item.flags() & ~Qt.ItemIsUserCheckable
+                )
+            tree.addTopLevelItem(item)
+        tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setStretchLastSection(True)
+        root.addWidget(tree, 1)
+
+        unresolved = sum(1 for item in issues if not item.repairable)
+        note = QLabel(
+            (
+                "Les corrections sélectionnées seront appliquées uniquement au "
+                "brouillon SSR. OBS et le runtime ne changeront qu’après "
+                "« Enregistrer et appliquer »."
+                + (
+                    f" · {unresolved} référence(s) restent sans proposition sûre."
+                    if unresolved
+                    else ""
+                )
+            )
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(dialog.reject)
+        actions.addWidget(cancel)
+        apply_button = QPushButton("Appliquer au brouillon")
+        apply_button.setObjectName("Primary")
+        actions.addWidget(apply_button)
+        root.addLayout(actions)
+
+        def apply_selected() -> None:
+            selected = []
+            for row in range(tree.topLevelItemCount()):
+                item = tree.topLevelItem(row)
+                if item.checkState(0) != Qt.Checked:
+                    continue
+                try:
+                    index = int(item.data(0, Qt.UserRole))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(issues):
+                    selected.append(issues[index])
+            if not selected:
+                QMessageBox.information(
+                    dialog,
+                    "Références OBS",
+                    "Sélectionnez au moins une proposition à appliquer.",
+                )
+                return
+            draft, applied = apply_reference_repairs(
+                self.config,
+                selected,
+            )
+            errors = validate_config(draft)
+            if errors:
+                QMessageBox.critical(
+                    dialog,
+                    "Références OBS",
+                    "Le brouillon réparé n’est pas valide :\n- "
+                    + "\n- ".join(errors),
+                )
+                return
+            if applied <= 0:
+                QMessageBox.information(
+                    dialog,
+                    "Références OBS",
+                    "Aucune référence n’a pu être modifiée.",
+                )
+                return
+
+            self.config = draft
+            self._load_config_into_ui()
+            self._mark_dirty()
+            self._refresh_dashboard_summary()
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Good",
+                    "Références OBS réparées dans le brouillon",
+                    f"{applied} remplacement(s)",
+                )
+            )
+            self.statusBar().showMessage(
+                (
+                    f"{applied} référence(s) réparée(s) dans le brouillon — "
+                    "enregistrez et appliquez pour activer les changements."
+                ),
+                10000,
+            )
+            dialog.accept()
+
+        apply_button.clicked.connect(apply_selected)
+        dialog.exec()
+
     def _card(self, title_text: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("Card")
