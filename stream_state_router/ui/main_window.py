@@ -1113,6 +1113,288 @@ class MainWindow(QMainWindow):
         self._ensure_expert_mode()
         self.tabs.setCurrentIndex(self.rules_tab_index)
 
+    def _show_scenario_simulator(self) -> None:
+        service = self._service
+        app = (
+            service.last_meaningful_app
+            if service is not None
+            else None
+        )
+        context: Mapping[str, object] = {}
+        if service is not None:
+            try:
+                explanation = service.explain_decision(app)
+                raw_plan = (
+                    explanation.get("obs_plan")
+                    if isinstance(explanation, Mapping)
+                    else None
+                )
+                raw_context = (
+                    raw_plan.get("context")
+                    if isinstance(raw_plan, Mapping)
+                    else None
+                )
+                if isinstance(raw_context, Mapping):
+                    context = raw_context
+            except Exception:
+                context = {}
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Simuler un scénario de routage")
+        dialog.resize(900, 650)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Le simulateur utilise exactement les règles et priorités du "
+            "moteur SSR, mais n’applique aucune commande à OBS."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        form = QFormLayout()
+        exe = QLineEdit(str(app.exe_name if app else ""))
+        path = QLineEdit(str(app.process_path if app else ""))
+        title = QLineEdit(str(app.window_title if app else ""))
+        scene = QLineEdit(str(context.get("program_scene") or ""))
+        running = QLineEdit(
+            ", ".join(
+                str(item)
+                for item in (
+                    context.get("running_processes")
+                    if isinstance(
+                        context.get("running_processes"),
+                        (list, tuple),
+                    )
+                    else ()
+                )
+            )
+        )
+
+        def bool_box(current) -> QComboBox:
+            box = QComboBox()
+            box.addItem("Inconnu / non spécifié", None)
+            box.addItem("Non", False)
+            box.addItem("Oui", True)
+            index = box.findData(current)
+            box.setCurrentIndex(max(0, index))
+            return box
+
+        streaming = bool_box(
+            context.get("streaming")
+            if isinstance(context.get("streaming"), bool)
+            else None
+        )
+        recording = bool_box(
+            context.get("recording")
+            if isinstance(context.get("recording"), bool)
+            else None
+        )
+        obs_enabled = bool_box(
+            bool(self._client and self._client.config.enabled)
+        )
+
+        form.addRow("Processus foreground", exe)
+        form.addRow("Chemin", path)
+        form.addRow("Titre de fenêtre", title)
+        form.addRow("Streaming", streaming)
+        form.addRow("Enregistrement", recording)
+        form.addRow("Scène programme", scene)
+        form.addRow("OBS activé", obs_enabled)
+        form.addRow(
+            "Processus actifs (séparés par des virgules)",
+            running,
+        )
+        root.addLayout(form)
+
+        result_label = QLabel("Résultat : —")
+        result_label.setStyleSheet("font-weight: 700;")
+        root.addWidget(result_label)
+
+        checks = QTreeWidget()
+        checks.setColumnCount(5)
+        checks.setHeaderLabels(
+            [
+                "Règle",
+                "Priorité",
+                "Comportement",
+                "Correspond",
+                "Détail",
+            ]
+        )
+        checks.setRootIsDecorated(False)
+        checks.setAlternatingRowColors(True)
+        checks.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        checks.header().setStretchLastSection(True)
+        root.addWidget(checks, 1)
+
+        actions = QHBoxLayout()
+        simulate = QPushButton("Simuler")
+        simulate.setObjectName("Primary")
+        actions.addWidget(simulate)
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+
+        def run_simulation() -> None:
+            processes = tuple(
+                item.strip()
+                for item in running.text().split(",")
+                if item.strip()
+            )
+            try:
+                report = simulate_rule_scenario(
+                    self.config,
+                    exe=exe.text().strip(),
+                    path=path.text().strip(),
+                    title=title.text(),
+                    streaming=streaming.currentData(),
+                    recording=recording.currentData(),
+                    program_scene=scene.text().strip(),
+                    obs_enabled=obs_enabled.currentData(),
+                    running_processes=processes,
+                )
+            except Exception as exc:
+                QMessageBox.critical(
+                    dialog,
+                    "Simulation",
+                    str(exc),
+                )
+                return
+
+            if report.kind == "match":
+                game = (
+                    str(report.state.get("Game") or "")
+                    if report.state is not None
+                    else ""
+                )
+                result_label.setText(
+                    f"Résultat : {report.rule_name} → {game or 'état MATCH'}"
+                )
+            elif report.kind == "fallback":
+                result_label.setText(
+                    "Résultat : configuration de secours"
+                )
+            elif report.kind == "ignore":
+                result_label.setText(
+                    f"Résultat : IGNORE ({report.rule_name})"
+                )
+            else:
+                result_label.setText(
+                    f"Résultat : {report.kind or '—'}"
+                )
+
+            checks.clear()
+            for check in report.checks:
+                checks.addTopLevelItem(
+                    QTreeWidgetItem(
+                        [
+                            check.name,
+                            str(check.priority),
+                            check.behavior,
+                            "Oui" if check.matched else "Non",
+                            check.reason,
+                        ]
+                    )
+                )
+
+        simulate.clicked.connect(run_simulation)
+        run_simulation()
+        dialog.exec()
+
+    def _show_profile_impact(
+        self,
+        domain: str,
+        profile_name: str,
+    ) -> None:
+        usages = profile_usages(
+            self.config,
+            domain,
+            profile_name,
+        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            f"Impact du profil {profile_name}"
+        )
+        dialog.resize(760, 440)
+        root = QVBoxLayout(dialog)
+
+        label = DOMAIN_LABELS.get(domain, domain)
+        title = QLabel(f"{label} · {profile_name}")
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        if usages:
+            intro = QLabel(
+                (
+                    f"{len(usages)} référence(s) utilisent ce profil. "
+                    "Une modification peut donc affecter les éléments "
+                    "ci-dessous."
+                )
+            )
+        else:
+            intro = QLabel(
+                "Ce profil n’est actuellement référencé ni par une règle, "
+                "ni par le fallback, ni par un profil enfant."
+            )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(
+            ["Type de dépendance", "Utilisateur", "Détail"]
+        )
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        kind_labels = {
+            "rule": "Règle",
+            "fallback": "Fallback",
+            "inheritance": "Héritage",
+        }
+        for usage in usages:
+            tree.addTopLevelItem(
+                QTreeWidgetItem(
+                    [
+                        kind_labels.get(usage.kind, usage.kind),
+                        usage.owner,
+                        usage.detail,
+                    ]
+                )
+            )
+        tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setStretchLastSection(True)
+        root.addWidget(tree, 1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        actions.addWidget(close)
+        root.addLayout(actions)
+        dialog.exec()
+
+    def _show_current_profile_impact(self) -> None:
+        current = self._current_profile()
+        if current is None:
+            return
+        domain, name, _profile = current
+        self._show_profile_impact(domain, name)
+
+    def _show_current_layout_impact(self) -> None:
+        current = self._current_layout_profile()
+        if current is None:
+            return
+        name, _profile = current
+        self._show_profile_impact("layout", name)
+
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
