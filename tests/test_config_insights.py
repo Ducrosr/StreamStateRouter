@@ -106,6 +106,43 @@ class ConfigInsightsTests(unittest.TestCase):
         self.assertIn("fallback", kinds)
         self.assertIn("inheritance", kinds)
 
+    def test_profile_content_entries_identify_parent_and_local_ownership(self) -> None:
+        config = _config()
+        config["profiles"]["game"]["Base"] = {
+            "actions": [
+                {
+                    "type": "set_program_scene",
+                    "name": "Parent scene",
+                    "enabled": True,
+                    "params": {"scene": "In Game"},
+                }
+            ],
+            "extends": "",
+            "conditions": {},
+        }
+        config["profiles"]["game"]["Overwatch"]["extends"] = "Base"
+        config["profiles"]["game"]["Overwatch"]["actions"] = [
+            {
+                "type": "wait_ms",
+                "name": "Local delay",
+                "enabled": True,
+                "params": {"duration_ms": 25},
+            }
+        ]
+
+        entries = profile_content_entries(
+            config,
+            "game",
+            "Overwatch",
+        )
+
+        self.assertEqual(
+            [entry.source_profile for entry in entries],
+            ["Base", "Overwatch"],
+        )
+        self.assertEqual(entries[0].target, "In Game")
+        self.assertEqual(entries[1].target, "25 ms")
+
     def test_effective_provenance_includes_lineage_and_selection_source(self) -> None:
         config = _config()
         config["profiles"]["game"]["Base OW"] = {
