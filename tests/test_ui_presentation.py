@@ -5,6 +5,7 @@ import unittest
 from stream_state_router.ui.presentation import (
     build_dashboard_snapshot,
     build_diagnostic_report,
+    build_simulation_report,
     user_activity_from_runtime_event,
 )
 
@@ -307,6 +308,52 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(activity.message, "Application incomplète")
         self.assertIn("layout", activity.detail)
         self.assertIn("capture", activity.detail)
+
+
+    def test_simulation_report_is_read_only_plan_summary(self) -> None:
+        report = build_simulation_report(
+            _explanation(
+                domains=[
+                    {
+                        "domain": "capture",
+                        "desired_profile": "HDR",
+                        "applied_profile": "Default",
+                        "status": "planned",
+                        "needs_apply": True,
+                        "operations": [
+                            {"type": "windows_hdr"},
+                            {"type": "source_filter_settings"},
+                        ],
+                    }
+                ]
+            )
+        )
+
+        self.assertTrue(report.would_change)
+        self.assertIn("Aucune commande", report.summary)
+        capture = next(
+            step for step in report.steps if step.domain == "capture"
+        )
+        self.assertEqual(capture.status_label, "À appliquer")
+        self.assertEqual(capture.operation_count, 2)
+
+    def test_simulation_report_ignore_never_claims_mutation(self) -> None:
+        explanation = _explanation(kind="ignore")
+        explanation["obs_plan"]["domains"] = [
+            {
+                "domain": "game",
+                "desired_profile": "Overwatch",
+                "applied_profile": "Vanilla",
+                "status": "planned",
+                "needs_apply": True,
+                "operations": [{"type": "set_program_scene"}],
+            }
+        ]
+
+        report = build_simulation_report(explanation)
+
+        self.assertFalse(report.would_change)
+        self.assertIn("conserverait", report.summary)
 
     def test_translates_planned_and_manual_hold_statuses(self) -> None:
         snapshot = build_dashboard_snapshot(
