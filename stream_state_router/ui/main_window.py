@@ -5655,7 +5655,7 @@ class MainWindow(QMainWindow):
         root.addWidget(intro)
 
         selector = QComboBox()
-        for index, (payload, path) in enumerate(backups):
+        for index, (_payload, path) in enumerate(backups):
             try:
                 stamp = time.strftime(
                     "%Y-%m-%d %H:%M:%S",
