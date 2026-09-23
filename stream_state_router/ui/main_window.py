@@ -591,7 +591,7 @@ class MainWindow(QMainWindow):
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Santé et capacités SSR")
-        dialog.resize(900, 620)
+        dialog.resize(1080, 650)
         root = QVBoxLayout(dialog)
 
         title = QLabel(report.summary)
@@ -617,9 +617,21 @@ class MainWindow(QMainWindow):
                 )
             )
         capabilities.header().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents
+            0,
+            QHeaderView.ResizeMode.ResizeToContents,
         )
-        capabilities.header().setStretchLastSection(True)
+        capabilities.header().setSectionResizeMode(
+            1,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        capabilities.header().setSectionResizeMode(
+            2,
+            QHeaderView.ResizeMode.Stretch,
+        )
+        capabilities.header().setSectionResizeMode(
+            3,
+            QHeaderView.ResizeMode.Stretch,
+        )
         root.addWidget(capabilities, 1)
 
         if report.findings:
@@ -654,9 +666,21 @@ class MainWindow(QMainWindow):
                     )
                 )
             findings.header().setSectionResizeMode(
-                QHeaderView.ResizeMode.ResizeToContents
+                0,
+                QHeaderView.ResizeMode.ResizeToContents,
             )
-            findings.header().setStretchLastSection(True)
+            findings.header().setSectionResizeMode(
+                1,
+                QHeaderView.ResizeMode.ResizeToContents,
+            )
+            findings.header().setSectionResizeMode(
+                2,
+                QHeaderView.ResizeMode.Stretch,
+            )
+            findings.header().setSectionResizeMode(
+                3,
+                QHeaderView.ResizeMode.Stretch,
+            )
             root.addWidget(findings)
 
         actions = QHBoxLayout()
@@ -2970,7 +2994,7 @@ class MainWindow(QMainWindow):
 
     def _on_foreground(self, app: ForegroundApp | None) -> None:
         if app is None:
-            self.fg_exe.setText("Aucune fenêtre")
+            self.fg_exe.setText("Aucune fenêtre exploitable")
             self.fg_title.setText("—")
             self.fg_path.setText("—")
             self._schedule_dashboard_refresh()
@@ -3612,6 +3636,8 @@ class MainWindow(QMainWindow):
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if str(value):
+                    item.setToolTip(str(value))
                 self.rules_table.setItem(row, col, item)
         self._refresh_automations_view()
 
