@@ -73,6 +73,13 @@ from ..services.config import (
     pop_layout_history,
     release_runtime_visibility_ownership,
 )
+from ..services.config_insights import (
+    apply_reference_repairs,
+    build_capability_report,
+    build_effective_provenance,
+    configured_action_types,
+    scan_obs_reference_repairs,
+)
 from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
@@ -408,6 +415,29 @@ class MainWindow(QMainWindow):
         summary_actions.addStretch(1)
         summary_lay.addLayout(summary_actions)
         root.addWidget(summary_card)
+
+        maintenance_card, maintenance_lay = self._card("Santé et maintenance")
+        maintenance_hint = QLabel(
+            "Vérifiez les capacités réellement utilisées, comprenez l’origine "
+            "des profils actifs et recherchez les références OBS devenues invalides."
+        )
+        maintenance_hint.setWordWrap(True)
+        maintenance_hint.setObjectName("Muted")
+        maintenance_lay.addWidget(maintenance_hint)
+        maintenance_actions = QHBoxLayout()
+        capabilities = QPushButton("Vérifier les capacités")
+        capabilities.setObjectName("Primary")
+        capabilities.clicked.connect(self._show_capability_report)
+        maintenance_actions.addWidget(capabilities)
+        provenance = QPushButton("Qui contrôle quoi ?")
+        provenance.clicked.connect(self._show_effective_provenance)
+        maintenance_actions.addWidget(provenance)
+        repair_refs = QPushButton("Réparer les références OBS…")
+        repair_refs.clicked.connect(self._start_reference_repair)
+        maintenance_actions.addWidget(repair_refs)
+        maintenance_actions.addStretch(1)
+        maintenance_lay.addLayout(maintenance_actions)
+        root.addWidget(maintenance_card)
 
         activity_card, activity_lay = self._card("Activité récente")
         activity_hint = QLabel(
