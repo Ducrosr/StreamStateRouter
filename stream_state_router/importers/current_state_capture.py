@@ -114,33 +114,6 @@ def find_process_rules(
     )
 
 
-def find_ignored_process_rules(
-    config: Mapping[str, Any],
-    process: str,
-) -> tuple[Mapping[str, Any], ...]:
-    wanted = str(process or "").strip().casefold()
-    if not wanted:
-        return ()
-    raw_rules = config.get("rules")
-    rules = raw_rules if isinstance(raw_rules, list) else []
-    matches = [
-        rule
-        for rule in rules
-        if isinstance(rule, Mapping)
-        and str(rule.get("behavior") or "match").strip().casefold() == "ignore"
-        and str(rule.get("exe") or "").strip().casefold() == wanted
-    ]
-    return tuple(
-        sorted(
-            matches,
-            key=lambda rule: int(rule.get("priority", 0))
-            if str(rule.get("priority", 0)).lstrip("-").isdigit()
-            else 0,
-            reverse=True,
-        )
-    )
-
-
 def suggest_capture_name(
     config: Mapping[str, Any],
     base_name: str,
