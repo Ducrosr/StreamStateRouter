@@ -198,6 +198,12 @@ def _layouts() -> dict:
             "coordinate_mode": "normalized",
             "modules": {
                 "Game Capture": {
+                    "base_bounds": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "width": 1920.0,
+                        "height": 1080.0,
+                    },
                     "geometry": {
                         "x": 0.0,
                         "y": 0.0,
@@ -205,6 +211,7 @@ def _layouts() -> dict:
                         "height": 1080.0,
                     },
                     "visible": True,
+                    "anchor": "top_left",
                     "elements": [],
                 }
             },
