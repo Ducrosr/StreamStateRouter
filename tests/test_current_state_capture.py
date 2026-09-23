@@ -272,6 +272,214 @@ class CurrentStateCaptureTests(unittest.TestCase):
         )
         self.assertEqual(validate_config(result.config), [])
 
+    def test_new_capture_routes_ownership_to_selected_domains(self) -> None:
+        result = build_current_state_capture_draft(
+            _config(),
+            snapshot=_snapshot(),
+            raw_layouts=_layouts(),
+            logical_state={
+                "OverlayProfile": "FPS",
+                "CaptureProfile": "HDR",
+                "AudioProfile": "Game",
+                "LayoutProfile": "FPS",
+            },
+            options=CurrentStateCaptureOptions(
+                name="League of Legends",
+                process="League of Legends.exe",
+                input_settings_domain="game",
+                audio_state_domain="audio",
+                filters_domain="capture",
+                visibility_domain="overlay",
+            ),
+        )
+
+        rule = result.config["rules"][0]
+        self.assertEqual(rule["state"]["Game"], "League of Legends")
+        self.assertNotEqual(rule["state"]["OverlayProfile"], "FPS")
+        self.assertNotEqual(rule["state"]["CaptureProfile"], "HDR")
+        self.assertNotEqual(rule["state"]["AudioProfile"], "Game")
+        self.assertEqual(
+            rule["state"]["LayoutProfile"],
+            "League of Legends",
+        )
+
+        expected = {
+            "game": {"set_input_settings"},
+            "audio": {"input_mute", "input_volume_db"},
+            "capture": {
+                "source_filter_enabled",
+                "source_filter_settings",
+            },
+            "overlay": {"scene_item_enabled"},
+        }
+        state_keys = {
+            "game": "Game",
+            "overlay": "OverlayProfile",
+            "capture": "CaptureProfile",
+            "audio": "AudioProfile",
+        }
+        for domain, kinds in expected.items():
+            profile_name = rule["state"][state_keys[domain]]
+            actions = result.config["profiles"][domain][profile_name][
+                "actions"
+            ]
+            self.assertEqual(
+                {action["type"] for action in actions},
+                kinds,
+            )
+
+        ownership = dict(result.report.owned_profiles)
+        self.assertEqual(
+            ownership["game"],
+            "League of Legends",
+        )
+        self.assertEqual(
+            ownership["layout"],
+            "League of Legends",
+        )
+        self.assertEqual(validate_config(result.config), [])
+
+    def test_unchecked_category_does_not_take_domain_ownership(self) -> None:
+        result = build_current_state_capture_draft(
+            _config(),
+            snapshot=_snapshot(),
+            raw_layouts={},
+            logical_state={
+                "AudioProfile": "Game",
+                "OverlayProfile": "FPS",
+                "CaptureProfile": "HDR",
+                "LayoutProfile": "FPS",
+            },
+            options=CurrentStateCaptureOptions(
+                name="Game X",
+                process="GameX.exe",
+                include_input_settings=False,
+                include_audio_state=False,
+                include_filters=True,
+                include_visibility=False,
+                include_layout=False,
+                filters_domain="capture",
+            ),
+        )
+
+        rule = result.config["rules"][0]
+        self.assertEqual(rule["state"]["AudioProfile"], "Game")
+        self.assertEqual(rule["state"]["OverlayProfile"], "FPS")
+        self.assertNotEqual(rule["state"]["CaptureProfile"], "HDR")
+        owned = dict(result.report.owned_profiles)
+        self.assertEqual(set(owned), {"capture"})
+        self.assertNotIn("audio", owned)
+        self.assertNotIn("overlay", owned)
+
+    def test_update_shared_capture_profile_clones_before_filter_capture(self) -> None:
+        config = _config()
+        shared_state = {
+            "Game": "Vanilla",
+            "OverlayProfile": "FPS",
+            "CaptureProfile": "HDR",
+            "AudioProfile": "Game",
+            "LayoutProfile": "FPS",
+        }
+        config["rules"] = [
+            {
+                "name": "Target",
+                "behavior": "match",
+                "priority": 100,
+                "enabled": True,
+                "exe": "Target.exe",
+                "state": dict(shared_state),
+                "conditions": {},
+            },
+            {
+                "name": "Other",
+                "behavior": "match",
+                "priority": 90,
+                "enabled": True,
+                "exe": "Other.exe",
+                "state": dict(shared_state),
+                "conditions": {},
+            },
+        ]
+
+        result = build_current_state_capture_draft(
+            config,
+            snapshot=_snapshot(),
+            raw_layouts={},
+            logical_state={},
+            options=CurrentStateCaptureOptions(
+                name="Target",
+                process="Target.exe",
+                existing_rule_name="Target",
+                include_input_settings=False,
+                include_audio_state=False,
+                include_filters=True,
+                include_visibility=False,
+                include_layout=False,
+                filters_domain="capture",
+            ),
+        )
+
+        target = next(
+            rule
+            for rule in result.config["rules"]
+            if rule["name"] == "Target"
+        )
+        other = next(
+            rule
+            for rule in result.config["rules"]
+            if rule["name"] == "Other"
+        )
+        self.assertNotEqual(
+            target["state"]["CaptureProfile"],
+            "HDR",
+        )
+        self.assertEqual(
+            other["state"]["CaptureProfile"],
+            "HDR",
+        )
+        target_profile = result.config["profiles"]["capture"][
+            target["state"]["CaptureProfile"]
+        ]
+        self.assertEqual(
+            {
+                action["type"]
+                for action in target_profile["actions"]
+            },
+            {
+                "source_filter_enabled",
+                "source_filter_settings",
+            },
+        )
+        self.assertEqual(
+            result.config["profiles"]["capture"]["HDR"]["actions"],
+            [],
+        )
+        self.assertTrue(
+            any("Capture" in note and "partagé" in note for note in result.report.notes)
+        )
+
+    def test_capture_rejects_unknown_ownership_domain(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "filters_domain",
+        ):
+            build_current_state_capture_draft(
+                _config(),
+                snapshot=_snapshot(),
+                raw_layouts={},
+                logical_state={},
+                options=CurrentStateCaptureOptions(
+                    name="Game X",
+                    process="GameX.exe",
+                    include_input_settings=False,
+                    include_audio_state=False,
+                    include_filters=True,
+                    include_visibility=False,
+                    include_layout=False,
+                    filters_domain="invalid",
+                ),
+            )
+
     def test_update_unshared_profiles_preserves_other_logical_domains(self) -> None:
         config = _config()
         config["profiles"]["game"]["Overwatch"] = {
