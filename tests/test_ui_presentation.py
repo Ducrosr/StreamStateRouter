@@ -366,6 +366,8 @@ class DashboardPresentationTests(unittest.TestCase):
                     "priority": 100,
                     "behavior": "match",
                     "exe": "Overwatch.exe",
+                    "path": "C:\\Games\\Overwatch.exe",
+                    "title_regex": "^Overwatch$",
                     "state": {
                         "Game": "Overwatch",
                         "OverlayProfile": "FPS",
@@ -403,6 +405,8 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(rows[0].result, "Conserver l’état courant")
         overwatch = next(row for row in rows if row.name == "Overwatch")
         self.assertIn("Overwatch.exe", overwatch.trigger)
+        self.assertIn("C:\\Games\\Overwatch.exe", overwatch.trigger)
+        self.assertIn("^Overwatch$", overwatch.trigger)
         self.assertIn("Jeu=Overwatch", overwatch.result)
         self.assertEqual(rows[-1].name, "Configuration de secours")
         self.assertIn("aucune règle", rows[-1].trigger)
