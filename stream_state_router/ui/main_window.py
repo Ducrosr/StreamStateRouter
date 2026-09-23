@@ -80,6 +80,7 @@ from ..services.config_insights import (
     build_capability_report,
     build_effective_provenance,
     configured_action_types,
+    detach_profile_inheritance,
     profile_content_entries,
     profile_lineage,
     profile_usages,
@@ -1517,6 +1518,9 @@ class MainWindow(QMainWindow):
         self.profile_parent.addItem("— Aucun —", "")
         self.profile_parent.currentIndexChanged.connect(self._profile_parent_changed)
         inheritance.addWidget(self.profile_parent, 1)
+        detach_profile = QPushButton("Détacher de la base")
+        detach_profile.clicked.connect(self._detach_current_profile)
+        inheritance.addWidget(detach_profile)
         hint = QLabel("Les actions du parent sont exécutées avant celles de ce profil.")
         hint.setObjectName("Muted")
         inheritance.addWidget(hint)
@@ -1615,6 +1619,9 @@ class MainWindow(QMainWindow):
         self.layout_parent.addItem("— Aucune —", "")
         self.layout_parent.currentIndexChanged.connect(self._layout_option_changed)
         options.addWidget(self.layout_parent)
+        detach_layout = QPushButton("Détacher de la base")
+        detach_layout.clicked.connect(self._detach_current_layout_profile)
+        options.addWidget(detach_layout)
         options.addWidget(QLabel("Coordonnées"))
         self.layout_coordinate_mode = QComboBox()
         self.layout_coordinate_mode.addItem("Normalisées", "normalized")
@@ -2970,6 +2977,60 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.actions_table.setItem(row, col, item)
+
+    def _detach_current_profile(self) -> None:
+        current = self._current_profile()
+        if current is None:
+            return
+        domain, name, profile = current
+        if not str(profile.get("extends") or "").strip():
+            QMessageBox.information(
+                self,
+                "Héritage",
+                "Ce profil n’hérite d’aucune base.",
+            )
+            return
+        if QMessageBox.question(
+            self,
+            "Détacher le profil",
+            (
+                f"Détacher « {name} » de sa base ?\n\n"
+                "Les actions et conditions héritées seront copiées dans le "
+                "profil afin de conserver le comportement effectif actuel."
+            ),
+        ) != QMessageBox.Yes:
+            return
+        draft, changed = detach_profile_inheritance(
+            self.config,
+            domain,
+            name,
+        )
+        if not changed:
+            return
+        errors = validate_config(draft)
+        if errors:
+            QMessageBox.critical(
+                self,
+                "Héritage",
+                "\n".join(errors),
+            )
+            return
+        self.config = draft
+        self._load_config_into_ui()
+        self.profile_domain.setCurrentIndex(
+            max(0, self.profile_domain.findData(domain))
+        )
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(name)
+        self._refresh_actions_table()
+        self._mark_dirty()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "Profil détaché de sa base",
+                f"{domain}/{name}",
+            )
+        )
 
     def _profile_parent_changed(self, *_args) -> None:
         current = self._current_profile()
@@ -4330,6 +4391,56 @@ class MainWindow(QMainWindow):
                 self.layout_inheritance_hint.setText(
                     "Héritage effectif : —"
                 )
+
+    def _detach_current_layout_profile(self) -> None:
+        current = self._current_layout_profile()
+        if current is None:
+            return
+        name, profile = current
+        if not str(profile.get("extends") or "").strip():
+            QMessageBox.information(
+                self,
+                "Héritage layout",
+                "Ce LayoutProfile n’hérite d’aucune base.",
+            )
+            return
+        if QMessageBox.question(
+            self,
+            "Détacher le LayoutProfile",
+            (
+                f"Détacher « {name} » de sa base ?\n\n"
+                "Le layout résolu sera matérialisé dans ce profil afin de "
+                "conserver exactement son état effectif."
+            ),
+        ) != QMessageBox.Yes:
+            return
+        draft, changed = detach_profile_inheritance(
+            self.config,
+            "layout",
+            name,
+        )
+        if not changed:
+            return
+        errors = validate_config(draft)
+        if errors:
+            QMessageBox.critical(
+                self,
+                "Héritage layout",
+                "\n".join(errors),
+            )
+            return
+        self.config = draft
+        self._load_config_into_ui()
+        self.layout_profile_name.setCurrentText(name)
+        self._refresh_layout_profile_view()
+        self._mark_dirty()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Muted",
+                "LayoutProfile détaché de sa base",
+                name,
+            )
+        )
 
     def _layout_option_changed(self, *_args) -> None:
         current = self._current_layout_profile()
