@@ -15,12 +15,16 @@ from stream_state_router.importers.scene_collection import (
     ImportedSceneItem,
     SceneCollectionSnapshot,
 )
+from stream_state_router.services.config import validate_config
 
 
 def _config() -> dict:
     return {
         "schema_version": 6,
         "router": {
+            "poll_ms": 50,
+            "debounce_ms": 150,
+            "fallback_debounce_ms": 350,
             "fallback_state": {
                 "Game": "Vanilla",
                 "OverlayProfile": "Vanilla",
@@ -28,6 +32,33 @@ def _config() -> dict:
                 "AudioProfile": "Default",
                 "LayoutProfile": "Vanilla",
             }
+        },
+        "obs": {
+            "enabled": False,
+            "host": "127.0.0.1",
+            "port": 4455,
+            "password": "",
+            "timeout_seconds": 2.0,
+            "reconnect_seconds": 3.0,
+        },
+        "api": {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 8765,
+            "token": "",
+        },
+        "host_control": {
+            "soundvolumeview_path": "",
+            "audio_timeout_seconds": 5.0,
+        },
+        "control_variables": {},
+        "activation_policies": {},
+        "layout_history": {},
+        "ui": {
+            "close_to_tray": True,
+            "start_with_windows": False,
+            "auto_detect_modules": True,
+            "module_scan_seconds": 5,
         },
         "rules": [],
         "profiles": {
@@ -78,15 +109,27 @@ def _config() -> dict:
         "layout_profiles": {
             "Vanilla": {
                 "scene": "Just Chatting",
+                "coordinate_mode": "normalized",
                 "modules": {},
                 "extends": "",
                 "conditions": {},
+                "transition": {
+                    "mode": "instant",
+                    "duration_ms": 0,
+                    "steps": 8,
+                },
             },
             "FPS": {
                 "scene": "In Game",
+                "coordinate_mode": "normalized",
                 "modules": {},
                 "extends": "",
                 "conditions": {},
+                "transition": {
+                    "mode": "instant",
+                    "duration_ms": 0,
+                    "steps": 8,
+                },
             },
         },
     }
@@ -221,6 +264,7 @@ class CurrentStateCaptureTests(unittest.TestCase):
             result.config["layout_profiles"]["League of Legends"]["scene"],
             "In Game",
         )
+        self.assertEqual(validate_config(result.config), [])
 
     def test_update_unshared_profiles_preserves_other_logical_domains(self) -> None:
         config = _config()
