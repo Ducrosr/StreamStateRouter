@@ -308,6 +308,59 @@ def build_effective_provenance(
     return tuple(rows)
 
 
+def _conditions_can_overlap(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    for key in ("streaming", "recording", "obs_enabled", "program_scene"):
+        if key not in left or key not in right:
+            continue
+        if left.get(key) != right.get(key):
+            return False
+    return True
+
+
+def _rules_can_overlap(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    try:
+        if int(left.get("priority", 0)) != int(right.get("priority", 0)):
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+    left_conditions = _mapping(left.get("conditions"))
+    right_conditions = _mapping(right.get("conditions"))
+    if not _conditions_can_overlap(left_conditions, right_conditions):
+        return False
+
+    shared_selector = False
+    for key in ("exe", "path", "title_regex"):
+        lvalue = str(left.get(key) or "").strip()
+        rvalue = str(right.get(key) or "").strip()
+        if not lvalue or not rvalue:
+            continue
+        if lvalue.casefold() != rvalue.casefold():
+            return False
+        shared_selector = True
+
+    left_process = str(
+        left_conditions.get("process_running") or ""
+    ).strip()
+    right_process = str(
+        right_conditions.get("process_running") or ""
+    ).strip()
+    if left_process and right_process:
+        if left_process.casefold() == right_process.casefold():
+            shared_selector = True
+        # Different background processes can both be running at once and are
+        # therefore still compatible; they simply do not establish the common
+        # selector by themselves.
+
+    return shared_selector
+
+
 def build_static_health_findings(
     config: Mapping[str, Any],
 ) -> tuple[HealthFinding, ...]:
@@ -338,9 +391,11 @@ def build_static_health_findings(
         signatures.setdefault(_rule_signature(rule), []).append(
             str(rule.get("name") or "Règle sans nom")
         )
+    duplicate_groups: set[frozenset[str]] = set()
     for names in signatures.values():
         if len(names) <= 1:
             continue
+        duplicate_groups.add(frozenset(names))
         findings.append(
             HealthFinding(
                 "warning",
@@ -349,6 +404,30 @@ def build_static_health_findings(
                 "Vérifiez si ces règles doivent réellement coexister.",
             )
         )
+
+    for left_index, left in enumerate(rules):
+        left_name = str(left.get("name") or "Règle sans nom")
+        for right in rules[left_index + 1 :]:
+            right_name = str(right.get("name") or "Règle sans nom")
+            if frozenset((left_name, right_name)) in duplicate_groups:
+                continue
+            if not _rules_can_overlap(left, right):
+                continue
+            findings.append(
+                HealthFinding(
+                    "warning",
+                    "Règles concurrentes à même priorité",
+                    (
+                        f"« {left_name} » et « {right_name} » peuvent "
+                        "correspondre au même contexte avec la priorité "
+                        f"{left.get('priority', 0)}."
+                    ),
+                    (
+                        "Donnez-leur des priorités distinctes ou rendez leurs "
+                        "conditions mutuellement exclusives."
+                    ),
+                )
+            )
 
     profiles = _mapping(config.get("profiles"))
     for domain in ("game", "overlay", "capture", "audio"):
