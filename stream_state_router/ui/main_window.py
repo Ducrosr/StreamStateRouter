@@ -2026,7 +2026,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        app = service.last_app
+        app = service.last_app or service.last_meaningful_app
         if app is None:
             QMessageBox.information(
                 self,
@@ -2051,7 +2051,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            explanation = service.explain_decision()
+            explanation = service.explain_decision(app)
             routing = (
                 explanation.get("routing", {})
                 if isinstance(explanation, Mapping)
