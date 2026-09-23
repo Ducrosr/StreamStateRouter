@@ -2057,6 +2057,58 @@ class MainWindow(QMainWindow):
                 if isinstance(explanation, Mapping)
                 else {}
             )
+            routing_kind = (
+                str(routing.get("kind") or "").strip().casefold()
+                if isinstance(routing, Mapping)
+                else ""
+            )
+            routing_rule = (
+                str(routing.get("rule_name") or "").strip()
+                if isinstance(routing, Mapping)
+                else ""
+            )
+            if routing_kind == "ignore":
+                QMessageBox.warning(
+                    self,
+                    "Capture de l’état actuel",
+                    (
+                        "L’application courante est actuellement ignorée par "
+                        f"la règle « {routing_rule or 'IGNORE'} ».\n\n"
+                        "L’assistant Simple ne remplace jamais une règle IGNORE. "
+                        "Modifiez d’abord cette règle en mode Expert."
+                    ),
+                )
+                return
+
+            exact_matches = find_process_rules(self.config, process)
+            if routing_kind == "match" and routing_rule and not exact_matches:
+                raw_rules = self.config.get("rules")
+                configured_rules = (
+                    raw_rules if isinstance(raw_rules, list) else []
+                )
+                active_rule = next(
+                    (
+                        rule
+                        for rule in configured_rules
+                        if isinstance(rule, Mapping)
+                        and str(rule.get("name") or "").strip() == routing_rule
+                    ),
+                    None,
+                )
+                if isinstance(active_rule, Mapping):
+                    QMessageBox.warning(
+                        self,
+                        "Capture de l’état actuel",
+                        (
+                            "Cette application est déjà pilotée par la règle "
+                            f"« {routing_rule} », mais cette règle utilise des "
+                            "sélecteurs avancés plutôt qu’un processus exact.\n\n"
+                            "Pour éviter de créer une règle concurrente, "
+                            "modifiez cette configuration en mode Expert."
+                        ),
+                    )
+                    return
+
             logical_state = (
                 dict(routing.get("effective_state") or {})
                 if isinstance(routing, Mapping)
