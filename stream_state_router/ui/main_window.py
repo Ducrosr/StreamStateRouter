@@ -182,6 +182,7 @@ class MainWindow(QMainWindow):
         self._last_runtime_restart_previous_stopped = False
         self._last_runtime_restart_diagnostic = ""
         self._pending_collection_imports: dict[str, dict[str, object]] = {}
+        self._pending_obs_controls: dict[str, tuple[object, str]] = {}
         self._user_activity_history: list[
             tuple[str, UserActivityEntry, int, float]
         ] = []
@@ -436,6 +437,73 @@ class MainWindow(QMainWindow):
                 control,
                 requires_edit_mode=requires_edit_mode,
             )
+
+    def _track_obs_request(
+        self,
+        request_id: str,
+        *,
+        busy_text: str,
+        control=None,
+    ) -> None:
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            return
+        if control is None:
+            control = self.sender()
+        if control is None or not callable(
+            getattr(control, "setEnabled", None)
+        ):
+            return
+
+        text_getter = getattr(control, "text", None)
+        original = (
+            str(text_getter())
+            if callable(text_getter)
+            else ""
+        )
+        self._pending_obs_controls[request_id] = (control, original)
+        try:
+            control.setEnabled(False)
+            setter = getattr(control, "setText", None)
+            if original and callable(setter):
+                setter(str(busy_text or "En cours…"))
+        except RuntimeError:
+            self._pending_obs_controls.pop(request_id, None)
+
+    def _finish_obs_request_feedback(
+        self,
+        request_id: str,
+        *,
+        success: bool,
+    ) -> None:
+        pending = self._pending_obs_controls.pop(
+            str(request_id or ""),
+            None,
+        )
+        if pending is None:
+            return
+        control, original = pending
+        setter = getattr(control, "setText", None)
+        try:
+            if original and callable(setter):
+                setter(
+                    ("✓ " if success else "✕ ")
+                    + original
+                )
+            control.setEnabled(False)
+        except RuntimeError:
+            return
+
+        def restore() -> None:
+            try:
+                if original and callable(setter):
+                    setter(original)
+                control.setEnabled(True)
+                self._refresh_obs_connected_controls()
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(1200, restore)
 
     def _require_edit_mode(self, operation: str) -> bool:
         if self._edit_mode:
@@ -3241,6 +3309,10 @@ class MainWindow(QMainWindow):
             payload = event.payload
             action = str(getattr(payload, "action", "") or "")
             request_id = str(getattr(payload, "request_id", "") or "")
+            self._finish_obs_request_feedback(
+                request_id,
+                success=bool(getattr(payload, "success", False)),
+            )
             if (
                 action == "collection.import.preview"
                 and request_id in self._pending_collection_imports
@@ -3677,6 +3749,10 @@ class MainWindow(QMainWindow):
             return
         try:
             request_id = self._service.request_force_reapply()
+            self._track_obs_request(
+                request_id,
+                busy_text="Réapplication…",
+            )
             self._log(f"Réapplication OBS mise en file ({request_id[:8]}).")
             self.statusBar().showMessage("Réapplication OBS en cours…", 3000)
         except Exception as exc:
@@ -4351,6 +4427,10 @@ class MainWindow(QMainWindow):
             request_id = service.request_collection_import_preview(
                 include_layouts=True,
             )
+            self._track_obs_request(
+                request_id,
+                busy_text="Capture…",
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -4654,6 +4734,10 @@ class MainWindow(QMainWindow):
             request_id = self._service.request_collection_import_preview(
                 include_layouts=True,
             )
+            self._track_obs_request(
+                request_id,
+                busy_text="Analyse…",
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -4775,6 +4859,7 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(self.profiles_tab_index)
 
     def _import_collection_to_profile(self) -> None:
+        feedback_control = self.sender()
         current = self._current_profile()
         if not current:
             QMessageBox.warning(
@@ -4805,6 +4890,16 @@ class MainWindow(QMainWindow):
             request_id = self._service.request_collection_import_preview(
                 include_layouts=bool(options.get("include_layouts", False)),
             )
+            self._track_obs_request(
+                request_id,
+                busy_text="Analyse…",
+                control=feedback_control,
+            )
+            self._track_obs_request(
+                request_id,
+                busy_text="Lecture OBS…",
+                control=feedback_control,
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -4829,6 +4924,7 @@ class MainWindow(QMainWindow):
         )
 
     def _migrate_collection_logic(self) -> None:
+        feedback_control = self.sender()
         if not self._require_edit_mode("Migrer la collection OBS"):
             return
         if self._service is None:
@@ -6048,6 +6144,10 @@ class MainWindow(QMainWindow):
         self._collect_settings()
         try:
             request_id = self._service.request_layout("apply", current[0])
+            self._track_obs_request(
+                request_id,
+                busy_text="Application…",
+            )
             self._log(f"Application layout {current[0]} mise en file ({request_id[:8]}).")
             self.statusBar().showMessage(f"Application du layout {current[0]}…", 3000)
         except Exception as exc:
@@ -6072,6 +6172,10 @@ class MainWindow(QMainWindow):
             return
         try:
             request_id = self._service.request_layout("preview", current[0])
+            self._track_obs_request(
+                request_id,
+                busy_text="Prévisualisation…",
+            )
             self._log(f"Aperçu layout {current[0]} mis en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Aperçu layout", str(exc))
@@ -6081,6 +6185,10 @@ class MainWindow(QMainWindow):
             return
         try:
             request_id = self._service.request_layout("cancel-preview")
+            self._track_obs_request(
+                request_id,
+                busy_text="Annulation…",
+            )
             self._log(f"Annulation aperçu mise en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Aperçu layout", str(exc))
@@ -6092,6 +6200,10 @@ class MainWindow(QMainWindow):
             return
         try:
             request_id = self._service.request_layout("undo")
+            self._track_obs_request(
+                request_id,
+                busy_text="Restauration…",
+            )
             self._log(f"Undo OBS mis en file ({request_id[:8]}).")
         except Exception as exc:
             QMessageBox.critical(self, "Undo OBS", str(exc))
