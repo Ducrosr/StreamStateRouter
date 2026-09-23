@@ -83,6 +83,14 @@ class ProvenanceRow:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigChange:
+    section: str
+    item: str
+    change_type: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
 class DependencyNode:
     label: str
     value: str = ""
@@ -531,6 +539,210 @@ def _rules_can_overlap(
         # selector by themselves.
 
     return shared_selector
+
+
+def _stable_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _named_mapping_changes(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    *,
+    section: str,
+    detail_builder=None,
+) -> list[ConfigChange]:
+    changes: list[ConfigChange] = []
+    names = sorted(
+        set(str(name) for name in before)
+        | set(str(name) for name in after),
+        key=str.casefold,
+    )
+    for name in names:
+        exists_before = name in before
+        exists_after = name in after
+        if not exists_before:
+            changes.append(
+                ConfigChange(
+                    section,
+                    name,
+                    "added",
+                    "Ajouté",
+                )
+            )
+            continue
+        if not exists_after:
+            changes.append(
+                ConfigChange(
+                    section,
+                    name,
+                    "removed",
+                    "Supprimé",
+                )
+            )
+            continue
+        old = before.get(name)
+        new = after.get(name)
+        if _stable_json(old) == _stable_json(new):
+            continue
+        detail = (
+            str(detail_builder(old, new))
+            if callable(detail_builder)
+            else "Modifié"
+        )
+        changes.append(
+            ConfigChange(
+                section,
+                name,
+                "modified",
+                detail,
+            )
+        )
+    return changes
+
+
+def _profile_change_detail(old: object, new: object) -> str:
+    old_map = _mapping(old)
+    new_map = _mapping(new)
+    old_actions = old_map.get("actions")
+    new_actions = new_map.get("actions")
+    parts: list[str] = []
+    if isinstance(old_actions, list) or isinstance(new_actions, list):
+        old_count = len(old_actions) if isinstance(old_actions, list) else 0
+        new_count = len(new_actions) if isinstance(new_actions, list) else 0
+        if old_count != new_count:
+            parts.append(f"actions {old_count} → {new_count}")
+    old_modules = old_map.get("modules")
+    new_modules = new_map.get("modules")
+    if isinstance(old_modules, Mapping) or isinstance(new_modules, Mapping):
+        old_count = len(old_modules) if isinstance(old_modules, Mapping) else 0
+        new_count = len(new_modules) if isinstance(new_modules, Mapping) else 0
+        if old_count != new_count:
+            parts.append(f"modules {old_count} → {new_count}")
+    old_parent = str(old_map.get("extends") or "").strip()
+    new_parent = str(new_map.get("extends") or "").strip()
+    if old_parent != new_parent:
+        parts.append(
+            f"base {old_parent or '—'} → {new_parent or '—'}"
+        )
+    if not parts:
+        parts.append("contenu modifié")
+    return " · ".join(parts)
+
+
+def _rule_change_detail(old: object, new: object) -> str:
+    old_map = _mapping(old)
+    new_map = _mapping(new)
+    labels = {
+        "enabled": "activation",
+        "priority": "priorité",
+        "behavior": "comportement",
+        "exe": "processus",
+        "launcher": "launcher",
+        "path": "chemin",
+        "title_regex": "titre",
+        "state": "profils",
+        "conditions": "conditions",
+        "apply_delay_ms": "délai",
+    }
+    changed = [
+        label
+        for key, label in labels.items()
+        if _stable_json(old_map.get(key)) != _stable_json(new_map.get(key))
+    ]
+    return ", ".join(changed) if changed else "règle modifiée"
+
+
+def build_config_change_report(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> tuple[ConfigChange, ...]:
+    changes: list[ConfigChange] = []
+
+    before_rules = {
+        str(rule.get("name") or f"Règle {index + 1}"): rule
+        for index, rule in enumerate(
+            before.get("rules")
+            if isinstance(before.get("rules"), list)
+            else []
+        )
+        if isinstance(rule, Mapping)
+    }
+    after_rules = {
+        str(rule.get("name") or f"Règle {index + 1}"): rule
+        for index, rule in enumerate(
+            after.get("rules")
+            if isinstance(after.get("rules"), list)
+            else []
+        )
+        if isinstance(rule, Mapping)
+    }
+    changes.extend(
+        _named_mapping_changes(
+            before_rules,
+            after_rules,
+            section="Règles",
+            detail_builder=_rule_change_detail,
+        )
+    )
+
+    before_profiles = _mapping(before.get("profiles"))
+    after_profiles = _mapping(after.get("profiles"))
+    for domain in ("game", "overlay", "capture", "audio"):
+        changes.extend(
+            _named_mapping_changes(
+                _mapping(before_profiles.get(domain)),
+                _mapping(after_profiles.get(domain)),
+                section=f"Profils {DOMAIN_LABELS[domain]}",
+                detail_builder=_profile_change_detail,
+            )
+        )
+
+    changes.extend(
+        _named_mapping_changes(
+            _mapping(before.get("layout_profiles")),
+            _mapping(after.get("layout_profiles")),
+            section="LayoutProfiles",
+            detail_builder=_profile_change_detail,
+        )
+    )
+    changes.extend(
+        _named_mapping_changes(
+            _mapping(before.get("activation_policies")),
+            _mapping(after.get("activation_policies")),
+            section="Activations",
+        )
+    )
+
+    top_sections = {
+        "router": "Routage",
+        "obs": "OBS",
+        "api": "API locale",
+        "host_control": "Contrôle Windows",
+        "control_variables": "Variables",
+        "ui": "Interface",
+    }
+    for key, label in top_sections.items():
+        old = before.get(key)
+        new = after.get(key)
+        if _stable_json(old) == _stable_json(new):
+            continue
+        changes.append(
+            ConfigChange(
+                label,
+                label,
+                "modified",
+                "Paramètres modifiés",
+            )
+        )
+
+    return tuple(changes)
 
 
 def build_effective_dependency_tree(
