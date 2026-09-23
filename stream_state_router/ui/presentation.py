@@ -513,3 +513,95 @@ def user_activity_from_runtime_event(
             ", ".join(str(item) for item in details if str(item).strip()),
         )
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationStep:
+    domain: str
+    label: str
+    desired: str
+    applied: str
+    status_label: str
+    operation_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationReport:
+    summary: str
+    would_change: bool
+    steps: tuple[SimulationStep, ...]
+
+
+def build_simulation_report(
+    explanation: Mapping[str, object] | None,
+) -> SimulationReport:
+    explanation = _mapping(explanation)
+    routing = _mapping(explanation.get("routing"))
+    plan = _mapping(explanation.get("obs_plan"))
+    raw_domains = plan.get("domains")
+    rows = raw_domains if isinstance(raw_domains, list) else []
+
+    steps: list[SimulationStep] = []
+    would_change = False
+    blocked = False
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        domain = str(row.get("domain") or "").strip()
+        desired = str(row.get("desired_profile") or "").strip()
+        applied = str(row.get("applied_profile") or "").strip()
+        status = str(row.get("status") or "").strip()
+        raw_operations = row.get("operations")
+        operations = raw_operations if isinstance(raw_operations, list) else []
+        needs_apply = bool(row.get("needs_apply")) or status.casefold() == "planned"
+        would_change = would_change or needs_apply
+        blocked = blocked or status.casefold() in {
+            "failed",
+            "missing",
+            "blocked",
+            "partial",
+        }
+        steps.append(
+            SimulationStep(
+                domain=domain,
+                label=DOMAIN_LABELS.get(domain, domain or "Élément"),
+                desired=desired or "—",
+                applied=applied or "—",
+                status_label=_status_label(
+                    status,
+                    desired=desired,
+                    applied=applied,
+                ),
+                operation_count=len(operations),
+            )
+        )
+
+    kind = str(routing.get("kind") or "").strip().casefold()
+    if kind == "ignore":
+        summary = "La règle courante conserverait l’état actuel."
+        would_change = False
+    elif blocked:
+        summary = (
+            "La prévisualisation a trouvé au moins un élément bloqué ou manquant."
+        )
+    elif would_change:
+        affected = sum(
+            1
+            for step in steps
+            if step.status_label in {"À appliquer", "À corriger", "Erreur"}
+        )
+        summary = (
+            f"{affected} domaine(s) nécessiteraient une modification. "
+            "Aucune commande n’a été envoyée à OBS."
+        )
+    else:
+        summary = (
+            "Aucun changement n’est nécessaire pour la décision actuelle. "
+            "Aucune commande n’a été envoyée à OBS."
+        )
+
+    return SimulationReport(
+        summary=summary,
+        would_change=would_change,
+        steps=tuple(steps),
+    )
