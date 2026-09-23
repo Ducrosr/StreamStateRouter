@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from stream_state_router.services.runtime import (
     RoutingService,
     RuntimeEvent,
+    _DriftProbeBudgetExceeded,
     summarize_obs_drift,
 )
 
@@ -80,6 +81,32 @@ class DriftSummaryTests(unittest.TestCase):
         self.assertEqual(status["count"], 0)
         self.assertEqual(status["signature"], "")
         self.assertEqual(status["unknown_count"], 1)
+
+
+class DriftProbeBudgetTests(unittest.TestCase):
+    def test_cooperative_checkpoint_aborts_expired_read_only_probe(self) -> None:
+        service = SimpleNamespace(
+            _thread=threading.current_thread(),
+            _shutdown_cleanup_active=False,
+            _lock=threading.RLock(),
+            _stopping=False,
+            _stop=threading.Event(),
+            _automatic_dispatch_foreground_signature=None,
+            _automatic_dispatch_superseded=False,
+            _automatic_dispatch_next_foreground_probe=0.0,
+            _drift_probe_deadline=1.0,
+            poll_seconds=0.05,
+        )
+
+        with patch(
+            "stream_state_router.services.runtime.time.monotonic",
+            return_value=2.0,
+        ):
+            with self.assertRaisesRegex(
+                _DriftProbeBudgetExceeded,
+                "Budget du probe",
+            ):
+                RoutingService._cooperative_obs_yield(service)
 
 
 class DriftProbeTests(unittest.TestCase):
