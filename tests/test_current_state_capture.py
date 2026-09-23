@@ -5,6 +5,7 @@ import unittest
 from stream_state_router.importers.current_state_capture import (
     CurrentStateCaptureOptions,
     build_current_state_capture_draft,
+    find_ignored_process_rules,
     find_process_rules,
     suggest_capture_name,
 )
@@ -281,7 +282,14 @@ class CurrentStateCaptureTests(unittest.TestCase):
     def test_update_shared_profiles_creates_dedicated_profiles(self) -> None:
         config = _config()
         config["profiles"]["game"]["Shared Game"] = {
-            "actions": [],
+            "actions": [
+                {
+                    "type": "wait_ms",
+                    "name": "Existing shared action",
+                    "enabled": True,
+                    "params": {"ms": 25},
+                }
+            ],
             "extends": "",
             "conditions": {},
         }
@@ -342,8 +350,17 @@ class CurrentStateCaptureTests(unittest.TestCase):
         self.assertEqual(other["state"]["Game"], "Shared Game")
         self.assertEqual(other["state"]["LayoutProfile"], "Shared Layout")
         self.assertEqual(
-            result.config["profiles"]["game"]["Shared Game"]["actions"],
-            [],
+            result.config["profiles"]["game"]["Shared Game"]["actions"][0]["name"],
+            "Existing shared action",
+        )
+        dedicated_actions = result.config["profiles"]["game"][
+            target["state"]["Game"]
+        ]["actions"]
+        self.assertTrue(
+            any(
+                action.get("name") == "Existing shared action"
+                for action in dedicated_actions
+            )
         )
         self.assertTrue(
             any("partagé" in note for note in result.report.notes)
@@ -388,6 +405,94 @@ class CurrentStateCaptureTests(unittest.TestCase):
         matches = find_process_rules(config, "Game.exe")
 
         self.assertEqual([rule["name"] for rule in matches], ["High", "Low"])
+
+    def test_profile_inheritance_counts_as_shared(self) -> None:
+        config = _config()
+        config["profiles"]["game"]["Parent"] = {
+            "actions": [],
+            "extends": "",
+            "conditions": {},
+        }
+        config["profiles"]["game"]["Child"] = {
+            "actions": [],
+            "extends": "Parent",
+            "conditions": {},
+        }
+        config["layout_profiles"]["Parent Layout"] = {
+            "scene": "Old",
+            "modules": {},
+            "extends": "",
+            "conditions": {},
+        }
+        config["layout_profiles"]["Child Layout"] = {
+            "scene": "Other",
+            "modules": {},
+            "extends": "Parent Layout",
+            "conditions": {},
+        }
+        config["rules"] = [
+            {
+                "name": "Target",
+                "behavior": "match",
+                "priority": 100,
+                "enabled": True,
+                "exe": "Target.exe",
+                "state": {
+                    "Game": "Parent",
+                    "OverlayProfile": "Vanilla",
+                    "CaptureProfile": "Default",
+                    "AudioProfile": "Default",
+                    "LayoutProfile": "Parent Layout",
+                },
+                "conditions": {},
+            }
+        ]
+
+        result = build_current_state_capture_draft(
+            config,
+            snapshot=_snapshot(),
+            raw_layouts=_layouts(),
+            logical_state={},
+            options=CurrentStateCaptureOptions(
+                name="Target",
+                process="Target.exe",
+                existing_rule_name="Target",
+            ),
+        )
+
+        rule = result.config["rules"][0]
+        self.assertNotEqual(rule["state"]["Game"], "Parent")
+        self.assertNotEqual(rule["state"]["LayoutProfile"], "Parent Layout")
+        self.assertEqual(
+            result.config["profiles"]["game"]["Child"]["extends"],
+            "Parent",
+        )
+        self.assertEqual(
+            result.config["layout_profiles"]["Child Layout"]["extends"],
+            "Parent Layout",
+        )
+
+    def test_find_ignored_process_rules_is_case_insensitive(self) -> None:
+        config = _config()
+        config["rules"] = [
+            {
+                "name": "Ignore launcher",
+                "behavior": "ignore",
+                "priority": 200,
+                "exe": "Launcher.exe",
+            },
+            {
+                "name": "Normal",
+                "behavior": "match",
+                "priority": 100,
+                "exe": "Launcher.exe",
+            },
+        ]
+
+        ignored = find_ignored_process_rules(config, "launcher.EXE")
+
+        self.assertEqual(len(ignored), 1)
+        self.assertEqual(ignored[0]["name"], "Ignore launcher")
 
     def test_suggest_capture_name_avoids_rule_and_profile_collisions(self) -> None:
         config = _config()
