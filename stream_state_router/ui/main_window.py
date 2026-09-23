@@ -3310,6 +3310,7 @@ class MainWindow(QMainWindow):
         rules, poll_ms, debounce_ms, fallback_ms = build_ruleset(
             runtime_config
         )
+        self._dispose_layout_sync_manager()
         self._client = OBSClientManager(build_obs_config(runtime_config))
         self._dispatcher = OBSDispatcher(
             self._client,
@@ -6038,9 +6039,32 @@ class MainWindow(QMainWindow):
         self._refresh_layout_profile_names()
         self._refresh_override_boxes()
 
-    def _sync_obs_modules(self) -> None:
+    def _dispose_layout_sync_manager(self) -> None:
+        manager = self._layout_sync_manager
+        self._layout_sync_manager = None
+        if manager is None:
+            return
+        client = getattr(manager, "client", None)
+        # Defensive compatibility with sessions created by older code where
+        # the UI could reference the runtime-owned LayoutManager directly.
+        if client is None or client is self._client:
+            return
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            self._log(f"Fermeture client OBS outil layout : {exc}")
+
+    def _layout_tool_obs_config(self):
+        if self._client is not None:
+            return self._client.config
         self._collect_settings()
-        cfg = build_obs_config(self.config)
+        return build_obs_config(self.config)
+
+    def _sync_obs_modules(self) -> None:
+        cfg = self._layout_tool_obs_config()
         if not cfg.enabled:
             QMessageBox.information(
                 self,
@@ -6048,12 +6072,17 @@ class MainWindow(QMainWindow):
                 "Activez « Piloter OBS » dans Paramètres, puis enregistrez/appliquez la configuration.",
             )
             return
+        manager = OBSLayoutManager(OBSClientManager(cfg))
         try:
-            manager = self._dispatcher.layout_manager if self._dispatcher is not None else OBSLayoutManager(OBSClientManager(cfg))
             scenes, current = manager.list_scenes()
         except Exception as exc:
+            try:
+                manager.client.close()
+            except Exception:
+                pass
             QMessageBox.critical(self, "Layouts OBS", str(exc))
             return
+        self._dispose_layout_sync_manager()
         self._layout_sync_manager = manager
         previous = self.layout_scene.currentText().strip()
         self.layout_scene.blockSignals(True)
@@ -6491,15 +6520,20 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Appliquer le layout", str(exc))
 
     def _layout_manager_for_tools(self) -> OBSLayoutManager:
-        self._collect_settings()
-        cfg = build_obs_config(self.config)
+        cfg = self._layout_tool_obs_config()
         if not cfg.enabled:
             raise RuntimeError("Activez le pilotage OBS avant d'utiliser cet outil.")
-        if self._dispatcher is not None:
-            return self._dispatcher.layout_manager
-        # Tools must never silently use a manager kept from an older runtime.
-        self._layout_sync_manager = None
-        return OBSLayoutManager(OBSClientManager(cfg))
+        manager = self._layout_sync_manager
+        if (
+            manager is not None
+            and getattr(getattr(manager, "client", None), "config", None)
+            == cfg
+        ):
+            return manager
+        self._dispose_layout_sync_manager()
+        manager = OBSLayoutManager(OBSClientManager(cfg))
+        self._layout_sync_manager = manager
+        return manager
 
     def _preview_layout_profile(self) -> None:
         current = self._current_layout_profile()
@@ -7238,6 +7272,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._dispose_layout_sync_manager()
         self._stop_runtime_for_exit()
         event.accept()
         QApplication.instance().quit()
@@ -7247,6 +7282,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        self._dispose_layout_sync_manager()
         self._stop_runtime_for_exit()
         self.tray.hide()
         QApplication.instance().quit()
