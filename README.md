@@ -25,6 +25,25 @@ Usage recommandé :
 Le chemin SoundVolumeView est configurable dans **Paramètres > Contrôle Windows**.
 HDR ne dépend d'aucun utilitaire externe.
 
+### Préparation via launcher
+
+Une règle d'application peut déclarer un exécutable **Launcher** (par exemple
+`Battle.net.exe` ou `Ankama Launcher.exe`). Chaque action de profil dispose
+d'une option **Préparer cette action dès le launcher**. Les actions marquées
+sont appliquées dès que le launcher est détecté, sans créer une seconde règle
+de routage pour le launcher.
+
+La préparation reste prioritaire tant que le launcher est actif : un fallback
+ne réécrit pas brièvement la même propriété (par exemple HDR OFF pendant un
+Alt-Tab). Lorsque l'application démarre, son état complet reprend la propriété ;
+si le launcher se ferme sans lancer l'application, SSR invalide uniquement les
+domaines préparés et restaure l'état routé courant.
+
+Si plusieurs applications ou launchers actifs demandent exactement la même
+préparation, SSR la déduplique. Si deux préparations écrivent des valeurs
+incompatibles sur la même cible, SSR refuse la préparation ambiguë et la
+signale dans le journal au lieu de choisir silencieusement.
+
 ### Import de collection OBS / Advanced Scene Switcher
 
 Depuis l'onglet **Profils**, le bouton **Importer collection OBS…** peut lire la
