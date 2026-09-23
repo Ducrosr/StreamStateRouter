@@ -83,6 +83,14 @@ class ProvenanceRow:
 
 
 @dataclass(frozen=True, slots=True)
+class DependencyNode:
+    label: str
+    value: str = ""
+    detail: str = ""
+    children: tuple["DependencyNode", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ScenarioCheck:
     name: str
     priority: int
@@ -523,6 +531,108 @@ def _rules_can_overlap(
         # selector by themselves.
 
     return shared_selector
+
+
+def build_effective_dependency_tree(
+    config: Mapping[str, Any],
+    explanation: Mapping[str, Any] | None,
+) -> DependencyNode:
+    explanation = _mapping(explanation)
+    routing = _mapping(explanation.get("routing"))
+    kind = str(routing.get("kind") or "").strip().casefold()
+    rule_name = str(routing.get("rule_name") or "").strip()
+
+    if kind == "manual_override":
+        root_value = "Override manuel"
+    elif kind == "fallback":
+        root_value = "Configuration de secours"
+    elif kind == "ignore":
+        root_value = f"IGNORE · {rule_name or 'règle active'}"
+    elif rule_name:
+        root_value = f"Règle « {rule_name} »"
+    else:
+        root_value = kind or "Aucune décision"
+
+    domains: list[DependencyNode] = []
+    for row in build_effective_provenance(config, explanation):
+        entries = profile_content_entries(
+            config,
+            row.domain,
+            row.profile if row.profile != "—" else "",
+        )
+        by_source: dict[str, list[ProfileContentEntry]] = {}
+        for entry in entries:
+            by_source.setdefault(entry.source_profile, []).append(entry)
+
+        source_nodes: list[DependencyNode] = []
+        # Parent content executes/applies before local content, so render the
+        # ancestry from the deepest base back to the selected profile.
+        for source_name in reversed(row.lineage):
+            content_nodes = tuple(
+                DependencyNode(
+                    label=entry.kind,
+                    value=entry.name,
+                    detail=(
+                        (entry.target + " · " if entry.target else "")
+                        + ("actif" if entry.enabled else "désactivé")
+                    ),
+                )
+                for entry in by_source.get(source_name, ())
+            )
+            source_nodes.append(
+                DependencyNode(
+                    label=(
+                        "Profil local"
+                        if source_name == row.profile
+                        else "Profil hérité"
+                    ),
+                    value=source_name,
+                    detail=(
+                        f"{len(content_nodes)} élément(s)"
+                        if content_nodes
+                        else "Aucun contenu local"
+                    ),
+                    children=content_nodes,
+                )
+            )
+
+        usage_nodes = tuple(
+            DependencyNode(
+                label={
+                    "rule": "Utilisé par règle",
+                    "fallback": "Utilisé par fallback",
+                    "inheritance": "Parent de profil",
+                }.get(usage.kind, usage.kind),
+                value=usage.owner,
+                detail=usage.detail,
+            )
+            for usage in row.usages
+        )
+
+        children: list[DependencyNode] = list(source_nodes)
+        if usage_nodes:
+            children.append(
+                DependencyNode(
+                    label="Autres dépendances",
+                    value=str(len(usage_nodes)),
+                    children=usage_nodes,
+                )
+            )
+        domains.append(
+            DependencyNode(
+                label=row.label,
+                value=row.profile,
+                detail=row.selected_by,
+                children=tuple(children),
+            )
+        )
+
+    return DependencyNode(
+        label="Décision courante",
+        value=root_value,
+        detail=str(routing.get("kind") or ""),
+        children=tuple(domains),
+    )
 
 
 def build_static_health_findings(
