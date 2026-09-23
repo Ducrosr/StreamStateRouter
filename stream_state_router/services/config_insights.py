@@ -7,7 +7,8 @@ import json
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
-from .config import validate_config
+from ..router.models import ForegroundApp
+from .config import build_ruleset, validate_config
 
 
 DOMAIN_LABELS = {
@@ -69,6 +70,23 @@ class ProvenanceRow:
     lineage: tuple[str, ...]
     content_summary: str
     usages: tuple[ProfileUsage, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioCheck:
+    name: str
+    priority: int
+    behavior: str
+    matched: bool
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioReport:
+    kind: str
+    rule_name: str
+    state: Mapping[str, str] | None
+    checks: tuple[ScenarioCheck, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +604,78 @@ def _best_candidate(
     if score >= 0.72 and score - second >= 0.08:
         return candidate, float(score), "Nom proche détecté"
     return "", 0.0, ""
+
+
+def simulate_rule_scenario(
+    config: Mapping[str, Any],
+    *,
+    exe: str = "",
+    path: str = "",
+    title: str = "",
+    streaming: bool | None = None,
+    recording: bool | None = None,
+    program_scene: str = "",
+    obs_enabled: bool | None = None,
+    running_processes: Sequence[str] = (),
+) -> ScenarioReport:
+    ruleset, _poll, _debounce, _fallback = build_ruleset(config)
+    has_foreground = bool(
+        str(exe or "").strip()
+        or str(path or "").strip()
+        or str(title or "").strip()
+    )
+    app = (
+        ForegroundApp(
+            hwnd=0,
+            pid=0,
+            exe_name=str(exe or "").strip(),
+            process_path=str(path or "").strip(),
+            window_title=str(title or "").strip(),
+        )
+        if has_foreground
+        else None
+    )
+    context: dict[str, object] = {
+        "program_scene": str(program_scene or "").strip(),
+        "running_processes": tuple(
+            str(item).strip()
+            for item in running_processes
+            if str(item).strip()
+        ),
+    }
+    if streaming is not None:
+        context["streaming"] = bool(streaming)
+    if recording is not None:
+        context["recording"] = bool(recording)
+    if obs_enabled is not None:
+        context["obs_enabled"] = bool(obs_enabled)
+
+    explanation = ruleset.explain(app, context=context)
+    mapping = explanation.as_mapping()
+    raw_state = mapping.get("state")
+    state = (
+        {
+            str(key): str(value)
+            for key, value in raw_state.items()
+        }
+        if isinstance(raw_state, Mapping)
+        else None
+    )
+    return ScenarioReport(
+        kind=str(mapping.get("kind") or ""),
+        rule_name=str(mapping.get("rule_name") or ""),
+        state=state,
+        checks=tuple(
+            ScenarioCheck(
+                name=str(item.name),
+                priority=int(item.priority),
+                behavior=str(item.behavior),
+                matched=bool(item.matched),
+                reason=str(item.reason),
+            )
+            for item in explanation.checks
+        ),
+    )
 
 
 def _reference_issue(
