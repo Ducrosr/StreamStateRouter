@@ -179,7 +179,9 @@ class MainWindow(QMainWindow):
         self._last_runtime_restart_previous_stopped = False
         self._last_runtime_restart_diagnostic = ""
         self._pending_collection_imports: dict[str, dict[str, object]] = {}
-        self._user_activity_history: list[tuple[str, UserActivityEntry]] = []
+        self._user_activity_history: list[
+            tuple[str, UserActivityEntry, int, float]
+        ] = []
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -3224,16 +3226,29 @@ class MainWindow(QMainWindow):
 
     def _record_user_activity(self, entry: UserActivityEntry) -> None:
         timestamp = time.strftime("%H:%M:%S")
-        if self._user_activity_history:
-            _last_time, last_entry = self._user_activity_history[-1]
+        now = time.monotonic()
+        for index in range(len(self._user_activity_history) - 1, -1, -1):
+            (
+                _previous_timestamp,
+                previous_entry,
+                repeat_count,
+                previous_seen,
+            ) = self._user_activity_history[index]
+            if now - previous_seen > 5.0:
+                break
             if (
-                last_entry.message == entry.message
-                and last_entry.detail == entry.detail
+                previous_entry.style == entry.style
+                and previous_entry.message == entry.message
+                and previous_entry.detail == entry.detail
             ):
-                self._user_activity_history[-1] = (timestamp, entry)
+                self._user_activity_history.pop(index)
+                self._user_activity_history.append(
+                    (timestamp, entry, repeat_count + 1, now)
+                )
                 self._refresh_user_activity()
                 return
-        self._user_activity_history.append((timestamp, entry))
+
+        self._user_activity_history.append((timestamp, entry, 1, now))
         self._user_activity_history = self._user_activity_history[-8:]
         self._refresh_user_activity()
 
@@ -3248,11 +3263,14 @@ class MainWindow(QMainWindow):
             "Bad": "✕",
             "Muted": "•",
         }
-        for timestamp, entry in reversed(self._user_activity_history):
+        for timestamp, entry, repeat_count, _seen_at in reversed(
+            self._user_activity_history
+        ):
+            repeat = f" ×{repeat_count}" if repeat_count > 1 else ""
             item = QTreeWidgetItem(
                 [
                     timestamp,
-                    f"{markers.get(entry.style, '•')} {entry.message}",
+                    f"{markers.get(entry.style, '•')} {entry.message}{repeat}",
                     entry.detail or "—",
                 ]
             )
