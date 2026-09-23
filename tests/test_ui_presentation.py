@@ -6,6 +6,7 @@ from stream_state_router.ui.presentation import (
     build_automation_rows,
     build_dashboard_snapshot,
     build_diagnostic_report,
+    build_manual_override_presentation,
     build_simulation_report,
     user_activity_from_runtime_event,
 )
@@ -293,6 +294,62 @@ class DashboardPresentationTests(unittest.TestCase):
             "prochain changement d’application",
             snapshot.reason,
         )
+
+    def test_manual_override_presentation_humanizes_duration(self) -> None:
+        view = build_manual_override_presentation(
+            {
+                "active": True,
+                "release_mode": "duration",
+                "remaining_seconds": 125,
+            }
+        )
+
+        self.assertTrue(view.active)
+        self.assertEqual(view.title, "Override manuel actif")
+        self.assertIn("2 min 5 s", view.detail)
+        self.assertEqual(view.style, "Warn")
+
+    def test_manual_override_presentation_stream_end_armed_then_active(self) -> None:
+        armed = build_manual_override_presentation(
+            {
+                "active": True,
+                "release_mode": "stream_end",
+                "stream_seen_active": False,
+            }
+        )
+        active = build_manual_override_presentation(
+            {
+                "active": True,
+                "release_mode": "stream_end",
+                "stream_seen_active": True,
+            }
+        )
+
+        self.assertIn("attend", armed.detail)
+        self.assertIn("stream en cours", active.detail)
+
+    def test_manual_override_presentation_inactive_returns_automatic(self) -> None:
+        view = build_manual_override_presentation(
+            {"active": False}
+        )
+
+        self.assertFalse(view.active)
+        self.assertEqual(view.style, "Good")
+        self.assertIn("Aucun override", view.detail)
+
+    def test_user_activity_humanizes_override_mode(self) -> None:
+        activity = user_activity_from_runtime_event(
+            "manual_override",
+            "Override manuel appliqué",
+            {
+                "active": True,
+                "release_mode": "foreground_change",
+            },
+        )
+
+        self.assertIsNotNone(activity)
+        assert activity is not None
+        self.assertIn("changement d’application", activity.detail)
 
     def test_user_activity_surfaces_override_auto_release(self) -> None:
         activity = user_activity_from_runtime_event(
