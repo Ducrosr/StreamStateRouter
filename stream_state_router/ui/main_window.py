@@ -148,6 +148,15 @@ class MainWindow(QMainWindow):
         self._expert_mode = bool(
             self._window_settings.value("main_window/expert_mode", False, type=bool)
         )
+        # Preserve historical behavior on first use: editing starts enabled,
+        # but users can explicitly freeze the draft during live operation.
+        self._config_edit_enabled = bool(
+            self._window_settings.value(
+                "main_window/config_edit_enabled",
+                True,
+                type=bool,
+            )
+        )
         self.config = copy.deepcopy(config)
         self._last_saved_config = copy.deepcopy(config)
         self._saved_revision = config_revision(self.config)
@@ -185,6 +194,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_ui_mode()
         self._build_menu()
+        self._apply_edit_mode()
         self._build_tray()
         self._load_config_into_ui()
         self._wire_dirty_signals()
@@ -223,6 +233,9 @@ class MainWindow(QMainWindow):
         self.mode_button = QPushButton()
         self.mode_button.clicked.connect(self._toggle_ui_mode)
         top.addWidget(self.mode_button)
+        self.edit_mode_button = QPushButton()
+        self.edit_mode_button.clicked.connect(self._toggle_edit_mode)
+        top.addWidget(self.edit_mode_button)
         self.pause_button = QPushButton("Suspendre")
         self.pause_button.clicked.connect(self._toggle_pause)
         top.addWidget(self.pause_button)
@@ -322,6 +335,94 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(self.dashboard_tab_index)
         if hasattr(self, "unsaved"):
             self._refresh_config_revision_status()
+
+    def _toggle_edit_mode(self) -> None:
+        self._config_edit_enabled = not self._config_edit_enabled
+        self._window_settings.setValue(
+            "main_window/config_edit_enabled",
+            self._config_edit_enabled,
+        )
+        self._window_settings.sync()
+        self._apply_edit_mode()
+
+    def _apply_edit_mode(self) -> None:
+        enabled = bool(self._config_edit_enabled)
+        if hasattr(self, "edit_mode_button"):
+            self.edit_mode_button.setText(
+                "Édition active"
+                if enabled
+                else "Configuration verrouillée"
+            )
+            self.edit_mode_button.setObjectName(
+                "Warn" if enabled else "Good"
+            )
+            self.edit_mode_button.setToolTip(
+                (
+                    "Cliquer pour verrouiller les écrans qui modifient "
+                    "la configuration."
+                )
+                if enabled
+                else (
+                    "La configuration est figée. Dashboard, diagnostics, "
+                    "overrides et commandes runtime restent disponibles."
+                )
+            )
+            self.edit_mode_button.style().unpolish(
+                self.edit_mode_button
+            )
+            self.edit_mode_button.style().polish(
+                self.edit_mode_button
+            )
+
+        for index in (
+            getattr(self, "rules_tab_index", -1),
+            getattr(self, "profiles_tab_index", -1),
+            getattr(self, "layouts_tab_index", -1),
+            getattr(self, "settings_tab_index", -1),
+        ):
+            if index < 0 or not hasattr(self, "tabs"):
+                continue
+            page = self.tabs.widget(index)
+            if page is not None:
+                page.setEnabled(enabled)
+            self.tabs.setTabToolTip(
+                index,
+                ""
+                if enabled
+                else "Configuration verrouillée : activez l’édition pour modifier ce contenu.",
+            )
+
+        for name in (
+            "capture_current_button",
+            "repair_refs_button",
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
+
+        for name in (
+            "_import_config_action",
+            "_restore_backup_action",
+            "_repair_refs_action",
+        ):
+            action = getattr(self, name, None)
+            if action is not None:
+                action.setEnabled(enabled)
+
+    def _require_edit_mode(self, operation: str) -> bool:
+        if self._config_edit_enabled:
+            return True
+        QMessageBox.information(
+            self,
+            "Configuration verrouillée",
+            (
+                f"{operation}\n\n"
+                "Activez « Édition active » en haut de la fenêtre pour "
+                "modifier le brouillon. Le verrouillage n’affecte pas le "
+                "runtime actuellement appliqué."
+            ),
+        )
+        return False
 
     def _schedule_dashboard_refresh(self) -> None:
         timer = getattr(self, "_dashboard_refresh_timer", None)
@@ -699,6 +800,8 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _start_reference_repair(self) -> None:
+        if not self._require_edit_mode("Réparer les références OBS"):
+            return
         service = self._service
         client = self._client
         if service is None:
@@ -1003,9 +1106,9 @@ class MainWindow(QMainWindow):
         provenance = QPushButton("Qui contrôle quoi ?")
         provenance.clicked.connect(self._show_effective_provenance)
         maintenance_actions.addWidget(provenance)
-        repair_refs = QPushButton("Réparer les références OBS…")
-        repair_refs.clicked.connect(self._start_reference_repair)
-        maintenance_actions.addWidget(repair_refs)
+        self.repair_refs_button = QPushButton("Réparer les références OBS…")
+        self.repair_refs_button.clicked.connect(self._start_reference_repair)
+        maintenance_actions.addWidget(self.repair_refs_button)
         maintenance_actions.addStretch(1)
         maintenance_lay.addLayout(maintenance_actions)
         root.addWidget(maintenance_card)
@@ -1041,10 +1144,12 @@ class MainWindow(QMainWindow):
         import_hint.setObjectName("Muted")
         import_lay.addWidget(import_hint)
         import_actions = QHBoxLayout()
-        capture_current = QPushButton("Capturer l’état actuel")
-        capture_current.setObjectName("Primary")
-        capture_current.clicked.connect(self._guided_capture_current_state)
-        import_actions.addWidget(capture_current)
+        self.capture_current_button = QPushButton("Capturer l’état actuel")
+        self.capture_current_button.setObjectName("Primary")
+        self.capture_current_button.clicked.connect(
+            self._guided_capture_current_state
+        )
+        import_actions.addWidget(self.capture_current_button)
         analyze_import = QPushButton("Analyser ma collection OBS")
         analyze_import.clicked.connect(self._guided_analyze_collection)
         import_actions.addWidget(analyze_import)
@@ -1896,6 +2001,10 @@ class MainWindow(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(slot)
             file_menu.addAction(action)
+            if text.startswith("Importer une configuration"):
+                self._import_config_action = action
+            elif text.startswith("Historique des sauvegardes"):
+                self._restore_backup_action = action
 
         tools_menu = self.menuBar().addMenu("Outils")
         palette = QAction("Palette de commandes…", self)
@@ -1912,6 +2021,8 @@ class MainWindow(QMainWindow):
             action = QAction(text, self)
             action.triggered.connect(slot)
             tools_menu.addAction(action)
+            if text.startswith("Réparer les références OBS"):
+                self._repair_refs_action = action
 
     def _show_command_palette(self) -> None:
         dialog = QDialog(self)
@@ -3540,6 +3651,8 @@ class MainWindow(QMainWindow):
         self._refresh_override_boxes()
 
     def _guided_capture_current_state(self) -> None:
+        if not self._require_edit_mode("Capturer l’état actuel"):
+            return
         service = self._service
         client = self._client
         if service is None:
@@ -4147,6 +4260,8 @@ class MainWindow(QMainWindow):
         )
 
     def _migrate_collection_logic(self) -> None:
+        if not self._require_edit_mode("Migrer la collection OBS"):
+            return
         if self._service is None:
             QMessageBox.warning(
                 self,
@@ -5725,6 +5840,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export", str(exc))
 
     def _import_config(self) -> None:
+        if not self._require_edit_mode("Importer une configuration"):
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Importer une configuration", "", "JSON (*.json)")
         if not path:
             return
@@ -5744,6 +5861,8 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
 
     def _restore_config_backup(self) -> None:
+        if not self._require_edit_mode("Restaurer une sauvegarde"):
+            return
         try:
             backups = list_valid_backups(limit=20)
         except Exception as exc:
