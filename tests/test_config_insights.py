@@ -609,6 +609,67 @@ class ConfigInsightsTests(unittest.TestCase):
             )
         )
 
+    def test_scenario_simulator_previews_effective_profile_content(self) -> None:
+        config = _config()
+        config["profiles"]["game"]["Base"] = {
+            "actions": [
+                {
+                    "type": "wait_ms",
+                    "name": "Base delay",
+                    "enabled": True,
+                    "params": {"duration_ms": 10},
+                }
+            ],
+            "extends": "",
+            "conditions": {},
+        }
+        config["profiles"]["game"]["Overwatch"]["extends"] = "Base"
+        config["profiles"]["game"]["Overwatch"]["actions"] = [
+            {
+                "type": "set_program_scene",
+                "name": "Gameplay scene",
+                "enabled": True,
+                "params": {"scene": "In Game"},
+            }
+        ]
+
+        report = simulate_rule_scenario(
+            config,
+            exe="Overwatch.exe",
+        )
+
+        game = next(
+            item for item in report.domains if item.domain == "game"
+        )
+        self.assertTrue(game.exists)
+        self.assertEqual(game.profile, "Overwatch")
+        self.assertEqual(game.lineage, ("Overwatch", "Base"))
+        self.assertEqual(
+            [entry.source_profile for entry in game.entries],
+            ["Base", "Overwatch"],
+        )
+        self.assertEqual(
+            [entry.name for entry in game.entries],
+            ["Base delay", "Gameplay scene"],
+        )
+
+    def test_scenario_simulator_marks_missing_profile_without_crashing(self) -> None:
+        config = _config()
+        config["rules"][0]["state"]["CaptureProfile"] = "Missing HDR"
+
+        report = simulate_rule_scenario(
+            config,
+            exe="Overwatch.exe",
+        )
+
+        capture = next(
+            item for item in report.domains if item.domain == "capture"
+        )
+        self.assertFalse(capture.exists)
+        self.assertEqual(capture.profile, "Missing HDR")
+        self.assertEqual(capture.content_summary, "Profil introuvable")
+        self.assertEqual(capture.entries, ())
+
     def test_scenario_simulator_supports_background_process_rules(self) -> None:
         config = _config()
         config["rules"].insert(

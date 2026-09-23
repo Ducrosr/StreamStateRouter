@@ -111,6 +111,17 @@ class ConfigChangeReview:
 
 
 @dataclass(frozen=True, slots=True)
+class ScenarioDomainPreview:
+    domain: str
+    label: str
+    profile: str
+    exists: bool
+    lineage: tuple[str, ...]
+    content_summary: str
+    entries: tuple[ProfileContentEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ScenarioCheck:
     name: str
     priority: int
@@ -125,6 +136,7 @@ class ScenarioReport:
     rule_name: str
     state: Mapping[str, str] | None
     checks: tuple[ScenarioCheck, ...]
+    domains: tuple[ScenarioDomainPreview, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1534,6 +1546,42 @@ def simulate_rule_scenario(
         if isinstance(raw_state, Mapping)
         else None
     )
+    domain_previews: list[ScenarioDomainPreview] = []
+    if state is not None:
+        for domain, label in DOMAIN_LABELS.items():
+            profile = str(state.get(STATE_KEYS[domain]) or "").strip()
+            profiles = _profile_maps(config, domain)
+            exists = bool(profile and profile in profiles)
+            lineage = (
+                profile_lineage(config, domain, profile)
+                if profile
+                else ()
+            )
+            entries = (
+                profile_content_entries(config, domain, profile)
+                if exists
+                else ()
+            )
+            domain_previews.append(
+                ScenarioDomainPreview(
+                    domain=domain,
+                    label=label,
+                    profile=profile or "—",
+                    exists=exists,
+                    lineage=lineage,
+                    content_summary=(
+                        _profile_content_summary(
+                            config,
+                            domain,
+                            lineage,
+                        )
+                        if exists
+                        else "Profil introuvable"
+                    ),
+                    entries=entries,
+                )
+            )
+
     return ScenarioReport(
         kind=str(mapping.get("kind") or ""),
         rule_name=str(mapping.get("rule_name") or ""),
@@ -1548,6 +1596,7 @@ def simulate_rule_scenario(
             )
             for item in explanation.checks
         ),
+        domains=tuple(domain_previews),
     )
 
 
