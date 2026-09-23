@@ -297,7 +297,7 @@ class MainWindow(QMainWindow):
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
-        self.rules_table = QTableWidget(0, 10)
+        self.rules_table = QTableWidget(0, 11)
         self.rules_table.setHorizontalHeaderLabels(
             [
                 "Actif",
@@ -305,6 +305,7 @@ class MainWindow(QMainWindow):
                 "Comportement",
                 "Priorité",
                 "Processus",
+                "Launcher",
                 "Premier plan",
                 "Chemin",
                 "Titre",
@@ -1168,6 +1169,7 @@ class MainWindow(QMainWindow):
                 rule.get("behavior", "match"),
                 str(rule.get("priority", 0)),
                 process_display,
+                rule.get("launcher", ""),
                 foreground_display,
                 rule.get("path", ""),
                 rule.get("title_regex", ""),
