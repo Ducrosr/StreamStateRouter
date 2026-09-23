@@ -44,6 +44,11 @@ class _RuntimeShutdownRequested(BaseException):
     """Internal cooperative-cancellation signal for the runtime worker."""
 
 
+MANUAL_OVERRIDE_RELEASE_MODES = frozenset(
+    {"manual", "duration", "foreground_change", "stream_end"}
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeEvent:
     kind: str
@@ -280,6 +285,10 @@ class RoutingService:
         # cooperative restart interrupted a long OBS transition.
         self._last_meaningful_app: ForegroundApp | None = bootstrap_foreground
         self._bootstrap_foreground: ForegroundApp | None = bootstrap_foreground
+        self._manual_override_release_mode = ""
+        self._manual_override_release_foreground: tuple[int, str, str] | None = None
+        self._manual_override_stream_seen_active = False
+        self._manual_override_next_stream_probe = 0.0
         self._dispatch_generation = 0
         self._last_obs_probe = 0.0
         self._last_obs_connected: bool | None = None
@@ -606,16 +615,119 @@ class RoutingService:
             )
         )
 
+    @staticmethod
+    def _foreground_identity(
+        app: ForegroundApp | None,
+    ) -> tuple[int, str, str] | None:
+        if app is None:
+            return None
+        return (
+            int(app.pid),
+            str(app.process_path or "").strip().casefold(),
+            str(app.exe_name or "").strip().casefold(),
+        )
+
+    def _reset_manual_override_release_locked(self) -> None:
+        self._manual_override_release_mode = ""
+        self._manual_override_release_foreground = None
+        self._manual_override_stream_seen_active = False
+        self._manual_override_next_stream_probe = 0.0
+
+    def manual_override_status(self) -> dict[str, object]:
+        with self._lock:
+            active = self.engine.manual_override is not None
+            mode = self._manual_override_release_mode if active else ""
+            baseline = self._manual_override_release_foreground
+            seen_stream = self._manual_override_stream_seen_active
+            remaining = None
+            until = self.engine.manual_override_until
+            if active and until is not None:
+                remaining = max(0.0, until - time.monotonic())
+        return {
+            "active": active,
+            "release_mode": mode,
+            "remaining_seconds": remaining,
+            "foreground_baseline": (
+                {
+                    "pid": baseline[0],
+                    "path": baseline[1],
+                    "exe": baseline[2],
+                }
+                if baseline is not None
+                else None
+            ),
+            "stream_seen_active": seen_stream,
+        }
+
     def set_manual_override(
         self,
         state: StreamState,
         *,
         duration_seconds: float | None = None,
+        release_mode: str = "manual",
     ) -> StateChange | None:
+        mode = str(release_mode or "manual").strip().casefold()
+        if mode not in MANUAL_OVERRIDE_RELEASE_MODES:
+            raise ValueError(
+                "release_mode doit être manual, duration, "
+                "foreground_change ou stream_end"
+            )
+
+        duration = (
+            float(duration_seconds)
+            if duration_seconds is not None
+            else None
+        )
+        if mode == "duration":
+            if duration is None or duration <= 0:
+                raise ValueError(
+                    "duration_seconds doit être > 0 pour un override temporaire"
+                )
+        elif duration is not None and duration > 0:
+            # Preserve the historical API: supplying a positive duration without
+            # an explicit mode still means a timed override.
+            if mode == "manual":
+                mode = "duration"
+            else:
+                raise ValueError(
+                    "duration_seconds ne peut pas être combiné avec ce mode"
+                )
+        else:
+            duration = None
+
         with self._lock:
-            change = self.engine.set_manual_override(state, duration_seconds=duration_seconds)
+            baseline = self._last_meaningful_app
+            if mode == "foreground_change" and baseline is None:
+                raise ValueError(
+                    "Aucune application externe connue pour armer "
+                    "la fin d’override au prochain changement."
+                )
+            self._manual_override_release_mode = mode
+            self._manual_override_release_foreground = (
+                self._foreground_identity(baseline)
+                if mode == "foreground_change"
+                else None
+            )
+            self._manual_override_stream_seen_active = False
+            self._manual_override_next_stream_probe = (
+                time.monotonic()
+                if mode == "stream_end"
+                else 0.0
+            )
+            change = self.engine.set_manual_override(
+                state,
+                duration_seconds=(duration if mode == "duration" else None),
+            )
         if change:
             self._apply_change(change, origin="manual_override")
+        self._emit(
+            RuntimeEvent(
+                "manual_override",
+                "Override manuel appliqué",
+                payload=self.manual_override_status(),
+            )
+        )
+        self._wake.set()
         return change
 
     def clear_manual_override(self) -> StateChange | None:
@@ -633,9 +745,63 @@ class RoutingService:
                 context=context,
                 use_context_provider=False,
             )
+            self._reset_manual_override_release_locked()
         if change:
             self._apply_change(change, origin="manual_override_clear")
+        self._emit(
+            RuntimeEvent(
+                "manual_override",
+                "Override manuel désactivé",
+                payload=self.manual_override_status(),
+            )
+        )
         return change
+
+    def _manual_override_release_probe(
+        self,
+        app: ForegroundApp | None,
+        *,
+        now: float,
+    ) -> tuple[str, Mapping[str, object] | None]:
+        with self._lock:
+            if self.engine.manual_override is None:
+                if self._manual_override_release_mode:
+                    self._reset_manual_override_release_locked()
+                return "", None
+            mode = self._manual_override_release_mode
+            baseline = self._manual_override_release_foreground
+            next_stream_probe = self._manual_override_next_stream_probe
+
+        if mode == "foreground_change":
+            identity = self._foreground_identity(app)
+            if (
+                identity is not None
+                and baseline is not None
+                and identity != baseline
+            ):
+                return "changement d’application", None
+            return "", None
+
+        if mode != "stream_end" or now < next_stream_probe:
+            return "", None
+
+        with self._lock:
+            self._manual_override_next_stream_probe = now + 1.0
+        try:
+            context = self.dispatcher.obs_context(force_refresh=True)
+        except Exception:
+            return "", None
+
+        streaming = context.get("streaming")
+        with self._lock:
+            if streaming is True:
+                self._manual_override_stream_seen_active = True
+                return "", context
+            seen_active = self._manual_override_stream_seen_active
+
+        if streaming is False and seen_active:
+            return "fin du stream", context
+        return "", context
 
     def force_reapply(self) -> DispatchResult | None:
         with self._dispatch_lock:
@@ -934,6 +1100,19 @@ class RoutingService:
             context = {}
         context = self._with_process_context(context)
         routing = self.engine.explain(target_app, context=context)
+        if str(routing.get("kind") or "") == "manual_override":
+            override_status = self.manual_override_status()
+            routing = {
+                **routing,
+                "override_release_mode": override_status.get(
+                    "release_mode",
+                    "",
+                ),
+                "override_stream_seen_active": override_status.get(
+                    "stream_seen_active",
+                    False,
+                ),
+            }
         kind = str(routing.get("kind") or "")
         effective_raw = routing.get("effective_state")
         if kind == "ignore":
