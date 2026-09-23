@@ -78,7 +78,9 @@ from ..services.config_insights import (
     build_capability_report,
     build_effective_provenance,
     configured_action_types,
+    profile_usages,
     scan_obs_reference_repairs,
+    simulate_rule_scenario,
 )
 from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
@@ -1088,6 +1090,9 @@ class MainWindow(QMainWindow):
         edit = QPushButton("Modifier les règles")
         edit.clicked.connect(self._open_rules_editor)
         actions.addWidget(edit)
+        simulate = QPushButton("Tester un scénario…")
+        simulate.clicked.connect(self._show_scenario_simulator)
+        actions.addWidget(simulate)
         actions.addStretch(1)
         root.addLayout(actions)
         return page
@@ -1176,6 +1181,7 @@ class MainWindow(QMainWindow):
             ("Renommer", self._rename_profile),
             ("Supprimer", self._delete_profile),
             ("Tester", self._test_profile),
+            ("Impact", self._show_current_profile_impact),
         ]:
             b = QPushButton(text)
             if text == "Nouveau":
@@ -1269,6 +1275,7 @@ class MainWindow(QMainWindow):
             ("Capturer depuis OBS", self._capture_layout_profile),
             ("Appliquer maintenant", self._apply_layout_profile),
             ("Éditer dans OBS", self._edit_layout_in_obs),
+            ("Impact", self._show_current_layout_impact),
         ]:
             button = QPushButton(text)
             if text == "Capturer depuis OBS":
