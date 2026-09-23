@@ -195,6 +195,23 @@ def build_dashboard_snapshot(
         ).strip()
         status = str(status_row.get("status") or plan_row.get("status") or "").strip()
         message = str(status_row.get("message") or plan_row.get("message") or "").strip()
+        if not obs_enabled:
+            status_label = "OBS désactivé"
+            message = (
+                "Le pilotage OBS est désactivé ; l’état effectif ne peut pas "
+                "être vérifié ni appliqué."
+            )
+        elif not obs_connected:
+            status_label = "Non vérifiable"
+            message = (
+                "Connexion OBS requise pour vérifier l’état réellement appliqué."
+            )
+        else:
+            status_label = _status_label(
+                status,
+                desired=desired,
+                applied=applied,
+            )
         differences.append(
             DashboardDifference(
                 domain=domain,
@@ -202,7 +219,7 @@ def build_dashboard_snapshot(
                 desired=desired or "—",
                 applied=applied or "—",
                 status=status,
-                status_label=_status_label(status, desired=desired, applied=applied),
+                status_label=status_label,
                 message=message,
             )
         )

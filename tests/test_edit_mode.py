@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -20,6 +20,7 @@ class _FakeButton:
         self.text = ""
         self.enabled = True
         self.object_name = ""
+        self.tooltip = ""
         self._style = _FakeStyle()
 
     def setText(self, value: str) -> None:
@@ -30,6 +31,9 @@ class _FakeButton:
 
     def setObjectName(self, value: str) -> None:
         self.object_name = value
+
+    def setToolTip(self, value: str) -> None:
+        self.tooltip = value
 
     def style(self):
         return self._style
@@ -91,6 +95,21 @@ class _FakeTabs:
         self.tooltips[index] = text
 
 
+def _bind_obs_helpers(window) -> None:
+    window._obs_connection_available = MethodType(
+        MainWindow._obs_connection_available,
+        window,
+    )
+    window._apply_obs_connected_control_state = MethodType(
+        MainWindow._apply_obs_connected_control_state,
+        window,
+    )
+    window._refresh_obs_connected_controls = MethodType(
+        MainWindow._refresh_obs_connected_controls,
+        window,
+    )
+
+
 class EditModeTests(unittest.TestCase):
     def test_mutating_surfaces_are_read_only_outside_edit_mode(self) -> None:
         pages = {
@@ -110,6 +129,15 @@ class EditModeTests(unittest.TestCase):
         repair_action = Mock()
         window = SimpleNamespace(
             _edit_mode=False,
+            _client=SimpleNamespace(
+                config=SimpleNamespace(enabled=True),
+                connected=True,
+            ),
+            _obs_connected_controls=[
+                (capture, True),
+                (repair, True),
+                (repair_action, True),
+            ],
             tabs=tabs,
             rules_tab_index=2,
             profiles_tab_index=3,
@@ -122,6 +150,7 @@ class EditModeTests(unittest.TestCase):
             _repair_refs_action=repair_action,
         )
 
+        _bind_obs_helpers(window)
         MainWindow._apply_edit_mode_surfaces(window)
 
         for page in pages.values():
@@ -134,6 +163,59 @@ class EditModeTests(unittest.TestCase):
         self.assertTrue(
             all("Mode édition" in value for value in tabs.tooltips.values())
         )
+
+    def test_obs_connected_controls_disable_when_obs_is_offline(self) -> None:
+        normal = _FakeButton()
+        edit_only = _FakeButton()
+        window = SimpleNamespace(
+            _client=SimpleNamespace(
+                config=SimpleNamespace(enabled=True),
+                connected=False,
+            ),
+            _edit_mode=False,
+            _obs_connected_controls=[
+                (normal, False),
+                (edit_only, True),
+            ],
+        )
+
+        _bind_obs_helpers(window)
+        MainWindow._refresh_obs_connected_controls(window)
+
+        self.assertFalse(normal.enabled)
+        self.assertFalse(edit_only.enabled)
+        self.assertIn("Connexion OBS requise", normal.tooltip)
+        self.assertIn("Mode édition", edit_only.tooltip)
+
+    def test_obs_connected_controls_combine_connection_and_edit_mode(self) -> None:
+        normal = _FakeButton()
+        edit_only = _FakeButton()
+        window = SimpleNamespace(
+            _client=SimpleNamespace(
+                config=SimpleNamespace(enabled=True),
+                connected=True,
+            ),
+            _edit_mode=False,
+            _obs_connected_controls=[
+                (normal, False),
+                (edit_only, True),
+            ],
+        )
+
+        _bind_obs_helpers(window)
+        MainWindow._refresh_obs_connected_controls(window)
+
+        self.assertTrue(normal.enabled)
+        self.assertFalse(edit_only.enabled)
+        self.assertEqual(normal.tooltip, "")
+        self.assertIn("Mode édition", edit_only.tooltip)
+
+        window._edit_mode = True
+        MainWindow._refresh_obs_connected_controls(window)
+
+        self.assertTrue(normal.enabled)
+        self.assertTrue(edit_only.enabled)
+        self.assertEqual(edit_only.tooltip, "")
 
     def test_require_edit_mode_blocks_outside_edit_session(self) -> None:
         window = SimpleNamespace(_edit_mode=False)

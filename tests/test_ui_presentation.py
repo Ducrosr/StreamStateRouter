@@ -121,6 +121,63 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(layout.applied, "Vanilla")
         self.assertEqual(layout.message, "Source introuvable")
 
+    def test_disconnected_obs_marks_domains_unverifiable(self) -> None:
+        snapshot = build_dashboard_snapshot(
+            _explanation(),
+            {
+                "success": False,
+                "failed_domains": ["game", "capture"],
+                "domain_details": [
+                    {
+                        "domain": "game",
+                        "desired_profile": "Overwatch",
+                        "applied_profile": "",
+                        "status": "failed",
+                        "message": "transport offline",
+                    },
+                    {
+                        "domain": "capture",
+                        "desired_profile": "HDR",
+                        "applied_profile": "",
+                        "status": "failed",
+                        "message": "transport offline",
+                    },
+                ],
+            },
+            obs_enabled=True,
+            obs_connected=False,
+        )
+
+        self.assertEqual(snapshot.health_text, "OBS déconnecté")
+        self.assertTrue(
+            all(
+                row.status_label == "Non vérifiable"
+                for row in snapshot.differences
+            )
+        )
+        self.assertTrue(
+            all(
+                "Connexion OBS requise" in row.message
+                for row in snapshot.differences
+            )
+        )
+
+    def test_disabled_obs_marks_domains_as_disabled(self) -> None:
+        snapshot = build_dashboard_snapshot(
+            _explanation(),
+            {},
+            obs_enabled=False,
+            obs_connected=False,
+        )
+
+        self.assertEqual(snapshot.health_text, "OBS désactivé")
+        self.assertTrue(
+            all(
+                row.status_label == "OBS désactivé"
+                for row in snapshot.differences
+            )
+        )
+
     def test_explains_fallback(self) -> None:
         snapshot = build_dashboard_snapshot(
             _explanation(kind="fallback", rule_name="fallback", game="Vanilla"),
