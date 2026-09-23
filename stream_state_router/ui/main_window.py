@@ -3218,6 +3218,21 @@ class MainWindow(QMainWindow):
             raw_snapshot
         )
 
+        if mode == "reference_repair":
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Muted",
+                    "Analyse des références OBS terminée",
+                    (
+                        f"{len(snapshot.scenes)} scène(s), "
+                        f"{len(snapshot.inputs)} input(s), "
+                        f"{len(snapshot.filters)} filtre(s)"
+                    ),
+                )
+            )
+            self._show_reference_repair_dialog(snapshot)
+            return
+
         if mode == "guided_current_state_capture":
             self._complete_guided_current_state_capture(
                 snapshot=snapshot,
