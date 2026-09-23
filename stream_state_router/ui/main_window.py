@@ -1444,7 +1444,7 @@ class MainWindow(QMainWindow):
         form.addRow("Streaming", streaming)
         form.addRow("Enregistrement", recording)
         form.addRow("Scène programme", scene)
-        form.addRow("OBS activé", obs_enabled)
+        form.addRow("Intégration OBS activée", obs_enabled)
         form.addRow(
             "Processus actifs (séparés par des virgules)",
             running,
@@ -1593,7 +1593,7 @@ class MainWindow(QMainWindow):
                             ]
                         )
                     )
-            profiles_tree.expandAll()
+            profiles_tree.collapseAll()
 
             checks.clear()
             for check in report.checks:
