@@ -1168,5 +1168,156 @@ class OBSDispatcherTests(unittest.TestCase):
             plan["declarative_blocks"],
         )
 
+
+    def test_launcher_preparation_overrides_fallback_until_released(self):
+        host = FakeHostController()
+        profiles = profile_map_from_raw(
+            {
+                "capture": {
+                    "SDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "params": {
+                                    "enabled": False,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                    "HDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": True,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(
+            FakeClient(),
+            profiles,
+            host_controller=host,
+        )
+        hdr_state = StreamState(capture_profile="HDR")
+        fallback = StreamState(capture_profile="SDR")
+
+        plan = dispatcher.build_launcher_preparation(
+            (("Overwatch", hdr_state),),
+            context={},
+        )
+        prepared = dispatcher.activate_launcher_preparation(plan)
+
+        self.assertEqual(prepared.executed, 1)
+        self.assertEqual(
+            dispatcher.launcher_override_keys(),
+            ("windows_hdr",),
+        )
+        self.assertEqual(
+            host.calls,
+            [
+                (
+                    "windows_hdr",
+                    {"enabled": True, "display": "primary"},
+                )
+            ],
+        )
+
+        dispatcher.dispatch_state(fallback)
+        self.assertEqual(len(host.calls), 1)
+
+        dispatcher.clear_launcher_preparation_overrides()
+        dispatcher.invalidate_applied_domains(("capture",))
+        dispatcher.dispatch_state(fallback)
+        self.assertEqual(
+            host.calls[-1],
+            (
+                "windows_hdr",
+                {"enabled": False, "display": "primary"},
+            ),
+        )
+
+    def test_shared_launcher_identical_preparation_is_deduplicated(self):
+        profiles = profile_map_from_raw(
+            {
+                "capture": {
+                    "HDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": True,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+        state = StreamState(capture_profile="HDR")
+
+        plan = dispatcher.build_launcher_preparation(
+            (("Game A", state), ("Game B", state)),
+            context={},
+        )
+
+        self.assertEqual(plan.conflicts, ())
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.override_keys, ("windows_hdr",))
+
+    def test_shared_launcher_conflicting_preparation_is_rejected(self):
+        profiles = profile_map_from_raw(
+            {
+                "capture": {
+                    "HDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": True,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                    "SDR": {
+                        "actions": [
+                            {
+                                "type": "windows_hdr",
+                                "preapply_on_launcher": True,
+                                "params": {
+                                    "enabled": False,
+                                    "display": "primary",
+                                },
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(FakeClient(), profiles)
+
+        plan = dispatcher.build_launcher_preparation(
+            (
+                ("HDR game", StreamState(capture_profile="HDR")),
+                ("SDR game", StreamState(capture_profile="SDR")),
+            ),
+            context={},
+        )
+
+        self.assertEqual(plan.actions, ())
+        self.assertTrue(plan.conflicts)
+        self.assertIn("windows_hdr", plan.conflicts[0])
+
 if __name__ == "__main__":
     unittest.main()
