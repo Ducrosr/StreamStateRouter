@@ -555,11 +555,15 @@ def build_static_health_findings(
         signatures.setdefault(_rule_signature(rule), []).append(
             str(rule.get("name") or "Règle sans nom")
         )
-    duplicate_groups: set[frozenset[str]] = set()
+    duplicate_pairs: set[frozenset[str]] = set()
     for names in signatures.values():
         if len(names) <= 1:
             continue
-        duplicate_groups.add(frozenset(names))
+        for left_index, left_name in enumerate(names):
+            for right_name in names[left_index + 1 :]:
+                duplicate_pairs.add(
+                    frozenset((left_name, right_name))
+                )
         findings.append(
             HealthFinding(
                 "warning",
@@ -573,7 +577,7 @@ def build_static_health_findings(
         left_name = str(left.get("name") or "Règle sans nom")
         for right in rules[left_index + 1 :]:
             right_name = str(right.get("name") or "Règle sans nom")
-            if frozenset((left_name, right_name)) in duplicate_groups:
+            if frozenset((left_name, right_name)) in duplicate_pairs:
                 continue
             if not _rules_can_overlap(left, right):
                 continue
@@ -646,6 +650,16 @@ def _capability_item(
         status_label=labels.get(status, status),
         detail=detail,
         action=action,
+    )
+
+
+def live_output_active(
+    context: Mapping[str, Any] | None,
+) -> bool:
+    values = _mapping(context)
+    return bool(
+        values.get("streaming", False)
+        or values.get("recording", False)
     )
 
 
