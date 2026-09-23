@@ -82,6 +82,7 @@ from .dialogs import (
 )
 from .presentation import (
     UserActivityEntry,
+    build_automation_rows,
     build_dashboard_snapshot,
     build_diagnostic_report,
     build_simulation_report,
@@ -201,6 +202,9 @@ class MainWindow(QMainWindow):
         self.dashboard_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_dashboard()), "Dashboard"
         )
+        self.automations_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_automations_tab()), "Automatisations"
+        )
         self.rules_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_rules_tab()), "Règles"
         )
@@ -273,6 +277,7 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.setVisible(self._expert_mode)
         self.tabs.setTabVisible(self.dashboard_tab_index, True)
+        self.tabs.setTabVisible(self.automations_tab_index, True)
         self.tabs.setTabVisible(self.settings_tab_index, True)
         self.mode_button.setText(
             "Mode simple" if self._expert_mode else "Mode expert"
@@ -494,6 +499,60 @@ class MainWindow(QMainWindow):
         root.addWidget(override_card)
         root.addStretch(1)
         return page
+
+    def _build_automations_tab(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setSpacing(12)
+
+        intro = QLabel(
+            "Cette vue décrit ce que SSR fera en langage utilisateur. "
+            "L’ordre suit la priorité des règles. L’édition détaillée reste "
+            "disponible en mode Expert."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        self.automations_tree = QTreeWidget()
+        self.automations_tree.setColumnCount(4)
+        self.automations_tree.setHeaderLabels(
+            ["Automatisation", "Quand", "Alors", "État"]
+        )
+        self.automations_tree.setRootIsDecorated(False)
+        self.automations_tree.setAlternatingRowColors(True)
+        self.automations_tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.automations_tree.header().setStretchLastSection(True)
+        root.addWidget(self.automations_tree, 1)
+
+        actions = QHBoxLayout()
+        refresh = QPushButton("Actualiser")
+        refresh.clicked.connect(self._refresh_automations_view)
+        actions.addWidget(refresh)
+        edit = QPushButton("Modifier les règles")
+        edit.clicked.connect(self._open_rules_editor)
+        actions.addWidget(edit)
+        actions.addStretch(1)
+        root.addLayout(actions)
+        return page
+
+    def _refresh_automations_view(self) -> None:
+        tree = getattr(self, "automations_tree", None)
+        if tree is None:
+            return
+        tree.clear()
+        for row in build_automation_rows(self.config):
+            tree.addTopLevelItem(
+                QTreeWidgetItem(
+                    [row.name, row.trigger, row.result, row.status]
+                )
+            )
+
+    def _open_rules_editor(self) -> None:
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.rules_tab_index)
 
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
@@ -912,6 +971,7 @@ class MainWindow(QMainWindow):
             actual_startup = bool(ui.get("start_with_windows", False))
         self.start_with_windows.setChecked(actual_startup)
         self._refresh_rules_table()
+        self._refresh_automations_view()
         self._refresh_profile_names()
         self._refresh_layout_profile_names()
         self._refresh_override_boxes()
@@ -1620,6 +1680,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.rules_table.setItem(row, col, item)
+        self._refresh_automations_view()
 
     def _selected_rule_index(self) -> int | None:
         rows = self.rules_table.selectionModel().selectedRows()
