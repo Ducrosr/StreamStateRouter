@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -95,6 +95,21 @@ class _FakeTabs:
         self.tooltips[index] = text
 
 
+def _bind_obs_helpers(window) -> None:
+    window._obs_connection_available = MethodType(
+        MainWindow._obs_connection_available,
+        window,
+    )
+    window._apply_obs_connected_control_state = MethodType(
+        MainWindow._apply_obs_connected_control_state,
+        window,
+    )
+    window._refresh_obs_connected_controls = MethodType(
+        MainWindow._refresh_obs_connected_controls,
+        window,
+    )
+
+
 class EditModeTests(unittest.TestCase):
     def test_mutating_surfaces_are_read_only_outside_edit_mode(self) -> None:
         pages = {
@@ -135,6 +150,7 @@ class EditModeTests(unittest.TestCase):
             _repair_refs_action=repair_action,
         )
 
+        _bind_obs_helpers(window)
         MainWindow._apply_edit_mode_surfaces(window)
 
         for page in pages.values():
@@ -163,6 +179,7 @@ class EditModeTests(unittest.TestCase):
             ],
         )
 
+        _bind_obs_helpers(window)
         MainWindow._refresh_obs_connected_controls(window)
 
         self.assertFalse(normal.enabled)
@@ -185,6 +202,7 @@ class EditModeTests(unittest.TestCase):
             ],
         )
 
+        _bind_obs_helpers(window)
         MainWindow._refresh_obs_connected_controls(window)
 
         self.assertTrue(normal.enabled)
