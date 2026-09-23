@@ -1353,6 +1353,15 @@ class RoutingService:
                 self.logger.info("OBS connection established: %s", message)
                 if hasattr(self.dispatcher, "invalidate_applied_state"):
                     self.dispatcher.invalidate_applied_state()
+                if self._active_launcher_preparation_signature:
+                    clearer = getattr(
+                        self.dispatcher,
+                        "clear_launcher_preparation_overrides",
+                        None,
+                    )
+                    if callable(clearer):
+                        clearer()
+                    self._clear_launcher_preparation_tracking()
                 if self._declarative_planning is not None:
                     self._declarative_planning.invalidate_catalog(
                         "OBS session connected or replaced"
