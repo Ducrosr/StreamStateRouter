@@ -172,6 +172,7 @@ class MainWindow(QMainWindow):
         self._quitting = False
         self._api: LocalControlAPI | None = None
         self._known_catalog_sources: set[str] = set()
+        self._obs_connected_controls: list[tuple[object, bool]] = []
         self._preview_active = False
         self._routing_incomplete = False
         self._runtime_restart_in_progress = False
@@ -372,26 +373,64 @@ class MainWindow(QMainWindow):
             )
 
         for name in (
-            "capture_current_button",
-            "repair_refs_button",
-        ):
-            widget = getattr(self, name, None)
-            if widget is not None:
-                widget.setEnabled(enabled)
-                widget.setToolTip(
-                    ""
-                    if enabled
-                    else "Activez Mode édition pour modifier le brouillon."
-                )
-
-        for name in (
             "_import_config_action",
             "_restore_backup_action",
-            "_repair_refs_action",
         ):
             action = getattr(self, name, None)
             if action is not None:
                 action.setEnabled(enabled)
+
+        self._refresh_obs_connected_controls()
+
+    def _obs_connection_available(self) -> bool:
+        client = self._client
+        return bool(
+            client is not None
+            and client.config.enabled
+            and client.connected
+        )
+
+    def _apply_obs_connected_control_state(
+        self,
+        control,
+        *,
+        requires_edit_mode: bool = False,
+    ) -> None:
+        connected = self._obs_connection_available()
+        edit_allowed = not requires_edit_mode or bool(self._edit_mode)
+        control.setEnabled(connected and edit_allowed)
+
+        reasons: list[str] = []
+        if not connected:
+            reasons.append("Connexion OBS requise.")
+        if requires_edit_mode and not self._edit_mode:
+            reasons.append(
+                "Activez Mode édition pour modifier le brouillon."
+            )
+        control.setToolTip(" ".join(reasons))
+
+    def _register_obs_connected_control(
+        self,
+        control,
+        *,
+        requires_edit_mode: bool = False,
+    ) -> None:
+        self._obs_connected_controls.append(
+            (control, bool(requires_edit_mode))
+        )
+        self._apply_obs_connected_control_state(
+            control,
+            requires_edit_mode=requires_edit_mode,
+        )
+
+    def _refresh_obs_connected_controls(self) -> None:
+        for control, requires_edit_mode in tuple(
+            self._obs_connected_controls
+        ):
+            self._apply_obs_connected_control_state(
+                control,
+                requires_edit_mode=requires_edit_mode,
+            )
 
     def _require_edit_mode(self, operation: str) -> bool:
         if self._edit_mode:
