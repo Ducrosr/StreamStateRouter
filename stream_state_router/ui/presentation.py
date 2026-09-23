@@ -107,7 +107,29 @@ def _reason_text(routing: Mapping[str, object]) -> str:
 
     kind = str(routing.get("kind") or "").strip().casefold()
     if kind == "manual_override":
-        return "Une configuration manuelle remplace temporairement le routage automatique."
+        mode = str(
+            routing.get("override_release_mode") or "manual"
+        ).strip().casefold()
+        remaining = routing.get("override_remaining_seconds")
+        if mode == "duration" and isinstance(remaining, (int, float)):
+            return (
+                "Une configuration manuelle remplace le routage automatique · "
+                f"retour automatique dans {max(0, int(round(float(remaining))))} s."
+            )
+        if mode == "foreground_change":
+            return (
+                "Une configuration manuelle remplace le routage automatique "
+                "jusqu’au prochain changement d’application."
+            )
+        if mode == "stream_end":
+            return (
+                "Une configuration manuelle remplace le routage automatique "
+                "jusqu’à la fin du stream."
+            )
+        return (
+            "Une configuration manuelle remplace le routage automatique "
+            "jusqu’à sa désactivation."
+        )
     if kind == "fallback":
         return "Aucune règle prioritaire ne correspond ; la configuration de secours est utilisée."
     if kind == "ignore":
@@ -233,6 +255,67 @@ def build_dashboard_snapshot(
         health_text=health_text,
         health_style=health_style,
         differences=tuple(differences),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ManualOverridePresentation:
+    active: bool
+    title: str
+    detail: str
+    style: str = "Warn"
+
+
+def build_manual_override_presentation(
+    status: Mapping[str, object] | None,
+) -> ManualOverridePresentation:
+    status = _mapping(status)
+    if not bool(status.get("active", False)):
+        return ManualOverridePresentation(
+            False,
+            "Routage automatique",
+            "Aucun override manuel actif.",
+            "Good",
+        )
+
+    mode = str(
+        status.get("release_mode") or "manual"
+    ).strip().casefold()
+    if mode == "duration":
+        remaining = status.get("remaining_seconds")
+        if isinstance(remaining, (int, float)):
+            seconds = max(0, int(round(float(remaining))))
+            minutes, seconds = divmod(seconds, 60)
+            if minutes and seconds:
+                detail = (
+                    f"Retour automatique dans {minutes} min {seconds} s."
+                )
+            elif minutes:
+                detail = f"Retour automatique dans {minutes} min."
+            else:
+                detail = f"Retour automatique dans {seconds} s."
+        else:
+            detail = "Retour automatique à la fin de la durée configurée."
+    elif mode == "foreground_change":
+        detail = (
+            "Retour automatique au prochain changement d’application externe."
+        )
+    elif mode == "stream_end":
+        if bool(status.get("stream_seen_active", False)):
+            detail = "Retour automatique à la fin du stream en cours."
+        else:
+            detail = (
+                "Override armé : SSR attend qu’un stream soit actif puis se "
+                "terminera automatiquement à sa fin."
+            )
+    else:
+        detail = "Actif jusqu’à désactivation manuelle."
+
+    return ManualOverridePresentation(
+        True,
+        "Override manuel actif",
+        detail,
+        "Warn",
     )
 
 
@@ -366,14 +449,26 @@ def build_diagnostic_report(
             )
         )
     elif kind == "manual_override":
+        override_status = {
+            "active": True,
+            "release_mode": routing.get("override_release_mode") or "manual",
+            "remaining_seconds": routing.get("override_remaining_seconds"),
+            "stream_seen_active": routing.get(
+                "override_stream_seen_active",
+                False,
+            ),
+        }
+        override_view = build_manual_override_presentation(
+            override_status
+        )
         items.append(
             DiagnosticItem(
                 "info",
                 "Un override manuel remplace le routage automatique",
-                "La configuration manuelle reste prioritaire tant qu’elle est active.",
+                override_view.detail,
                 (
                     "Utilisez « Revenir au routage automatique » si vous souhaitez "
-                    "laisser SSR décider à nouveau."
+                    "laisser SSR décider immédiatement."
                 ),
             )
         )
@@ -489,6 +584,20 @@ def user_activity_from_runtime_event(
         )
     if kind == "obs_error":
         return UserActivityEntry("Bad", "Erreur OBS", str(message or "").strip())
+    if kind == "manual_override":
+        active = bool(payload.get("active", False))
+        presentation = build_manual_override_presentation(payload)
+        return UserActivityEntry(
+            "Warn" if active else "Good",
+            "Override manuel activé" if active else "Override manuel désactivé",
+            presentation.detail if active else "",
+        )
+    if kind == "manual_override_released":
+        return UserActivityEntry(
+            "Good",
+            "Override manuel terminé",
+            str(payload.get("reason") or message or "").strip(),
+        )
     if kind == "pause":
         paused = "suspendu" in str(message or "").casefold()
         return UserActivityEntry(

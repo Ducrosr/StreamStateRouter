@@ -105,6 +105,7 @@ from .presentation import (
     build_automation_rows,
     build_dashboard_snapshot,
     build_diagnostic_report,
+    build_manual_override_presentation,
     build_simulation_report,
     user_activity_from_runtime_event,
 )
@@ -339,6 +340,7 @@ class MainWindow(QMainWindow):
             self.dashboard_health.setObjectName("Bad")
             self.dashboard_decision.setText("Décision : —")
             self.dashboard_reason.setText("Pourquoi : le moteur de routage n’est pas actif.")
+            self.dashboard_override_row.setVisible(False)
             self.dashboard_diff.clear()
             return
 
@@ -350,6 +352,7 @@ class MainWindow(QMainWindow):
             self.dashboard_health.setObjectName("Warn")
             self.dashboard_decision.setText("Décision : —")
             self.dashboard_reason.setText(f"Pourquoi : {exc}")
+            self.dashboard_override_row.setVisible(False)
             self.dashboard_diff.clear()
             return
 
@@ -365,6 +368,24 @@ class MainWindow(QMainWindow):
         self.dashboard_health.style().polish(self.dashboard_health)
         self.dashboard_decision.setText(f"Décision : {snapshot.decision}")
         self.dashboard_reason.setText(f"Pourquoi : {snapshot.reason}")
+
+        override_view = build_manual_override_presentation(
+            service.manual_override_status()
+        )
+        self.dashboard_override_row.setVisible(override_view.active)
+        if override_view.active:
+            self.dashboard_override_label.setText(
+                f"{override_view.title} · {override_view.detail}"
+            )
+            self.dashboard_override_label.setObjectName(
+                override_view.style
+            )
+            self.dashboard_override_label.style().unpolish(
+                self.dashboard_override_label
+            )
+            self.dashboard_override_label.style().polish(
+                self.dashboard_override_label
+            )
 
         self.dashboard_diff.clear()
         for difference in snapshot.differences:
@@ -920,6 +941,19 @@ class MainWindow(QMainWindow):
         summary_lay.addWidget(self.dashboard_decision)
         summary_lay.addWidget(self.dashboard_reason)
 
+        self.dashboard_override_row = QWidget()
+        override_row_lay = QHBoxLayout(self.dashboard_override_row)
+        override_row_lay.setContentsMargins(0, 4, 0, 4)
+        self.dashboard_override_label = QLabel("")
+        self.dashboard_override_label.setWordWrap(True)
+        self.dashboard_override_label.setObjectName("Warn")
+        override_row_lay.addWidget(self.dashboard_override_label, 1)
+        dashboard_auto = QPushButton("Revenir au routage automatique")
+        dashboard_auto.clicked.connect(self._clear_override)
+        override_row_lay.addWidget(dashboard_auto)
+        self.dashboard_override_row.setVisible(False)
+        summary_lay.addWidget(self.dashboard_override_row)
+
         self.dashboard_diff = QTreeWidget()
         self.dashboard_diff.setColumnCount(4)
         self.dashboard_diff.setHeaderLabels(["Élément", "Attendu", "Actuel", "État"])
@@ -1055,11 +1089,35 @@ class MainWindow(QMainWindow):
             box = QComboBox()
             self.override_boxes[domain] = box
             form.addRow(DOMAIN_LABELS[domain], box)
+        self.override_release_mode = QComboBox()
+        self.override_release_mode.addItem(
+            "Jusqu’à désactivation manuelle",
+            "manual",
+        )
+        self.override_release_mode.addItem(
+            "Après une durée",
+            "duration",
+        )
+        self.override_release_mode.addItem(
+            "Au prochain changement d’application",
+            "foreground_change",
+        )
+        self.override_release_mode.addItem(
+            "À la fin du stream",
+            "stream_end",
+        )
         self.override_duration = QSpinBox()
-        self.override_duration.setRange(0, 1440)
+        self.override_duration.setRange(1, 1440)
+        self.override_duration.setValue(30)
         self.override_duration.setSuffix(" min")
-        self.override_duration.setSpecialValueText("Permanent")
-        form.addRow("Durée override", self.override_duration)
+        self.override_duration.setEnabled(False)
+        self.override_release_mode.currentIndexChanged.connect(
+            lambda *_args: self.override_duration.setEnabled(
+                self.override_release_mode.currentData() == "duration"
+            )
+        )
+        form.addRow("Fin de l’override", self.override_release_mode)
+        form.addRow("Durée", self.override_duration)
         override_lay.addLayout(form)
         actions = QHBoxLayout()
         apply_button = QPushButton("Appliquer l'override")
@@ -2578,6 +2636,8 @@ class MainWindow(QMainWindow):
             "obs_disconnected",
             "obs_error",
             "obs_command_result",
+            "manual_override",
+            "manual_override_released",
         }:
             self._schedule_dashboard_refresh()
         if event.kind == "routing_rule" and isinstance(event.payload, dict):
@@ -2957,23 +3017,55 @@ class MainWindow(QMainWindow):
             audio_profile=self.override_boxes["audio"].currentText(),
             layout_profile=self.override_boxes["layout"].currentText(),
         )
-        duration = self.override_duration.value() * 60
-        self._service.set_manual_override(
-            state,
-            duration_seconds=(duration if duration > 0 else None),
+        release_mode = str(
+            self.override_release_mode.currentData() or "manual"
         )
+        duration = (
+            self.override_duration.value() * 60
+            if release_mode == "duration"
+            else None
+        )
+        try:
+            self._service.set_manual_override(
+                state,
+                duration_seconds=duration,
+                release_mode=release_mode,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Override manuel",
+                str(exc),
+            )
+            return
+
+        labels = {
+            "manual": "jusqu’à désactivation manuelle",
+            "duration": f"pendant {self.override_duration.value()} min",
+            "foreground_change": "jusqu’au prochain changement d’application",
+            "stream_end": "jusqu’à la fin du stream",
+        }
         self._log(
-            "Override manuel appliqué"
-            + (f" pour {self.override_duration.value()} min." if duration else " sans expiration.")
+            "Override manuel appliqué · "
+            + labels.get(release_mode, release_mode)
         )
 
     def _clear_override(self) -> None:
-        if self._service:
-            self._service.clear_manual_override()
-            self._log("Override manuel désactivé.")
+        if not self._service:
+            return
+        if not self._safe_live_confirm(
+            "Revenir au routage automatique"
+        ):
+            return
+        self._service.clear_manual_override()
+        self._log("Override manuel désactivé.")
 
     def _force_reapply(self) -> None:
         if not self._service:
+            return
+        if not self._safe_live_confirm(
+            "Réappliquer la configuration courante à OBS"
+        ):
             return
         try:
             request_id = self._service.request_force_reapply()
@@ -5451,6 +5543,11 @@ class MainWindow(QMainWindow):
                 "applied": self._applied_revision,
             },
             "routing": service.routing_status() if service else {},
+            "manual_override": (
+                service.manual_override_status()
+                if service
+                else {"active": False}
+            ),
             "obs_catalog": (
                 service.obs_catalog_status()
                 if service
@@ -5474,7 +5571,10 @@ class MainWindow(QMainWindow):
         if action == "auto":
             self._service.pause(False)
             self._service.clear_manual_override()
-            return {"paused": False}
+            return {
+                "paused": False,
+                "manual_override": self._service.manual_override_status(),
+            }
         if action == "catalog.sync":
             request_id = self._service.request_catalog_sync()
             return {"request_id": request_id, "status": "accepted"}
@@ -5509,10 +5609,26 @@ class MainWindow(QMainWindow):
             request_id = self._service.request_force_reapply()
             return {"request_id": request_id, "status": "accepted"}
         if action == "override":
-            state = StreamState.from_mapping(payload.get("state") if isinstance(payload.get("state"), dict) else {})
-            duration = float(payload.get("duration_seconds", 0) or 0)
-            self._service.set_manual_override(state, duration_seconds=duration or None)
-            return {"state": state.as_variables()}
+            state = StreamState.from_mapping(
+                payload.get("state")
+                if isinstance(payload.get("state"), dict)
+                else {}
+            )
+            duration = float(
+                payload.get("duration_seconds", 0) or 0
+            )
+            release_mode = str(
+                payload.get("release_mode") or "manual"
+            ).strip().casefold()
+            self._service.set_manual_override(
+                state,
+                duration_seconds=duration or None,
+                release_mode=release_mode,
+            )
+            return {
+                "state": state.as_variables(),
+                "manual_override": self._service.manual_override_status(),
+            }
         if action == "layout.apply":
             name = str(payload.get("name") or "").strip()
             if not name:

@@ -78,6 +78,30 @@ class ThreadRecordingDispatcher(FakeDispatcher):
         return super().dispatch_change(change)
 
 
+class StreamingContextDispatcher(ThreadRecordingDispatcher):
+    def __init__(self, *, streaming: bool = True):
+        super().__init__()
+        self.streaming = bool(streaming)
+        self.context_calls = 0
+        self.cached_context_calls = 0
+
+    def _context(self):
+        return {
+            "obs_enabled": True,
+            "streaming": self.streaming,
+            "recording": False,
+            "program_scene": "In Game",
+        }
+
+    def obs_context(self, *, force_refresh=False):
+        self.context_calls += 1
+        return self._context()
+
+    def cached_obs_context(self):
+        self.cached_context_calls += 1
+        return self._context()
+
+
 class DiagnosticDispatcher(FakeDispatcher):
     def __init__(self, *, incomplete: bool = False):
         super().__init__()
@@ -2981,6 +3005,224 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(dispatcher.thread_names, ["SSR-Router"])
         finally:
             self.assertTrue(service.stop())
+
+    def test_foreground_change_override_ignores_none_and_same_application(self):
+        first_app = ForegroundApp(
+            1,
+            101,
+            "game-a.exe",
+            process_path=r"C:\Games\A\game-a.exe",
+        )
+        second_app = ForegroundApp(
+            2,
+            202,
+            "game-b.exe",
+            process_path=r"C:\Games\B\game-b.exe",
+        )
+        automatic_a = StreamState(game="GameA")
+        automatic_b = StreamState(game="GameB")
+        manual = StreamState(game="Manual")
+        provider = FakeProvider(first_app)
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule("Game A", automatic_a, exe="game-a.exe"),
+                    AppRule("Game B", automatic_b, exe="game-b.exe"),
+                ]
+            ),
+            debounce_ms=0,
+            fallback_debounce_ms=0,
+        )
+        dispatcher = ThreadRecordingDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=provider,
+        )
+        events = []
+        service.on_event = events.append
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while (
+                service.last_meaningful_app != first_app
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertEqual(service.last_meaningful_app, first_app)
+
+            service.set_manual_override(
+                manual,
+                release_mode="foreground_change",
+            )
+            self.assertEqual(
+                service.manual_override_status()["release_mode"],
+                "foreground_change",
+            )
+
+            provider.app = None
+            time.sleep(0.08)
+            self.assertIsNotNone(engine.manual_override)
+
+            provider.app = first_app
+            time.sleep(0.08)
+            self.assertIsNotNone(engine.manual_override)
+
+            provider.app = second_app
+            deadline = time.monotonic() + 1.0
+            while (
+                engine.manual_override is not None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            self.assertIsNone(engine.manual_override)
+            self.assertEqual(engine.current_state, automatic_b)
+            self.assertTrue(
+                any(
+                    event.kind == "manual_override_released"
+                    and event.payload.get("reason")
+                    == "changement d’application"
+                    for event in events
+                )
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_foreground_change_override_requires_known_external_app(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        service = RoutingService(
+            engine,
+            ThreadRecordingDispatcher(),
+            provider=FakeProvider(None),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Aucune application externe"):
+            service.set_manual_override(
+                StreamState(game="Manual"),
+                release_mode="foreground_change",
+            )
+
+    def test_stream_end_override_seeds_active_state_from_cache_without_obs_io(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = StreamingContextDispatcher(streaming=True)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+
+        service.set_manual_override(
+            StreamState(game="Manual"),
+            release_mode="stream_end",
+        )
+
+        status = service.manual_override_status()
+        self.assertTrue(status["stream_seen_active"])
+        self.assertEqual(dispatcher.cached_context_calls, 1)
+        self.assertEqual(dispatcher.context_calls, 0)
+
+    def test_stream_end_override_waits_for_active_then_releases(self):
+        app = ForegroundApp(1, 101, "game.exe")
+        automatic = StreamState(game="Automatic")
+        manual = StreamState(game="Manual")
+        engine = StateRouterEngine(
+            RuleSet([AppRule("Game", automatic, exe="game.exe")]),
+            debounce_ms=0,
+            fallback_debounce_ms=0,
+        )
+        dispatcher = StreamingContextDispatcher(streaming=True)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=10,
+            provider=FakeProvider(app),
+        )
+        events = []
+        service.on_event = events.append
+        service.start()
+        try:
+            service.set_manual_override(
+                manual,
+                release_mode="stream_end",
+            )
+
+            deadline = time.monotonic() + 1.0
+            while (
+                not service.manual_override_status()["stream_seen_active"]
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertTrue(
+                service.manual_override_status()["stream_seen_active"]
+            )
+
+            dispatcher.streaming = False
+            with service._lock:
+                service._manual_override_next_stream_probe = 0.0
+            service._wake.set()
+
+            deadline = time.monotonic() + 1.0
+            while (
+                engine.manual_override is not None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            self.assertIsNone(engine.manual_override)
+            self.assertEqual(engine.current_state, automatic)
+            self.assertTrue(
+                any(
+                    event.kind == "manual_override_released"
+                    and event.payload.get("reason") == "fin du stream"
+                    for event in events
+                )
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_stream_end_probe_does_not_release_before_active_seen(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = StreamingContextDispatcher(streaming=False)
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+        service.set_manual_override(
+            StreamState(game="Manual"),
+            release_mode="stream_end",
+        )
+
+        reason, _context = service._manual_override_release_probe(
+            None,
+            now=time.monotonic() + 2.0,
+        )
+
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(engine.manual_override)
+        self.assertFalse(
+            service.manual_override_status()["stream_seen_active"]
+        )
+
+    def test_positive_duration_keeps_backward_compatible_duration_mode(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        service = RoutingService(
+            engine,
+            ThreadRecordingDispatcher(),
+            provider=FakeProvider(None),
+        )
+
+        service.set_manual_override(
+            StreamState(game="Manual"),
+            duration_seconds=60,
+        )
+
+        status = service.manual_override_status()
+        self.assertTrue(status["active"])
+        self.assertEqual(status["release_mode"], "duration")
+        self.assertGreater(status["remaining_seconds"], 0)
 
     def test_clear_manual_override_runs_on_worker_while_paused(self):
         automatic_app = ForegroundApp(1, 1, "automatic.exe")
