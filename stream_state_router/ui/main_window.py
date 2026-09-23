@@ -81,6 +81,7 @@ from ..services.config_insights import (
     build_effective_provenance,
     configured_action_types,
     detach_profile_inheritance,
+    live_output_active,
     profile_content_entries,
     profile_lineage,
     profile_usages,
@@ -2709,10 +2710,10 @@ class MainWindow(QMainWindow):
             if dispatcher is not None
             else {}
         )
+        if not live_output_active(context):
+            return True
         streaming = bool(context.get("streaming", False))
         recording = bool(context.get("recording", False))
-        if not streaming and not recording:
-            return True
         active = []
         if streaming:
             active.append("stream")
