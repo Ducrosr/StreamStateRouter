@@ -274,6 +274,39 @@ class DashboardPresentationTests(unittest.TestCase):
             any("secours" in item.title for item in report.items)
         )
 
+    def test_manual_override_reason_describes_release_condition(self) -> None:
+        explanation = _explanation(
+            kind="manual_override",
+            rule_name="manual",
+            game="Manual",
+        )
+        explanation["routing"]["override_release_mode"] = "foreground_change"
+
+        snapshot = build_dashboard_snapshot(
+            explanation,
+            {},
+            obs_enabled=True,
+            obs_connected=True,
+        )
+
+        self.assertIn(
+            "prochain changement d’application",
+            snapshot.reason,
+        )
+
+    def test_user_activity_surfaces_override_auto_release(self) -> None:
+        activity = user_activity_from_runtime_event(
+            "manual_override_released",
+            "Override manuel terminé",
+            {"reason": "fin du stream"},
+        )
+
+        self.assertIsNotNone(activity)
+        assert activity is not None
+        self.assertEqual(activity.style, "Good")
+        self.assertEqual(activity.message, "Override manuel terminé")
+        self.assertEqual(activity.detail, "fin du stream")
+
     def test_user_activity_filters_runtime_noise(self) -> None:
         self.assertIsNone(
             user_activity_from_runtime_event(
