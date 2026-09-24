@@ -536,6 +536,36 @@ Les statistiques d'actions comptent chaque déclaration une seule fois. La class
 profil tient toutefois compte de ses actions héritées via `extends`. Les valeurs arbitraires de
 `set_input_settings` ne sont jamais incluses dans le rapport.
 
+## Contrôle système read-only
+
+Pour valider le poste Windows et la configuration sans démarrer le runtime ni
+modifier OBS :
+
+```powershell
+python main.py --system-check
+```
+
+Le contrôle vérifie la configuration, la connexion OBS WebSocket et son
+catalogue en lecture seule, puis uniquement les capacités Windows réellement
+utilisées par la configuration : présence de SoundVolumeView pour
+`app_audio_output` et prise en charge/état HDR de l'écran principal pour
+`windows_hdr`.
+
+La commande n'appelle aucune action de profil, ne change pas le routage audio,
+ne bascule pas HDR et ne modifie aucune scène/source/filtre OBS. Elle peut être
+exécutée même si SSR est déjà ouvert, car elle s'arrête avant le mutex
+d'instance et le démarrage du runtime.
+
+Pour une sortie exploitable par script :
+
+```powershell
+python main.py --system-check-json
+```
+
+Le code de sortie est `0` lorsqu'aucune erreur bloquante n'est détectée et
+`1` lorsqu'une erreur de configuration ou de capacité utilisée est détectée.
+Les avertissements seuls restent non bloquants.
+
 ## Validation développeur
 
 ```powershell
