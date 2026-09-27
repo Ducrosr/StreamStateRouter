@@ -1143,6 +1143,11 @@ class OBSDispatcher:
                     skipped += 1
                     status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
                     continue
+                # From this point the layout manager may mutate OBS. Forget any
+                # previous acknowledgement before the first possible write so an
+                # interruption, transport failure or partial application leaves
+                # the domain pending instead of falsely proving convergence.
+                self._applied_profiles.pop(domain, None)
                 try:
                     result = self._layout_manager.apply_profile(layout)
                 except Exception as exc:
@@ -1185,6 +1190,7 @@ class OBSDispatcher:
             domain_executed = 0
             domain_skipped = 0
             failed = ""
+            domain_invalidated = False
             variables = self._execution_variables(state)
             for action in profile.actions:
                 self._yield_runtime()
@@ -1199,6 +1205,11 @@ class OBSDispatcher:
                     skipped += 1
                     domain_skipped += 1
                     continue
+                if not domain_invalidated:
+                    # The first executable action can mutate OBS/host state. An
+                    # old acknowledgement must not survive a partial batch.
+                    self._applied_profiles.pop(domain, None)
+                    domain_invalidated = True
                 try:
                     self.execute_action(action, variables=variables)
                 except Exception as exc:
