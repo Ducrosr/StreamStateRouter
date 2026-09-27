@@ -231,17 +231,19 @@ class LayoutTests(unittest.TestCase):
 
             def send(self, request, data=None, *, expected_session_generation=None):
                 if (
+                    expected_session_generation is not None
+                    and self.session_generation != expected_session_generation
+                ):
+                    raise RuntimeError("stale OBS session")
+                if request == "GetVersion":
+                    return {}
+                if (
                     request == "GetVideoSettings"
                     and expected_session_generation is not None
                     and self.fail_video
                 ):
                     self.session_generation = 12
                     raise RuntimeError("transport closed")
-                if (
-                    expected_session_generation is not None
-                    and self.session_generation != expected_session_generation
-                ):
-                    raise RuntimeError("stale OBS session")
                 return super().send(request, data)
 
         client = GuardedRestoreClient()
