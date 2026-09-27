@@ -1346,7 +1346,12 @@ class OBSDispatcher:
             raise ValueError(f"Layout introuvable : {profile_name}")
         profile = resolve_layout_profile(profile_name, self._layout_profiles)
         if isinstance(profile.get("conditions"), Mapping) and not self.conditions_match(profile["conditions"]):
-            return DispatchResult(0, 1, ("layout",))
+            return DispatchResult(
+                0,
+                1,
+                ("layout",),
+                ("conditions OBS non satisfaites",),
+            )
         baseline = ""
         if not preview:
             if self._desired_state is not None:
@@ -1358,16 +1363,23 @@ class OBSDispatcher:
             if preview
             else self._layout_manager.apply_profile(profile)
         )
-        if not preview:
+        incomplete = bool(result.missing_sources or result.warnings)
+        if not preview and not incomplete:
             if baseline and profile_name == baseline:
                 self.clear_manual_layout_hold()
             else:
                 self.set_manual_layout_hold(baseline)
+        warnings = tuple(
+            [
+                *(f"source manquante: {name}" for name in result.missing_sources),
+                *result.warnings,
+            ]
+        )
         return DispatchResult(
             result.elements_applied,
             result.elements_skipped,
             ("layout",),
-            result.warnings,
+            warnings,
         )
 
     def _resolve_action_profile(self, domain: str, name: str) -> OBSProfile | None:
