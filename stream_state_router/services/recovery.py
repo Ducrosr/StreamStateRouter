@@ -77,6 +77,14 @@ class RuntimeMarker:
         )
         self.finalized = True
 
+    def checkpoint_pending_cleanup(self, pending_cleanup) -> None:
+        """Durably journal live cleanup obligations without finalizing the session."""
+        self._write(
+            False,
+            cleanup_complete=False,
+            pending_cleanup=pending_cleanup,
+        )
+
     def clean_shutdown(self) -> None:
         self.finish(clean_shutdown=True, cleanup_complete=True, pending_cleanup=())
 
