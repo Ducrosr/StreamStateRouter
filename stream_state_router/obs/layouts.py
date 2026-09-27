@@ -320,7 +320,17 @@ class OBSLayoutManager:
         self._snapshot_generation = 0
         self._last_discovery_warnings: list[str] = []
         self._pending_fade_cleanup: dict[tuple[str, str], PendingFadeCleanup] = {}
+        self._pending_cleanup_changed = None
         self._last_scene_collection = ""
+
+    def set_pending_cleanup_changed(self, callback) -> None:
+        """Persist cleanup obligations whenever their durable set changes."""
+        self._pending_cleanup_changed = callback
+
+    def _notify_pending_cleanup_changed(self) -> None:
+        callback = self._pending_cleanup_changed
+        if callback is not None:
+            callback()
 
     def pending_fade_cleanup(self) -> tuple[str, ...]:
         """Compatibility view of pending fade sources."""
@@ -370,6 +380,8 @@ class OBSLayoutManager:
                 continue
             self._pending_fade_cleanup[(collection, source)] = pending
             imported += 1
+        if imported:
+            self._notify_pending_cleanup_changed()
         return imported
 
     def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
@@ -395,6 +407,7 @@ class OBSLayoutManager:
                 )
                 continue
             self._pending_fade_cleanup.pop(key, None)
+            self._notify_pending_cleanup_changed()
         return tuple(warnings)
 
     def _fade_collection_context(self, *, probe: bool = False) -> str:
@@ -425,6 +438,10 @@ class OBSLayoutManager:
                 created_at=time.monotonic(),
             )
             self._pending_fade_cleanup[key] = pending
+            # This notification happens before any temporary opacity mutation.
+            # A process crash after the next OBS write can therefore recover the
+            # obligation from disk on the following launch.
+            self._notify_pending_cleanup_changed()
         return pending
 
     def _neutralize_fade_sources(
