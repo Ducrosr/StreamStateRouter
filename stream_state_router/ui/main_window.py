@@ -4027,8 +4027,17 @@ class MainWindow(QMainWindow):
             "Revenir au routage automatique"
         ):
             return
-        self._service.clear_manual_override()
-        self._log("Override manuel désactivé.")
+        try:
+            request_id = self._service.request_clear_manual_override()
+            self._track_obs_request(
+                request_id,
+                busy_text="Retour au routage automatique…",
+            )
+            self._log(
+                f"Retour au routage automatique mis en file ({request_id[:8]})."
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Override manuel", str(exc))
 
     def _force_reapply(self) -> None:
         if not self._service:
@@ -6831,10 +6840,11 @@ class MainWindow(QMainWindow):
             return {"paused": self._service.paused}
         if action == "auto":
             self._service.pause(False)
-            self._service.clear_manual_override()
+            request_id = self._service.request_clear_manual_override()
             return {
                 "paused": False,
-                "manual_override": self._service.manual_override_status(),
+                "request_id": request_id,
+                "status": "accepted",
             }
         if action == "catalog.sync":
             request_id = self._service.request_catalog_sync()
