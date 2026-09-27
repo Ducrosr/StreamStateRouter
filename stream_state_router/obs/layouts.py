@@ -617,6 +617,11 @@ class OBSLayoutManager:
             )
         except Exception as exc:
             return f"Scene Collection non lisible ; restauration refusée : {exc}"
+        if expected_session and int(
+            getattr(self.client, "session_generation", 0) or 0
+        ) != expected_session:
+            self.invalidate_session()
+            return "Session OBS modifiée pendant la validation ; restauration refusée."
         if snapshot.collection and current != snapshot.collection:
             return (
                 f"Snapshot lié à la Scene Collection '{snapshot.collection}', "
