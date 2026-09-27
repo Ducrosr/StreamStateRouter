@@ -102,6 +102,7 @@ class LayoutSnapshot:
     created_at: float = field(default_factory=time.time)
     collection: str = ""
     generation: int = 0
+    obs_session_generation: int = 0
     complete: bool = True
     warnings: tuple[str, ...] = ()
 
@@ -525,8 +526,18 @@ class OBSLayoutManager:
         self._snapshot_generation += 1
         self.reset_cache()
 
-    def _scene_collection_name(self) -> str:
-        response = self.client.send("GetSceneCollectionList")
+    def _scene_collection_name(
+        self,
+        *,
+        expected_session_generation: int | None = None,
+    ) -> str:
+        if expected_session_generation is None:
+            response = self.client.send("GetSceneCollectionList")
+        else:
+            response = self.client.send(
+                "GetSceneCollectionList",
+                expected_session_generation=expected_session_generation,
+            )
         collection = str(response.get("currentSceneCollectionName") or "").strip()
         if collection:
             self._last_scene_collection = collection
@@ -569,6 +580,9 @@ class OBSLayoutManager:
             label,
             collection=collection,
             generation=self._snapshot_generation,
+            obs_session_generation=int(
+                getattr(self.client, "session_generation", 0) or 0
+            ),
             complete=complete,
             warnings=tuple(warnings),
         )
@@ -576,8 +590,31 @@ class OBSLayoutManager:
     def _snapshot_context_error(self, snapshot: LayoutSnapshot) -> str:
         if snapshot.generation != self._snapshot_generation:
             return "Snapshot issu d'une session OBS précédente ; restauration refusée."
+        expected_session = int(snapshot.obs_session_generation or 0)
+        if expected_session:
+            current_session = int(
+                getattr(self.client, "session_generation", 0) or 0
+            )
+            if current_session != expected_session:
+                self.invalidate_session()
+                return "Snapshot issu d'une connexion OBS précédente ; restauration refusée."
+            try:
+                # Force a transport round-trip without allowing an implicit
+                # reconnect. This closes the window where OBS restarted but the
+                # periodic runtime probe has not observed the new session yet.
+                self.client.send(
+                    "GetVersion",
+                    expected_session_generation=expected_session,
+                )
+            except Exception as exc:
+                self.invalidate_session()
+                return f"Session OBS non vérifiable ; restauration refusée : {exc}"
         try:
-            current = self._scene_collection_name()
+            current = self._scene_collection_name(
+                expected_session_generation=(
+                    expected_session if expected_session else None
+                )
+            )
         except Exception as exc:
             return f"Scene Collection non lisible ; restauration refusée : {exc}"
         if snapshot.collection and current != snapshot.collection:
