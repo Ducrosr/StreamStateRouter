@@ -222,6 +222,51 @@ class LayoutTests(unittest.TestCase):
             any(request.startswith("Set") for request, _payload in client.calls)
         )
 
+    def test_restore_refuses_reconnect_during_profile_preparation(self):
+        class GuardedRestoreClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.session_generation = 11
+                self.fail_video = False
+
+            def send(self, request, data=None, *, expected_session_generation=None):
+                if (
+                    request == "GetVideoSettings"
+                    and expected_session_generation is not None
+                    and self.fail_video
+                ):
+                    self.session_generation = 12
+                    raise RuntimeError("transport closed")
+                if (
+                    expected_session_generation is not None
+                    and self.session_generation != expected_session_generation
+                ):
+                    raise RuntimeError("stale OBS session")
+                return super().send(request, data)
+
+        client = GuardedRestoreClient()
+        manager = OBSLayoutManager(client)
+        profile = manager.capture_profile("Gameplay")
+        snapshot = LayoutSnapshot(
+            profile,
+            "apply",
+            collection="Collection A",
+            generation=0,
+            obs_session_generation=11,
+            complete=True,
+        )
+        manager._undo_stack.append(snapshot)
+        client.calls.clear()
+        client.fail_video = True
+
+        result = manager.undo_last()
+
+        self.assertTrue(result.warnings)
+        self.assertIn("Restauration interrompue", result.warnings[0])
+        self.assertFalse(
+            any(request.startswith("Set") for request, _payload in client.calls)
+        )
+
     def test_apply_matching_layout_performs_no_mutation_writes(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
@@ -591,6 +636,69 @@ class LayoutTests(unittest.TestCase):
         self.assertTrue(snapshots)
         self.assertEqual(snapshots[0][0]["source"], "[Webcam] Avatar")
         self.assertLess(order.index("journal"), order.index("opacity"))
+
+    def test_fade_cleanup_retries_journal_after_initial_persistence_failure(self):
+        client = FakeLayoutClient()
+        client.scene_collection = "Collection A"
+        manager = OBSLayoutManager(client)
+        attempts = []
+        writes = []
+        fail_once = True
+
+        def journal():
+            nonlocal fail_once
+            attempts.append("journal")
+            if fail_once:
+                fail_once = False
+                raise OSError("disk unavailable")
+
+        manager.set_pending_cleanup_changed(journal)
+        manager._ensure_fade_filter = lambda _source, _opacity: None
+        manager._set_source_opacity = lambda _source, _opacity: writes.append("opacity")
+        prepared = [{
+            "target_enabled": True,
+            "current_enabled": False,
+            "visibility_changed": True,
+            "source": "[Webcam] Avatar",
+            "container": "Gameplay",
+            "transform_changed": False,
+            "target_transform": {},
+            "current_transform": {},
+        }]
+
+        with self.assertRaisesRegex(OSError, "disk unavailable"):
+            manager._animate_layout_transition(
+                prepared, mode="fade", duration_ms=1, steps=1, warnings=[]
+            )
+        self.assertEqual(writes, [])
+
+        manager._animate_layout_transition(
+            prepared, mode="fade", duration_ms=1, steps=1, warnings=[]
+        )
+
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertTrue(writes)
+
+    def test_successful_fade_neutralization_journals_obligation_removal(self):
+        client = FakeLayoutClient()
+        client.scene_collection = "Collection A"
+        manager = OBSLayoutManager(client)
+        snapshots = []
+        manager.set_pending_cleanup_changed(
+            lambda: snapshots.append(manager.export_pending_fade_cleanup())
+        )
+
+        manager._ensure_pending_fade("[Webcam] Avatar", "Collection A")
+        manager._set_source_opacity = lambda _source, _opacity: None
+        self.assertEqual(
+            manager._neutralize_fade_sources(
+                {"[Webcam] Avatar"}, collection="Collection A"
+            ),
+            (),
+        )
+
+        self.assertTrue(snapshots[0])
+        self.assertEqual(snapshots[-1], ())
 
     def test_fade_cleanup_is_prearmed_before_first_opacity_io(self):
         from stream_state_router.obs.client import OBSUnavailableError
