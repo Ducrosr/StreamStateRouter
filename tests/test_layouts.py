@@ -186,6 +186,42 @@ class LayoutTests(unittest.TestCase):
             any(request.startswith("Set") for request, _payload in client.calls)
         )
 
+    def test_undo_refuses_same_collection_when_session_changes_during_validation(self):
+        class ReconnectingCollectionClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.session_generation = 11
+
+            def send(self, request, data=None, *, expected_session_generation=None):
+                if request == "GetVersion":
+                    return {}
+                if request == "GetSceneCollectionList":
+                    self.session_generation = 12
+                    return {"currentSceneCollectionName": "Collection A"}
+                return super().send(request, data)
+
+        client = ReconnectingCollectionClient()
+        manager = OBSLayoutManager(client)
+        manager._undo_stack.append(
+            LayoutSnapshot(
+                {"scene": "Gameplay", "modules": {}},
+                "apply",
+                collection="Collection A",
+                generation=0,
+                obs_session_generation=11,
+                complete=True,
+            )
+        )
+
+        result = manager.undo_last()
+
+        self.assertTrue(result.warnings)
+        self.assertIn("Session OBS modifiée", result.warnings[0])
+        self.assertEqual(manager._snapshot_generation, 1)
+        self.assertFalse(
+            any(request.startswith("Set") for request, _payload in client.calls)
+        )
+
     def test_apply_matching_layout_performs_no_mutation_writes(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
