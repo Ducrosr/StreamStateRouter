@@ -644,11 +644,38 @@ class OBSLayoutManager:
         previous_guard = self._restore_session_generation
         self._restore_session_generation = expected_session or None
         try:
-            return self.apply_profile(
+            result = self.apply_profile(
                 snapshot.profile,
                 record_undo=False,
                 transition_override={"mode": "instant", "duration_ms": 0},
             )
+            if expected_session:
+                try:
+                    # apply_profile may classify an OBS read failure as a
+                    # missing resource. Re-probe the exact guarded transport
+                    # before accepting the restore so a lost/reconnected
+                    # session can never look like a successful partial undo.
+                    self.client.send(
+                        "GetVersion",
+                        expected_session_generation=expected_session,
+                    )
+                except Exception as exc:
+                    self.invalidate_session()
+                    return LayoutApplyResult(
+                        warnings=(
+                            f"Restauration interrompue : session OBS modifiée ou non vérifiable ({exc})",
+                            *snapshot.warnings,
+                        )
+                    )
+                if int(getattr(self.client, "session_generation", 0) or 0) != expected_session:
+                    self.invalidate_session()
+                    return LayoutApplyResult(
+                        warnings=(
+                            "Restauration interrompue : session OBS modifiée pendant l'opération.",
+                            *snapshot.warnings,
+                        )
+                    )
+            return result
         except Exception as exc:
             if expected_session:
                 self.invalidate_session()
