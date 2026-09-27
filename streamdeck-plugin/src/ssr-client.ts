@@ -88,7 +88,7 @@ async function command(path: string, body: Record<string, unknown> = {}): Promis
 export const ssrClient = {
   status: async () => request("/status") as Promise<SSRStatus>,
   pause: async (paused: boolean) => request("/pause", { paused }),
-  auto: async () => request("/auto", {}),
+  auto: async () => command("/auto", {}),
   reapply: async () => command("/reapply"),
   setControlVariable: async (name: string, value: string) =>
     command("/control/set", { name, value }),
