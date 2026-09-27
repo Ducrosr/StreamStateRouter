@@ -42,6 +42,7 @@ class PendingFadeCleanup:
     source: str
     collection: str
     created_at: float
+    persisted: bool = False
     attempts: int = 0
     last_error: str = ""
 
@@ -439,10 +440,12 @@ class OBSLayoutManager:
                 created_at=time.monotonic(),
             )
             self._pending_fade_cleanup[key] = pending
-            # This notification happens before any temporary opacity mutation.
-            # A process crash after the next OBS write can therefore recover the
-            # obligation from disk on the following launch.
+        if not pending.persisted:
+            # Persistence is part of arming the cleanup obligation, not a
+            # best-effort side effect. If it fails, leave the entry unarmed so
+            # every later attempt must retry before any opacity mutation.
             self._notify_pending_cleanup_changed()
+            pending.persisted = True
         return pending
 
     def _neutralize_fade_sources(
@@ -494,6 +497,7 @@ class OBSLayoutManager:
                 warnings.append(f"{source}: opacité neutre non acquittée ({exc})")
             else:
                 self._pending_fade_cleanup.pop((collection, source), None)
+                self._notify_pending_cleanup_changed()
         return tuple(warnings)
 
     def set_cooperative_yield(self, callback) -> None:
