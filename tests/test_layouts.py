@@ -227,7 +227,7 @@ class LayoutTests(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.session_generation = 11
-                self.fail_video = False
+                self.fail_restore_read = False
 
             def send(self, request, data=None, *, expected_session_generation=None):
                 if (
@@ -238,9 +238,9 @@ class LayoutTests(unittest.TestCase):
                 if request == "GetVersion":
                     return {}
                 if (
-                    request == "GetVideoSettings"
+                    request == "GetSceneItemId"
                     and expected_session_generation is not None
-                    and self.fail_video
+                    and self.fail_restore_read
                 ):
                     self.session_generation = 12
                     raise RuntimeError("transport closed")
@@ -259,7 +259,7 @@ class LayoutTests(unittest.TestCase):
         )
         manager._undo_stack.append(snapshot)
         client.calls.clear()
-        client.fail_video = True
+        client.fail_restore_read = True
 
         result = manager.undo_last()
 
