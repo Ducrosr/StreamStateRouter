@@ -1016,6 +1016,27 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertNotIn("overlay", dispatcher.applied_profiles())
         self.assertEqual(dispatcher.pending_domains(state_a), ("overlay",))
 
+    def test_manual_layout_apply_surfaces_missing_sources_as_failure_warning(self):
+        dispatcher = OBSDispatcher(
+            FakeClient(),
+            {},
+            {"Manual": {"scene": "Gameplay", "modules": {}}},
+        )
+        dispatcher.layout_manager.apply_profile = lambda _profile: SimpleNamespace(
+            elements_applied=1,
+            elements_skipped=1,
+            missing_sources=("[Webcam] Missing",),
+            warnings=(),
+        )
+
+        result = dispatcher.execute_layout_profile("Manual")
+
+        self.assertEqual(
+            result.warnings,
+            ("source manquante: [Webcam] Missing",),
+        )
+        self.assertFalse(dispatcher._manual_layout_hold_active)
+
     def test_layout_profile_is_dispatched_as_fifth_state_domain(self):
         client = FakeClient()
         layout = {
