@@ -85,6 +85,7 @@ class StreamingContextDispatcher(ThreadRecordingDispatcher):
         self.streaming = bool(streaming)
         self.context_calls = 0
         self.cached_context_calls = 0
+        self.context_threads = []
 
     def _context(self):
         return {
@@ -96,6 +97,7 @@ class StreamingContextDispatcher(ThreadRecordingDispatcher):
 
     def obs_context(self, *, force_refresh=False):
         self.context_calls += 1
+        self.context_threads.append(threading.current_thread().name)
         return self._context()
 
     def cached_obs_context(self):
@@ -3514,8 +3516,11 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(dispatcher.changes)
             self.assertEqual(dispatcher.changes[-1].current, manual)
 
-            change = service.clear_manual_override()
-            self.assertIsNotNone(change)
+            request_id = service.request_clear_manual_override()
+            self.assertEqual(
+                service.command_status(request_id)["status"],
+                "accepted",
+            )
 
             deadline = time.monotonic() + 1.0
             while (
