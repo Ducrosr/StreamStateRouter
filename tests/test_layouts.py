@@ -479,6 +479,43 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(manager.retry_pending_fade_cleanup(), ())
         self.assertEqual(manager.pending_fade_cleanup(), ())
 
+    def test_fade_cleanup_journal_callback_runs_before_first_opacity_write(self):
+        client = FakeLayoutClient()
+        client.scene_collection = "Collection A"
+        manager = OBSLayoutManager(client)
+        order = []
+        snapshots = []
+
+        def journal():
+            order.append("journal")
+            snapshots.append(manager.export_pending_fade_cleanup())
+
+        manager.set_pending_cleanup_changed(journal)
+        manager._ensure_fade_filter = lambda _source, _opacity: None
+        manager._set_source_opacity = lambda _source, _opacity: order.append("opacity")
+        prepared = [{
+            "target_enabled": True,
+            "current_enabled": False,
+            "visibility_changed": True,
+            "source": "[Webcam] Avatar",
+            "container": "Gameplay",
+            "transform_changed": False,
+            "target_transform": {},
+            "current_transform": {},
+        }]
+
+        manager._animate_layout_transition(
+            prepared,
+            mode="fade",
+            duration_ms=1,
+            steps=1,
+            warnings=[],
+        )
+
+        self.assertTrue(snapshots)
+        self.assertEqual(snapshots[0][0]["source"], "[Webcam] Avatar")
+        self.assertLess(order.index("journal"), order.index("opacity"))
+
     def test_fade_cleanup_is_prearmed_before_first_opacity_io(self):
         from stream_state_router.obs.client import OBSUnavailableError
 
