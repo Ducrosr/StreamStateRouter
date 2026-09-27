@@ -323,6 +323,7 @@ class OBSLayoutManager:
         self._last_discovery_warnings: list[str] = []
         self._pending_fade_cleanup: dict[tuple[str, str], PendingFadeCleanup] = {}
         self._pending_cleanup_changed = None
+        self._restore_session_generation: int | None = None
         self._last_scene_collection = ""
 
     def set_pending_cleanup_changed(self, callback) -> None:
@@ -639,11 +640,27 @@ class OBSLayoutManager:
         context_error = self._snapshot_context_error(snapshot)
         if context_error:
             return LayoutApplyResult(warnings=(context_error, *snapshot.warnings))
-        return self.apply_profile(
-            snapshot.profile,
-            record_undo=False,
-            transition_override={"mode": "instant", "duration_ms": 0},
-        )
+        expected_session = int(snapshot.obs_session_generation or 0)
+        previous_guard = self._restore_session_generation
+        self._restore_session_generation = expected_session or None
+        try:
+            return self.apply_profile(
+                snapshot.profile,
+                record_undo=False,
+                transition_override={"mode": "instant", "duration_ms": 0},
+            )
+        except Exception as exc:
+            if expected_session:
+                self.invalidate_session()
+                return LayoutApplyResult(
+                    warnings=(
+                        f"Restauration interrompue : session OBS modifiée ou non vérifiable ({exc})",
+                        *snapshot.warnings,
+                    )
+                )
+            raise
+        finally:
+            self._restore_session_generation = previous_guard
 
     def set_runtime_visibility_owners(
         self,
@@ -677,6 +694,16 @@ class OBSLayoutManager:
         """Return current runtime visibility ownership without exposing storage."""
 
         return frozenset(self._runtime_visibility_owners)
+
+    def _send(self, request: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        expected = self._restore_session_generation
+        if expected is None:
+            return self.client.send(request, data)
+        return self.client.send(
+            request,
+            data,
+            expected_session_generation=expected,
+        )
 
     def reset_cache(self) -> None:
         self._scene_item_cache.clear()
@@ -727,17 +754,17 @@ class OBSLayoutManager:
             "sceneItemEnabled": bool(enabled),
         }
         try:
-            self.client.send("SetSceneItemEnabled", payload)
+            self._send("SetSceneItemEnabled", payload)
         except OBSResourceNotFoundError:
             # The graph may have changed between resolution and mutation.
             # Resolve the exact pair once more; confirmed absence then propagates.
             item_id = self._fresh_scene_item_id(container_name, source_name)
             payload["sceneItemId"] = item_id
-            self.client.send("SetSceneItemEnabled", payload)
+            self._send("SetSceneItemEnabled", payload)
 
     def canvas_size(self) -> tuple[int, int] | None:
         try:
-            response = self.client.send("GetVideoSettings")
+            response = self._send("GetVideoSettings")
             width = _int(response.get("baseWidth"))
             height = _int(response.get("baseHeight"))
             return (width, height) if width > 0 and height > 0 else None
@@ -745,7 +772,7 @@ class OBSLayoutManager:
             return None
 
     def list_scenes(self) -> tuple[list[str], str]:
-        response = self.client.send("GetSceneList")
+        response = self._send("GetSceneList")
         names = [
             str(scene.get("sceneName") or "")
             for scene in response.get("scenes", []) or []
@@ -754,7 +781,7 @@ class OBSLayoutManager:
         current = str(response.get("currentProgramSceneName") or "")
         if not current:
             try:
-                current_response = self.client.send("GetCurrentProgramScene")
+                current_response = self._send("GetCurrentProgramScene")
                 current = str(
                     current_response.get("sceneName")
                     or current_response.get("currentProgramSceneName")
@@ -808,7 +835,7 @@ class OBSLayoutManager:
             return
         self._yield_runtime()
         if prefetched is None:
-            response = self.client.send("GetSceneItemList", {"sceneName": container})
+            response = self._send("GetSceneItemList", {"sceneName": container})
             items = response.get("sceneItems", []) or []
         else:
             items = prefetched
@@ -954,7 +981,7 @@ class OBSLayoutManager:
             return
         self._yield_runtime()
         if prefetched is None:
-            response = self.client.send("GetSceneItemList", {"sceneName": container})
+            response = self._send("GetSceneItemList", {"sceneName": container})
             items = response.get("sceneItems", []) or []
         else:
             items = prefetched
@@ -2863,21 +2890,21 @@ class OBSLayoutManager:
         # cached item look missing.
         item_id = self._scene_item_id(container, source)
         try:
-            transform_response = self.client.send(
+            transform_response = self._send(
                 "GetSceneItemTransform", {"sceneName": container, "sceneItemId": item_id}
             )
         except Exception:
             self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             item_id = self._scene_item_id(container, source)
-            transform_response = self.client.send(
+            transform_response = self._send(
                 "GetSceneItemTransform", {"sceneName": container, "sceneItemId": item_id}
             )
         enabled = None
         enabled_error = ""
         self._yield_runtime()
         try:
-            enabled_response = self.client.send(
+            enabled_response = self._send(
                 "GetSceneItemEnabled", {"sceneName": container, "sceneItemId": item_id}
             )
             if "sceneItemEnabled" in enabled_response:
@@ -2904,12 +2931,12 @@ class OBSLayoutManager:
             "sceneItemTransform": dict(transform),
         }
         try:
-            self.client.send("SetSceneItemTransform", payload)
+            self._send("SetSceneItemTransform", payload)
         except Exception:
             self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             payload["sceneItemId"] = self._scene_item_id(container, source)
-            self.client.send("SetSceneItemTransform", payload)
+            self._send("SetSceneItemTransform", payload)
 
     def _set_enabled(self, container: str, source: str, enabled: bool) -> None:
         self._yield_runtime()
@@ -2920,12 +2947,12 @@ class OBSLayoutManager:
             "sceneItemEnabled": bool(enabled),
         }
         try:
-            self.client.send("SetSceneItemEnabled", payload)
+            self._send("SetSceneItemEnabled", payload)
         except Exception:
             self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             payload["sceneItemId"] = self._scene_item_id(container, source)
-            self.client.send("SetSceneItemEnabled", payload)
+            self._send("SetSceneItemEnabled", payload)
 
     def _animate_transform(
         self,
