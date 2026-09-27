@@ -3491,12 +3491,13 @@ class RuntimeTests(unittest.TestCase):
                         "Automatic",
                         automatic,
                         exe="automatic.exe",
+                        conditions={"streaming": True},
                     )
                 ]
             ),
             debounce_ms=150,
         )
-        dispatcher = ThreadRecordingDispatcher()
+        dispatcher = StreamingContextDispatcher(streaming=True)
         service = RoutingService(
             engine,
             dispatcher,
@@ -3536,6 +3537,11 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.thread_names,
                 ["SSR-Router", "SSR-Router"],
+            )
+            self.assertTrue(dispatcher.context_threads)
+            self.assertTrue(
+                all(name == "SSR-Router" for name in dispatcher.context_threads),
+                dispatcher.context_threads,
             )
         finally:
             self.assertTrue(service.stop())
