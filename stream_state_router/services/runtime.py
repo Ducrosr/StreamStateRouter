@@ -1223,6 +1223,9 @@ class RoutingService:
             options["name"] = str(profile_name)
         return self.submit_obs_command(f"layout.{action}", options=options)
 
+    def request_clear_manual_override(self) -> str:
+        return self.submit_obs_command("override.clear")
+
     def request_layout_catalog(self, scene: str) -> str:
         scene_name = str(scene or "").strip()
         if not scene_name:
@@ -3123,6 +3126,8 @@ class RoutingService:
                             for module_name, elements in catalog.items()
                         },
                     }
+                elif command.action == "override.clear":
+                    result = self.clear_manual_override()
                 elif command.action == "layout.apply":
                     result = self.dispatcher.execute_layout_profile(
                         str(command.options.get("name") or "")
