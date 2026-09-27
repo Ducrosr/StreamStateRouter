@@ -3567,11 +3567,10 @@ class MainWindow(QMainWindow):
                 # for that operation. Do not leave an older checkpoint exposed
                 # as though it could undo the failed apply.
                 self._invalidate_layout_undo_checkpoint()
-            elif (
-                command_success
-                and action == "layout.apply"
-                and not applied_layout
-            ):
+            elif action == "layout.apply" and not applied_layout:
+                # External/API layout.apply requests do not appear in the GUI's
+                # pending map. Whether they succeed or fail, the previous GUI
+                # checkpoint no longer describes the latest layout operation.
                 self._invalidate_layout_undo_checkpoint()
 
             if (
