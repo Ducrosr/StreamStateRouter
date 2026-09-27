@@ -6,6 +6,7 @@ from unittest.mock import patch
 from stream_state_router.obs.client import OBSResourceNotFoundError
 from stream_state_router.obs.layouts import (
     OBSLayoutManager,
+    LayoutSnapshot,
     compact_layout_overrides,
     split_module_source,
 )
@@ -145,6 +146,45 @@ class LayoutTests(unittest.TestCase):
             {"[Webcam] Cadre", "[Webcam] Avatar"},
         )
         self.assertFalse(any(request == "GetSceneItemTransform" for request, _ in client.calls))
+
+    def test_undo_refuses_snapshot_when_transport_died_before_runtime_probe(self):
+        class SessionAwareClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.session_generation = 7
+                self.transport_dead = True
+
+            def send(self, request, data=None, *, expected_session_generation=None):
+                if expected_session_generation is not None:
+                    self.asserted_generation = expected_session_generation
+                    if self.transport_dead:
+                        self.session_generation += 1
+                        raise RuntimeError("transport closed")
+                return super().send(request, data)
+
+        client = SessionAwareClient()
+        manager = OBSLayoutManager(client)
+        manager._undo_stack.append(
+            LayoutSnapshot(
+                {"scene": "Gameplay", "modules": {}},
+                "apply",
+                collection="Collection A",
+                generation=0,
+                obs_session_generation=7,
+                complete=True,
+            )
+        )
+
+        result = manager.undo_last()
+
+        self.assertTrue(result.warnings)
+        self.assertIn("Session OBS non vérifiable", result.warnings[0])
+        self.assertEqual(client.asserted_generation, 7)
+        self.assertEqual(manager._snapshot_generation, 1)
+        self.assertEqual(len(manager._undo_stack), 1)
+        self.assertFalse(
+            any(request.startswith("Set") for request, _payload in client.calls)
+        )
 
     def test_apply_matching_layout_performs_no_mutation_writes(self):
         client = FakeLayoutClient()
