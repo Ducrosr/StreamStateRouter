@@ -607,7 +607,7 @@ class OBSLayoutManager:
                 # Force a transport round-trip without allowing an implicit
                 # reconnect. This closes the window where OBS restarted but the
                 # periodic runtime probe has not observed the new session yet.
-                self.client.send(
+                self._send(
                     "GetVersion",
                     expected_session_generation=expected_session,
                 )
@@ -873,7 +873,7 @@ class OBSLayoutManager:
                 continue
             if is_group:
                 try:
-                    group = self.client.send(
+                    group = self._send(
                         "GetGroupSceneItemList",
                         {"sceneName": source},
                     )
@@ -1016,7 +1016,7 @@ class OBSLayoutManager:
                 )
             )
             if imported is not None and not hard_locked:
-                transform_response = self.client.send(
+                transform_response = self._send(
                     "GetSceneItemTransform",
                     {"sceneName": container, "sceneItemId": item_id},
                 )
@@ -1050,7 +1050,7 @@ class OBSLayoutManager:
                 continue
             if is_group:
                 try:
-                    group = self.client.send("GetGroupSceneItemList", {"sceneName": source})
+                    group = self._send("GetGroupSceneItemList", {"sceneName": source})
                     children = [item for item in group.get("sceneItems", []) or [] if isinstance(item, Mapping)]
                     self._discover_container(
                         root_scene=root_scene,
@@ -1276,7 +1276,7 @@ class OBSLayoutManager:
             if depth > 10:
                 return
             try:
-                response = self.client.send("GetGroupSceneItemList", {"sceneName": group})
+                response = self._send("GetGroupSceneItemList", {"sceneName": group})
             except Exception as exc:
                 self._last_discovery_warnings.append(
                     f"Groupe de support '{group}' non lisible : {exc}"
@@ -1313,7 +1313,7 @@ class OBSLayoutManager:
                 )
                 source_kind = "group" if is_group else ("scene" if is_scene else "input")
                 if parsed is None:
-                    tr = self.client.send(
+                    tr = self._send(
                         "GetSceneItemTransform",
                         {"sceneName": group, "sceneItemId": item_id},
                     ).get("sceneItemTransform") or {}
@@ -1343,7 +1343,7 @@ class OBSLayoutManager:
                 return
             visited_scenes.add(scene_name)
             try:
-                response = self.client.send("GetSceneItemList", {"sceneName": scene_name})
+                response = self._send("GetSceneItemList", {"sceneName": scene_name})
             except Exception as exc:
                 self._last_discovery_warnings.append(
                     f"Scène de support '{scene_name}' non lisible : {exc}"
@@ -1378,7 +1378,7 @@ class OBSLayoutManager:
                 )
                 source_kind = "group" if is_group else ("scene" if is_scene else "input")
                 if parsed is None:
-                    tr = self.client.send(
+                    tr = self._send(
                         "GetSceneItemTransform",
                         {"sceneName": scene_name, "sceneItemId": item_id},
                     ).get("sceneItemTransform") or {}
@@ -2985,14 +2985,14 @@ class OBSLayoutManager:
         Filter creation is a bounded recovery path. Transport/protocol errors
         are not interpreted as absence and therefore propagate unchanged.
         """
-        response = self.client.send("GetSourceFilterList", {"sourceName": source})
+        response = self._send("GetSourceFilterList", {"sourceName": source})
         filters = response.get("filters", []) or []
         found = any(
             isinstance(item, Mapping) and str(item.get("filterName") or "") == SSR_FADE_FILTER
             for item in filters
         )
         if not found:
-            self.client.send(
+            self._send(
                 "CreateSourceFilter",
                 {
                     "sourceName": source,
@@ -3004,7 +3004,7 @@ class OBSLayoutManager:
                 },
             )
             return
-        self.client.send(
+        self._send(
             "SetSourceFilterEnabled",
             {"sourceName": source, "filterName": SSR_FADE_FILTER, "filterEnabled": True},
         )
@@ -3017,13 +3017,13 @@ class OBSLayoutManager:
             "overlay": True,
         }
         try:
-            self.client.send("SetSourceFilterSettings", payload)
+            self._send("SetSourceFilterSettings", payload)
             return
         except OBSResourceNotFoundError:
             # Confirmed absence is the only error that may create/re-enable the
             # helper filter. Retry the settings write once, never recursively.
             self._ensure_fade_filter(source, opacity)
-        self.client.send("SetSourceFilterSettings", payload)
+        self._send("SetSourceFilterSettings", payload)
 
     def _animate_opacity(self, source: str, start: float, end: float, duration_ms: int, steps: int) -> None:
         self._ensure_fade_filter(source, start)
@@ -3040,7 +3040,7 @@ class OBSLayoutManager:
     def _fresh_scene_item_id(self, container: str, source: str) -> int:
         self._yield_runtime()
         self._invalidate_scene_item_id(container, source)
-        response = self.client.send(
+        response = self._send(
             "GetSceneItemId",
             {"sceneName": container, "sourceName": source},
         )
@@ -3059,7 +3059,7 @@ class OBSLayoutManager:
         cached = self._scene_item_cache.get(key)
         if cached:
             return cached
-        response = self.client.send(
+        response = self._send(
             "GetSceneItemId",
             {"sceneName": container, "sourceName": source},
         )
