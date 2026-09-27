@@ -3357,6 +3357,21 @@ class MainWindow(QMainWindow):
             ),
         )
         self._pending_cleanup_transfer = ()
+        layout_manager = getattr(self._dispatcher, "layout_manager", None)
+        marker = self._runtime_marker
+        if (
+            layout_manager is not None
+            and marker is not None
+            and hasattr(layout_manager, "set_pending_cleanup_changed")
+        ):
+            # The layout manager invokes this before temporary opacity writes
+            # and after successful neutralization. Snapshot all runtime cleanup
+            # obligations so the crash marker is always restart-replayable.
+            layout_manager.set_pending_cleanup_changed(
+                lambda: marker.checkpoint_pending_cleanup(
+                    self._service.pending_cleanup_snapshot()
+                )
+            )
         self._service.on_foreground = self.bridge.foreground.emit
         self._service.on_change = self.bridge.state_change.emit
         self._service.on_dispatch = self.bridge.dispatch.emit
