@@ -3562,6 +3562,11 @@ class MainWindow(QMainWindow):
                 self._set_layout_undo_checkpoint(
                     f"Application du layout « {applied_layout} »"
                 )
+            elif applied_layout:
+                # A partial/failed manual apply has no trustworthy undo ticket
+                # for that operation. Do not leave an older checkpoint exposed
+                # as though it could undo the failed apply.
+                self._invalidate_layout_undo_checkpoint()
             elif (
                 command_success
                 and action == "layout.apply"
