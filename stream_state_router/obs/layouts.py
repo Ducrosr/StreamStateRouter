@@ -607,7 +607,7 @@ class OBSLayoutManager:
                 # Force a transport round-trip without allowing an implicit
                 # reconnect. This closes the window where OBS restarted but the
                 # periodic runtime probe has not observed the new session yet.
-                self._send(
+                self.client.send(
                     "GetVersion",
                     expected_session_generation=expected_session,
                 )
