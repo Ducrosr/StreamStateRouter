@@ -1967,6 +1967,7 @@ class OBSLayoutManager:
                 "item": item,
                 "container": container,
                 "source": source,
+                "source_type": str(item.get("source_type") or "input"),
                 "current_transform": current["transform"],
                 "target_transform": target_transform,
                 "transform_changed": self._transform_needs_update(
@@ -2191,6 +2192,15 @@ class OBSLayoutManager:
             if target_enabled is None:
                 fallback.append(prepared)
                 continue
+
+            # OBS groups have their own compositor/bounds lifecycle. Applying a
+            # temporary color-filter opacity directly to the group can leave the
+            # group source rendering transparent even after the filter is
+            # neutralized or removed. Keep group geometry/visibility managed,
+            # but degrade the visual transition to direct changes.
+            if str(prepared.get("source_type") or "").casefold() == "group":
+                fallback.append(prepared)
+                continue
             if current_enabled is None:
                 warnings.append(
                     f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
@@ -2350,6 +2360,19 @@ class OBSLayoutManager:
             current_visible = bool(current_enabled)
             target_visible = bool(target_enabled)
             if not current_visible and not target_visible:
+                continue
+
+            # Never attach the temporary fade filter to an OBS group. Real OBS
+            # validation showed that a group can keep rendering transparently
+            # after a fade/filter lifecycle even though its children still render
+            # correctly. Groups still participate in geometry animation and use
+            # direct visibility fallback when needed.
+            if str(prepared.get("source_type") or "").casefold() == "group":
+                fallback_visibility.add(index)
+                if target_visible and not current_visible:
+                    self._set_enabled(
+                        prepared["container"], prepared["source"], True
+                    )
                 continue
 
             touched_fades.add(source)
