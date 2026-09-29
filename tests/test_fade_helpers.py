@@ -156,6 +156,37 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
             ):
                 store.entries()
 
+    def test_duplicate_qualified_source_ownership_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "helper-manifest.json"
+            store = FadeHelperManifestStore(path)
+            first = store.prepare_layout_fade(
+                connection_host="127.0.0.1",
+                connection_port=4455,
+                collection="Collection A",
+                source_uuid="input-uuid",
+                source_alias="Avatar",
+                source_kind="image_source",
+                session_generation=1,
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            duplicate = dict(raw["helpers"][0])
+            duplicate["helper_id"] = "another-helper-id"
+            duplicate["filter"] = dict(duplicate["filter"])
+            duplicate["filter"]["name"] = (
+                LAYOUT_FADE_FILTER_PREFIX + duplicate["helper_id"]
+            )
+            raw["helpers"].append(duplicate)
+            path.write_text(json.dumps(raw), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                FadeHelperManifestError,
+                "multiple helpers for one qualified source",
+            ):
+                store.entries()
+
+            self.assertEqual(first.source_uuid, "input-uuid")
+
     def test_future_manifest_is_rejected_without_overwrite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "helper-manifest.json"
