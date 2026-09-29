@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -2087,6 +2088,44 @@ class LayoutTests(unittest.TestCase):
         self.assertFalse(
             any(
                 request == "CreateSourceFilter"
+                for request, _ in client.calls
+            )
+        )
+
+    def test_cleanup_contradictory_manifest_keeps_obligation_without_mutation(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        store._entries = [
+            replace(
+                item,
+                filter_name=identity.filter_name + "-contradictory",
+            )
+            if item.helper_id == identity.helper_id
+            else item
+            for item in store._entries
+        ]
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(
+            any("identité helper contradictoire" in item for item in warnings),
+            warnings,
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
                 for request, _ in client.calls
             )
         )
