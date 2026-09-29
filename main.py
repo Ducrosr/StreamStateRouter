@@ -13,7 +13,7 @@ from stream_state_router.services.config import (
     validate_config,
 )
 from stream_state_router.services.logging_setup import configure_logging
-from stream_state_router.services.recovery import RuntimeMarker
+from stream_state_router.services.recovery import RuntimeMarker, RuntimeMarkerFormatError
 from stream_state_router.services.single_instance import SingleInstanceGuard
 
 
@@ -157,7 +157,16 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     marker = RuntimeMarker()
-    marker.start()
+    try:
+        marker.start()
+    except RuntimeMarkerFormatError as exc:
+        print(
+            "Démarrage refusé pour préserver le journal de récupération : "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        guard.close()
+        return 4
     try:
         if args.headless:
             code = run_headless(config)
