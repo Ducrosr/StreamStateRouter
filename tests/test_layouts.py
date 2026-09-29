@@ -871,6 +871,353 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(current_types[("Gameplay", "[Webcam] Cadre")], "input")
         self.assertEqual(occurrences["[Webcam] Cadre"], 1)
 
+    def test_fade_inventory_rejects_ambiguous_group_discriminator(self):
+        ambiguous_values = ("missing", None, "")
+
+        for marker in ambiguous_values:
+            for mode in ("fade", "move_fade"):
+                with self.subTest(marker=marker, mode=mode):
+                    class AmbiguousGroupClient(FakeLayoutClient):
+                        def send(self, request, data=None, _marker=marker):
+                            payload = dict(data or {})
+                            if (
+                                request == "GetSceneItemList"
+                                and payload.get("sceneName") == "Pause"
+                            ):
+                                self.calls.append((request, payload))
+                                row = {
+                                    "sourceName": "G",
+                                    "sourceType": "OBS_SOURCE_TYPE_SCENE",
+                                    "inputKind": None,
+                                    "sceneItemId": 201,
+                                    "sceneItemEnabled": True,
+                                }
+                                if _marker != "missing":
+                                    row["isGroup"] = _marker
+                                return {"sceneItems": [row]}
+                            if (
+                                request == "GetGroupSceneItemList"
+                                and payload.get("sceneName") == "G"
+                            ):
+                                self.calls.append((request, payload))
+                                return {
+                                    "sceneItems": [
+                                        self._scene_item_row("[Webcam] Cadre", 301)
+                                    ]
+                                }
+                            return super().send(request, data)
+
+                    client = AmbiguousGroupClient()
+                    manager = OBSLayoutManager(client)
+                    _types, _occurrences, complete = manager._fade_runtime_inventory()
+                    self.assertFalse(complete)
+
+                    profile = manager.capture_profile("Gameplay")
+                    profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+                    profile["modules"]["[Webcam] Cadre"]["visible"] = True
+                    profile["transition"] = {
+                        "mode": mode,
+                        "duration_ms": 1,
+                        "steps": 1,
+                    }
+                    client.enabled[1] = False
+                    client.calls.clear()
+
+                    with patch("stream_state_router.obs.layouts.time.sleep"):
+                        manager.apply_profile(profile, record_undo=False)
+
+                    self.assertTrue(client.enabled[1])
+                    self.assertAlmostEqual(client.transforms[1]["positionX"], 500.0)
+                    self.assertFalse(
+                        any(
+                            "SourceFilter" in request
+                            and payload.get("sourceName") == "[Webcam] Cadre"
+                            for request, payload in client.calls
+                        )
+                    )
+
+    def test_fade_inventory_rejects_referenced_scene_missing_from_catalog(self):
+        for mode in ("fade", "move_fade"):
+            with self.subTest(mode=mode):
+                class MissingNestedSceneClient(FakeLayoutClient):
+                    def send(self, request, data=None):
+                        payload = dict(data or {})
+                        if request == "GetSceneList":
+                            self.calls.append((request, payload))
+                            return {
+                                "currentProgramSceneName": "Gameplay",
+                                "scenes": [
+                                    {"sceneName": "Gameplay"},
+                                    {"sceneName": "Pause"},
+                                ],
+                            }
+                        if (
+                            request == "GetSceneItemList"
+                            and payload.get("sceneName") == "Pause"
+                        ):
+                            self.calls.append((request, payload))
+                            return {
+                                "sceneItems": [
+                                    {
+                                        "sourceName": "Nested",
+                                        "sourceType": "OBS_SOURCE_TYPE_SCENE",
+                                        "inputKind": "scene",
+                                        "isGroup": False,
+                                        "sceneItemId": 201,
+                                        "sceneItemEnabled": True,
+                                    }
+                                ]
+                            }
+                        if (
+                            request == "GetSceneItemList"
+                            and payload.get("sceneName") == "Nested"
+                        ):
+                            self.calls.append((request, payload))
+                            return {
+                                "sceneItems": [
+                                    self._scene_item_row("[Webcam] Cadre", 301)
+                                ]
+                            }
+                        return super().send(request, data)
+
+                client = MissingNestedSceneClient()
+                manager = OBSLayoutManager(client)
+                _types, occurrences, complete = manager._fade_runtime_inventory()
+                self.assertFalse(complete)
+                self.assertEqual(occurrences["[Webcam] Cadre"], 1)
+                self.assertFalse(
+                    any(
+                        request == "GetSceneItemList"
+                        and payload.get("sceneName") == "Nested"
+                        for request, payload in client.calls
+                    )
+                )
+
+                profile = manager.capture_profile("Gameplay")
+                profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+                profile["transition"] = {
+                    "mode": mode,
+                    "duration_ms": 1,
+                    "steps": 1,
+                }
+                client.calls.clear()
+
+                with patch("stream_state_router.obs.layouts.time.sleep"):
+                    manager.apply_profile(profile, record_undo=False)
+
+                self.assertFalse(
+                    any(
+                        "SourceFilter" in request
+                        and payload.get("sourceName") == "[Webcam] Cadre"
+                        for request, payload in client.calls
+                    )
+                )
+
+    def test_fade_inventory_counts_referenced_scene_when_catalogued(self):
+        class CataloguedNestedSceneClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSceneList":
+                    self.calls.append((request, payload))
+                    return {
+                        "currentProgramSceneName": "Gameplay",
+                        "scenes": [
+                            {"sceneName": "Gameplay"},
+                            {"sceneName": "Pause"},
+                            {"sceneName": "Nested"},
+                        ],
+                    }
+                if (
+                    request == "GetSceneItemList"
+                    and payload.get("sceneName") == "Pause"
+                ):
+                    self.calls.append((request, payload))
+                    return {
+                        "sceneItems": [
+                            {
+                                "sourceName": "Nested",
+                                "sourceType": "OBS_SOURCE_TYPE_SCENE",
+                                "inputKind": "scene",
+                                "isGroup": False,
+                                "sceneItemId": 201,
+                                "sceneItemEnabled": True,
+                            }
+                        ]
+                    }
+                if (
+                    request == "GetSceneItemList"
+                    and payload.get("sceneName") == "Nested"
+                ):
+                    self.calls.append((request, payload))
+                    return {
+                        "sceneItems": [
+                            self._scene_item_row("[Webcam] Cadre", 301)
+                        ]
+                    }
+                return super().send(request, data)
+
+        client = CataloguedNestedSceneClient()
+        manager = OBSLayoutManager(client)
+
+        _types, occurrences, complete = manager._fade_runtime_inventory()
+
+        self.assertTrue(complete)
+        self.assertEqual(occurrences["[Webcam] Cadre"], 2)
+
+    def test_fade_inventory_rejects_non_text_source_names(self):
+        bad_names = (
+            {"name": "[Webcam] Cadre"},
+            ["[Webcam] Cadre"],
+            101,
+        )
+
+        for bad_name in bad_names:
+            for container_kind in ("scene", "group"):
+                for mode in ("fade", "move_fade"):
+                    with self.subTest(
+                        bad_name=bad_name,
+                        container_kind=container_kind,
+                        mode=mode,
+                    ):
+                        class BadSourceNameClient(FakeLayoutClient):
+                            def send(
+                                self,
+                                request,
+                                data=None,
+                                _bad_name=bad_name,
+                                _container_kind=container_kind,
+                            ):
+                                payload = dict(data or {})
+                                if (
+                                    request == "GetSceneItemList"
+                                    and payload.get("sceneName") == "Pause"
+                                ):
+                                    self.calls.append((request, payload))
+                                    if _container_kind == "scene":
+                                        return {
+                                            "sceneItems": [
+                                                {
+                                                    "sourceName": _bad_name,
+                                                    "sourceType": "OBS_SOURCE_TYPE_INPUT",
+                                                    "inputKind": "image_source",
+                                                    "sceneItemId": 201,
+                                                    "sceneItemEnabled": True,
+                                                }
+                                            ]
+                                        }
+                                    return {
+                                        "sceneItems": [
+                                            {
+                                                "sourceName": "G",
+                                                "sourceType": "OBS_SOURCE_TYPE_SCENE",
+                                                "isGroup": True,
+                                                "sceneItemId": 202,
+                                                "sceneItemEnabled": True,
+                                            }
+                                        ]
+                                    }
+                                if (
+                                    request == "GetGroupSceneItemList"
+                                    and payload.get("sceneName") == "G"
+                                ):
+                                    self.calls.append((request, payload))
+                                    return {
+                                        "sceneItems": [
+                                            {
+                                                "sourceName": _bad_name,
+                                                "sourceType": "OBS_SOURCE_TYPE_INPUT",
+                                                "inputKind": "image_source",
+                                                "sceneItemId": 301,
+                                                "sceneItemEnabled": True,
+                                            }
+                                        ]
+                                    }
+                                return super().send(request, data)
+
+                        client = BadSourceNameClient()
+                        manager = OBSLayoutManager(client)
+                        _types, _occurrences, complete = manager._fade_runtime_inventory()
+                        self.assertFalse(complete)
+
+                        profile = manager.capture_profile("Gameplay")
+                        profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+                        profile["transition"] = {
+                            "mode": mode,
+                            "duration_ms": 1,
+                            "steps": 1,
+                        }
+                        client.calls.clear()
+
+                        with patch("stream_state_router.obs.layouts.time.sleep"):
+                            manager.apply_profile(profile, record_undo=False)
+
+                        self.assertFalse(
+                            any(
+                                "SourceFilter" in request
+                                and payload.get("sourceName") == "[Webcam] Cadre"
+                                for request, payload in client.calls
+                            )
+                        )
+
+    def test_fade_inventory_rejects_non_text_scene_names(self):
+        bad_names = ({"name": "Pause"}, ["Pause"], 101)
+
+        for bad_name in bad_names:
+            with self.subTest(bad_name=bad_name):
+                class BadSceneNameClient(FakeLayoutClient):
+                    def send(self, request, data=None, _bad_name=bad_name):
+                        if request == "GetSceneList":
+                            self.calls.append((request, dict(data or {})))
+                            return {
+                                "currentProgramSceneName": "Gameplay",
+                                "scenes": [
+                                    {"sceneName": "Gameplay"},
+                                    {"sceneName": _bad_name},
+                                ],
+                            }
+                        return super().send(request, data)
+
+                manager = OBSLayoutManager(BadSceneNameClient())
+                _types, _occurrences, complete = manager._fade_runtime_inventory()
+                self.assertFalse(complete)
+
+    def test_fade_inventory_accepts_numeric_text_identifiers(self):
+        class NumericTextClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                payload = dict(data or {})
+                if request == "GetSceneList":
+                    self.calls.append((request, payload))
+                    return {
+                        "currentProgramSceneName": "Gameplay",
+                        "scenes": [
+                            {"sceneName": "Gameplay"},
+                            {"sceneName": "101"},
+                        ],
+                    }
+                if (
+                    request == "GetSceneItemList"
+                    and payload.get("sceneName") == "101"
+                ):
+                    self.calls.append((request, payload))
+                    return {
+                        "sceneItems": [
+                            {
+                                "sourceName": "202",
+                                "sourceType": "OBS_SOURCE_TYPE_INPUT",
+                                "inputKind": "image_source",
+                                "sceneItemId": 202,
+                                "sceneItemEnabled": True,
+                            }
+                        ]
+                    }
+                return super().send(request, data)
+
+        manager = OBSLayoutManager(NumericTextClient())
+        _types, occurrences, complete = manager._fade_runtime_inventory()
+
+        self.assertTrue(complete)
+        self.assertEqual(occurrences["202"], 1)
+
     def test_unknown_visibility_uses_direct_target_for_all_a0_source_types(self):
         for response_kind in ("missing", "null", "error"):
             for source_type in ("input", "scene", "group"):
