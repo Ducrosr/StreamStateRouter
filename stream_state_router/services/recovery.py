@@ -13,6 +13,10 @@ from .paths import user_data_dir
 CLEANUP_SCHEMA_VERSION = 3
 
 
+class RuntimeMarkerFormatError(RuntimeError):
+    """runtime.json cannot be understood safely by this SSR version."""
+
+
 def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | None:
     item = dict(raw)
     kind = str(item.get("kind") or "").strip().casefold()
@@ -78,20 +82,64 @@ class RuntimeMarker:
             if self.path.exists():
                 try:
                     data = json.loads(self.path.read_text(encoding="utf-8"))
-                    self.previous_unclean = data.get("clean_shutdown") is False
-                    self.previous_cleanup_incomplete = data.get("cleanup_complete") is False
-                    raw_pending = data.get("pending_cleanup", [])
-                    if isinstance(raw_pending, list):
-                        normalized: list[dict[str, object]] = []
-                        for item in raw_pending:
-                            if not isinstance(item, Mapping):
-                                continue
-                            parsed = _normalize_cleanup_item(item)
-                            if parsed is not None:
-                                normalized.append(parsed)
-                        self.previous_pending_cleanup = tuple(normalized)
-                except Exception:
-                    self.previous_unclean = True
+                except Exception as exc:
+                    raise RuntimeMarkerFormatError(
+                        f"runtime.json illisible; recovery préservé sans réécriture: {exc}"
+                    ) from exc
+                if not isinstance(data, Mapping):
+                    raise RuntimeMarkerFormatError(
+                        "runtime.json doit contenir un objet JSON; fichier préservé"
+                    )
+
+                raw_schema = data.get("cleanup_schema")
+                schema: int | None
+                if raw_schema is None:
+                    schema = None
+                elif isinstance(raw_schema, bool) or not isinstance(raw_schema, int):
+                    raise RuntimeMarkerFormatError(
+                        "cleanup_schema invalide; runtime.json préservé"
+                    )
+                else:
+                    schema = int(raw_schema)
+                if schema is not None and schema > CLEANUP_SCHEMA_VERSION:
+                    raise RuntimeMarkerFormatError(
+                        f"cleanup_schema futur {schema} > {CLEANUP_SCHEMA_VERSION}; "
+                        "downgrade refusé pour préserver le recovery"
+                    )
+
+                self.previous_unclean = data.get("clean_shutdown") is False
+                self.previous_cleanup_incomplete = data.get("cleanup_complete") is False
+                raw_pending = data.get("pending_cleanup", [])
+                if not isinstance(raw_pending, list):
+                    if schema is not None and schema >= CLEANUP_SCHEMA_VERSION:
+                        raise RuntimeMarkerFormatError(
+                            "pending_cleanup invalide pour le schéma courant; fichier préservé"
+                        )
+                    raw_pending = []
+
+                normalized: list[dict[str, object]] = []
+                strict_current_schema = (
+                    schema is not None and schema >= CLEANUP_SCHEMA_VERSION
+                )
+                for item in raw_pending:
+                    if not isinstance(item, Mapping):
+                        if strict_current_schema:
+                            raise RuntimeMarkerFormatError(
+                                "obligation cleanup non-objet dans le schéma courant; "
+                                "runtime.json préservé"
+                            )
+                        continue
+                    parsed = _normalize_cleanup_item(item)
+                    if parsed is None:
+                        if strict_current_schema:
+                            raise RuntimeMarkerFormatError(
+                                "obligation cleanup inconnue ou incomplète dans le schéma "
+                                "courant; runtime.json préservé"
+                            )
+                        continue
+                    normalized.append(parsed)
+                self.previous_pending_cleanup = tuple(normalized)
+
             self.finalized = False
             self._write(
                 False,
