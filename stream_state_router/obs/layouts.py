@@ -621,6 +621,19 @@ class OBSLayoutManager:
         collection = str(collection or "").strip()
         if not collection or collection == "<unknown>":
             raise RuntimeError("Scene Collection inconnue pour le helper de fade")
+        source = str(source or "").strip()
+        legacy_conflicts = [
+            pending
+            for pending in self._pending_fade_cleanup.values()
+            if pending.legacy
+            and pending.collection == collection
+            and pending.source == source
+        ]
+        if legacy_conflicts:
+            raise RuntimeError(
+                f"Obligation fade legacy ambiguë pour {source}; "
+                "nouveau helper refusé"
+            )
         host, port = self._fade_connection_context()
         source_alias, source_uuid, source_kind = self._resolve_fade_input(source)
         session_generation = int(
