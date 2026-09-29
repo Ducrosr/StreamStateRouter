@@ -2037,6 +2037,120 @@ class LayoutTests(unittest.TestCase):
             )
         )
 
+    def test_reusable_helper_is_neutralized_before_enable(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        identity = store.mark_observed(
+            identity.helper_id,
+            source_alias="[Webcam] Avatar",
+            non_temporary_settings={},
+        )
+        client.source_filters["[Webcam] Avatar"] = {
+            identity.filter_name: {
+                "kind": identity.filter_kind,
+                "enabled": False,
+                "settings": {"opacity": 0.25},
+            }
+        }
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        client.calls.clear()
+
+        prepared = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+
+        self.assertEqual(prepared.helper_id, identity.helper_id)
+        mutations = [
+            (request, payload)
+            for request, payload in client.calls
+            if request in {
+                "SetSourceFilterSettings",
+                "SetSourceFilterEnabled",
+            }
+        ]
+        self.assertEqual(
+            [request for request, _ in mutations],
+            ["SetSourceFilterSettings", "SetSourceFilterEnabled"],
+        )
+        self.assertEqual(
+            mutations[0][1]["filterSettings"],
+            {"opacity": 1.0},
+        )
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertTrue(state["enabled"])
+
+    def test_reusable_helper_neutralize_response_loss_uses_readback_before_enable(self):
+        class LostNeutralResponseClient(FakeLayoutClient):
+            lose_neutral_response = True
+
+            def send(self, request, data=None):
+                payload = data or {}
+                settings = payload.get("filterSettings")
+                if (
+                    request == "SetSourceFilterSettings"
+                    and self.lose_neutral_response
+                    and isinstance(settings, dict)
+                    and settings.get("opacity") == 1.0
+                ):
+                    self.lose_neutral_response = False
+                    super().send(request, data)
+                    raise RuntimeError("neutral response lost")
+                return super().send(request, data)
+
+        client = LostNeutralResponseClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        identity = store.mark_observed(
+            identity.helper_id,
+            source_alias="[Webcam] Avatar",
+            non_temporary_settings={},
+        )
+        client.source_filters["[Webcam] Avatar"] = {
+            identity.filter_name: {
+                "kind": identity.filter_kind,
+                "enabled": False,
+                "settings": {"opacity": 0.25},
+            }
+        }
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        client.calls.clear()
+
+        manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertTrue(state["enabled"])
+        self.assertEqual(
+            sum(
+                1
+                for request, payload in client.calls
+                if request == "SetSourceFilterSettings"
+                and (payload.get("filterSettings") or {}).get("opacity") == 1.0
+            ),
+            1,
+        )
+
     def test_cleanup_missing_owned_helper_is_terminal_without_create(self):
         client = FakeLayoutClient()
         store = MemoryFadeHelperManifestStore()
