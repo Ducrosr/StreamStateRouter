@@ -169,18 +169,15 @@ def _text(value: object) -> str:
 
 
 def _positive_int(value: object) -> int:
-    try:
-        result = int(value)
-    except (TypeError, ValueError, OverflowError):
+    if isinstance(value, bool) or not isinstance(value, int):
         return 0
-    return result if result > 0 else 0
+    return value if value > 0 else 0
 
 
 def _non_negative_int(value: object) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError, OverflowError):
+    if isinstance(value, bool) or not isinstance(value, int):
         return 0
+    return max(0, value)
 
 
 def _normalize_host(value: object) -> str:
