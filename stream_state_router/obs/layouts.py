@@ -358,6 +358,7 @@ class OBSLayoutManager:
             )
         )
         self._active_fade_helpers: dict[str, FadeHelperIdentity] = {}
+        self._active_fade_sessions: dict[str, int] = {}
 
     def set_pending_cleanup_changed(self, callback) -> None:
         """Persist cleanup obligations whenever their durable set changes."""
@@ -373,6 +374,31 @@ class OBSLayoutManager:
                 )
             return
         callback()
+
+    def _fade_send(
+        self,
+        request: str,
+        data: dict[str, Any] | None = None,
+        *,
+        session_generation: int = 0,
+    ) -> dict[str, Any]:
+        expected = max(0, int(session_generation or 0))
+        if expected and isinstance(self.client, OBSClientManager):
+            return self.client.send(
+                request,
+                data,
+                expected_session_generation=expected,
+            )
+        response = self._send(request, data)
+        if expected:
+            current = int(
+                getattr(self.client, "session_generation", 0) or 0
+            )
+            if current != expected:
+                raise RuntimeError(
+                    "Session OBS modifiée pendant l'opération de fade"
+                )
+        return response
 
     def _fade_connection_context(self) -> tuple[str, int]:
         config = getattr(self.client, "config", None)
@@ -393,8 +419,12 @@ class OBSLayoutManager:
         source: str,
         *,
         source_uuid: str = "",
+        session_generation: int = 0,
     ) -> tuple[str, str, str]:
-        response = self._send("GetInputList")
+        response = self._fade_send(
+            "GetInputList",
+            session_generation=session_generation,
+        )
         raw_inputs = response.get("inputs") if isinstance(response, Mapping) else None
         if not isinstance(raw_inputs, list):
             raise RuntimeError("Inventaire des inputs OBS incomplet")
@@ -425,8 +455,17 @@ class OBSLayoutManager:
             )
         return matches[0]
 
-    def _fade_filter_rows(self, source: str) -> list[Mapping[str, Any]]:
-        response = self._send("GetSourceFilterList", {"sourceName": source})
+    def _fade_filter_rows(
+        self,
+        source: str,
+        *,
+        session_generation: int = 0,
+    ) -> list[Mapping[str, Any]]:
+        response = self._fade_send(
+            "GetSourceFilterList",
+            {"sourceName": source},
+            session_generation=session_generation,
+        )
         raw = response.get("filters") if isinstance(response, Mapping) else None
         if not isinstance(raw, list):
             raise RuntimeError(f"Inventaire des filtres incomplet pour {source}")
@@ -441,10 +480,13 @@ class OBSLayoutManager:
         self,
         source: str,
         filter_name: str,
+        *,
+        session_generation: int = 0,
     ) -> tuple[str, bool | None, dict[str, Any]]:
-        response = self._send(
+        response = self._fade_send(
             "GetSourceFilter",
             {"sourceName": source, "filterName": filter_name},
+            session_generation=session_generation,
         )
         if not isinstance(response, Mapping):
             raise RuntimeError(f"État du helper illisible pour {source}")
@@ -612,6 +654,7 @@ class OBSLayoutManager:
             self._pending_fade_cleanup[key] = pending
             raise
         self._active_fade_helpers.pop(pending.source, None)
+        self._active_fade_sessions.pop(pending.source, None)
 
     def _prepare_fade_filter(
         self,
@@ -635,10 +678,28 @@ class OBSLayoutManager:
                 "nouveau helper refusé"
             )
         host, port = self._fade_connection_context()
-        source_alias, source_uuid, source_kind = self._resolve_fade_input(source)
+        current_collection = self._scene_collection_name()
+        if current_collection != collection:
+            raise RuntimeError(
+                f"Scene Collection modifiée avant le fade "
+                f"({collection} != {current_collection})"
+            )
         session_generation = int(
             getattr(self.client, "session_generation", 0) or 0
         )
+        source_alias, source_uuid, source_kind = self._resolve_fade_input(
+            source,
+            session_generation=session_generation,
+        )
+        if session_generation and isinstance(self.client, OBSClientManager):
+            verified_collection = self._scene_collection_name(
+                expected_session_generation=session_generation,
+            )
+            if verified_collection != collection:
+                raise RuntimeError(
+                    f"Scene Collection modifiée pendant la préparation du fade "
+                    f"({collection} != {verified_collection})"
+                )
 
         # Durable ownership evidence is written before the cleanup obligation.
         identity = self._fade_helper_store.prepare_layout_fade(
@@ -653,7 +714,10 @@ class OBSLayoutManager:
         # The crash obligation must be durable before any Create/Enable/Settings.
         self._ensure_pending_fade(identity)
 
-        rows = self._fade_filter_rows(source_alias)
+        rows = self._fade_filter_rows(
+            source_alias,
+            session_generation=session_generation,
+        )
         expected_rows = [
             row
             for row in rows
@@ -674,7 +738,7 @@ class OBSLayoutManager:
                     + ", ".join(sorted(set(lookalikes), key=str.casefold))
                 )
             try:
-                self._send(
+                self._fade_send(
                     "CreateSourceFilter",
                     {
                         "sourceName": source_alias,
@@ -682,13 +746,17 @@ class OBSLayoutManager:
                         "filterKind": identity.filter_kind,
                         "filterSettings": {"opacity": 1.0},
                     },
+                    session_generation=session_generation,
                 )
             except Exception:
                 # A transport loss can make Create outcome uncertain. Do not
                 # issue a second Create. If the session changed, defer recovery.
                 if int(getattr(self.client, "session_generation", 0) or 0) != session_generation:
                     raise
-                rows = self._fade_filter_rows(source_alias)
+                rows = self._fade_filter_rows(
+            source_alias,
+            session_generation=session_generation,
+        )
                 expected_rows = [
                     row
                     for row in rows
@@ -697,7 +765,10 @@ class OBSLayoutManager:
                 if len(expected_rows) != 1:
                     raise
             else:
-                rows = self._fade_filter_rows(source_alias)
+                rows = self._fade_filter_rows(
+            source_alias,
+            session_generation=session_generation,
+        )
                 expected_rows = [
                     row
                     for row in rows
@@ -711,6 +782,7 @@ class OBSLayoutManager:
         kind, enabled, settings = self._fade_filter_state(
             source_alias,
             identity.filter_name,
+            session_generation=session_generation,
         )
         if kind != identity.filter_kind:
             raise RuntimeError(
@@ -728,13 +800,14 @@ class OBSLayoutManager:
             )
 
         if enabled is not True:
-            self._send(
+            self._fade_send(
                 "SetSourceFilterEnabled",
                 {
                     "sourceName": source_alias,
                     "filterName": identity.filter_name,
                     "filterEnabled": True,
                 },
+                session_generation=session_generation,
             )
             kind, enabled, settings = self._fade_filter_state(
                 source_alias,
@@ -750,6 +823,7 @@ class OBSLayoutManager:
                 )
 
         self._active_fade_helpers[source_alias] = identity
+        self._active_fade_sessions[source_alias] = session_generation
         return identity
 
     def _set_source_opacity(self, source: str, opacity: float) -> None:
@@ -758,7 +832,11 @@ class OBSLayoutManager:
             raise RuntimeError(
                 f"Aucun helper de fade préparé pour {source}; création implicite interdite"
             )
-        self._send(
+        session_generation = self._active_fade_sessions.get(
+            str(source),
+            0,
+        )
+        self._fade_send(
             "SetSourceFilterSettings",
             {
                 "sourceName": str(source),
@@ -768,6 +846,7 @@ class OBSLayoutManager:
                 },
                 "overlay": True,
             },
+            session_generation=session_generation,
         )
 
     def _cleanup_filter_absent(
@@ -1051,6 +1130,7 @@ class OBSLayoutManager:
         # ownership remains in the manifest; the next fade must re-resolve and
         # re-verify the helper before any mutation.
         self._active_fade_helpers.clear()
+        self._active_fade_sessions.clear()
 
     def _scene_collection_name(
         self,
