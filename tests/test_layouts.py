@@ -66,7 +66,7 @@ class FakeLayoutClient:
             host="127.0.0.1",
             port=4455,
         )
-        self.session_generation = 1
+        self.session_generation = 0
         self.input_uuids = {
             name: f"uuid-{index}"
             for index, name in enumerate(self.items, start=1)
