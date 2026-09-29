@@ -515,40 +515,41 @@ class LayoutTests(unittest.TestCase):
         self.assertIn(20, avatar_reads)
         self.assertNotEqual(avatar_reads[0], 2)
 
-    def test_group_elements_never_receive_temporary_fade_filters(self):
-        for mode in ("fade", "move_fade"):
-            with self.subTest(mode=mode):
-                client = FakeLayoutClient()
-                manager = OBSLayoutManager(client)
-                profile = manager.capture_profile("Gameplay")
-                group = profile["modules"]["[Webcam] Cadre"]
-                group["elements"][0]["source_type"] = "group"
-                group["geometry"]["x"] = 500.0
-                profile["transition"] = {
-                    "mode": mode,
-                    "duration_ms": 1,
-                    "steps": 1,
-                }
-                client.calls.clear()
+    def test_composite_elements_never_receive_temporary_fade_filters(self):
+        for source_type in ("scene", "group"):
+            for mode in ("fade", "move_fade"):
+                with self.subTest(source_type=source_type, mode=mode):
+                    client = FakeLayoutClient()
+                    manager = OBSLayoutManager(client)
+                    profile = manager.capture_profile("Gameplay")
+                    composite = profile["modules"]["[Webcam] Cadre"]
+                    composite["elements"][0]["source_type"] = source_type
+                    composite["geometry"]["x"] = 500.0
+                    profile["transition"] = {
+                        "mode": mode,
+                        "duration_ms": 1,
+                        "steps": 1,
+                    }
+                    client.calls.clear()
 
-                with patch("stream_state_router.obs.layouts.time.sleep"):
-                    result = manager.apply_profile(profile, record_undo=False)
+                    with patch("stream_state_router.obs.layouts.time.sleep"):
+                        result = manager.apply_profile(profile, record_undo=False)
 
-                self.assertEqual(result.missing_sources, ())
-                self.assertTrue(
-                    any(
-                        request == "SetSceneItemTransform"
-                        and int(payload.get("sceneItemId", 0)) == 1
-                        for request, payload in client.calls
+                    self.assertEqual(result.missing_sources, ())
+                    self.assertTrue(
+                        any(
+                            request == "SetSceneItemTransform"
+                            and int(payload.get("sceneItemId", 0)) == 1
+                            for request, payload in client.calls
+                        )
                     )
-                )
-                self.assertFalse(
-                    any(
-                        "SourceFilter" in request
-                        and payload.get("sourceName") == "[Webcam] Cadre"
-                        for request, payload in client.calls
+                    self.assertFalse(
+                        any(
+                            "SourceFilter" in request
+                            and payload.get("sourceName") == "[Webcam] Cadre"
+                            for request, payload in client.calls
+                        )
                     )
-                )
 
     def test_fade_opacity_recovery_is_bounded_on_missing_filter(self):
         class MissingOnceClient(FakeLayoutClient):
