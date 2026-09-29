@@ -4114,19 +4114,6 @@ class OBSLayoutManager:
             if index != steps:
                 self._cooperative_sleep(delay)
 
-    def _animate_opacity(self, source: str, start: float, end: float, duration_ms: int, steps: int) -> None:
-        self._prepare_fade_filter(source, self._fade_collection_context(probe=True))
-        self._set_source_opacity(source, start)
-        if duration_ms <= 0:
-            self._set_source_opacity(source, end)
-            return
-        delay = duration_ms / 1000.0 / steps
-        for index in range(1, steps + 1):
-            value = start + (end - start) * (index / steps)
-            self._set_source_opacity(source, value)
-            if index != steps:
-                self._cooperative_sleep(delay)
-
     def _fresh_scene_item_id(self, container: str, source: str) -> int:
         self._yield_runtime()
         self._invalidate_scene_item_id(container, source)
