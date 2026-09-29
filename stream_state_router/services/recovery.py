@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import uuid
 from datetime import datetime, timezone
 from typing import Mapping
 
 from .paths import user_data_dir
 
 
-CLEANUP_SCHEMA_VERSION = 2
+CLEANUP_SCHEMA_VERSION = 3
 
 
 def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | None:
@@ -26,11 +28,38 @@ def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | No
         item["kind"] = "activation_hide"
         return item
     if kind == "layout_fade":
-        if not str(item.get("source") or "").strip():
-            return None
-        if not str(item.get("collection") or "").strip():
+        source = str(item.get("source") or "").strip()
+        collection = str(item.get("collection") or "").strip()
+        if not source or not collection:
             return None
         item["kind"] = "layout_fade"
+
+        helper_id = str(item.get("helper_id") or "").strip()
+        if not helper_id:
+            # Schema v2 only knew collection + source. Preserve it for
+            # diagnostics/transfer, but never promote it into helper ownership.
+            item["legacy"] = True
+            return item
+
+        connection = item.get("connection")
+        if not isinstance(connection, Mapping):
+            return None
+        host = str(connection.get("host") or "").strip()
+        try:
+            port = int(connection.get("port", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        required = (
+            str(item.get("source_uuid") or "").strip(),
+            str(item.get("source_kind") or "").strip(),
+            str(item.get("filter_name") or "").strip(),
+            str(item.get("filter_kind") or "").strip(),
+            str(item.get("cleanup_action") or "").strip(),
+        )
+        if not host or port <= 0 or not all(required):
+            return None
+        item["connection"] = {"host": host.casefold(), "port": port}
+        item["legacy"] = False
         return item
     return None
 
@@ -118,6 +147,29 @@ class RuntimeMarker:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            temp = self.path.with_suffix(".tmp")
-            temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            temp.replace(self.path)
+            temp = self.path.with_name(
+                f".{self.path.name}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                with temp.open("w", encoding="utf-8", newline="\\n") as handle:
+                    json.dump(payload, handle, indent=2)
+                    handle.write("\\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, self.path)
+                if os.name != "nt":
+                    try:
+                        directory_fd = os.open(self.path.parent, os.O_RDONLY)
+                    except OSError:
+                        directory_fd = -1
+                    if directory_fd >= 0:
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+            except Exception:
+                try:
+                    temp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
