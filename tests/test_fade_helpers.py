@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from stream_state_router.obs.fade_helpers import (
@@ -157,6 +158,45 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
                 original,
+            )
+
+    def test_failed_atomic_replace_preserves_previous_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "helper-manifest.json"
+            store = FadeHelperManifestStore(path)
+            first = store.prepare_layout_fade(
+                connection_host="127.0.0.1",
+                connection_port=4455,
+                collection="Collection A",
+                source_uuid="input-uuid",
+                source_alias="Avatar",
+                source_kind="image_source",
+                session_generation=1,
+            )
+            before = path.read_bytes()
+
+            with patch(
+                "stream_state_router.obs.fade_helpers.os.replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with self.assertRaisesRegex(
+                    FadeHelperManifestError,
+                    "replace failed",
+                ):
+                    store.prepare_layout_fade(
+                        connection_host="127.0.0.1",
+                        connection_port=4455,
+                        collection="Collection A",
+                        source_uuid=first.source_uuid,
+                        source_alias="Avatar Renamed",
+                        source_kind="image_source",
+                        session_generation=2,
+                    )
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(
+                list(path.parent.glob(f".{path.name}.*.tmp")),
+                [],
             )
 
     def test_corrupt_manifest_is_rejected_without_replacement(self):
