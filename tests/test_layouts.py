@@ -2320,6 +2320,67 @@ class LayoutTests(unittest.TestCase):
             any(request == "CreateSourceFilter" for request, _ in client.calls)
         )
 
+    def test_cleanup_readback_failure_keeps_obligation_then_recovers(self):
+        class VerificationFailureClient(FakeLayoutClient):
+            fail_next_helper_readback = False
+            helper_reads = 0
+
+            def send(self, request, data=None):
+                if request == "GetSourceFilter":
+                    self.helper_reads += 1
+                    if self.fail_next_helper_readback and self.helper_reads >= 2:
+                        self.fail_next_helper_readback = False
+                        raise RuntimeError("verification unavailable")
+                return super().send(request, data)
+
+        client = VerificationFailureClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+        manager._set_source_opacity("[Webcam] Avatar", 0.25)
+        client.helper_reads = 0
+        client.fail_next_helper_readback = True
+        client.calls.clear()
+
+        first = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(first)
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertTrue(state["enabled"])
+
+        second = manager.retry_pending_fade_cleanup()
+
+        self.assertEqual(second, ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        self.assertFalse(state["enabled"])
+
+    def test_cleanup_transport_rejects_any_attempted_filter_creation(self):
+        class NoCreateDuringCleanupClient(FakeLayoutClient):
+            forbid_create = False
+
+            def send(self, request, data=None):
+                if request == "CreateSourceFilter" and self.forbid_create:
+                    raise AssertionError("cleanup attempted CreateSourceFilter")
+                return super().send(request, data)
+
+        client = NoCreateDuringCleanupClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+        manager._set_source_opacity("[Webcam] Avatar", 0.25)
+        client.forbid_create = True
+        client.calls.clear()
+
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertFalse(state["enabled"])
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+
     def test_detectable_helper_rename_keeps_obligation_without_mutation(self):
         client = FakeLayoutClient()
         store = MemoryFadeHelperManifestStore()
