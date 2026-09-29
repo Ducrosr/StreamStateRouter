@@ -255,6 +255,40 @@ class RuntimeMarkerTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
             self.assertEqual(marker.previous_pending_cleanup, ())
 
+    def test_schema3_non_string_identity_is_preserved_and_blocks_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            original = {
+                "clean_shutdown": False,
+                "cleanup_complete": False,
+                "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                "pending_cleanup": [
+                    {
+                        "kind": "layout_fade",
+                        "source": {"unexpected": "mapping"},
+                        "collection": "Collection A",
+                        "helper_id": 123,
+                        "source_uuid": "input-uuid",
+                        "source_kind": "image_source",
+                        "connection": {"host": "127.0.0.1", "port": 4455},
+                        "filter_name": "[SSR] Layout Fade::abc123",
+                        "filter_kind": "color_filter_v2",
+                        "cleanup_action": "neutralize_disable",
+                    }
+                ],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            marker = RuntimeMarker()
+            marker.path = path
+
+            with self.assertRaisesRegex(
+                RuntimeMarkerFormatError,
+                "inconnue ou incomplète",
+            ):
+                marker.start()
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
     def test_future_cleanup_schema_is_preserved_and_blocks_downgrade(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runtime.json"
