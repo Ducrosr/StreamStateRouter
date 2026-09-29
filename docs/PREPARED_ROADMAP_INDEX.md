@@ -10,7 +10,8 @@ Do not merge preparation material into the A0 validation PR merely to make it vi
 
 ## Status legend
 
-- FROZEN: implementation exists; awaiting architecture gate
+- CLOSED: audited gate is closed
+- IMPLEMENTED-GATE: implementation exists; mandatory checkpoint/real validation still pending
 - READY-PREP: implementation plan is prepared, but gate/dependencies are not cleared
 - LATER-PREP: architecture/UX notes prepared for a later gate
 
@@ -18,19 +19,32 @@ Do not merge preparation material into the A0 validation PR merely to make it vi
 
 | Lot | Status | Gate before implementation | Prepared material |
 |---|---|---|---|
-| A0 fade safety | FROZEN | Astra final approval | PR #148 head itself |
-| A1 helper ownership/recovery | READY-PREP | A0 approved | A1 helper/recovery docs + Sol prompt + validation |
+| A0 fade safety | CLOSED | — | Astra closed `6a288052…` |
+| A1 helper ownership/recovery | IMPLEMENTED-GATE | Astra A1 checkpoint + real Windows/OBS | PR #152 + `A1_ASTRA_CHECKPOINT_READY.md` + validation |
 | A2 OBS bindings/repair | READY-PREP | A1 approved | A2 binding prep |
-| B0 typed filter slice | READY-PREP | A2 approved | B0 typed filter prep |
-| B1 guided capture | READY-PREP | B0 stable | B1 guided capture + UX inventory |
-| B2 profile composition | READY-PREP | B0 stable; coordinate with B1 | B2 composition prep |
-| C0 Windows volume/mute | LATER-PREP | B0 contract; B1 integration | C0 audio prep |
-| C1 declarative HDR | LATER-PREP | B0 contract; B1 integration | C1 HDR prep |
-| D0 Try/Revert + surrender | LATER-PREP | B0; adapters to be trialled | D0 prep |
-| E0 assisted migration | LATER-PREP | B1/B2 + available capabilities | E0 prep |
-| E1 diagnostics/replay | LATER-PREP | B0 contracts stable | E1 prep |
-| F0 API/Stream Deck intents | LATER-PREP | B1/B2 + result contract | F0 prep |
-| G0 bounded media | LATER-PREP | B0 + F0 | G0 prep |
+| B0 typed filter slice | READY-PREP | A1 approved for pure contracts; executable path requires sufficient A2 bindings | B0 typed filter prep |
+| B2 profile composition core | READY-PREP | A2/B0 contracts sufficient | B2 composition prep |
+| B1 guided capture | READY-PREP | B0 + effective-parent core from B2 | B1 guided capture + UX inventory |
+| C0 Windows volume/mute | LATER-PREP | common contracts stable | C0 audio prep |
+| C1 declarative HDR | LATER-PREP | common contracts stable | C1 HDR prep |
+| E1 diagnostics/replay | LATER-PREP | stable B0 contracts | E1 prep |
+| F0 API/Stream Deck intents | LATER-PREP | stable result/catalog contracts | F0 prep |
+| E0 assisted migration | LATER-PREP | common draft + B1/B2 | E0 prep |
+| D0 Try/Revert + surrender | LATER-PREP | per-property adapter guarantees | D0 prep |
+| G0 bounded media | LATER-PREP | product need + uncertain-command contract | G0 prep |
+
+### Latest Astra execution order
+
+1. A1 corrected + independent tooling hardening.
+2. After A1 validation: A2 + pure B0.
+3. Executable B0 + minimal result/provenance contracts.
+4. B2 core, then B1 using the effective parent.
+5. In parallel once common contracts are stable: C0, C1, E1 foundation, F0 result contract.
+6. E0/common draft, F0 catalogs, E1 replay as their contracts stabilize.
+7. D0 per qualified property/domain.
+8. G0 only after a confirmed product need.
+
+Parallel work does not authorize competing business engines, property models, or draft models.
 
 ## Required Astra checkpoints
 
@@ -44,7 +58,7 @@ Review:
 - source-vs-occurrence scope
 - full visibility matrix
 
-Required approval text:
+Gate result:
 
 `A0 EST FERMÉ. SOL PEUT COMMENCER A1.`
 
