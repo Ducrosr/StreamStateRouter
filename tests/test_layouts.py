@@ -2140,6 +2140,102 @@ class LayoutTests(unittest.TestCase):
             any(request == "CreateSourceFilter" for request, _ in client.calls)
         )
 
+    def test_fade_hidden_to_visible_opacity_response_loss_keeps_final_visibility(self):
+        class LostFadeInOpacityResponseClient(FakeLayoutClient):
+            lose_zero_response = False
+
+            def send(self, request, data=None):
+                payload = data or {}
+                settings = payload.get("filterSettings")
+                opacity = (
+                    settings.get("opacity")
+                    if isinstance(settings, dict)
+                    else None
+                )
+                if (
+                    request == "SetSourceFilterSettings"
+                    and self.lose_zero_response
+                    and opacity == 0.0
+                ):
+                    self.lose_zero_response = False
+                    super().send(request, data)
+                    raise RuntimeError("fade-in opacity response lost")
+                return super().send(request, data)
+
+        client = LostFadeInOpacityResponseClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        profile = manager.capture_profile("Gameplay")
+        profile["transition"] = {"mode": "fade", "duration_ms": 100, "steps": 2}
+        client.enabled[2] = False
+        client.lose_zero_response = True
+        client.calls.clear()
+
+        with patch("stream_state_router.obs.layouts.time.sleep"):
+            result = manager.apply_profile(profile, record_undo=False)
+
+        self.assertTrue(client.enabled[2])
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        identity = store.entries()[0]
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertFalse(state["enabled"])
+        self.assertTrue(
+            any("Fondu d'apparition incertain" in item for item in result.warnings),
+            result.warnings,
+        )
+
+    def test_move_fade_hidden_to_visible_opacity_response_loss_cleans_immediately(self):
+        class LostMoveFadeInOpacityResponseClient(FakeLayoutClient):
+            lose_zero_response = False
+
+            def send(self, request, data=None):
+                payload = data or {}
+                settings = payload.get("filterSettings")
+                opacity = (
+                    settings.get("opacity")
+                    if isinstance(settings, dict)
+                    else None
+                )
+                if (
+                    request == "SetSourceFilterSettings"
+                    and self.lose_zero_response
+                    and opacity == 0.0
+                ):
+                    self.lose_zero_response = False
+                    super().send(request, data)
+                    raise RuntimeError("move-fade opacity response lost")
+                return super().send(request, data)
+
+        client = LostMoveFadeInOpacityResponseClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        profile = manager.capture_profile("Gameplay")
+        profile["transition"] = {"mode": "move_fade", "duration_ms": 100, "steps": 2}
+        client.enabled[2] = False
+        client.lose_zero_response = True
+        client.calls.clear()
+
+        with patch.object(
+            manager,
+            "_transition_progress",
+            return_value=iter((1.0,)),
+        ):
+            result = manager.apply_profile(profile, record_undo=False)
+
+        self.assertTrue(client.enabled[2])
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        identity = store.entries()[0]
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertFalse(state["enabled"])
+        self.assertTrue(
+            any("Fondu indisponible" in item for item in result.warnings),
+            result.warnings,
+        )
+
     def test_cleanup_opacity_response_loss_uses_readback_before_ack(self):
         class LostNeutralizeResponseClient(FakeLayoutClient):
             lose_neutralize_response = False
