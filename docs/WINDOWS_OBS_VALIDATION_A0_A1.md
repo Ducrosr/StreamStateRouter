@@ -164,7 +164,7 @@ Base:
 
 `6a288052001cd01cf7283251bc506d6219ea721c`
 
-Before a real-OBS run, replace `<A1_GREEN_SHA>` below with the exact SHA whose
+Before a real-OBS run, replace `0682913ed2bd847fa71db6e0bb37d2ccd037eb45` below with the exact SHA whose
 Tests + CodeQL are green. Never validate an older desktop executable by accident.
 
 ### Sync exact SHA
@@ -173,11 +173,11 @@ Tests + CodeQL are green. Never validate an older desktop executable by accident
 Set-Location "C:\Streaming\StreamStateRouter\Source"
 
 git fetch origin
-git switch --detach <A1_GREEN_SHA>
+git switch --detach 0682913ed2bd847fa71db6e0bb37d2ccd037eb45
 git rev-parse HEAD
 ```
 
-Expected output must be exactly `<A1_GREEN_SHA>`.
+Expected output must be exactly `0682913ed2bd847fa71db6e0bb37d2ccd037eb45`.
 
 ### Rebuild executable
 
