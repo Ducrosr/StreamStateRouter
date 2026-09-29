@@ -217,7 +217,7 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
             )
             raw = json.loads(path.read_text(encoding="utf-8"))
             duplicate = dict(raw["helpers"][0])
-            duplicate["helper_id"] = "another-helper-id"
+            duplicate["helper_id"] = "1234567890ab4def8abc1234567890ab"
             duplicate["filter"] = dict(duplicate["filter"])
             duplicate["filter"]["name"] = (
                 LAYOUT_FADE_FILTER_PREFIX + duplicate["helper_id"]
@@ -232,6 +232,53 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
                 store.entries()
 
             self.assertEqual(first.source_uuid, "input-uuid")
+
+    def test_contradictory_ownership_identity_is_rejected(self):
+        mutations = (
+            (
+                "helper_id",
+                lambda row: row.__setitem__("helper_id", "not-a-uuid"),
+            ),
+            (
+                "purpose",
+                lambda row: row.__setitem__("purpose", "other-purpose"),
+            ),
+            (
+                "filter_name",
+                lambda row: row["filter"].__setitem__(
+                    "name",
+                    LAYOUT_FADE_FILTER_PREFIX + "1234567890ab4def8abc1234567890ab",
+                ),
+            ),
+            (
+                "filter_kind",
+                lambda row: row["filter"].__setitem__(
+                    "kind",
+                    "unexpected_filter_kind",
+                ),
+            ),
+        )
+
+        for label, mutate in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "helper-manifest.json"
+                store = FadeHelperManifestStore(path)
+                store.prepare_layout_fade(
+                    connection_host="127.0.0.1",
+                    connection_port=4455,
+                    collection="Collection A",
+                    source_uuid="input-uuid",
+                    source_alias="Avatar",
+                    source_kind="image_source",
+                    session_generation=1,
+                )
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                raw["helpers"][0]["filter"] = dict(raw["helpers"][0]["filter"])
+                mutate(raw["helpers"][0])
+                path.write_text(json.dumps(raw), encoding="utf-8")
+
+                with self.assertRaises(FadeHelperManifestError):
+                    store.entries()
 
     def test_future_manifest_is_rejected_without_overwrite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
