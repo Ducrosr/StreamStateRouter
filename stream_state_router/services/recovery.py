@@ -151,9 +151,9 @@ class RuntimeMarker:
                 f".{self.path.name}.{uuid.uuid4().hex}.tmp"
             )
             try:
-                with temp.open("w", encoding="utf-8", newline="\\n") as handle:
+                with temp.open("w", encoding="utf-8", newline="\n") as handle:
                     json.dump(payload, handle, indent=2)
-                    handle.write("\\n")
+                    handle.write("\n")
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temp, self.path)
