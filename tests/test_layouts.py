@@ -54,6 +54,8 @@ class FakeLayoutClient:
         }
         self.shared_in_pause = set()
         self.unknown_enabled = set()
+        self.null_enabled = set()
+        self.failed_enabled = set()
 
     def _scene_item_row(self, source, scene_item_id):
         row = {
@@ -109,8 +111,12 @@ class FakeLayoutClient:
             return {"sceneItemId": self.items.get(payload["sourceName"], 0)}
         if request == "GetSceneItemEnabled":
             item_id = int(payload["sceneItemId"])
+            if item_id in self.failed_enabled:
+                raise RuntimeError("visibility timeout")
             if item_id in self.unknown_enabled:
                 return {}
+            if item_id in self.null_enabled:
+                return {"sceneItemEnabled": None}
             return {"sceneItemEnabled": self.enabled.get(item_id, True)}
         if request == "SetSceneItemTransform":
             item_id = int(payload["sceneItemId"])
@@ -717,6 +723,211 @@ class LayoutTests(unittest.TestCase):
                         for request, payload in client.calls
                     )
                 )
+
+    def test_fade_inventory_requires_authoritative_scene_item_payloads(self):
+        invalid_payloads = {
+            "missing": {},
+            "null": {"sceneItems": None},
+            "wrong_type": {"sceneItems": "not-a-list"},
+            "bad_row": {"sceneItems": [None]},
+            "unknown_row": {
+                "sceneItems": [
+                    {
+                        "sourceName": "Unclassified",
+                        "sceneItemId": 101,
+                        "sceneItemEnabled": True,
+                    }
+                ]
+            },
+        }
+
+        for label, invalid_response in invalid_payloads.items():
+            for mode in ("fade", "move_fade"):
+                with self.subTest(label=label, mode=mode):
+                    class PartialSceneClient(FakeLayoutClient):
+                        def send(self, request, data=None):
+                            payload = dict(data or {})
+                            if (
+                                request == "GetSceneItemList"
+                                and payload.get("sceneName") == "Pause"
+                            ):
+                                self.calls.append((request, payload))
+                                return invalid_response
+                            return super().send(request, data)
+
+                    client = PartialSceneClient()
+                    manager = OBSLayoutManager(client)
+                    profile = manager.capture_profile("Gameplay")
+                    profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+                    profile["transition"] = {
+                        "mode": mode,
+                        "duration_ms": 1,
+                        "steps": 1,
+                    }
+                    client.calls.clear()
+
+                    with patch("stream_state_router.obs.layouts.time.sleep"):
+                        result = manager.apply_profile(profile, record_undo=False)
+
+                    self.assertEqual(result.missing_sources, ())
+                    self.assertFalse(
+                        any(
+                            "SourceFilter" in request
+                            and payload.get("sourceName") == "[Webcam] Cadre"
+                            for request, payload in client.calls
+                        )
+                    )
+                    self.assertAlmostEqual(
+                        client.transforms[1]["positionX"],
+                        500.0,
+                        places=6,
+                    )
+
+    def test_fade_inventory_requires_authoritative_group_item_payloads(self):
+        invalid_payloads = (
+            {},
+            {"sceneItems": None},
+            {"sceneItems": [None]},
+            {
+                "sceneItems": [
+                    {
+                        "sourceName": "Unclassified Child",
+                        "sceneItemId": 201,
+                        "sceneItemEnabled": True,
+                    }
+                ]
+            },
+        )
+
+        for invalid_response in invalid_payloads:
+            for mode in ("fade", "move_fade"):
+                with self.subTest(response=invalid_response, mode=mode):
+                    class PartialGroupClient(FakeLayoutClient):
+                        def send(self, request, data=None):
+                            payload = dict(data or {})
+                            if (
+                                request == "GetSceneItemList"
+                                and payload.get("sceneName") == "Gameplay"
+                            ):
+                                response = super().send(request, data)
+                                response["sceneItems"].append(
+                                    {
+                                        "sourceName": "Broken Group",
+                                        "sceneItemId": 99,
+                                        "sceneItemEnabled": True,
+                                        "isGroup": True,
+                                        "sourceType": "OBS_SOURCE_TYPE_SCENE",
+                                    }
+                                )
+                                return response
+                            if (
+                                request == "GetGroupSceneItemList"
+                                and payload.get("sceneName") == "Broken Group"
+                            ):
+                                self.calls.append((request, payload))
+                                return invalid_response
+                            return super().send(request, data)
+
+                    client = PartialGroupClient()
+                    manager = OBSLayoutManager(client)
+                    profile = manager.capture_profile("Gameplay")
+                    profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+                    profile["transition"] = {
+                        "mode": mode,
+                        "duration_ms": 1,
+                        "steps": 1,
+                    }
+                    client.calls.clear()
+
+                    with patch("stream_state_router.obs.layouts.time.sleep"):
+                        result = manager.apply_profile(profile, record_undo=False)
+
+                    self.assertEqual(result.missing_sources, ())
+                    self.assertFalse(
+                        any(
+                            "SourceFilter" in request
+                            and payload.get("sourceName") == "[Webcam] Cadre"
+                            for request, payload in client.calls
+                        )
+                    )
+
+    def test_fade_inventory_accepts_explicit_empty_scene_item_list(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+
+        current_types, occurrences, complete = manager._fade_runtime_inventory()
+
+        self.assertTrue(complete)
+        self.assertEqual(current_types[("Gameplay", "[Webcam] Cadre")], "input")
+        self.assertEqual(occurrences["[Webcam] Cadre"], 1)
+
+    def test_unknown_visibility_uses_direct_target_for_all_a0_source_types(self):
+        for response_kind in ("missing", "null", "error"):
+            for source_type in ("input", "scene", "group"):
+                for mode in ("fade", "move_fade"):
+                    for target_visible in (True, False):
+                        with self.subTest(
+                            response_kind=response_kind,
+                            source_type=source_type,
+                            mode=mode,
+                            target_visible=target_visible,
+                        ):
+                            client = FakeLayoutClient()
+                            client.source_kinds["[Webcam] Cadre"] = source_type
+                            manager = OBSLayoutManager(client)
+                            profile = manager.capture_profile("Gameplay")
+                            profile["modules"]["[Webcam] Cadre"]["geometry"]["x"] = 500.0
+                            profile["modules"]["[Webcam] Cadre"]["visible"] = target_visible
+                            profile["transition"] = {
+                                "mode": mode,
+                                "duration_ms": 1,
+                                "steps": 1,
+                            }
+
+                            client.enabled[1] = not target_visible
+                            if response_kind == "missing":
+                                client.unknown_enabled.add(1)
+                            elif response_kind == "null":
+                                client.null_enabled.add(1)
+                            else:
+                                client.failed_enabled.add(1)
+                            client.calls.clear()
+
+                            with patch("stream_state_router.obs.layouts.time.sleep"):
+                                result = manager.apply_profile(
+                                    profile,
+                                    record_undo=False,
+                                )
+
+                            self.assertEqual(client.enabled[1], target_visible)
+                            self.assertAlmostEqual(
+                                client.transforms[1]["positionX"],
+                                500.0,
+                                places=6,
+                            )
+                            self.assertTrue(
+                                any(
+                                    "Visibilité actuelle inconnue" in warning
+                                    for warning in result.warnings
+                                )
+                            )
+                            self.assertFalse(
+                                any(
+                                    "SourceFilter" in request
+                                    and payload.get("sourceName") == "[Webcam] Cadre"
+                                    for request, payload in client.calls
+                                )
+                            )
+
+    def test_get_current_item_treats_null_visibility_as_unknown(self):
+        client = FakeLayoutClient()
+        client.null_enabled.add(1)
+        manager = OBSLayoutManager(client)
+
+        item = manager._get_current_item("Gameplay", "[Webcam] Cadre")
+
+        self.assertIsNone(item["enabled"])
+        self.assertIn("non booléenne", item["enabled_error"])
 
     def test_fade_with_unknown_visibility_stays_on_direct_path(self):
         for mode in ("fade", "move_fade"):
