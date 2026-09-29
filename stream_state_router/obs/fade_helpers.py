@@ -5,7 +5,7 @@ import json
 import os
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -258,12 +258,7 @@ class FadeHelperManifestStore:
                         "owned fade helper filter kind is incompatible"
                     )
                 if current.source_alias != source_alias:
-                    updated = FadeHelperIdentity(
-                        **{
-                            **current.__dict__,
-                            "source_alias": source_alias,
-                        }
-                    )
+                    updated = replace(current, source_alias=source_alias)
                     entries[entries.index(current)] = updated
                     self._write(entries)
                     return updated
