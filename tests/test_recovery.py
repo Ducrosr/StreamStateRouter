@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from stream_state_router.services.recovery import CLEANUP_SCHEMA_VERSION, RuntimeMarker
@@ -159,6 +160,46 @@ class RuntimeMarkerTests(unittest.TestCase):
             self.assertEqual(restored["helper_id"], "abc123")
             self.assertEqual(restored["source_uuid"], "input-uuid")
             self.assertFalse(restored["legacy"])
+
+    def test_atomic_replace_failure_preserves_previous_runtime_marker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            original = {
+                "clean_shutdown": False,
+                "cleanup_complete": False,
+                "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                "pending_cleanup": [
+                    {
+                        "kind": "layout_fade",
+                        "source": "[Webcam] Avatar",
+                        "collection": "Collection A",
+                    }
+                ],
+                "updated_at": "before",
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            marker = RuntimeMarker()
+            marker.path = path
+
+            with patch(
+                "stream_state_router.services.recovery.os.replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    marker.finish(
+                        clean_shutdown=True,
+                        cleanup_complete=True,
+                        pending_cleanup=(),
+                    )
+
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                original,
+            )
+            self.assertEqual(
+                list(path.parent.glob(f".{path.name}.*.tmp")),
+                [],
+            )
 
     def test_invalid_schema3_layout_fade_identity_is_not_replayed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
