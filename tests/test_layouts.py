@@ -12,6 +12,7 @@ from stream_state_router.obs.layouts import (
     split_module_source,
 )
 from stream_state_router.obs.fade_helpers import (
+    FadeHelperManifestError,
     MemoryFadeHelperManifestStore,
     LEGACY_LAYOUT_FADE_FILTER,
 )
@@ -1596,6 +1597,30 @@ class LayoutTests(unittest.TestCase):
         self.assertLess(events.index("manifest"), events.index("journal"))
         self.assertLess(events.index("journal"), events.index("create"))
 
+    def test_manifest_failure_blocks_journal_and_filter_creation(self):
+        events = []
+
+        class FailingStore(MemoryFadeHelperManifestStore):
+            def prepare_layout_fade(self, **kwargs):
+                events.append("manifest")
+                raise FadeHelperManifestError("manifest unavailable")
+
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client, fade_helper_store=FailingStore())
+        manager.set_pending_cleanup_changed(lambda: events.append("journal"))
+        client.calls.clear()
+
+        with self.assertRaisesRegex(
+            FadeHelperManifestError,
+            "manifest unavailable",
+        ):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertEqual(events, ["manifest"])
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
     def test_journal_failure_blocks_filter_creation(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(
@@ -1695,6 +1720,120 @@ class LayoutTests(unittest.TestCase):
         )
         self.assertEqual(create_count, 1)
         self.assertEqual(snapshots[-1], ())
+
+    def test_cleanup_opacity_response_loss_uses_readback_before_ack(self):
+        class LostNeutralizeResponseClient(FakeLayoutClient):
+            lose_neutralize_response = False
+
+            def send(self, request, data=None):
+                payload = data or {}
+                if (
+                    request == "SetSourceFilterSettings"
+                    and self.lose_neutralize_response
+                    and float(
+                        (payload.get("filterSettings") or {}).get(
+                            "opacity",
+                            -1.0,
+                        )
+                    )
+                    == 1.0
+                ):
+                    self.lose_neutralize_response = False
+                    super().send(request, data)
+                    raise RuntimeError("neutralize response lost")
+                return super().send(request, data)
+
+        client = LostNeutralizeResponseClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        manager._set_source_opacity("[Webcam] Avatar", 0.25)
+        client.lose_neutralize_response = True
+        client.calls.clear()
+
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertFalse(state["enabled"])
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_cleanup_disable_response_loss_uses_readback_before_ack(self):
+        class LostDisableResponseClient(FakeLayoutClient):
+            lose_disable_response = False
+
+            def send(self, request, data=None):
+                payload = data or {}
+                if (
+                    request == "SetSourceFilterEnabled"
+                    and self.lose_disable_response
+                    and payload.get("filterEnabled") is False
+                ):
+                    self.lose_disable_response = False
+                    super().send(request, data)
+                    raise RuntimeError("disable response lost")
+                return super().send(request, data)
+
+        client = LostDisableResponseClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        manager._set_source_opacity("[Webcam] Avatar", 0.25)
+        client.lose_disable_response = True
+        client.calls.clear()
+
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertFalse(state["enabled"])
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_detectable_helper_rename_keeps_obligation_without_mutation(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        filters = client.source_filters["[Webcam] Avatar"]
+        state = filters.pop(identity.filter_name)
+        renamed = identity.filter_name + "-renamed"
+        filters[renamed] = state
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(any("helper-like" in item for item in warnings), warnings)
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
+        )
 
     def test_cleanup_same_name_new_uuid_keeps_obligation(self):
         client = FakeLayoutClient()
