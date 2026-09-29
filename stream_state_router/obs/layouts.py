@@ -812,6 +812,11 @@ class OBSLayoutManager:
                 raise RuntimeError(
                     f"Helper de fade dupliqué pour {source_alias}"
                 )
+            if expected_rows and identity.state != "observed":
+                raise RuntimeError(
+                    f"Helper de fade existant non prouvé pour {source_alias}; "
+                    "adoption interdite"
+                )
 
             if not expected_rows:
                 lookalikes = [
@@ -1099,6 +1104,16 @@ class OBSLayoutManager:
                 False,
                 f"{pending.source}: identité helper contradictoire; "
                 "cleanup suspendu",
+            )
+        if identity.state != "observed":
+            # The manifest was durably prepared before Create. If SSR never
+            # persisted an observation, no temporary opacity write could have
+            # been emitted by the normal path. A same-name filter is therefore
+            # not safe to adopt or mutate during recovery.
+            return (
+                True,
+                f"{pending.source}: helper jamais observé; "
+                "aucune mutation de recovery nécessaire",
             )
 
         try:
