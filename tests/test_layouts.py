@@ -2970,6 +2970,75 @@ class LayoutTests(unittest.TestCase):
         self.assertAlmostEqual(opacities[2], 0.5, places=6)
         self.assertAlmostEqual(opacities[3], 1.0, places=6)
 
+    def test_move_fade_lost_prepare_enable_response_cleans_immediately(self):
+        class LostEnableResponseClient(FakeLayoutClient):
+            lose_enable_response = True
+
+            def send(self, request, data=None):
+                payload = data or {}
+                if (
+                    request == "SetSourceFilterEnabled"
+                    and self.lose_enable_response
+                    and payload.get("filterEnabled") is True
+                ):
+                    self.lose_enable_response = False
+                    super().send(request, data)
+                    raise RuntimeError("enable response lost")
+                return super().send(request, data)
+
+        client = LostEnableResponseClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        identity = store.mark_observed(
+            identity.helper_id,
+            source_alias="[Webcam] Avatar",
+            non_temporary_settings={},
+        )
+        client.source_filters["[Webcam] Avatar"] = {
+            identity.filter_name: {
+                "kind": identity.filter_kind,
+                "enabled": False,
+                "settings": {"opacity": 1.0},
+            }
+        }
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        profile = manager.capture_profile("Gameplay")
+        profile["transition"] = {
+            "mode": "move_fade",
+            "duration_ms": 100,
+            "steps": 2,
+        }
+        profile["modules"]["[Webcam] Avatar"]["geometry"]["x"] += 50.0
+        client.calls.clear()
+
+        with patch.object(
+            manager,
+            "_transition_progress",
+            return_value=iter((1.0,)),
+        ):
+            result = manager.apply_profile(profile, record_undo=False)
+
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertFalse(state["enabled"])
+        self.assertTrue(
+            any("Fondu indisponible" in warning for warning in result.warnings),
+            result.warnings,
+        )
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
     def test_move_fade_opacity_curve_uses_fifteen_percent_edges(self):
         curve = OBSLayoutManager._move_fade_opacity
 
