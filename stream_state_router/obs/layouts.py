@@ -400,6 +400,24 @@ class OBSLayoutManager:
                 )
         return response
 
+    def _verify_fade_collection(
+        self,
+        expected_collection: str,
+        *,
+        session_generation: int = 0,
+    ) -> None:
+        if session_generation and isinstance(self.client, OBSClientManager):
+            current = self._scene_collection_name(
+                expected_session_generation=session_generation,
+            )
+        else:
+            current = self._scene_collection_name()
+        if current != expected_collection:
+            raise RuntimeError(
+                f"Scene Collection modifiée pendant l'opération de fade "
+                f"({expected_collection} != {current})"
+            )
+
     def _fade_connection_context(self) -> tuple[str, int]:
         config = getattr(self.client, "config", None)
         if config is None:
@@ -849,16 +867,42 @@ class OBSLayoutManager:
             session_generation=session_generation,
         )
 
-    def _cleanup_filter_absent(
+    def _cleanup_filter_absence_status(
         self,
         source: str,
         identity: FadeHelperIdentity,
-    ) -> bool:
-        rows = self._fade_filter_rows(source)
-        return not any(
-            str(row.get("filterName") or "").strip() == identity.filter_name
-            for row in rows
+        *,
+        session_generation: int = 0,
+    ) -> tuple[bool, str]:
+        rows = self._fade_filter_rows(
+            source,
+            session_generation=session_generation,
         )
+        exact = [
+            row
+            for row in rows
+            if str(row.get("filterName") or "").strip() == identity.filter_name
+        ]
+        if exact:
+            return False, ""
+        suspicious = [
+            str(row.get("filterName") or "").strip()
+            for row in rows
+            if (
+                identity.helper_id
+                and identity.helper_id
+                in str(row.get("filterName") or "")
+            )
+            or is_layout_fade_name(row.get("filterName"))
+        ]
+        if suspicious:
+            return (
+                False,
+                f"{source}: helper attendu absent mais filtre(s) helper-like "
+                f"présent(s) ({', '.join(sorted(set(suspicious), key=str.casefold))}); "
+                "cleanup suspendu",
+            )
+        return True, ""
 
     def _cleanup_pending_fade(
         self,
@@ -867,12 +911,14 @@ class OBSLayoutManager:
         if pending.legacy or not pending.helper_id:
             return (
                 False,
-                f"{pending.source}: obligation fade legacy non prouvée; aucune mutation automatique",
+                f"{pending.source}: obligation fade legacy non prouvée; "
+                "aucune mutation automatique",
             )
         if pending.cleanup_action != "neutralize_disable":
             return (
                 False,
-                f"{pending.source}: action de cleanup inconnue ({pending.cleanup_action})",
+                f"{pending.source}: action de cleanup inconnue "
+                f"({pending.cleanup_action})",
             )
 
         try:
@@ -880,24 +926,49 @@ class OBSLayoutManager:
         except Exception as exc:
             return False, f"{pending.source}: contexte OBS non vérifiable ({exc})"
         if host != pending.connection_host or port != pending.connection_port:
-            return False, f"{pending.source}: connexion OBS différente; cleanup suspendu"
+            return (
+                False,
+                f"{pending.source}: connexion OBS différente; cleanup suspendu",
+            )
 
         try:
+            self._verify_fade_collection(pending.collection)
+            session_generation = int(
+                getattr(self.client, "session_generation", 0) or 0
+            )
             source_alias, source_uuid, source_kind = self._resolve_fade_input(
                 pending.source,
                 source_uuid=pending.source_uuid,
+                session_generation=session_generation,
+            )
+            self._verify_fade_collection(
+                pending.collection,
+                session_generation=session_generation,
             )
         except Exception as exc:
-            return False, f"{pending.source}: cible source non vérifiable ({exc})"
+            return (
+                False,
+                f"{pending.source}: cible/contexte non vérifiable ({exc})",
+            )
         if source_uuid != pending.source_uuid or source_kind != pending.source_kind:
-            return False, f"{pending.source}: source remplacée ou kind modifié; cleanup suspendu"
+            return (
+                False,
+                f"{pending.source}: source remplacée ou kind modifié; "
+                "cleanup suspendu",
+            )
 
         try:
             identity = self._fade_helper_store.get(pending.helper_id)
         except FadeHelperManifestError as exc:
-            return False, f"{pending.source}: manifeste helper non fiable ({exc})"
+            return (
+                False,
+                f"{pending.source}: manifeste helper non fiable ({exc})",
+            )
         if identity is None:
-            return False, f"{pending.source}: manifeste helper absent; cleanup suspendu"
+            return (
+                False,
+                f"{pending.source}: manifeste helper absent; cleanup suspendu",
+            )
         if (
             identity.connection_host != pending.connection_host
             or identity.connection_port != pending.connection_port
@@ -907,44 +978,101 @@ class OBSLayoutManager:
             or identity.filter_name != pending.filter_name
             or identity.filter_kind != pending.filter_kind
         ):
-            return False, f"{pending.source}: identité helper contradictoire; cleanup suspendu"
+            return (
+                False,
+                f"{pending.source}: identité helper contradictoire; "
+                "cleanup suspendu",
+            )
 
         try:
-            rows = self._fade_filter_rows(source_alias)
+            rows = self._fade_filter_rows(
+                source_alias,
+                session_generation=session_generation,
+            )
         except Exception as exc:
-            return False, f"{pending.source}: inventaire filtres non vérifiable ({exc})"
+            return (
+                False,
+                f"{pending.source}: inventaire filtres non vérifiable ({exc})",
+            )
         expected = [
             row
             for row in rows
             if str(row.get("filterName") or "").strip() == identity.filter_name
         ]
         if not expected:
-            return True, f"{pending.source}: helper déjà absent"
+            try:
+                absent, ambiguity = self._cleanup_filter_absence_status(
+                    source_alias,
+                    identity,
+                    session_generation=session_generation,
+                )
+            except Exception as exc:
+                return (
+                    False,
+                    f"{pending.source}: absence helper non vérifiable ({exc})",
+                )
+            if ambiguity:
+                return False, ambiguity
+            if absent:
+                return True, f"{pending.source}: helper déjà absent"
         if len(expected) != 1:
-            return False, f"{pending.source}: helper dupliqué; cleanup suspendu"
+            return (
+                False,
+                f"{pending.source}: helper dupliqué; cleanup suspendu",
+            )
 
         try:
             kind, enabled, settings = self._fade_filter_state(
                 source_alias,
                 identity.filter_name,
+                session_generation=session_generation,
             )
         except OBSResourceNotFoundError:
-            return True, f"{pending.source}: helper déjà absent"
+            try:
+                absent, ambiguity = self._cleanup_filter_absence_status(
+                    source_alias,
+                    identity,
+                    session_generation=session_generation,
+                )
+            except Exception as exc:
+                return (
+                    False,
+                    f"{pending.source}: disparition helper non vérifiable ({exc})",
+                )
+            if ambiguity:
+                return False, ambiguity
+            if absent:
+                return True, f"{pending.source}: helper déjà absent"
+            return False, f"{pending.source}: helper devenu ambigu"
         except Exception as exc:
             return False, f"{pending.source}: helper non vérifiable ({exc})"
+
         if kind != identity.filter_kind:
-            return False, f"{pending.source}: kind helper modifié; cleanup suspendu"
+            return (
+                False,
+                f"{pending.source}: kind helper modifié; cleanup suspendu",
+            )
         if not self._fade_helper_store.settings_compatible(identity, settings):
-            return False, f"{pending.source}: helper modifié extérieurement; cleanup suspendu"
+            return (
+                False,
+                f"{pending.source}: helper modifié extérieurement; "
+                "cleanup suspendu",
+            )
 
         raw_opacity = settings.get("opacity")
-        opacity_known = (
+        opacity_neutral = (
             isinstance(raw_opacity, (int, float))
             and not isinstance(raw_opacity, bool)
+            and abs(float(raw_opacity) - 1.0) <= 1e-6
         )
-        if not opacity_known or abs(float(raw_opacity) - 1.0) > 1e-6:
+        if not opacity_neutral:
+            write_error: Exception | None = None
             try:
-                self._send(
+                self._verify_fade_collection(
+                    pending.collection,
+                    session_generation=session_generation,
+                )
+                self._fade_send(
                     "SetSourceFilterSettings",
                     {
                         "sourceName": source_alias,
@@ -952,15 +1080,43 @@ class OBSLayoutManager:
                         "filterSettings": {"opacity": 1.0},
                         "overlay": True,
                     },
+                    session_generation=session_generation,
                 )
             except OBSResourceNotFoundError:
-                if self._cleanup_filter_absent(source_alias, identity):
-                    return True, f"{pending.source}: helper disparu pendant neutralisation"
-                raise
-            kind, enabled, settings = self._fade_filter_state(
-                source_alias,
-                identity.filter_name,
-            )
+                try:
+                    absent, ambiguity = self._cleanup_filter_absence_status(
+                        source_alias,
+                        identity,
+                        session_generation=session_generation,
+                    )
+                except Exception as exc:
+                    return (
+                        False,
+                        f"{pending.source}: neutralisation incertaine ({exc})",
+                    )
+                if ambiguity:
+                    return False, ambiguity
+                if absent:
+                    return (
+                        True,
+                        f"{pending.source}: helper disparu pendant neutralisation",
+                    )
+            except Exception as exc:
+                write_error = exc
+
+            try:
+                kind, enabled, settings = self._fade_filter_state(
+                    source_alias,
+                    identity.filter_name,
+                    session_generation=session_generation,
+                )
+            except Exception as exc:
+                detail = write_error or exc
+                return (
+                    False,
+                    f"{pending.source}: neutralisation/readback incertain "
+                    f"({detail})",
+                )
             raw_opacity = settings.get("opacity")
             if (
                 kind != identity.filter_kind
@@ -968,31 +1124,97 @@ class OBSLayoutManager:
                 or isinstance(raw_opacity, bool)
                 or abs(float(raw_opacity) - 1.0) > 1e-6
             ):
-                return False, f"{pending.source}: opacité neutre non vérifiée"
+                suffix = f" après erreur {write_error}" if write_error else ""
+                return (
+                    False,
+                    f"{pending.source}: opacité neutre non vérifiée{suffix}",
+                )
+            if not self._fade_helper_store.settings_compatible(
+                identity,
+                settings,
+            ):
+                return (
+                    False,
+                    f"{pending.source}: helper modifié pendant neutralisation",
+                )
 
         if enabled is not False:
+            write_error = None
             try:
-                self._send(
+                self._verify_fade_collection(
+                    pending.collection,
+                    session_generation=session_generation,
+                )
+                self._fade_send(
                     "SetSourceFilterEnabled",
                     {
                         "sourceName": source_alias,
                         "filterName": identity.filter_name,
                         "filterEnabled": False,
                     },
+                    session_generation=session_generation,
                 )
             except OBSResourceNotFoundError:
-                if self._cleanup_filter_absent(source_alias, identity):
-                    return True, f"{pending.source}: helper disparu pendant désactivation"
-                raise
-            kind, enabled, settings = self._fade_filter_state(
-                source_alias,
-                identity.filter_name,
-            )
-            if kind != identity.filter_kind or enabled is not False:
-                return False, f"{pending.source}: désactivation helper non vérifiée"
-            if not self._fade_helper_store.settings_compatible(identity, settings):
-                return False, f"{pending.source}: helper modifié pendant cleanup"
+                try:
+                    absent, ambiguity = self._cleanup_filter_absence_status(
+                        source_alias,
+                        identity,
+                        session_generation=session_generation,
+                    )
+                except Exception as exc:
+                    return (
+                        False,
+                        f"{pending.source}: désactivation incertaine ({exc})",
+                    )
+                if ambiguity:
+                    return False, ambiguity
+                if absent:
+                    return (
+                        True,
+                        f"{pending.source}: helper disparu pendant désactivation",
+                    )
+            except Exception as exc:
+                write_error = exc
 
+            try:
+                kind, enabled, settings = self._fade_filter_state(
+                    source_alias,
+                    identity.filter_name,
+                    session_generation=session_generation,
+                )
+            except Exception as exc:
+                detail = write_error or exc
+                return (
+                    False,
+                    f"{pending.source}: désactivation/readback incertain "
+                    f"({detail})",
+                )
+            if kind != identity.filter_kind or enabled is not False:
+                suffix = f" après erreur {write_error}" if write_error else ""
+                return (
+                    False,
+                    f"{pending.source}: désactivation helper non vérifiée"
+                    f"{suffix}",
+                )
+            if not self._fade_helper_store.settings_compatible(
+                identity,
+                settings,
+            ):
+                return (
+                    False,
+                    f"{pending.source}: helper modifié pendant cleanup",
+                )
+
+        try:
+            self._verify_fade_collection(
+                pending.collection,
+                session_generation=session_generation,
+            )
+        except Exception as exc:
+            return (
+                False,
+                f"{pending.source}: contexte changé avant acquittement ({exc})",
+            )
         return True, ""
 
     def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
