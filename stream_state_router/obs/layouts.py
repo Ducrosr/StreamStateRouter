@@ -3242,7 +3242,7 @@ class OBSLayoutManager:
         steps: int,
         warnings: list[str],
     ) -> None:
-        """Animate one layout on a single global timeline with bounded fade cleanup."""
+        """Animate one layout on a single global timeline."""
         if mode == "fade":
             self._animate_fade_reposition(
                 prepared_items,
@@ -3260,14 +3260,10 @@ class OBSLayoutManager:
             )
             return
 
+        # The generic path now handles move-only transitions. Fade creation,
+        # mutation and recovery live exclusively in the two specialized paths.
         move = mode == "move"
-        fade = False
-        # Bind all temporary fade obligations in this transition to the Scene
-        # Collection observed immediately before any fade mutation.
-        fade_collection = self._fade_collection_context(probe=True) if fade else ""
-        fade_state: dict[int, tuple[float, float]] = {}
         fallback_visibility: set[int] = set()
-        touched_fades: set[str] = set()
 
         for index, prepared in enumerate(prepared_items):
             self._yield_runtime()
@@ -3285,103 +3281,71 @@ class OBSLayoutManager:
                 if bool(target_enabled):
                     self._set_enabled(container, source, True)
                 continue
-
-            if fade:
-                # A filter mutation can succeed in OBS even when the response is
-                # lost. Arm neutralization before the first fade I/O so every
-                # uncertain temporary filter state has durable recovery work.
-                touched_fades.add(source)
-                self._ensure_pending_fade(source, fade_collection)
-                try:
-                    if bool(target_enabled):
-                        self._set_source_opacity(source, 0.0)
-                        self._set_enabled(container, source, True)
-                        fade_state[index] = (0.0, 1.0)
-                    else:
-                        self._ensure_fade_filter(source, 1.0)
-                        fade_state[index] = (1.0, 0.0)
-                except Exception as exc:
-                    warnings.append(f"Fondu indisponible pour {source}: {exc}")
-                    fallback_visibility.add(index)
-                    if bool(target_enabled):
-                        self._set_enabled(container, source, True)
-            elif move and bool(target_enabled):
+            if move and bool(target_enabled):
                 self._set_enabled(container, source, True)
 
-        try:
-            for t in self._transition_progress(duration_ms, steps):
-                for index, prepared in enumerate(prepared_items):
-                    self._yield_runtime()
-                    if move and prepared["transform_changed"]:
-                        target = prepared["target_transform"]
-                        current = prepared["current_transform"]
-                        if target:
-                            keys = [
-                                key
-                                for key in target
-                                if isinstance(target.get(key), (int, float))
-                            ]
-                            update = {
-                                key: _float(current.get(key), _float(target.get(key)))
-                                + (
-                                    _float(target.get(key))
-                                    - _float(current.get(key), _float(target.get(key)))
-                                )
-                                * t
-                                for key in keys
-                            }
-                            if update:
-                                self._set_transform(
-                                    prepared["container"],
-                                    prepared["source"],
-                                    update,
-                                )
-
-                    opacity = fade_state.get(index)
-                    if opacity is not None:
-                        start_opacity, end_opacity = opacity
-                        self._set_source_opacity(
-                            prepared["source"],
-                            start_opacity + (end_opacity - start_opacity) * t,
-                        )
-
-            for index, prepared in enumerate(prepared_items):
-                target_enabled = prepared["target_enabled"]
-                current_enabled = prepared["current_enabled"]
-                if (
-                    not move
-                    and prepared["target_transform"]
-                    and prepared["transform_changed"]
-                ):
+        for t in self._transition_progress(duration_ms, steps):
+            for prepared in prepared_items:
+                self._yield_runtime()
+                if not move or not prepared["transform_changed"]:
+                    continue
+                target = prepared["target_transform"]
+                current = prepared["current_transform"]
+                if not target:
+                    continue
+                keys = [
+                    key
+                    for key in target
+                    if isinstance(target.get(key), (int, float))
+                ]
+                update = {
+                    key: _float(current.get(key), _float(target.get(key)))
+                    + (
+                        _float(target.get(key))
+                        - _float(current.get(key), _float(target.get(key)))
+                    )
+                    * t
+                    for key in keys
+                }
+                if update:
                     self._set_transform(
                         prepared["container"],
                         prepared["source"],
-                        prepared["target_transform"],
+                        update,
                     )
-                if target_enabled is None:
-                    continue
-                if current_enabled is not None and bool(target_enabled) == current_enabled:
-                    continue
 
-                if index in fade_state:
-                    if not bool(target_enabled):
-                        self._set_enabled(prepared["container"], prepared["source"], False)
-                        self._set_source_opacity(prepared["source"], 1.0)
-                elif index in fallback_visibility or move:
-                    if not bool(target_enabled):
-                        self._set_enabled(prepared["container"], prepared["source"], False)
-                    elif index in fallback_visibility:
-                        self._set_enabled(prepared["container"], prepared["source"], True)
-        except Exception as exc:
-            cleanup_warnings = self._neutralize_fade_sources(touched_fades, collection=fade_collection)
-            warnings.extend(cleanup_warnings)
-            detail = ""
-            if cleanup_warnings:
-                detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
-            raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
-        else:
-            cleanup_warnings = self._neutralize_fade_sources(touched_fades, collection=fade_collection)
-            warnings.extend(cleanup_warnings)
+        for index, prepared in enumerate(prepared_items):
+            target_enabled = prepared["target_enabled"]
+            current_enabled = prepared["current_enabled"]
+            if (
+                not move
+                and prepared["target_transform"]
+                and prepared["transform_changed"]
+            ):
+                self._set_transform(
+                    prepared["container"],
+                    prepared["source"],
+                    prepared["target_transform"],
+                )
+            if target_enabled is None:
+                continue
+            if (
+                current_enabled is not None
+                and bool(target_enabled) == bool(current_enabled)
+            ):
+                continue
+            if not bool(target_enabled):
+                self._set_enabled(
+                    prepared["container"],
+                    prepared["source"],
+                    False,
+                )
+            elif index in fallback_visibility:
+                self._set_enabled(
+                    prepared["container"],
+                    prepared["source"],
+                    True,
+                )
 
     def _wait_group_resize_settle(self) -> None:
         """Allow OBS to finish automatic group-bound recomputation.
