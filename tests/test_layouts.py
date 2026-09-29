@@ -1508,6 +1508,67 @@ class LayoutTests(unittest.TestCase):
             )
         )
 
+    def test_legacy_obligation_blocks_new_helper_creation(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.import_pending_fade_cleanup(
+            (
+                {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                },
+            )
+        )
+        client.calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "legacy ambigu"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_repeated_legacy_cleanup_warning_is_deduplicated(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(client)
+        manager.import_pending_fade_cleanup(
+            (
+                {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                },
+            )
+        )
+
+        first = manager.retry_pending_fade_cleanup()
+        second = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(first)
+        self.assertEqual(second, ())
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
+    def test_session_invalidation_forgets_active_helper_only(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        self.assertIn("[Webcam] Avatar", manager._active_fade_helpers)
+
+        manager.invalidate_session()
+
+        self.assertNotIn("[Webcam] Avatar", manager._active_fade_helpers)
+        self.assertIsNotNone(store.get(identity.helper_id))
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
     def test_manifest_then_journal_precede_first_filter_mutation(self):
         events = []
 
