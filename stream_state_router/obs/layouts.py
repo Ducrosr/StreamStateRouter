@@ -3631,9 +3631,13 @@ class OBSLayoutManager:
                     )
                 continue
 
+            # Mirror the fade path: once preparation begins, include
+            # the source in immediate cleanup. Pre-mutation preparation
+            # failures disarm their own obligation, so this remains a no-op
+            # unless an OBS-side effect may actually have occurred.
+            touched_fades.add(source)
             try:
                 self._prepare_fade_filter(source, fade_collection)
-                touched_fades.add(source)
                 if not current_visible:
                     self._set_source_opacity(source, 0.0)
                     self._set_enabled(
