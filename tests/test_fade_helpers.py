@@ -133,6 +133,29 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
                 )
             )
 
+    def test_duplicate_helper_id_is_rejected_as_ambiguous_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "helper-manifest.json"
+            store = FadeHelperManifestStore(path)
+            store.prepare_layout_fade(
+                connection_host="127.0.0.1",
+                connection_port=4455,
+                collection="Collection A",
+                source_uuid="input-uuid",
+                source_alias="Avatar",
+                source_kind="image_source",
+                session_generation=1,
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["helpers"].append(dict(raw["helpers"][0]))
+            path.write_text(json.dumps(raw), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                FadeHelperManifestError,
+                "duplicate helper_id",
+            ):
+                store.entries()
+
     def test_future_manifest_is_rejected_without_overwrite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "helper-manifest.json"
