@@ -2193,12 +2193,14 @@ class OBSLayoutManager:
                 fallback.append(prepared)
                 continue
 
-            # OBS groups have their own compositor/bounds lifecycle. Applying a
-            # temporary color-filter opacity directly to the group can leave the
-            # group source rendering transparent even after the filter is
-            # neutralized or removed. Keep group geometry/visibility managed,
-            # but degrade the visual transition to direct changes.
-            if str(prepared.get("source_type") or "").casefold() == "group":
+            # OBS composite sources (nested scenes and groups) have their own
+            # compositor/bounds lifecycle. Real-OBS validation showed that a
+            # temporary color-filter opacity on these sources can leave the
+            # composite rendering transparent even after the filter is
+            # neutralized or removed, while its children still render correctly.
+            # Keep geometry/visibility managed, but degrade the visual transition
+            # to direct changes for composite sources.
+            if str(prepared.get("source_type") or "").casefold() in {"scene", "group"}:
                 fallback.append(prepared)
                 continue
             if current_enabled is None:
@@ -2362,12 +2364,12 @@ class OBSLayoutManager:
             if not current_visible and not target_visible:
                 continue
 
-            # Never attach the temporary fade filter to an OBS group. Real OBS
-            # validation showed that a group can keep rendering transparently
-            # after a fade/filter lifecycle even though its children still render
-            # correctly. Groups still participate in geometry animation and use
+            # Never attach the temporary fade filter to OBS composite sources.
+            # Nested scenes and groups can keep rendering transparently after a
+            # fade/filter lifecycle even though their children still render
+            # correctly. They still participate in geometry animation and use
             # direct visibility fallback when needed.
-            if str(prepared.get("source_type") or "").casefold() == "group":
+            if str(prepared.get("source_type") or "").casefold() in {"scene", "group"}:
                 fallback_visibility.add(index)
                 if target_visible and not current_visible:
                     self._set_enabled(
