@@ -165,6 +165,24 @@ class RuntimeMarkerTests(unittest.TestCase):
             self.assertEqual(restored["source_uuid"], "input-uuid")
             self.assertFalse(restored["legacy"])
 
+    def test_checkpoint_refuses_unknown_cleanup_without_overwriting_marker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            marker = RuntimeMarker()
+            marker.path = path
+            marker.start()
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RuntimeMarkerFormatError,
+                "inconnue ou incomplète",
+            ):
+                marker.checkpoint_pending_cleanup(
+                    ({"kind": "future_cleanup_kind", "opaque": True},)
+                )
+
+            self.assertEqual(path.read_bytes(), before)
+
     def test_atomic_replace_failure_preserves_previous_runtime_marker(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runtime.json"
