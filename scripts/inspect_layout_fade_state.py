@@ -43,6 +43,14 @@ def _parse_args() -> argparse.Namespace:
             "leurs réglages arbitraires."
         ),
     )
+    parser.add_argument(
+        "--raw-local",
+        action="store_true",
+        help=(
+            "Conserve les alias/UUID/contexte OBS locaux dans le rapport. "
+            "À réserver à un diagnostic local non partagé."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -81,39 +89,67 @@ def _safe_error(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _safe_pending_cleanup(raw: object) -> list[dict[str, Any]]:
+def _safe_pending_cleanup(
+    raw: object,
+    *,
+    raw_local: bool,
+) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
-    allowed = {
-        "kind",
-        "source",
-        "collection",
-        "helper_id",
-        "source_uuid",
-        "source_kind",
-        "filter_name",
-        "filter_kind",
-        "cleanup_action",
-        "legacy",
-        "ambiguous",
-        "attempts",
-    }
     rows: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, Mapping):
             continue
-        row = {
-            str(key): value
-            for key, value in item.items()
-            if str(key) in allowed
-            and isinstance(value, (str, int, float, bool, type(None)))
-        }
+        if raw_local:
+            allowed = {
+                "kind",
+                "source",
+                "collection",
+                "helper_id",
+                "source_uuid",
+                "source_kind",
+                "filter_name",
+                "filter_kind",
+                "cleanup_action",
+                "legacy",
+                "ambiguous",
+                "attempts",
+            }
+            row = {
+                str(key): value
+                for key, value in item.items()
+                if str(key) in allowed
+                and isinstance(value, (str, int, float, bool, type(None)))
+            }
+        else:
+            row = {
+                "kind": _safe_text(item.get("kind")),
+                "source_kind": _safe_text(item.get("source_kind")),
+                "filter_kind": _safe_text(item.get("filter_kind")),
+                "cleanup_action": _safe_text(item.get("cleanup_action")),
+                "legacy": bool(item.get("legacy", False)),
+                "ambiguous": bool(item.get("ambiguous", False)),
+                "attempts": (
+                    int(item.get("attempts", 0))
+                    if isinstance(item.get("attempts"), int)
+                    and not isinstance(item.get("attempts"), bool)
+                    else 0
+                ),
+                "has_source_identity": bool(
+                    _safe_text(item.get("source"))
+                    or _safe_text(item.get("source_uuid"))
+                ),
+                "has_helper_identity": bool(
+                    _safe_text(item.get("helper_id"))
+                    and _safe_text(item.get("filter_name"))
+                ),
+            }
         row["has_error"] = bool(item.get("last_error"))
         rows.append(row)
     return rows
 
 
-def _load_runtime_marker() -> dict[str, Any]:
+def _load_runtime_marker(*, raw_local: bool) -> dict[str, Any]:
     path = _user_data_dir_read_only() / "runtime.json"
     payload: dict[str, Any] = {
         "exists": path.is_file(),
@@ -142,7 +178,8 @@ def _load_runtime_marker() -> dict[str, Any]:
             "clean_shutdown": raw.get("clean_shutdown"),
             "cleanup_complete": raw.get("cleanup_complete"),
             "pending_cleanup": _safe_pending_cleanup(
-                raw.get("pending_cleanup")
+                raw.get("pending_cleanup"),
+                raw_local=raw_local,
             ),
         }
     )
@@ -203,6 +240,29 @@ def _candidate_sources(catalog) -> tuple[str, ...]:
         *(_safe_text(item.source) for item in catalog.scene_items),
     }
     return tuple(sorted((item for item in values if item), key=str.casefold))
+
+
+def _shareable_catalog_summary(catalog) -> dict[str, Any]:
+    kinds = _source_kind_map(catalog)
+    kind_counts: dict[str, int] = {}
+    for kind in kinds.values():
+        normalized = _safe_text(kind) or "unknown"
+        kind_counts[normalized] = kind_counts.get(normalized, 0) + 1
+    return {
+        "canvas": list(catalog.canvas) if catalog.canvas else None,
+        "scenes": len(catalog.scenes),
+        "groups": len(catalog.groups),
+        "scene_items": len(catalog.scene_items),
+        "inputs": len(catalog.inputs),
+        "transitions": len(catalog.transitions),
+        "available_requests": len(catalog.available_requests),
+        "warnings_count": len(catalog.warnings),
+        "unreadable_containers_count": len(catalog.unreadable_containers),
+        "complete": not catalog.warnings and not catalog.unreadable_containers,
+        "partial": bool(catalog.warnings or catalog.unreadable_containers),
+        "session_generation": int(catalog.session_generation or 0),
+        "source_kind_counts": dict(sorted(kind_counts.items())),
+    }
 
 
 def _is_fade_helper_name(value: object) -> bool:
@@ -298,7 +358,7 @@ def main() -> int:
 
     report: dict[str, Any] = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
-        "mode": "read_only_shareable",
+        "mode": "read_only_raw_local" if args.raw_local else "read_only_shareable",
         "status": "starting",
         "coverage": {
             "sources_attempted": 0,
@@ -306,7 +366,7 @@ def main() -> int:
             "filter_detail_failures": 0,
             "context_stable": False,
         },
-        "runtime_marker": _load_runtime_marker(),
+        "runtime_marker": _load_runtime_marker(raw_local=args.raw_local),
         "obs": {},
         "catalog": {},
         "filters": [],
@@ -321,10 +381,18 @@ def main() -> int:
         # Explicit path prevents load_config() from calling ensure_user_config().
         config = load_config(_existing_config_path())
         obs_config = replace(build_obs_config(config), enabled=True)
-        report["obs"] = {
-            "host": obs_config.host,
-            "port": obs_config.port,
-        }
+        report["obs"] = (
+            {
+                "host": obs_config.host,
+                "port": obs_config.port,
+            }
+            if args.raw_local
+            else {
+                "configured": True,
+                "host_redacted": True,
+                "port_redacted": True,
+            }
+        )
 
         client = OBSClientManager(obs_config)
         readonly = _ReadOnlyOBSClient(client)
@@ -338,22 +406,33 @@ def main() -> int:
         )
         kinds = _source_kind_map(catalog)
 
-        report["catalog"] = catalog.summary()
-        report["catalog"]["source_kinds"] = dict(
-            sorted(kinds.items(), key=lambda item: item[0].casefold())
-        )
+        if args.raw_local:
+            report["catalog"] = catalog.summary()
+            report["catalog"]["source_kinds"] = dict(
+                sorted(kinds.items(), key=lambda item: item[0].casefold())
+            )
+        else:
+            report["catalog"] = _shareable_catalog_summary(catalog)
 
         all_filters: list[dict[str, Any]] = []
         fade_helpers: list[dict[str, Any]] = []
 
         sources = _candidate_sources(catalog)
+        source_refs = {
+            source: f"source-{index:03d}"
+            for index, source in enumerate(sources, start=1)
+        }
         report["coverage"]["sources_attempted"] = len(sources)
         for source in sources:
             try:
                 refs = reader.filters_for_source(source)
             except Exception as exc:
                 report["warnings"].append(
-                    f"Filtres illisibles pour {source} ({_safe_error(exc)})"
+                    (
+                        f"Filtres illisibles pour {source} ({_safe_error(exc)})"
+                        if args.raw_local
+                        else f"Filtres illisibles pour une source ({_safe_error(exc)})"
+                    )
                 )
                 continue
             report["coverage"]["sources_read"] += 1
@@ -379,6 +458,13 @@ def main() -> int:
                     if is_ssr_named
                     else ""
                 )
+                if not args.raw_local:
+                    row["source"] = source_refs[source]
+                    row["name"] = (
+                        "fade-helper"
+                        if is_fade_helper
+                        else ("ssr-named-filter" if is_ssr_named else "filter")
+                    )
 
                 if args.include_all_filters or is_ssr_named:
                     all_filters.append(row)
@@ -416,8 +502,13 @@ def main() -> int:
         report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
         _atomic_write_report(report_path, report)
 
+        collection_label = (
+            repr(initial_collection)
+            if args.raw_local
+            else "<masquée>"
+        )
         print(
-            f"Collection : {initial_collection!r} · "
+            f"Collection : {collection_label} · "
             f"{len(fade_helpers)} helper(s) de fade visible(s)"
         )
         for row in fade_helpers:
