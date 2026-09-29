@@ -818,6 +818,141 @@ class OBSLayoutManager:
                 current = ""
         return names, current
 
+    @staticmethod
+    def _scene_item_source_kind(raw: Mapping[str, Any]) -> str:
+        """Classify one *current* OBS scene item without trusting profile metadata."""
+        if bool(raw.get("isGroup", False)):
+            return "group"
+        source_type = str(raw.get("sourceType") or "").strip()
+        input_kind = str(raw.get("inputKind") or "").strip()
+        if source_type == "OBS_SOURCE_TYPE_SCENE" or input_kind == "scene":
+            return "scene"
+        if source_type == "OBS_SOURCE_TYPE_INPUT" or (
+            input_kind and input_kind != "scene"
+        ):
+            return "input"
+        return "unknown"
+
+    @staticmethod
+    def _classify_fade_eligibility(
+        *,
+        profile_source_type: str,
+        current_source_type: str,
+        source_occurrences: int,
+        inventory_complete: bool,
+    ) -> tuple[bool, str]:
+        """Return whether a temporary source-level fade is safe enough for A0.
+
+        A0 intentionally does not introduce a new input-kind whitelist. It keeps
+        the existing input fade behavior only when both the saved profile and the
+        current OBS topology agree that the target is an isolated input. Unknown,
+        stale, composite, or shared targets degrade to direct geometry/visibility.
+        """
+        saved = str(profile_source_type or "").casefold().strip()
+        current = str(current_source_type or "").casefold().strip()
+        if not inventory_complete:
+            return False, "topologie OBS incomplète"
+        if current not in {"input", "scene", "group"}:
+            return False, "type OBS courant inconnu"
+        if saved not in {"input", "scene", "group"}:
+            return False, "type enregistré absent ou inconnu"
+        if saved != current:
+            return False, "type enregistré différent du type OBS courant"
+        if current != "input":
+            return False, f"source composite {current}"
+        if int(source_occurrences) != 1:
+            return False, "source partagée"
+        return True, "input isolé"
+
+    def _fade_runtime_inventory(
+        self,
+    ) -> tuple[dict[tuple[str, str], str], dict[str, int], bool]:
+        """Read current collection topology for source-level fade eligibility.
+
+        Color filters are attached to OBS sources, not scene-item occurrences.
+        The inventory therefore records both the live kind of each occurrence and
+        how many scene/group items currently reference each source name. Any
+        incomplete topology makes the result non-authoritative so callers fall
+        back to direct mutations instead of guessing.
+        """
+        current_types: dict[tuple[str, str], str] = {}
+        source_occurrences: dict[str, int] = {}
+        try:
+            response = self._send("GetSceneList")
+        except Exception:
+            return current_types, source_occurrences, False
+
+        scene_names = [
+            str(scene.get("sceneName") or "").strip()
+            for scene in response.get("scenes", []) or []
+            if isinstance(scene, Mapping)
+            and str(scene.get("sceneName") or "").strip()
+        ]
+        if not scene_names:
+            return current_types, source_occurrences, False
+
+        pending_groups: set[str] = set()
+        complete = True
+
+        def collect(container: str, rows: Iterable[Mapping[str, Any]]) -> None:
+            for raw in rows:
+                if not isinstance(raw, Mapping):
+                    continue
+                source = str(raw.get("sourceName") or "").strip()
+                if not source:
+                    continue
+                kind = self._scene_item_source_kind(raw)
+                key = (container, source)
+                previous = current_types.get(key)
+                if previous is None:
+                    current_types[key] = kind
+                elif previous != kind:
+                    current_types[key] = "unknown"
+                source_occurrences[source] = source_occurrences.get(source, 0) + 1
+                if kind == "group":
+                    pending_groups.add(source)
+
+        for scene in scene_names:
+            self._yield_runtime()
+            try:
+                scene_response = self._send(
+                    "GetSceneItemList",
+                    {"sceneName": scene},
+                )
+            except Exception:
+                complete = False
+                continue
+            rows = [
+                item
+                for item in scene_response.get("sceneItems", []) or []
+                if isinstance(item, Mapping)
+            ]
+            collect(scene, rows)
+
+        visited_groups: set[str] = set()
+        while pending_groups:
+            self._yield_runtime()
+            group = pending_groups.pop()
+            if group in visited_groups:
+                continue
+            visited_groups.add(group)
+            try:
+                group_response = self._send(
+                    "GetGroupSceneItemList",
+                    {"sceneName": group},
+                )
+            except Exception:
+                complete = False
+                continue
+            rows = [
+                item
+                for item in group_response.get("sceneItems", []) or []
+                if isinstance(item, Mapping)
+            ]
+            collect(group, rows)
+
+        return current_types, source_occurrences, complete
+
     def scan_scene_topology(
         self,
         scene: str,
@@ -1542,7 +1677,7 @@ class OBSLayoutManager:
                 "source_type": (
                     "group"
                     if source in group_sources
-                    else str(raw.get("source_type") or "input")
+                    else str(raw.get("source_type") or "")
                 ),
                 "path": list(raw.get("path") or ()),
                 "transform": update,
@@ -1920,6 +2055,16 @@ class OBSLayoutManager:
             _int(transition.get("steps"), 8),
         )
 
+        fade_current_types: dict[tuple[str, str], str] = {}
+        fade_source_occurrences: dict[str, int] = {}
+        fade_inventory_complete = False
+        if mode in {"fade", "move_fade"} and duration_ms > 0:
+            (
+                fade_current_types,
+                fade_source_occurrences,
+                fade_inventory_complete,
+            ) = self._fade_runtime_inventory()
+
         applied = 0
         skipped = 0
         modules_for_skip = profile.get("modules") if isinstance(profile.get("modules"), Mapping) else {}
@@ -1963,11 +2108,25 @@ class OBSLayoutManager:
             )
             target_enabled = item["enabled"]
             current_enabled = current.get("enabled")
+            profile_source_type = str(item.get("source_type") or "")
+            current_source_type = fade_current_types.get(
+                (container, source),
+                "unknown",
+            )
+            fade_eligible, fade_reason = self._classify_fade_eligibility(
+                profile_source_type=profile_source_type,
+                current_source_type=current_source_type,
+                source_occurrences=fade_source_occurrences.get(source, 0),
+                inventory_complete=fade_inventory_complete,
+            )
             return {
                 "item": item,
                 "container": container,
                 "source": source,
-                "source_type": str(item.get("source_type") or "input"),
+                "source_type": profile_source_type,
+                "current_source_type": current_source_type,
+                "fade_eligible": fade_eligible,
+                "fade_reason": fade_reason,
                 "current_transform": current["transform"],
                 "target_transform": target_transform,
                 "transform_changed": self._transform_needs_update(
@@ -2193,14 +2352,10 @@ class OBSLayoutManager:
                 fallback.append(prepared)
                 continue
 
-            # OBS composite sources (nested scenes and groups) have their own
-            # compositor/bounds lifecycle. Real-OBS validation showed that a
-            # temporary color-filter opacity on these sources can leave the
-            # composite rendering transparent even after the filter is
-            # neutralized or removed, while its children still render correctly.
-            # Keep geometry/visibility managed, but degrade the visual transition
-            # to direct changes for composite sources.
-            if str(prepared.get("source_type") or "").casefold() in {"scene", "group"}:
+            # A0 uses one live classification for every fade phase. Composite,
+            # unknown, stale, or shared targets must never reach source-level
+            # opacity helpers; geometry/visibility still use the direct path.
+            if not bool(prepared.get("fade_eligible", False)):
                 fallback.append(prepared)
                 continue
             if current_enabled is None:
@@ -2247,6 +2402,8 @@ class OBSLayoutManager:
                 if target_enabled is None or current_enabled is None:
                     continue
                 if bool(target_enabled) == bool(current_enabled):
+                    continue
+                if not bool(prepared.get("fade_eligible", False)):
                     continue
                 if bool(target_enabled):
                     try:
@@ -2364,12 +2521,9 @@ class OBSLayoutManager:
             if not current_visible and not target_visible:
                 continue
 
-            # Never attach the temporary fade filter to OBS composite sources.
-            # Nested scenes and groups can keep rendering transparently after a
-            # fade/filter lifecycle even though their children still render
-            # correctly. They still participate in geometry animation and use
-            # direct visibility fallback when needed.
-            if str(prepared.get("source_type") or "").casefold() in {"scene", "group"}:
+            # Reuse the same A0 classification as fade/reposition. No opacity
+            # write is allowed for composite, unknown, stale, or shared targets.
+            if not bool(prepared.get("fade_eligible", False)):
                 fallback_visibility.add(index)
                 if target_visible and not current_visible:
                     self._set_enabled(
@@ -2760,7 +2914,7 @@ class OBSLayoutManager:
                         "source_type": (
                             "group"
                             if source in group_sources
-                            else str(element.get("source_type") or "input")
+                            else str(element.get("source_type") or "")
                         ),
                         "transform": update,
                         "enabled": enabled,
