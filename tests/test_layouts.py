@@ -1481,6 +1481,63 @@ class LayoutTests(unittest.TestCase):
             any(request == "CreateSourceFilter" for request, _ in client.calls)
         )
 
+    def test_duplicate_schema3_obligations_are_quarantined_without_mutation(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        base = {
+            "kind": "layout_fade",
+            "source": "[Webcam] Avatar",
+            "collection": "Collection A",
+            "helper_id": identity.helper_id,
+            "source_uuid": identity.source_uuid,
+            "source_kind": identity.source_kind,
+            "connection": {
+                "host": identity.connection_host,
+                "port": identity.connection_port,
+            },
+            "filter_name": identity.filter_name,
+            "filter_kind": identity.filter_kind,
+            "cleanup_action": "neutralize_disable",
+        }
+        contradictory = dict(base)
+        contradictory["filter_name"] = identity.filter_name + "-other"
+
+        manager.import_pending_fade_cleanup((base, contradictory))
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(
+            any("dupliquée ou contradictoire" in item for item in warnings),
+            warnings,
+        )
+        exported = manager.export_pending_fade_cleanup()
+        self.assertEqual(len(exported), 1)
+        self.assertTrue(exported[0]["ambiguous"])
+        self.assertEqual(exported[0]["helper_id"], identity.helper_id)
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
+        )
+
     def test_legacy_v2_cleanup_never_mutates_or_creates(self):
         client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
