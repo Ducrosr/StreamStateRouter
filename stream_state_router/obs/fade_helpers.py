@@ -361,6 +361,12 @@ class FadeHelperManifestStore:
         if not matches:
             return None
         item = matches[0]
+        # A write-ahead "prepared" entry proves only that SSR reserved an
+        # identity. It does not prove that the matching OBS filter was created
+        # by SSR. Ownership becomes reusable/exportable only after the normal
+        # creation path has observed the exact helper and persisted that state.
+        if item.state != "observed":
+            return None
         # Alias is descriptive, not the stable identity. Same UUID with a rename
         # remains the same input, but the caller must update the alias before
         # the next mutation through prepare_layout_fade().
