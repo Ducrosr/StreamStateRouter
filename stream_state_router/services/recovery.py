@@ -53,10 +53,10 @@ def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | No
         if not isinstance(connection, Mapping):
             return None
         host = _strict_text(connection.get("host"))
-        try:
-            port = int(connection.get("port", 0) or 0)
-        except (TypeError, ValueError, OverflowError):
+        raw_port = connection.get("port")
+        if isinstance(raw_port, bool) or not isinstance(raw_port, int):
             return None
+        port = raw_port
         required = (
             _strict_text(item.get("source_uuid")),
             _strict_text(item.get("source_kind")),
