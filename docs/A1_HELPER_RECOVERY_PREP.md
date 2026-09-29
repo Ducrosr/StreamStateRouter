@@ -89,6 +89,41 @@ A1 must distinguish:
 
 This is an implementation proposal constrained by the Astra contract. If a new architectural decision becomes necessary, stop before coding that decision.
 
+## Persistence boundary: manifest != runtime cleanup journal
+
+A1 needs two lifetimes of state.
+
+The helper ownership manifest is persistent inventory. A reusable helper can remain in OBS after a clean transition and after a clean SSR shutdown, so the evidence that SSR created/owns that helper must survive when no cleanup is pending.
+
+The runtime cleanup journal is transient write-ahead recovery state. It records unfinished compensation work and can become empty after verified cleanup.
+
+Do not use `runtime.json` as the only ownership manifest.
+
+A minimal split is therefore:
+
+- persistent helper manifest under the SSR user-data directory
+- versioned `runtime.json` obligations referencing a manifest/helper identity
+
+The repository does not currently expose a durable OBS filter UUID through `FilterRef`; do not invent one. A1 may use an SSR-generated helper identity plus an exact generated filter name and persistent manifest, while A2 remains responsible for broader resource binding/identity architecture.
+
+Any exact filename/schema for the persistent helper manifest is still an implementation detail until the A0 gate is cleared. It must remain backward compatible and independently writeable/replaceable.
+
+## Legacy boundary
+
+The legacy filter name `[SSR] Layout Fade` is not proof of ownership.
+
+A v2 cleanup obligation containing only collection + source is not proof of ownership either.
+
+Therefore A1 migration must distinguish:
+
+- proven new helper
+- legacy ambiguous helper-like filter
+- proven new obligation
+- legacy ambiguous obligation
+
+Legacy ambiguity must never trigger automatic adoption, mutation, deletion or recreation.
+
+
 ### Helper manifest
 
 A small SSR-side persisted record, keyed by generated `helper_id`.
@@ -271,3 +306,26 @@ A1 is not complete until:
 - ambiguous lookalikes are reported
 - real OBS kill/restart and shutdown-backlog tests are completed
 - Astra re-audits provenance, write-ahead, idempotence and migration
+
+## Decisions to return to Astra if implementation reaches them
+
+These are not reasons to block preparation, but SOL must not silently choose a broader policy.
+
+1. Exact persistent manifest filename and long-term schema if it needs to become a public compatibility contract.
+2. Exact generated helper display-name format if a user-visible OBS name is considered part of the UX contract.
+3. Whether a legacy ambiguous v2 obligation can be explicitly dismissed after a read-only proof that no matching helper exists, or must remain visible until user acknowledgement.
+4. Any automatic deletion policy. A1 currently assumes no automatic deletion.
+5. Any ownership transfer/adoption of a pre-existing user filter. A1 currently forbids it.
+6. Any new strategy for composites. A1 inherits A0's direct fallback and does not change it.
+7. Any attempt to broaden the generated-helper mechanism to non-fade filters.
+
+## Mechanical work that can be prepared without those decisions
+
+- pure manifest serialization/deserialization helpers
+- v2 marker characterization fixtures
+- read-only helper observation
+- recovery path that contains no CreateSourceFilter capability
+- verification helpers for opacity/enabled
+- import filtering hook based on proven ownership predicate
+- fault-injection fixtures
+- real-OBS diagnostic tooling
