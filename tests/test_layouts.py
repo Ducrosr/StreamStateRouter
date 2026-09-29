@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from stream_state_router.obs.client import OBSResourceNotFoundError
@@ -9,6 +10,10 @@ from stream_state_router.obs.layouts import (
     LayoutSnapshot,
     compact_layout_overrides,
     split_module_source,
+)
+from stream_state_router.obs.fade_helpers import (
+    MemoryFadeHelperManifestStore,
+    LEGACY_LAYOUT_FADE_FILTER,
 )
 
 
@@ -56,6 +61,17 @@ class FakeLayoutClient:
         self.unknown_enabled = set()
         self.null_enabled = set()
         self.failed_enabled = set()
+        self.config = SimpleNamespace(
+            enabled=True,
+            host="127.0.0.1",
+            port=4455,
+        )
+        self.session_generation = 1
+        self.input_uuids = {
+            name: f"uuid-{index}"
+            for index, name in enumerate(self.items, start=1)
+        }
+        self.source_filters = {}
 
     def _scene_item_row(self, source, scene_item_id):
         row = {
@@ -80,6 +96,76 @@ class FakeLayoutClient:
         self.calls.append((request, payload))
         if request == "GetSceneCollectionList":
             return {"currentSceneCollectionName": getattr(self, "scene_collection", "Collection A")}
+        if request == "GetInputList":
+            return {
+                "inputs": [
+                    {
+                        "inputName": name,
+                        "inputUuid": self.input_uuids.get(name, ""),
+                        "inputKind": "image_source",
+                    }
+                    for name, kind in self.source_kinds.items()
+                    if kind == "input"
+                ]
+            }
+        if request == "GetSourceFilterList":
+            source = str(payload.get("sourceName") or "")
+            filters = self.source_filters.get(source, {})
+            return {
+                "filters": [
+                    {
+                        "filterName": name,
+                        "filterKind": state["kind"],
+                        "filterEnabled": state["enabled"],
+                    }
+                    for name, state in filters.items()
+                ]
+            }
+        if request == "CreateSourceFilter":
+            source = str(payload.get("sourceName") or "")
+            name = str(payload.get("filterName") or "")
+            filters = self.source_filters.setdefault(source, {})
+            if name in filters:
+                raise RuntimeError("duplicate filter")
+            filters[name] = {
+                "kind": str(payload.get("filterKind") or ""),
+                "enabled": True,
+                "settings": dict(payload.get("filterSettings") or {}),
+            }
+            return {}
+        if request == "GetSourceFilter":
+            source = str(payload.get("sourceName") or "")
+            name = str(payload.get("filterName") or "")
+            state = self.source_filters.get(source, {}).get(name)
+            if state is None:
+                raise OBSResourceNotFoundError(request, "missing filter")
+            return {
+                "filterName": name,
+                "filterKind": state["kind"],
+                "filterEnabled": state["enabled"],
+                "filterSettings": dict(state["settings"]),
+            }
+        if request == "SetSourceFilterEnabled":
+            source = str(payload.get("sourceName") or "")
+            name = str(payload.get("filterName") or "")
+            state = self.source_filters.get(source, {}).get(name)
+            if state is None:
+                raise OBSResourceNotFoundError(request, "missing filter")
+            state["enabled"] = bool(payload.get("filterEnabled"))
+            return {}
+        if request == "SetSourceFilterSettings":
+            source = str(payload.get("sourceName") or "")
+            name = str(payload.get("filterName") or "")
+            state = self.source_filters.get(source, {}).get(name)
+            if state is None:
+                raise OBSResourceNotFoundError(request, "missing filter")
+            settings = payload.get("filterSettings")
+            if isinstance(settings, dict):
+                if bool(payload.get("overlay", True)):
+                    state["settings"].update(settings)
+                else:
+                    state["settings"] = dict(settings)
+            return {}
         if request == "GetSceneList":
             return {
                 "currentProgramSceneName": "Gameplay",
@@ -1382,298 +1468,292 @@ class LayoutTests(unittest.TestCase):
         )
 
 
-    def test_fade_opacity_recovery_is_bounded_on_missing_filter(self):
-        class MissingOnceClient(FakeLayoutClient):
-            def __init__(self):
-                super().__init__()
-                self.settings_attempts = 0
-
-            def send(self, request, data=None):
-                if request == "SetSourceFilterSettings":
-                    self.settings_attempts += 1
-                    if self.settings_attempts == 1:
-                        from stream_state_router.obs.client import OBSResourceNotFoundError
-                        raise OBSResourceNotFoundError(request, "missing filter")
-                    self.calls.append((request, dict(data or {})))
-                    return {}
-                if request == "GetSourceFilterList":
-                    self.calls.append((request, dict(data or {})))
-                    return {"filters": []}
-                if request == "CreateSourceFilter":
-                    self.calls.append((request, dict(data or {})))
-                    return {}
-                return super().send(request, data)
-
-        client = MissingOnceClient()
+    def test_set_source_opacity_never_creates_missing_helper(self):
+        client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
 
-        manager._set_source_opacity("[Webcam] Avatar", 0.5)
-
-        self.assertEqual(client.settings_attempts, 2)
-        self.assertEqual(
-            [request for request, _payload in client.calls if request == "CreateSourceFilter"],
-            ["CreateSourceFilter"],
-        )
-
-    def test_fade_persistent_settings_error_does_not_recurse(self):
-        class PersistentFailureClient(FakeLayoutClient):
-            def __init__(self):
-                super().__init__()
-                self.settings_attempts = 0
-
-            def send(self, request, data=None):
-                if request == "SetSourceFilterSettings":
-                    self.settings_attempts += 1
-                    from stream_state_router.obs.client import OBSResourceNotFoundError
-                    raise OBSResourceNotFoundError(request, "missing filter")
-                if request == "GetSourceFilterList":
-                    self.calls.append((request, dict(data or {})))
-                    return {"filters": []}
-                if request == "CreateSourceFilter":
-                    self.calls.append((request, dict(data or {})))
-                    return {}
-                return super().send(request, data)
-
-        client = PersistentFailureClient()
-        manager = OBSLayoutManager(client)
-
-        with self.assertRaises(OBSResourceNotFoundError):
+        with self.assertRaisesRegex(RuntimeError, "création implicite interdite"):
             manager._set_source_opacity("[Webcam] Avatar", 0.5)
 
-        self.assertEqual(client.settings_attempts, 2)
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
 
-    def test_pending_fade_cleanup_is_retained_until_neutralization_succeeds(self):
-        from stream_state_router.obs.client import OBSUnavailableError
-
-        class FadeCleanupClient(FakeLayoutClient):
-            def __init__(self):
-                super().__init__()
-                self.fail_cleanup = True
-
-            def send(self, request, data=None):
-                if request == "SetSourceFilterSettings":
-                    self.calls.append((request, dict(data or {})))
-                    if self.fail_cleanup:
-                        raise OBSUnavailableError("offline")
-                    return {}
-                return super().send(request, data)
-
-        client = FadeCleanupClient()
+    def test_legacy_v2_cleanup_never_mutates_or_creates(self):
+        client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
+        manager.import_pending_fade_cleanup(
+            (
+                {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                },
+            )
+        )
+        client.calls.clear()
 
-        warnings = manager._neutralize_fade_sources(["[Webcam] Avatar"])
+        warnings = manager.retry_pending_fade_cleanup()
+
         self.assertTrue(warnings)
         self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
-
-        client.fail_cleanup = False
-        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
-        self.assertEqual(manager.pending_fade_cleanup(), ())
-
-    def test_fade_cleanup_journal_callback_runs_before_first_opacity_write(self):
-        client = FakeLayoutClient()
-        client.scene_collection = "Collection A"
-        manager = OBSLayoutManager(client)
-        order = []
-        snapshots = []
-
-        def journal():
-            order.append("journal")
-            snapshots.append(manager.export_pending_fade_cleanup())
-
-        manager.set_pending_cleanup_changed(journal)
-        manager._ensure_fade_filter = lambda _source, _opacity: None
-        manager._set_source_opacity = lambda _source, _opacity: order.append("opacity")
-        prepared = [{
-            "target_enabled": True,
-            "current_enabled": False,
-            "visibility_changed": True,
-            "source": "[Webcam] Avatar",
-            "container": "Gameplay",
-            "transform_changed": False,
-            "target_transform": {},
-            "current_transform": {},
-            "fade_eligible": True,
-        }]
-
-        manager._animate_layout_transition(
-            prepared,
-            mode="fade",
-            duration_ms=1,
-            steps=1,
-            warnings=[],
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
         )
 
-        self.assertTrue(snapshots)
-        self.assertEqual(snapshots[0][0]["source"], "[Webcam] Avatar")
-        self.assertLess(order.index("journal"), order.index("opacity"))
+    def test_manifest_then_journal_precede_first_filter_mutation(self):
+        events = []
 
-    def test_fade_cleanup_retries_journal_after_initial_persistence_failure(self):
+        class RecordingStore(MemoryFadeHelperManifestStore):
+            def prepare_layout_fade(self, **kwargs):
+                events.append("manifest")
+                return super().prepare_layout_fade(**kwargs)
+
+        class RecordingClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                if request == "CreateSourceFilter":
+                    events.append("create")
+                return super().send(request, data)
+
+        client = RecordingClient()
+        manager = OBSLayoutManager(client, fade_helper_store=RecordingStore())
+        manager.set_pending_cleanup_changed(lambda: events.append("journal"))
+
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+
+        self.assertTrue(identity.helper_id)
+        self.assertLess(events.index("manifest"), events.index("journal"))
+        self.assertLess(events.index("journal"), events.index("create"))
+
+    def test_journal_failure_blocks_filter_creation(self):
         client = FakeLayoutClient()
-        client.scene_collection = "Collection A"
-        manager = OBSLayoutManager(client)
-        attempts = []
-        writes = []
-        fail_once = True
-
-        def journal():
-            nonlocal fail_once
-            attempts.append("journal")
-            if fail_once:
-                fail_once = False
-                raise OSError("disk unavailable")
-
-        manager.set_pending_cleanup_changed(journal)
-        manager._ensure_fade_filter = lambda _source, _opacity: None
-        manager._set_source_opacity = lambda _source, _opacity: writes.append("opacity")
-        prepared = [{
-            "target_enabled": True,
-            "current_enabled": False,
-            "visibility_changed": True,
-            "source": "[Webcam] Avatar",
-            "container": "Gameplay",
-            "transform_changed": False,
-            "target_transform": {},
-            "current_transform": {},
-            "fade_eligible": True,
-        }]
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(
+            lambda: (_ for _ in ()).throw(OSError("disk unavailable"))
+        )
 
         with self.assertRaisesRegex(OSError, "disk unavailable"):
-            manager._animate_layout_transition(
-                prepared, mode="fade", duration_ms=1, steps=1, warnings=[]
-            )
-        self.assertEqual(writes, [])
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
 
-        manager._animate_layout_transition(
-            prepared, mode="fade", duration_ms=1, steps=1, warnings=[]
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
         )
 
-        self.assertGreaterEqual(len(attempts), 2)
-        self.assertTrue(writes)
+    def test_create_response_lost_is_observed_without_second_create(self):
+        class LostCreateResponseClient(FakeLayoutClient):
+            def __init__(self):
+                super().__init__()
+                self.create_count = 0
 
-    def test_successful_fade_neutralization_journals_obligation_removal(self):
+            def send(self, request, data=None):
+                if request == "CreateSourceFilter":
+                    self.create_count += 1
+                    super().send(request, data)
+                    raise RuntimeError("response lost")
+                return super().send(request, data)
+
+        client = LostCreateResponseClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+
+        self.assertEqual(client.create_count, 1)
+        self.assertEqual(identity.state, "observed")
+
+    def test_cleanup_missing_owned_helper_is_terminal_without_create(self):
         client = FakeLayoutClient()
-        client.scene_collection = "Collection A"
-        manager = OBSLayoutManager(client)
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        manager._ensure_pending_fade(identity)
+        client.calls.clear()
+
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_cleanup_neutralizes_then_disables_with_readback(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
         snapshots = []
         manager.set_pending_cleanup_changed(
             lambda: snapshots.append(manager.export_pending_fade_cleanup())
         )
 
-        manager._ensure_pending_fade("[Webcam] Avatar", "Collection A")
-        manager._set_source_opacity = lambda _source, _opacity: None
-        self.assertEqual(
-            manager._neutralize_fade_sources(
-                {"[Webcam] Avatar"}, collection="Collection A"
-            ),
-            (),
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
         )
-
-        self.assertTrue(snapshots[0])
-        self.assertEqual(snapshots[-1], ())
-
-    def test_fade_cleanup_is_prearmed_before_first_opacity_io(self):
-        from stream_state_router.obs.client import OBSUnavailableError
-
-        class FirstFadeWriteUncertainClient(FakeLayoutClient):
-            def send(self, request, data=None):
-                if request == "SetSourceFilterSettings":
-                    self.calls.append((request, dict(data or {})))
-                    raise OBSUnavailableError("response lost")
-                return super().send(request, data)
-
-        client = FirstFadeWriteUncertainClient()
-        client.scene_collection = "Collection A"
-        manager = OBSLayoutManager(client)
-        warnings = []
-        prepared = [{
-            "target_enabled": True,
-            "current_enabled": False,
-            "visibility_changed": True,
-            "source": "[Webcam] Avatar",
-            "container": "Gameplay",
-            "transform_changed": False,
-            "target_transform": {},
-            "current_transform": {},
-            "fade_eligible": True,
-        }]
-
-        manager._animate_layout_transition(
-            prepared,
-            mode="fade",
-            duration_ms=1,
-            steps=1,
-            warnings=warnings,
+        manager._set_source_opacity("[Webcam] Avatar", 0.25)
+        create_count = sum(
+            1 for request, _ in client.calls if request == "CreateSourceFilter"
         )
-
-        exported = manager.export_pending_fade_cleanup()
-        self.assertEqual(len(exported), 1)
-        self.assertEqual(exported[0]["source"], "[Webcam] Avatar")
-        self.assertEqual(exported[0]["collection"], "Collection A")
-        self.assertTrue(warnings)
-
-    def test_immediate_fade_cleanup_never_writes_in_foreign_collection(self):
-        client = FakeLayoutClient()
-        client.scene_collection = "Collection B"
-        manager = OBSLayoutManager(client)
         client.calls.clear()
 
-        warnings = manager._neutralize_fade_sources(
-            ["[Webcam] Avatar"],
-            collection="Collection A",
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertFalse(state["enabled"])
+        self.assertEqual(
+            sum(1 for request, _ in client.calls if request == "CreateSourceFilter"),
+            0,
         )
+        self.assertEqual(create_count, 1)
+        self.assertEqual(snapshots[-1], ())
+
+    def test_cleanup_same_name_new_uuid_keeps_obligation(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+        client.input_uuids["[Webcam] Avatar"] = "uuid-recreated"
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
 
         self.assertTrue(warnings)
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
         self.assertFalse(
-            any(request == "SetSourceFilterSettings" for request, _ in client.calls)
-        )
-        exported = manager.export_pending_fade_cleanup()
-        self.assertEqual(len(exported), 1)
-        self.assertEqual(exported[0]["collection"], "Collection A")
-
-    def test_fade_cleanup_export_import_preserves_collection_context(self):
-        from stream_state_router.obs.client import OBSUnavailableError
-
-        class FadeCleanupClient(FakeLayoutClient):
-            def __init__(self):
-                super().__init__()
-                self.fail_cleanup = True
-
-            def send(self, request, data=None):
-                if request == "SetSourceFilterSettings":
-                    self.calls.append((request, dict(data or {})))
-                    if self.fail_cleanup:
-                        raise OBSUnavailableError("offline")
-                    return {}
-                return super().send(request, data)
-
-        client_a = FadeCleanupClient()
-        client_a.scene_collection = "Collection A"
-        manager_a = OBSLayoutManager(client_a)
-        self.assertTrue(manager_a._neutralize_fade_sources(["[Webcam] Avatar"]))
-        exported = manager_a.export_pending_fade_cleanup()
-
-        self.assertEqual(len(exported), 1)
-        self.assertEqual(exported[0]["kind"], "layout_fade")
-        self.assertEqual(exported[0]["collection"], "Collection A")
-
-        client_b = FadeCleanupClient()
-        client_b.fail_cleanup = False
-        client_b.scene_collection = "Collection B"
-        manager_b = OBSLayoutManager(client_b)
-        self.assertEqual(manager_b.import_pending_fade_cleanup(exported), 1)
-        client_b.calls.clear()
-
-        self.assertEqual(manager_b.retry_pending_fade_cleanup(), ())
-        self.assertEqual(manager_b.pending_fade_cleanup(), ("[Webcam] Avatar",))
-        self.assertFalse(
-            any(request == "SetSourceFilterSettings" for request, _ in client_b.calls)
+            any(
+                request in {"SetSourceFilterSettings", "SetSourceFilterEnabled"}
+                for request, _ in client.calls
+            )
         )
 
-        client_b.scene_collection = "Collection A"
-        self.assertEqual(manager_b.retry_pending_fade_cleanup(), ())
-        self.assertEqual(manager_b.pending_fade_cleanup(), ())
+    def test_cleanup_external_non_temporary_change_suspends_reuse(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        client.source_filters["[Webcam] Avatar"][identity.filter_name][
+            "settings"
+        ]["contrast"] = 0.5
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
+
         self.assertTrue(
-            any(request == "SetSourceFilterSettings" for request, _ in client_b.calls)
+            any("modifié extérieurement" in warning for warning in warnings)
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertFalse(
+            any(request == "SetSourceFilterEnabled" for request, _ in client.calls)
+        )
+
+    def test_obligation_removal_failure_restores_in_memory_obligation(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        writes = 0
+
+        def journal():
+            nonlocal writes
+            writes += 1
+            if writes >= 2:
+                raise OSError("cannot persist removal")
+
+        manager.set_pending_cleanup_changed(journal)
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        manager._ensure_pending_fade(identity)
+
+        warnings = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(warnings)
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
+    def test_foreign_collection_cleanup_never_mutates(self):
+        client = FakeLayoutClient()
+        client.scene_collection = "Collection A"
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+        client.scene_collection = "Collection B"
+        client.calls.clear()
+
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertFalse(
+            any(
+                request in {
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                    "CreateSourceFilter",
+                }
+                for request, _ in client.calls
+            )
+        )
+
+    def test_legacy_named_filter_is_never_adopted(self):
+        client = FakeLayoutClient()
+        client.source_filters["[Webcam] Avatar"] = {
+            LEGACY_LAYOUT_FADE_FILTER: {
+                "kind": "color_filter_v2",
+                "enabled": True,
+                "settings": {"opacity": 0.5},
+            }
+        }
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+        client.calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "ambigu"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
         )
 
     def test_fade_transition_context_probe_overrides_stale_collection(self):
@@ -1710,30 +1790,7 @@ class LayoutTests(unittest.TestCase):
         self.assertAlmostEqual(progress[1], 1.0, places=6)
 
     def test_fade_repositions_visible_item_only_while_fully_transparent(self):
-        class FadeClient(FakeLayoutClient):
-            def __init__(self):
-                super().__init__()
-                self.filters = set()
-
-            def send(self, request, data=None):
-                payload = dict(data or {})
-                if request == "GetSourceFilterList":
-                    self.calls.append((request, payload))
-                    source = str(payload.get("sourceName") or "")
-                    filters = []
-                    if source in self.filters:
-                        filters.append({"filterName": "[SSR] Layout Fade"})
-                    return {"filters": filters}
-                if request == "CreateSourceFilter":
-                    self.calls.append((request, payload))
-                    self.filters.add(str(payload.get("sourceName") or ""))
-                    return {}
-                if request in {"SetSourceFilterEnabled", "SetSourceFilterSettings"}:
-                    self.calls.append((request, payload))
-                    return {}
-                return super().send(request, data)
-
-        client = FadeClient()
+        client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
         profile = manager.capture_profile("Gameplay")
         profile["transition"] = {"mode": "fade", "duration_ms": 1000, "steps": 8}
@@ -1764,30 +1821,7 @@ class LayoutTests(unittest.TestCase):
         self.assertAlmostEqual(after[0], 0.0, places=6)
         self.assertAlmostEqual(after[-1], 1.0, places=6)
     def test_move_fade_uses_fast_edge_fades_and_invisible_middle(self):
-        class MoveFadeClient(FakeLayoutClient):
-            def __init__(self):
-                super().__init__()
-                self.filters = set()
-
-            def send(self, request, data=None):
-                payload = dict(data or {})
-                if request == "GetSourceFilterList":
-                    self.calls.append((request, payload))
-                    source = str(payload.get("sourceName") or "")
-                    filters = []
-                    if source in self.filters:
-                        filters.append({"filterName": "[SSR] Layout Fade"})
-                    return {"filters": filters}
-                if request == "CreateSourceFilter":
-                    self.calls.append((request, payload))
-                    self.filters.add(str(payload.get("sourceName") or ""))
-                    return {}
-                if request in {"SetSourceFilterEnabled", "SetSourceFilterSettings"}:
-                    self.calls.append((request, payload))
-                    return {}
-                return super().send(request, data)
-
-        client = MoveFadeClient()
+        client = FakeLayoutClient()
         manager = OBSLayoutManager(client)
         profile = manager.capture_profile("Gameplay")
         profile["transition"] = {"mode": "move_fade", "duration_ms": 1000, "steps": 8}
