@@ -257,6 +257,17 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
                     "unexpected_filter_kind",
                 ),
             ),
+            (
+                "connection_port_type",
+                lambda row: row["connection"].__setitem__("port", "4455"),
+            ),
+            (
+                "session_generation_type",
+                lambda row: row.__setitem__(
+                    "creation_session_generation",
+                    "1",
+                ),
+            ),
         )
 
         for label, mutate in mutations:
