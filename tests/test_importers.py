@@ -13,6 +13,10 @@ from stream_state_router.importers import (
     SceneCollectionSnapshot,
 )
 from stream_state_router.obs.client import OBSRequestError
+from stream_state_router.obs.fade_helpers import (
+    LEGACY_LAYOUT_FADE_FILTER,
+    MemoryFadeHelperManifestStore,
+)
 
 
 class _ImportClient:
@@ -178,6 +182,130 @@ class ImporterTests(unittest.TestCase):
                 "source_filter_settings",
                 "scene_item_enabled",
             ],
+        )
+
+    def test_scene_collection_excludes_proven_owned_fade_helper(self):
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Streaming",
+            source_uuid="input-1",
+            source_alias="Game Capture",
+            source_kind="game_capture",
+            session_generation=1,
+        )
+
+        class OwnedHelperClient(_ImportClient):
+            config = SimpleNamespace(
+                enabled=True,
+                host="127.0.0.1",
+                port=4455,
+            )
+
+            def send(self, request, data=None):
+                if (
+                    request == "GetSourceFilterList"
+                    and data
+                    and data.get("sourceName") == "Game Capture"
+                ):
+                    return {
+                        "filters": [
+                            {
+                                "filterName": identity.filter_name,
+                                "filterKind": identity.filter_kind,
+                                "filterEnabled": False,
+                            },
+                            {
+                                "filterName": "Tone Map",
+                                "filterKind": "shader_filter",
+                                "filterEnabled": True,
+                            },
+                        ]
+                    }
+                if request == "GetSourceFilter" and data:
+                    if data.get("filterName") == identity.filter_name:
+                        return {
+                            "filterName": identity.filter_name,
+                            "filterKind": identity.filter_kind,
+                            "filterEnabled": False,
+                            "filterSettings": {"opacity": 1.0},
+                        }
+                return super().send(request, data)
+
+        importer = SceneCollectionImporter(
+            OwnedHelperClient(),
+            fade_helper_store=store,
+        )
+        snapshot = importer.snapshot()
+        helper = next(
+            item for item in snapshot.filters
+            if item.name == identity.filter_name
+        )
+
+        self.assertEqual(helper.helper_status, "owned_helper")
+        actions, skipped = importer.actions_from_snapshot(snapshot)
+        rendered = str(actions)
+        self.assertNotIn(identity.filter_name, rendered)
+        self.assertFalse(
+            any(identity.filter_name in item for item in skipped),
+            skipped,
+        )
+        self.assertIn("Tone Map", rendered)
+
+    def test_scene_collection_reports_unproven_helper_lookalike_without_action(self):
+        class LegacyHelperClient(_ImportClient):
+            config = SimpleNamespace(
+                enabled=True,
+                host="127.0.0.1",
+                port=4455,
+            )
+
+            def send(self, request, data=None):
+                if (
+                    request == "GetSourceFilterList"
+                    and data
+                    and data.get("sourceName") == "Game Capture"
+                ):
+                    return {
+                        "filters": [
+                            {
+                                "filterName": LEGACY_LAYOUT_FADE_FILTER,
+                                "filterKind": "color_filter_v2",
+                                "filterEnabled": True,
+                            }
+                        ]
+                    }
+                if request == "GetSourceFilter" and data:
+                    if data.get("filterName") == LEGACY_LAYOUT_FADE_FILTER:
+                        return {
+                            "filterName": LEGACY_LAYOUT_FADE_FILTER,
+                            "filterKind": "color_filter_v2",
+                            "filterEnabled": True,
+                            "filterSettings": {"opacity": 0.42},
+                        }
+                return super().send(request, data)
+
+        importer = SceneCollectionImporter(
+            LegacyHelperClient(),
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        snapshot = importer.snapshot()
+
+        self.assertEqual(len(snapshot.filters), 1)
+        self.assertEqual(
+            snapshot.filters[0].helper_status,
+            "ambiguous_helper",
+        )
+        self.assertTrue(
+            any("non prouvé" in warning for warning in snapshot.warnings),
+            snapshot.warnings,
+        )
+        actions, skipped = importer.actions_from_snapshot(snapshot)
+        self.assertNotIn(LEGACY_LAYOUT_FADE_FILTER, str(actions))
+        self.assertTrue(
+            any("helper-like ambigu" in item for item in skipped),
+            skipped,
         )
 
     def test_scene_collection_ignores_expected_non_audio_604(self):
