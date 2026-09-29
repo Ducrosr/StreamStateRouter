@@ -1710,6 +1710,56 @@ class LayoutTests(unittest.TestCase):
             any(request == "CreateSourceFilter" for request, _ in client.calls)
         )
 
+    def test_contradictory_pending_identity_blocks_normal_helper_mutation(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        manager.import_pending_fade_cleanup(
+            (
+                {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                    "helper_id": identity.helper_id,
+                    "source_uuid": identity.source_uuid,
+                    "source_kind": identity.source_kind,
+                    "connection": {
+                        "host": identity.connection_host,
+                        "port": identity.connection_port,
+                    },
+                    "filter_name": identity.filter_name + "-wrong",
+                    "filter_kind": identity.filter_kind,
+                    "cleanup_action": "neutralize_disable",
+                },
+            )
+        )
+        client.calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "Obligation fade contradictoire"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
     def test_create_response_lost_is_observed_without_second_create(self):
         class LostCreateResponseClient(FakeLayoutClient):
             def __init__(self):
