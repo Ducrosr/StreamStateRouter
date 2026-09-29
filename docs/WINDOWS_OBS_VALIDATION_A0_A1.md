@@ -1,6 +1,9 @@
-# Windows / OBS validation — A0 freeze and A1 gate
+# Windows / OBS validation — A0 closed / A1 checkpoint
 
-This checklist is intentionally operational. It does not authorize A1 before A0 approval.
+This checklist is intentionally operational.
+
+A0 is closed by Astra. A1 may be validated, but must remain unmerged and must not be
+declared closed before the Astra A1 checkpoint.
 
 ## A0 current reference
 
@@ -145,3 +148,148 @@ Required:
 - worker stops cleanly or reports incomplete shutdown
 - durable obligations survive
 - no residual opacity after recovery
+
+
+## A1 implementation validation workflow
+
+PR:
+
+`#152 — A1: durable fade helper ownership and safe recovery`
+
+Branch:
+
+`feat/a1-helper-recovery`
+
+Base:
+
+`6a288052001cd01cf7283251bc506d6219ea721c`
+
+Before a real-OBS run, replace `<A1_GREEN_SHA>` below with the exact SHA whose
+Tests + CodeQL are green. Never validate an older desktop executable by accident.
+
+### Sync exact SHA
+
+```powershell
+Set-Location "C:\Streaming\StreamStateRouter\Source"
+
+git fetch origin
+git switch --detach <A1_GREEN_SHA>
+git rev-parse HEAD
+```
+
+Expected output must be exactly `<A1_GREEN_SHA>`.
+
+### Rebuild executable
+
+```powershell
+Set-Location "C:\Streaming\StreamStateRouter\Source"
+
+Remove-Item ".\build" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item ".\dist"  -Recurse -Force -ErrorAction SilentlyContinue
+
+.\.venv\Scripts\python.exe -m PyInstaller `
+    --clean `
+    --noconfirm `
+    .\StreamStateRouter.spec
+
+Copy-Item `
+    ".\dist\StreamStateRouter.exe" `
+    "$env:USERPROFILE\Desktop\StreamStateRouter-A1.exe" `
+    -Force
+
+Get-Item "$env:USERPROFILE\Desktop\StreamStateRouter-A1.exe" |
+    Select-Object FullName, Length, LastWriteTime
+```
+
+Close any older SSR instance before launching the A1 build.
+
+### Files to preserve during crash/restart scenarios
+
+User-data directory:
+
+`%APPDATA%\StreamStateRouter`
+
+Relevant A1 evidence:
+
+- `runtime.json`
+- `helper-manifest.json`
+- latest SSR logs
+- latest OBS log
+- exact Git SHA
+- approximate local time of the event
+
+Do not edit either JSON file during a scenario.
+
+### Expected A1 helper lifecycle
+
+Normal owned input helper:
+
+1. manifest identity exists;
+2. cleanup obligation is durable before temporary mutation;
+3. filter name is `[SSR] Layout Fade::<helper_id>`;
+4. temporary opacity may change during transition;
+5. cleanup returns opacity to `1`;
+6. readback verifies it;
+7. helper is disabled;
+8. readback verifies disabled;
+9. only then is the cleanup obligation removed.
+
+A helper may remain present in OBS for safe reuse. A1 does not automatically delete it.
+
+### Fast non-destructive smoke test
+
+Use one disposable isolated input.
+
+1. Apply a layout using `fade`.
+2. Apply a second layout using `move_fade`.
+3. Verify requested geometry and visibility.
+4. Inspect the input filters after each transition.
+
+Expected after settling:
+
+- at most one owned generated fade helper for that qualified source;
+- opacity = 1;
+- enabled = false;
+- no pending `layout_fade` obligation in `runtime.json`.
+
+### Composite regression check
+
+For one nested scene and one group, run both transitions.
+
+Expected:
+
+- geometry/visibility follow target;
+- no generated fade helper on the composite;
+- no source-level opacity mutation;
+- no persistent invisibility.
+
+### Crash test safety
+
+Use a disposable collection/profile only.
+
+Never kill SSR during a production stream for validation.
+
+For the controlled kill/restart test:
+
+1. verify a live `layout_fade` obligation exists;
+2. kill SSR;
+3. do not touch OBS/filter state;
+4. copy `runtime.json` and `helper-manifest.json` as evidence;
+5. restart the same A1 executable;
+6. let recovery settle;
+7. verify opacity = 1 and helper disabled;
+8. verify the obligation disappears only after recovery.
+
+### Stop conditions
+
+Stop the test and preserve evidence if:
+
+- a composite receives a generated helper;
+- more than one generated helper appears for one qualified input;
+- recovery emits a new Create;
+- opacity remains non-neutral after recovery;
+- source UUID changed but SSR still mutates the old ownership target;
+- collection changes and cleanup still mutates the previous collection;
+- `runtime.json` or `helper-manifest.json` becomes unreadable.
+
+Do not manually “repair” the state before evidence is copied.
