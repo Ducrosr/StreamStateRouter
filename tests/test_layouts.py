@@ -745,14 +745,19 @@ class LayoutTests(unittest.TestCase):
             for mode in ("fade", "move_fade"):
                 with self.subTest(label=label, mode=mode):
                     class PartialSceneClient(FakeLayoutClient):
-                        def send(self, request, data=None):
+                        def send(
+                            self,
+                            request,
+                            data=None,
+                            _invalid_response=invalid_response,
+                        ):
                             payload = dict(data or {})
                             if (
                                 request == "GetSceneItemList"
                                 and payload.get("sceneName") == "Pause"
                             ):
                                 self.calls.append((request, payload))
-                                return invalid_response
+                                return _invalid_response
                             return super().send(request, data)
 
                     client = PartialSceneClient()
@@ -803,7 +808,12 @@ class LayoutTests(unittest.TestCase):
             for mode in ("fade", "move_fade"):
                 with self.subTest(response=invalid_response, mode=mode):
                     class PartialGroupClient(FakeLayoutClient):
-                        def send(self, request, data=None):
+                        def send(
+                            self,
+                            request,
+                            data=None,
+                            _invalid_response=invalid_response,
+                        ):
                             payload = dict(data or {})
                             if (
                                 request == "GetSceneItemList"
@@ -825,7 +835,7 @@ class LayoutTests(unittest.TestCase):
                                 and payload.get("sceneName") == "Broken Group"
                             ):
                                 self.calls.append((request, payload))
-                                return invalid_response
+                                return _invalid_response
                             return super().send(request, data)
 
                     client = PartialGroupClient()
