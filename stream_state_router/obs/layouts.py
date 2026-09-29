@@ -656,6 +656,34 @@ class OBSLayoutManager:
                 legacy=False,
             )
             self._pending_fade_cleanup[key] = pending
+        else:
+            expected = (
+                identity.collection,
+                identity.helper_id,
+                identity.source_uuid,
+                identity.source_kind,
+                identity.connection_host,
+                identity.connection_port,
+                identity.filter_name,
+                identity.filter_kind,
+                "neutralize_disable",
+            )
+            observed = (
+                pending.collection,
+                pending.helper_id,
+                pending.source_uuid,
+                pending.source_kind,
+                pending.connection_host,
+                pending.connection_port,
+                pending.filter_name,
+                pending.filter_kind,
+                pending.cleanup_action,
+            )
+            if pending.legacy or observed != expected:
+                raise RuntimeError(
+                    f"Obligation fade contradictoire pour {identity.source_alias}; "
+                    "mutation du helper refusée"
+                )
         if not pending.persisted:
             self._notify_pending_cleanup_changed()
             pending.persisted = True
