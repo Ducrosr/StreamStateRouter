@@ -674,6 +674,17 @@ class OBSLayoutManager:
         self._active_fade_helpers.pop(pending.source, None)
         self._active_fade_sessions.pop(pending.source, None)
 
+    def _discard_unmutated_fade_obligation(
+        self,
+        identity: FadeHelperIdentity,
+    ) -> None:
+        """Remove write-ahead state when preparation failed before OBS mutation."""
+        key = (identity.collection, identity.helper_id)
+        pending = self._pending_fade_cleanup.get(key)
+        if pending is None:
+            return
+        self._remove_pending_fade(key)
+
     def _prepare_fade_filter(
         self,
         source: str,
@@ -731,118 +742,164 @@ class OBSLayoutManager:
         )
         # The crash obligation must be durable before any Create/Enable/Settings.
         self._ensure_pending_fade(identity)
-
-        rows = self._fade_filter_rows(
-            source_alias,
-            session_generation=session_generation,
-        )
-        expected_rows = [
-            row
-            for row in rows
-            if str(row.get("filterName") or "").strip() == identity.filter_name
-        ]
-        if len(expected_rows) > 1:
-            raise RuntimeError(f"Helper de fade dupliqué pour {source_alias}")
-
-        if not expected_rows:
-            lookalikes = [
-                str(row.get("filterName") or "").strip()
-                for row in rows
-                if is_layout_fade_name(row.get("filterName"))
-            ]
-            if lookalikes:
-                raise RuntimeError(
-                    f"Helper de fade ambigu pour {source_alias}: "
-                    + ", ".join(sorted(set(lookalikes), key=str.casefold))
-                )
-            try:
-                self._fade_send(
-                    "CreateSourceFilter",
-                    {
-                        "sourceName": source_alias,
-                        "filterName": identity.filter_name,
-                        "filterKind": identity.filter_kind,
-                        "filterSettings": {"opacity": 1.0},
-                    },
-                    session_generation=session_generation,
-                )
-            except Exception:
-                # A transport loss can make Create outcome uncertain. Do not
-                # issue a second Create. If the session changed, defer recovery.
-                if int(getattr(self.client, "session_generation", 0) or 0) != session_generation:
-                    raise
-                rows = self._fade_filter_rows(
-            source_alias,
-            session_generation=session_generation,
-        )
-                expected_rows = [
-                    row
-                    for row in rows
-                    if str(row.get("filterName") or "").strip() == identity.filter_name
-                ]
-                if len(expected_rows) != 1:
-                    raise
-            else:
-                rows = self._fade_filter_rows(
-            source_alias,
-            session_generation=session_generation,
-        )
-                expected_rows = [
-                    row
-                    for row in rows
-                    if str(row.get("filterName") or "").strip() == identity.filter_name
-                ]
-                if len(expected_rows) != 1:
-                    raise RuntimeError(
-                        f"CreateSourceFilter non vérifié pour {source_alias}"
-                    )
-
-        kind, enabled, settings = self._fade_filter_state(
-            source_alias,
-            identity.filter_name,
-            session_generation=session_generation,
-        )
-        if kind != identity.filter_kind:
-            raise RuntimeError(
-                f"Kind du helper incompatible pour {source_alias}: {kind}"
-            )
-        if not self._fade_helper_store.settings_compatible(identity, settings):
-            raise RuntimeError(
-                f"Helper de fade modifié extérieurement pour {source_alias}"
-            )
-        if identity.state != "observed":
-            identity = self._fade_helper_store.mark_observed(
-                identity.helper_id,
-                source_alias=source_alias,
-                non_temporary_settings=settings,
-            )
-
-        if enabled is not True:
-            self._fade_send(
-                "SetSourceFilterEnabled",
-                {
-                    "sourceName": source_alias,
-                    "filterName": identity.filter_name,
-                    "filterEnabled": True,
-                },
+        effect_started = False
+        try:
+            rows = self._fade_filter_rows(
+                source_alias,
                 session_generation=session_generation,
             )
+            expected_rows = [
+                row
+                for row in rows
+                if str(row.get("filterName") or "").strip()
+                == identity.filter_name
+            ]
+            if len(expected_rows) > 1:
+                raise RuntimeError(
+                    f"Helper de fade dupliqué pour {source_alias}"
+                )
+
+            if not expected_rows:
+                lookalikes = [
+                    str(row.get("filterName") or "").strip()
+                    for row in rows
+                    if is_layout_fade_name(row.get("filterName"))
+                ]
+                if lookalikes:
+                    raise RuntimeError(
+                        f"Helper de fade ambigu pour {source_alias}: "
+                        + ", ".join(
+                            sorted(set(lookalikes), key=str.casefold)
+                        )
+                    )
+
+                # From this point on a transport failure may hide an OBS-side
+                # effect, so the durable cleanup obligation must remain.
+                effect_started = True
+                try:
+                    self._fade_send(
+                        "CreateSourceFilter",
+                        {
+                            "sourceName": source_alias,
+                            "filterName": identity.filter_name,
+                            "filterKind": identity.filter_kind,
+                            "filterSettings": {"opacity": 1.0},
+                        },
+                        session_generation=session_generation,
+                    )
+                except Exception:
+                    # A response loss can make Create outcome uncertain.
+                    # Observe the generated identity once, never issue a second
+                    # Create while the outcome is uncertain.
+                    if (
+                        int(
+                            getattr(
+                                self.client,
+                                "session_generation",
+                                0,
+                            )
+                            or 0
+                        )
+                        != session_generation
+                    ):
+                        raise
+                    rows = self._fade_filter_rows(
+                        source_alias,
+                        session_generation=session_generation,
+                    )
+                    expected_rows = [
+                        row
+                        for row in rows
+                        if str(row.get("filterName") or "").strip()
+                        == identity.filter_name
+                    ]
+                    if len(expected_rows) != 1:
+                        raise
+                else:
+                    rows = self._fade_filter_rows(
+                        source_alias,
+                        session_generation=session_generation,
+                    )
+                    expected_rows = [
+                        row
+                        for row in rows
+                        if str(row.get("filterName") or "").strip()
+                        == identity.filter_name
+                    ]
+                    if len(expected_rows) != 1:
+                        raise RuntimeError(
+                            f"CreateSourceFilter non vérifié pour "
+                            f"{source_alias}"
+                        )
+
             kind, enabled, settings = self._fade_filter_state(
                 source_alias,
                 identity.filter_name,
+                session_generation=session_generation,
             )
-            if kind != identity.filter_kind or enabled is not True:
+            if kind != identity.filter_kind:
                 raise RuntimeError(
-                    f"Activation du helper non vérifiée pour {source_alias}"
+                    f"Kind du helper incompatible pour {source_alias}: "
+                    f"{kind}"
                 )
-            if not self._fade_helper_store.settings_compatible(identity, settings):
+            if not self._fade_helper_store.settings_compatible(
+                identity,
+                settings,
+            ):
                 raise RuntimeError(
-                    f"Helper de fade modifié pendant activation pour {source_alias}"
+                    f"Helper de fade modifié extérieurement pour "
+                    f"{source_alias}"
+                )
+            if identity.state != "observed":
+                identity = self._fade_helper_store.mark_observed(
+                    identity.helper_id,
+                    source_alias=source_alias,
+                    non_temporary_settings=settings,
                 )
 
-        self._active_fade_helpers[source_alias] = identity
-        self._active_fade_sessions[source_alias] = session_generation
-        return identity
+            if enabled is not True:
+                effect_started = True
+                self._fade_send(
+                    "SetSourceFilterEnabled",
+                    {
+                        "sourceName": source_alias,
+                        "filterName": identity.filter_name,
+                        "filterEnabled": True,
+                    },
+                    session_generation=session_generation,
+                )
+                kind, enabled, settings = self._fade_filter_state(
+                    source_alias,
+                    identity.filter_name,
+                    session_generation=session_generation,
+                )
+                if kind != identity.filter_kind or enabled is not True:
+                    raise RuntimeError(
+                        f"Activation du helper non vérifiée pour "
+                        f"{source_alias}"
+                    )
+                if not self._fade_helper_store.settings_compatible(
+                    identity,
+                    settings,
+                ):
+                    raise RuntimeError(
+                        f"Helper de fade modifié pendant activation pour "
+                        f"{source_alias}"
+                    )
+
+            self._active_fade_helpers[source_alias] = identity
+            self._active_fade_sessions[source_alias] = session_generation
+            return identity
+        except Exception as exc:
+            if not effect_started:
+                try:
+                    self._discard_unmutated_fade_obligation(identity)
+                except Exception as discard_exc:
+                    raise RuntimeError(
+                        f"{exc}; retrait du journal pré-mutation impossible: "
+                        f"{discard_exc}"
+                    ) from exc
+            raise
 
     def _set_source_opacity(self, source: str, opacity: float) -> None:
         identity = self._active_fade_helpers.get(str(source))
