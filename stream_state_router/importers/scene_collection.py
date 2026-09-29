@@ -356,6 +356,7 @@ class SceneCollectionImporter:
         input_ref,
         filter_name: str,
         filter_kind: str,
+        filter_settings: Mapping[str, Any] | None,
         warnings: list[str],
     ) -> str:
         if not is_layout_fade_name(filter_name):
@@ -391,6 +392,21 @@ class SceneCollectionImporter:
             )
             return "ambiguous_helper"
         if owned is not None:
+            if filter_settings is None:
+                warnings.append(
+                    f"Helper SSR prouvé mais settings non vérifiables : "
+                    f"{input_ref.name}/{filter_name}"
+                )
+                return "ambiguous_helper"
+            if not self._fade_helper_store.settings_compatible(
+                owned,
+                filter_settings,
+            ):
+                warnings.append(
+                    f"Helper SSR modifié extérieurement : "
+                    f"{input_ref.name}/{filter_name}"
+                )
+                return "ambiguous_helper"
             return "owned_helper"
         warnings.append(
             f"Filtre ressemblant à un helper SSR mais non prouvé : "
@@ -480,21 +496,25 @@ class SceneCollectionImporter:
                 identity = (source, ref.name)
                 if identity in filters:
                     continue
+                filter_settings_for_ownership: Mapping[str, Any] | None
                 try:
                     details = self.reader.filter_details(source, ref.name)
                     settings = dict(details.settings)
                     filter_ref = details.filter
+                    filter_settings_for_ownership = settings
                 except OBSRequestError as exc:
                     warnings.append(
                         f"Filter '{source}/{ref.name}' settings unreadable: {exc}"
                     )
                     settings = {}
                     filter_ref = ref
+                    filter_settings_for_ownership = None
                 helper_status = self._classify_helper_filter(
                     collection=catalog.collection,
                     input_ref=input_refs.get(source),
                     filter_name=ref.name,
                     filter_kind=filter_ref.kind,
+                    filter_settings=filter_settings_for_ownership,
                     warnings=warnings,
                 )
                 filters[identity] = ImportedFilter(
