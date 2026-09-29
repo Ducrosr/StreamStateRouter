@@ -1570,6 +1570,78 @@ class LayoutTests(unittest.TestCase):
         self.assertIsNotNone(store.get(identity.helper_id))
         self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
 
+    def test_missing_input_uuid_refuses_helper_before_persistence_or_create(self):
+        client = FakeLayoutClient()
+        client.input_uuids["[Webcam] Avatar"] = ""
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        journal_calls = []
+        manager.set_pending_cleanup_changed(
+            lambda: journal_calls.append("journal")
+        )
+        client.calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "Identité d'input OBS incomplète"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertEqual(store.entries(), ())
+        self.assertEqual(journal_calls, [])
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_duplicate_input_identity_refuses_helper_before_persistence(self):
+        class DuplicateInputClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                if request == "GetInputList":
+                    self.calls.append((request, dict(data or {})))
+                    row = {
+                        "inputName": "[Webcam] Avatar",
+                        "inputUuid": "uuid-duplicate",
+                        "inputKind": "image_source",
+                    }
+                    return {"inputs": [dict(row), dict(row)]}
+                return super().send(request, data)
+
+        client = DuplicateInputClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        with self.assertRaisesRegex(RuntimeError, "non résolu de façon unique"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertEqual(store.entries(), ())
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_active_fade_stops_when_obs_session_changes_mid_write(self):
+        class SessionChangeClient(FakeLayoutClient):
+            change_session_on_opacity = False
+
+            def send(self, request, data=None):
+                result = super().send(request, data)
+                if request == "SetSourceFilterSettings" and self.change_session_on_opacity:
+                    self.change_session_on_opacity = False
+                    self.session_generation += 1
+                return result
+
+        client = SessionChangeClient()
+        client.session_generation = 7
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+        manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+        client.change_session_on_opacity = True
+
+        with self.assertRaisesRegex(RuntimeError, "Session OBS modifiée"):
+            manager._set_source_opacity("[Webcam] Avatar", 0.25)
+
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
     def test_manifest_then_journal_precede_first_filter_mutation(self):
         events = []
 
