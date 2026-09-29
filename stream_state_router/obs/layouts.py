@@ -3449,12 +3449,15 @@ class OBSLayoutManager:
                     except Exception as exc:
                         # The opacity mutation may have reached OBS even when its
                         # response was lost. Keep the pre-armed neutralization
-                        # obligation, skip this source's fade-in, and degrade to a
-                        # warning rather than aborting the whole layout transition.
+                        # obligation, skip this source's fade-in, and fall back to
+                        # the direct visibility target. Cleanup will neutralize and
+                        # disable the helper before the transition is considered
+                        # settled.
                         warnings.append(
                             f"Fondu d'apparition incertain pour {prepared['source']}: {exc}"
                         )
                         fade_in.pop(prepared["source"], None)
+                        fallback.append(prepared)
                 else:
                     self._set_enabled(prepared["container"], prepared["source"], False)
 
@@ -3577,7 +3580,11 @@ class OBSLayoutManager:
             except Exception as exc:
                 warnings.append(f"Fondu indisponible pour {source}: {exc}")
                 fallback_visibility.add(index)
-                touched_fades.discard(source)
+                # If preparation succeeded and a later opacity/visibility call
+                # became uncertain, the helper may already have affected OBS.
+                # Keep the source in touched_fades so immediate cleanup still
+                # neutralizes/disables it. A preparation failure before success
+                # never added the source to touched_fades in the first place.
                 if target_visible:
                     self._set_enabled(
                         prepared["container"], prepared["source"], True
