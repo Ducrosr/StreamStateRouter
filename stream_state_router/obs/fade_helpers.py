@@ -95,7 +95,16 @@ class FadeHelperIdentity:
         filter_kind = _text(filter_ref.get("kind"))
         created_at = _text(raw.get("created_at"))
         version = _text(raw.get("created_with_version"))
-        session_generation = _non_negative_int(raw.get("creation_session_generation"))
+        raw_session_generation = raw.get("creation_session_generation")
+        if (
+            isinstance(raw_session_generation, bool)
+            or not isinstance(raw_session_generation, int)
+            or raw_session_generation < 0
+        ):
+            raise FadeHelperManifestError(
+                "helper creation session generation is invalid"
+            )
+        session_generation = raw_session_generation
         state = _text(raw.get("state")) or "prepared"
         non_temporary = raw.get("non_temporary_settings")
         if non_temporary is None:
@@ -174,12 +183,6 @@ def _positive_int(value: object) -> int:
     return value if value > 0 else 0
 
 
-def _non_negative_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    return max(0, value)
-
-
 def _normalize_host(value: object) -> str:
     return _text(value).casefold()
 
@@ -244,6 +247,14 @@ class FadeHelperManifestStore:
         source_uuid = _text(source_uuid)
         source_alias = _text(source_alias)
         source_kind = _text(source_kind)
+        if (
+            isinstance(session_generation, bool)
+            or not isinstance(session_generation, int)
+            or session_generation < 0
+        ):
+            raise FadeHelperManifestError(
+                "invalid OBS session generation for durable fade helper"
+            )
         if not all((host, port, collection, source_uuid, source_alias, source_kind)):
             raise FadeHelperManifestError(
                 "insufficient target identity for durable fade helper"
@@ -295,7 +306,7 @@ class FadeHelperManifestStore:
                 filter_kind=LAYOUT_FADE_FILTER_KIND,
                 created_at=datetime.now(timezone.utc).isoformat(),
                 created_with_version=str(__version__),
-                creation_session_generation=max(0, int(session_generation or 0)),
+                creation_session_generation=session_generation,
                 state="prepared",
                 non_temporary_settings={},
             )
