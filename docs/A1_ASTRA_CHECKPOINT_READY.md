@@ -6,16 +6,16 @@
 - Lot : **A1 — durable fade helper ownership / safe recovery**
 - Base A0 approuvée : `6a288052001cd01cf7283251bc506d6219ea721c`
 - Branche : `feat/a1-helper-recovery`
-- HEAD à auditer : `882b8a44b2a49f54fa6b546959466abadff759ae`
+- HEAD à auditer : `0682913ed2bd847fa71db6e0bb37d2ccd037eb45`
 - PR : **#152**, draft
 - Ne pas merger / ne pas rendre ready avant verdict Astra + validation réelle Windows/OBS.
 
 ## CI du HEAD exact
 
-GitHub Actions sur `882b8a44b2a49f54fa6b546959466abadff759ae` :
+GitHub Actions sur `0682913ed2bd847fa71db6e0bb37d2ccd037eb45` :
 
 - Tests / windows : **SUCCESS**
-  - **670 tests**
+  - **677 tests**
   - **1 skipped**
   - Ruff : **SUCCESS**
 - Tests / streamdeck : **SUCCESS**
@@ -25,8 +25,8 @@ GitHub Actions sur `882b8a44b2a49f54fa6b546959466abadff759ae` :
 
 Runs :
 
-- Tests : `36645362689`
-- CodeQL : `36645362775`
+- Tests : `36646679491`
+- CodeQL : `36646679458`
 
 ## Diff A1 vs A0
 
@@ -113,6 +113,12 @@ Les cas ambigus conservent l'obligation et ne mutent pas OBS :
   - écriture refusée fail-closed ;
   - aucun effet temporaire ne doit démarrer sur un journal tronqué.
 
+### Préparation / réutilisation normale
+
+- un helper réutilisable est remis à `opacity=1` avec readback avant réactivation ;
+- une réponse perdue pendant cette neutralisation est résolue par observation, sans seconde écriture aveugle ;
+- en `move_fade`, toute préparation tentée reste éligible au cleanup immédiat si un effet OBS devient incertain.
+
 ### Réponses perdues
 
 - Create appliqué/réponse perdue : observation de l'identité générée, jamais de second Create.
@@ -128,7 +134,9 @@ Les cas ambigus conservent l'obligation et ne mutent pas OBS :
 
 ### Capture/import
 
-- helper prouvé : exclu des réglages métier ;
+- helper prouvé et settings compatibles : exclu des réglages métier ;
+- helper prouvé mais réglages non temporaires modifiés : ambigu + warning ;
+- helper prouvé mais settings illisibles : ambigu + warning ;
 - filtre utilisateur : conservé ;
 - lookalike ambigu : preuve conservée + warning, jamais converti automatiquement en action exécutable ;
 - le current-state capture réutilise la même classification.
@@ -181,6 +189,19 @@ Un ancien `RuntimeMarker.start()` pouvait perdre un journal qu'il ne comprenait 
 ### Fade-in avec réponse perdue
 
 Une réponse perdue après application réelle de `opacity=0` pouvait laisser le target hidden en mode fade, ou échapper au cleanup immédiat en move_fade. Corrigé et couvert en transition complète.
+
+
+### Preuve d'ownership trop permissive
+
+Le manifeste acceptait des combinaisons contradictoires `helper_id/purpose/filter_name/filter_kind` et certaines identités numériques pouvaient être coercées depuis des types JSON inattendus. Le schéma A1 exige maintenant l'identité générée canonique et des types persistés stricts.
+
+### Import d'un helper modifié
+
+Un helper historiquement prouvé mais dont les réglages non temporaires avaient été modifiés pouvait encore être classé owned pendant capture/import. Il est désormais mis en quarantaine comme ambigu et signalé.
+
+### Réutilisation avec opacité réservée non neutre
+
+Un helper disabled mais laissé avec une ancienne opacité pouvait être réactivé avant neutralisation. La préparation garantit désormais `opacity=1` + readback avant enable.
 
 ## Point volontairement laissé conservateur pour Astra
 
