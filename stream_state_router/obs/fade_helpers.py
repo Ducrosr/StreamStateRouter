@@ -125,6 +125,26 @@ class FadeHelperIdentity:
             )
         if state not in {"prepared", "observed"}:
             raise FadeHelperManifestError(f"unknown helper state: {state}")
+        try:
+            parsed_helper_id = uuid.UUID(hex=helper_id)
+        except (ValueError, AttributeError) as exc:
+            raise FadeHelperManifestError("helper_id is not a generated UUID") from exc
+        if (
+            parsed_helper_id.version != 4
+            or parsed_helper_id.hex != helper_id
+        ):
+            raise FadeHelperManifestError("helper_id is not a canonical UUID4 hex value")
+        if purpose != LAYOUT_FADE_PURPOSE:
+            raise FadeHelperManifestError(f"unsupported helper purpose: {purpose}")
+        expected_filter_name = f"{LAYOUT_FADE_FILTER_PREFIX}{helper_id}"
+        if filter_name != expected_filter_name:
+            raise FadeHelperManifestError(
+                "helper filter name contradicts helper_id"
+            )
+        if filter_kind != LAYOUT_FADE_FILTER_KIND:
+            raise FadeHelperManifestError(
+                f"unsupported layout fade filter kind: {filter_kind}"
+            )
         return cls(
             helper_id=helper_id,
             purpose=purpose,
