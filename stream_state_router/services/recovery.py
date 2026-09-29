@@ -17,9 +17,13 @@ class RuntimeMarkerFormatError(RuntimeError):
     """runtime.json cannot be understood safely by this SSR version."""
 
 
+def _strict_text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | None:
     item = dict(raw)
-    kind = str(item.get("kind") or "").strip().casefold()
+    kind = _strict_text(item.get("kind")).casefold()
     if not kind:
         # Legacy runtime markers only persisted activation hides.
         if isinstance(item.get("target"), Mapping):
@@ -32,13 +36,13 @@ def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | No
         item["kind"] = "activation_hide"
         return item
     if kind == "layout_fade":
-        source = str(item.get("source") or "").strip()
-        collection = str(item.get("collection") or "").strip()
+        source = _strict_text(item.get("source"))
+        collection = _strict_text(item.get("collection"))
         if not source or not collection:
             return None
         item["kind"] = "layout_fade"
 
-        helper_id = str(item.get("helper_id") or "").strip()
+        helper_id = _strict_text(item.get("helper_id"))
         if not helper_id:
             # Schema v2 only knew collection + source. Preserve it for
             # diagnostics/transfer, but never promote it into helper ownership.
@@ -48,17 +52,17 @@ def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | No
         connection = item.get("connection")
         if not isinstance(connection, Mapping):
             return None
-        host = str(connection.get("host") or "").strip()
+        host = _strict_text(connection.get("host"))
         try:
             port = int(connection.get("port", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             return None
         required = (
-            str(item.get("source_uuid") or "").strip(),
-            str(item.get("source_kind") or "").strip(),
-            str(item.get("filter_name") or "").strip(),
-            str(item.get("filter_kind") or "").strip(),
-            str(item.get("cleanup_action") or "").strip(),
+            _strict_text(item.get("source_uuid")),
+            _strict_text(item.get("source_kind")),
+            _strict_text(item.get("filter_name")),
+            _strict_text(item.get("filter_kind")),
+            _strict_text(item.get("cleanup_action")),
         )
         if not host or port <= 0 or not all(required):
             return None
