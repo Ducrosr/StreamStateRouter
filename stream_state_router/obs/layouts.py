@@ -60,6 +60,7 @@ class PendingFadeCleanup:
     filter_kind: str = ""
     cleanup_action: str = "neutralize_disable"
     legacy: bool = False
+    ambiguous: bool = False
     persisted: bool = False
     attempts: int = 0
     last_error: str = ""
@@ -561,6 +562,7 @@ class OBSLayoutManager:
                         "filter_kind": item.filter_kind,
                         "cleanup_action": item.cleanup_action,
                         "legacy": False,
+                        "ambiguous": bool(item.ambiguous),
                     }
                 )
             rows.append(row)
@@ -604,6 +606,7 @@ class OBSLayoutManager:
                         raw.get("cleanup_action") or "neutralize_disable"
                     ).strip(),
                     legacy=legacy,
+                    ambiguous=bool(raw.get("ambiguous", False)),
                     persisted=True,
                     attempts=max(0, int(raw.get("attempts", 0) or 0)),
                     last_error=str(raw.get("last_error") or ""),
@@ -614,6 +617,29 @@ class OBSLayoutManager:
                 collection,
                 helper_id if helper_id else f"legacy:{source}",
             )
+            previous = self._pending_fade_cleanup.get(key)
+            if previous is not None:
+                same_identity = (
+                    previous.source == pending.source
+                    and previous.collection == pending.collection
+                    and previous.helper_id == pending.helper_id
+                    and previous.source_uuid == pending.source_uuid
+                    and previous.source_kind == pending.source_kind
+                    and previous.connection_host == pending.connection_host
+                    and previous.connection_port == pending.connection_port
+                    and previous.filter_name == pending.filter_name
+                    and previous.filter_kind == pending.filter_kind
+                    and previous.cleanup_action == pending.cleanup_action
+                    and previous.legacy == pending.legacy
+                )
+                previous.ambiguous = True
+                previous.last_error = (
+                    "obligation fade dupliquée"
+                    if same_identity
+                    else "obligation fade contradictoire dupliquée"
+                )
+                imported += 1
+                continue
             self._pending_fade_cleanup[key] = pending
             imported += 1
         return imported
@@ -679,7 +705,7 @@ class OBSLayoutManager:
                 pending.filter_kind,
                 pending.cleanup_action,
             )
-            if pending.legacy or observed != expected:
+            if pending.legacy or pending.ambiguous or observed != expected:
                 raise RuntimeError(
                     f"Obligation fade contradictoire pour {identity.source_alias}; "
                     "mutation du helper refusée"
@@ -997,6 +1023,12 @@ class OBSLayoutManager:
             return (
                 False,
                 f"{pending.source}: obligation fade legacy non prouvée; "
+                "aucune mutation automatique",
+            )
+        if pending.ambiguous:
+            return (
+                False,
+                f"{pending.source}: obligation fade dupliquée ou contradictoire; "
                 "aucune mutation automatique",
             )
         if pending.cleanup_action != "neutralize_disable":
