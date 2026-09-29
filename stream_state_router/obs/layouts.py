@@ -820,13 +820,37 @@ class OBSLayoutManager:
 
     @staticmethod
     def _scene_item_source_kind(raw: Mapping[str, Any]) -> str:
-        """Classify one *current* OBS scene item without trusting profile metadata."""
-        if bool(raw.get("isGroup", False)):
+        """Classify one *current* OBS scene item without trusting profile metadata.
+
+        Fade admission is deliberately stricter than general OBS discovery. A
+        scene-like source can also be a group, so an absent or malformed isGroup
+        discriminator must not silently turn a group into an ordinary scene.
+        """
+        raw_is_group = raw.get("isGroup") if "isGroup" in raw else None
+        if raw_is_group is not None and not isinstance(raw_is_group, bool):
+            return "unknown"
+        if raw_is_group is True:
             return "group"
-        source_type = str(raw.get("sourceType") or "").strip()
-        input_kind = str(raw.get("inputKind") or "").strip()
-        if source_type == "OBS_SOURCE_TYPE_SCENE" or input_kind == "scene":
+
+        raw_source_type = raw.get("sourceType")
+        raw_input_kind = raw.get("inputKind")
+        if raw_source_type is not None and not isinstance(raw_source_type, str):
+            return "unknown"
+        if raw_input_kind is not None and not isinstance(raw_input_kind, str):
+            return "unknown"
+
+        source_type = (raw_source_type or "").strip()
+        input_kind = (raw_input_kind or "").strip()
+
+        if input_kind == "scene":
             return "scene"
+        if source_type == "OBS_SOURCE_TYPE_SCENE":
+            # OBS groups are scene-like sources too. Without an explicit false
+            # isGroup flag (or the explicit inputKind=scene above), the metadata
+            # is ambiguous and cannot authorize a source-level fade.
+            if raw_is_group is False:
+                return "scene"
+            return "unknown"
         if source_type == "OBS_SOURCE_TYPE_INPUT" or (
             input_kind and input_kind != "scene"
         ):
@@ -892,7 +916,11 @@ class OBSLayoutManager:
             if not isinstance(raw_scene, Mapping):
                 complete = False
                 continue
-            scene_name = str(raw_scene.get("sceneName") or "").strip()
+            raw_scene_name = raw_scene.get("sceneName")
+            if not isinstance(raw_scene_name, str):
+                complete = False
+                continue
+            scene_name = raw_scene_name.strip()
             if not scene_name:
                 complete = False
                 continue
@@ -900,6 +928,7 @@ class OBSLayoutManager:
         if not scene_names:
             return current_types, source_occurrences, False
 
+        scene_name_set = set(scene_names)
         pending_groups: set[str] = set()
 
         def inventory_rows(
@@ -917,7 +946,8 @@ class OBSLayoutManager:
                 if not isinstance(raw, Mapping):
                     valid = False
                     continue
-                source = str(raw.get("sourceName") or "").strip()
+                raw_source = raw.get("sourceName")
+                source = raw_source.strip() if isinstance(raw_source, str) else ""
                 kind = self._scene_item_source_kind(raw)
                 if not source or kind == "unknown":
                     # A row that cannot be identified may hide another occurrence
@@ -930,7 +960,11 @@ class OBSLayoutManager:
         def collect(container: str, rows: Iterable[Mapping[str, Any]]) -> None:
             nonlocal complete
             for raw in rows:
-                source = str(raw.get("sourceName") or "").strip()
+                raw_source = raw.get("sourceName")
+                if not isinstance(raw_source, str):
+                    complete = False
+                    continue
+                source = raw_source.strip()
                 if not source:
                     complete = False
                     continue
@@ -947,6 +981,11 @@ class OBSLayoutManager:
                 source_occurrences[source] = source_occurrences.get(source, 0) + 1
                 if kind == "group":
                     pending_groups.add(source)
+                elif kind == "scene" and source not in scene_name_set:
+                    # GetSceneList is the authoritative scene catalogue for this
+                    # inventory. A referenced scene missing from it means a whole
+                    # container may be unobserved, so the topology is incomplete.
+                    complete = False
 
         for scene in scene_names:
             self._yield_runtime()
