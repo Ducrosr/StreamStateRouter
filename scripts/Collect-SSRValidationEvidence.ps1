@@ -1,10 +1,13 @@
 param(
     [string]$RepoPath = "C:\Streaming\StreamStateRouter\Source",
     [string]$OutputRoot = "$env:USERPROFILE\Desktop\SSR-Validation",
-    [switch]$SkipObsInspection
+    [switch]$SkipObsInspection,
+    [switch]$RawLocal,
+    [int64]$MaxRawLogBytes = 4194304
 )
 
 $ErrorActionPreference = "Stop"
+$script:Partial = $false
 
 function Write-TextFile {
     param(
@@ -14,77 +17,188 @@ function Write-TextFile {
     $Lines | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$destination = Join-Path $OutputRoot "SSR-$stamp"
-New-Item -ItemType Directory -Path $destination -Force | Out-Null
+function Mark-Partial {
+    param([Parameter(Mandatory = $true)][string]$Message)
+    $script:Partial = $true
+    $script:Summary += $Message
+}
 
-$summary = @(
+function Invoke-GitText {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    $output = & git @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "git exited with code $exitCode"
+    }
+    return ($output | Out-String).Trim()
+}
+
+function New-UniqueDestination {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$BaseName
+    )
+
+    New-Item -ItemType Directory -Path $Root -Force | Out-Null
+    $candidate = Join-Path $Root $BaseName
+    $index = 2
+    while (Test-Path -LiteralPath $candidate) {
+        $candidate = Join-Path $Root "$BaseName-$index"
+        $index += 1
+    }
+    New-Item -ItemType Directory -Path $candidate | Out-Null
+    return $candidate
+}
+
+function Copy-RawLogsBounded {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][int]$MaxCount,
+        [Parameter(Mandatory = $true)][int64]$MaxBytes
+    )
+
+    if (-not (Test-Path -LiteralPath $Source)) {
+        return [pscustomobject]@{ Count = 0; Bytes = 0; Truncated = $false }
+    }
+
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    $count = 0
+    $bytes = [int64]0
+    $truncated = $false
+
+    $items = Get-ChildItem -LiteralPath $Source -File |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First $MaxCount
+
+    foreach ($item in $items) {
+        if (($bytes + [int64]$item.Length) -gt $MaxBytes) {
+            $truncated = $true
+            continue
+        }
+        Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $Destination $item.Name)
+        $count += 1
+        $bytes += [int64]$item.Length
+    }
+
+    return [pscustomobject]@{
+        Count = $count
+        Bytes = $bytes
+        Truncated = $truncated
+    }
+}
+
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$destination = New-UniqueDestination -Root $OutputRoot -BaseName "SSR-$stamp"
+
+$script:Summary = @(
     "CollectedAt=$(Get-Date -Format o)"
-    "Computer=$env:COMPUTERNAME"
-    "User=$env:USERNAME"
-    "RepoPath=$RepoPath"
+    "Mode=$(if ($RawLocal) { 'raw-local-sensitive' } else { 'shareable-redacted' })"
+    "DestinationId=$(Split-Path -Leaf $destination)"
 )
 
-if (Test-Path -LiteralPath (Join-Path $RepoPath ".git")) {
-    try {
-        $head = (& git -C $RepoPath rev-parse HEAD 2>&1 | Out-String).Trim()
-        $branch = (& git -C $RepoPath branch --show-current 2>&1 | Out-String).Trim()
-        $status = (& git -C $RepoPath status --short 2>&1 | Out-String).TrimEnd()
-        $summary += "GitHead=$head"
-        $summary += "GitBranch=$branch"
+if ($RawLocal) {
+    $script:Summary += "WARNING=RawLocal contains sensitive local paths/logs/process command lines; do not share without review."
+}
+
+try {
+    if (Test-Path -LiteralPath (Join-Path $RepoPath ".git")) {
+        $head = Invoke-GitText -Arguments @("-C", $RepoPath, "rev-parse", "HEAD")
+        $branchName = Invoke-GitText -Arguments @("-C", $RepoPath, "branch", "--show-current")
+        $status = Invoke-GitText -Arguments @("-C", $RepoPath, "status", "--short")
+        $script:Summary += "SourceGitHead=$head"
+        $script:Summary += "SourceGitBranch=$branchName"
+
         Write-TextFile -Path (Join-Path $destination "git-status.txt") -Lines @(
             "HEAD: $head"
-            "Branch: $branch"
+            "Branch: $branchName"
             ""
             "git status --short:"
             $status
         )
     }
-    catch {
-        $summary += "GitError=$($_.Exception.Message)"
+    else {
+        Mark-Partial "GitRepo=not-found"
     }
 }
-else {
-    $summary += "GitRepo=not-found"
+catch {
+    Mark-Partial "GitError=$($_.Exception.GetType().Name)"
 }
 
 $runtimePath = Join-Path $env:APPDATA "StreamStateRouter\runtime.json"
-if (Test-Path -LiteralPath $runtimePath) {
-    Copy-Item -LiteralPath $runtimePath -Destination (Join-Path $destination "runtime.json") -Force
-    $summary += "RuntimeMarker=copied"
+try {
+    if (Test-Path -LiteralPath $runtimePath) {
+        if ($RawLocal) {
+            Copy-Item -LiteralPath $runtimePath -Destination (Join-Path $destination "runtime.raw.json")
+            $script:Summary += "RuntimeMarker=raw-copied"
+        }
+        else {
+            $runtimeRaw = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
+            $pending = @()
+            foreach ($item in @($runtimeRaw.pending_cleanup)) {
+                if ($null -eq $item) {
+                    continue
+                }
+                $pending += [ordered]@{
+                    kind = $item.kind
+                    source = $item.source
+                    collection = $item.collection
+                    helper_id = $item.helper_id
+                    source_uuid = $item.source_uuid
+                    source_kind = $item.source_kind
+                    filter_name = $item.filter_name
+                    filter_kind = $item.filter_kind
+                    cleanup_action = $item.cleanup_action
+                    legacy = $item.legacy
+                    ambiguous = $item.ambiguous
+                    attempts = $item.attempts
+                    has_error = -not [string]::IsNullOrWhiteSpace([string]$item.last_error)
+                }
+            }
+            $runtimeSafe = [ordered]@{
+                clean_shutdown = $runtimeRaw.clean_shutdown
+                cleanup_complete = $runtimeRaw.cleanup_complete
+                cleanup_schema = $runtimeRaw.cleanup_schema
+                pending_cleanup = $pending
+            }
+            $runtimeSafe |
+                ConvertTo-Json -Depth 8 |
+                Set-Content -LiteralPath (Join-Path $destination "runtime-summary.json") -Encoding UTF8
+            $script:Summary += "RuntimeMarker=redacted-summary"
+        }
+    }
+    else {
+        $script:Summary += "RuntimeMarker=not-found"
+    }
+}
+catch {
+    Mark-Partial "RuntimeMarkerError=$($_.Exception.GetType().Name)"
+}
+
+if ($RawLocal) {
+    try {
+        $ssrResult = Copy-RawLogsBounded -Source (Join-Path $env:APPDATA "StreamStateRouter\logs") -Destination (Join-Path $destination "ssr-logs-raw") -MaxCount 5 -MaxBytes $MaxRawLogBytes
+        $script:Summary += "SsrLogsRawCount=$($ssrResult.Count)"
+        $script:Summary += "SsrLogsRawBytes=$($ssrResult.Bytes)"
+        $script:Summary += "SsrLogsRawTruncated=$($ssrResult.Truncated)"
+    }
+    catch {
+        Mark-Partial "SsrLogsError=$($_.Exception.GetType().Name)"
+    }
+
+    try {
+        $obsResult = Copy-RawLogsBounded -Source (Join-Path $env:APPDATA "obs-studio\logs") -Destination (Join-Path $destination "obs-logs-raw") -MaxCount 2 -MaxBytes $MaxRawLogBytes
+        $script:Summary += "ObsLogsRawCount=$($obsResult.Count)"
+        $script:Summary += "ObsLogsRawBytes=$($obsResult.Bytes)"
+        $script:Summary += "ObsLogsRawTruncated=$($obsResult.Truncated)"
+    }
+    catch {
+        Mark-Partial "ObsLogsError=$($_.Exception.GetType().Name)"
+    }
 }
 else {
-    $summary += "RuntimeMarker=not-found"
-}
-
-$ssrLogs = Join-Path $env:APPDATA "StreamStateRouter\logs"
-if (Test-Path -LiteralPath $ssrLogs) {
-    $latestSsrLogs = Get-ChildItem -LiteralPath $ssrLogs -File |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 5
-    if ($latestSsrLogs) {
-        $target = Join-Path $destination "ssr-logs"
-        New-Item -ItemType Directory -Path $target -Force | Out-Null
-        foreach ($item in $latestSsrLogs) {
-            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $target $item.Name) -Force
-        }
-        $summary += "SsrLogs=$($latestSsrLogs.Count)"
-    }
-}
-
-$obsLogs = Join-Path $env:APPDATA "obs-studio\logs"
-if (Test-Path -LiteralPath $obsLogs) {
-    $latestObs = Get-ChildItem -LiteralPath $obsLogs -File |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 2
-    if ($latestObs) {
-        $target = Join-Path $destination "obs-logs"
-        New-Item -ItemType Directory -Path $target -Force | Out-Null
-        foreach ($item in $latestObs) {
-            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $target $item.Name) -Force
-        }
-        $summary += "ObsLogs=$($latestObs.Count)"
-    }
+    $script:Summary += "RawLogs=omitted"
 }
 
 if (-not $SkipObsInspection) {
@@ -119,41 +233,98 @@ if (-not $SkipObsInspection) {
                 else {
                     & $python $inspectionScript --report $report
                 }
-                $summary += "FadeInspectionExitCode=$LASTEXITCODE"
+                $inspectionExitCode = $LASTEXITCODE
+                $script:Summary += "FadeInspectionExitCode=$inspectionExitCode"
+                if ($inspectionExitCode -ne 0) {
+                    Mark-Partial "FadeInspection=partial-or-error"
+                }
             }
             catch {
-                $summary += "FadeInspectionError=$($_.Exception.Message)"
+                Mark-Partial "FadeInspectionError=$($_.Exception.GetType().Name)"
             }
         }
         else {
-            $summary += "FadeInspection=python-not-found"
+            Mark-Partial "FadeInspection=python-not-found"
         }
     }
     else {
-        $summary += "FadeInspection=script-not-found"
+        Mark-Partial "FadeInspection=script-not-found"
     }
+}
+else {
+    $script:Summary += "FadeInspection=skipped"
 }
 
 try {
-    $processes = Get-CimInstance Win32_Process |
-        Where-Object {
-            $_.Name -match "^(obs64|StreamStateRouter|python|pythonw)\.exe$"
-        } |
-        Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine
+    if ($RawLocal) {
+        $processes = Get-CimInstance Win32_Process |
+            Where-Object {
+                $_.Name -match "^(obs64|StreamStateRouter|python|pythonw)\.exe$"
+            } |
+            Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine
+    }
+    else {
+        $processes = Get-CimInstance Win32_Process |
+            Where-Object {
+                $_.Name -match "^(obs64|StreamStateRouter)\.exe$"
+            } |
+            Select-Object ProcessId, ParentProcessId, Name
+    }
 
     $processes |
         Format-List |
         Out-String |
         Set-Content -LiteralPath (Join-Path $destination "processes.txt") -Encoding UTF8
+
+    $runningSsr = Get-Process -Name "StreamStateRouter" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $runningSsr) {
+        $script:Summary += "RunningSSRProcessId=$($runningSsr.Id)"
+        try {
+            $runningPath = $runningSsr.Path
+            if (-not [string]::IsNullOrWhiteSpace($runningPath)) {
+                $versionInfo = (Get-Item -LiteralPath $runningPath).VersionInfo
+                $script:Summary += "RunningSSRFileVersion=$($versionInfo.FileVersion)"
+                $script:Summary += "RunningSSRProductVersion=$($versionInfo.ProductVersion)"
+                if ($RawLocal) {
+                    $script:Summary += "RunningSSRPath=$runningPath"
+                }
+            }
+        }
+        catch {
+            Mark-Partial "RunningSSRVersionError=$($_.Exception.GetType().Name)"
+        }
+    }
+    else {
+        $script:Summary += "RunningSSR=not-detected-as-exe"
+    }
 }
 catch {
-    $summary += "ProcessInventoryError=$($_.Exception.Message)"
+    Mark-Partial "ProcessInventoryError=$($_.Exception.GetType().Name)"
 }
 
-Write-TextFile -Path (Join-Path $destination "summary.txt") -Lines $summary
+$overallStatus = if ($script:Partial) { "partial" } else { "ok" }
+$script:Summary = @("Status=$overallStatus") + $script:Summary
+Write-TextFile -Path (Join-Path $destination "summary.txt") -Lines $script:Summary
 
 Write-Host ""
-Write-Host "Preuves SSR collectées dans :" -ForegroundColor Green
+if ($script:Partial) {
+    Write-Host "Collecte SSR terminée avec éléments partiels :" -ForegroundColor Yellow
+}
+else {
+    Write-Host "Collecte SSR terminée :" -ForegroundColor Green
+}
 Write-Host $destination
 Write-Host ""
-Write-Host "Ce script ne modifie ni OBS ni la configuration SSR."
+if ($RawLocal) {
+    Write-Host "ATTENTION : ce dossier contient des données brutes potentiellement sensibles." -ForegroundColor Yellow
+}
+else {
+    Write-Host "Mode partageable : logs bruts, chemins personnels et command lines omis."
+}
+Write-Host "Le collecteur ne modifie ni OBS ni la configuration SSR."
+
+if ($script:Partial) {
+    exit 2
+}
+exit 0
