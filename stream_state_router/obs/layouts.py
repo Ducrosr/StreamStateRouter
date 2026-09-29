@@ -1044,6 +1044,43 @@ class OBSLayoutManager:
             )
 
         try:
+            identity = self._fade_helper_store.get(pending.helper_id)
+        except FadeHelperManifestError as exc:
+            return (
+                False,
+                f"{pending.source}: manifeste helper non fiable ({exc})",
+            )
+        if identity is None:
+            return (
+                False,
+                f"{pending.source}: manifeste helper absent; cleanup suspendu",
+            )
+        if (
+            identity.connection_host != pending.connection_host
+            or identity.connection_port != pending.connection_port
+            or identity.collection != pending.collection
+            or identity.source_uuid != pending.source_uuid
+            or identity.source_kind != pending.source_kind
+            or identity.filter_name != pending.filter_name
+            or identity.filter_kind != pending.filter_kind
+        ):
+            return (
+                False,
+                f"{pending.source}: identité helper contradictoire; "
+                "cleanup suspendu",
+            )
+        if identity.state != "observed":
+            # The manifest was durably prepared before Create. If SSR never
+            # persisted an observation, no temporary opacity write could have
+            # been emitted by the normal path. Do not require the external
+            # target to still exist, and never adopt a same-name filter.
+            return (
+                True,
+                f"{pending.source}: helper jamais observé; "
+                "aucune mutation de recovery nécessaire",
+            )
+
+        try:
             host, port = self._fade_connection_context()
         except Exception as exc:
             return False, f"{pending.source}: contexte OBS non vérifiable ({exc})"
@@ -1077,43 +1114,6 @@ class OBSLayoutManager:
                 False,
                 f"{pending.source}: source remplacée ou kind modifié; "
                 "cleanup suspendu",
-            )
-
-        try:
-            identity = self._fade_helper_store.get(pending.helper_id)
-        except FadeHelperManifestError as exc:
-            return (
-                False,
-                f"{pending.source}: manifeste helper non fiable ({exc})",
-            )
-        if identity is None:
-            return (
-                False,
-                f"{pending.source}: manifeste helper absent; cleanup suspendu",
-            )
-        if (
-            identity.connection_host != pending.connection_host
-            or identity.connection_port != pending.connection_port
-            or identity.collection != pending.collection
-            or identity.source_uuid != pending.source_uuid
-            or identity.source_kind != pending.source_kind
-            or identity.filter_name != pending.filter_name
-            or identity.filter_kind != pending.filter_kind
-        ):
-            return (
-                False,
-                f"{pending.source}: identité helper contradictoire; "
-                "cleanup suspendu",
-            )
-        if identity.state != "observed":
-            # The manifest was durably prepared before Create. If SSR never
-            # persisted an observation, no temporary opacity write could have
-            # been emitted by the normal path. A same-name filter is therefore
-            # not safe to adopt or mutate during recovery.
-            return (
-                True,
-                f"{pending.source}: helper jamais observé; "
-                "aucune mutation de recovery nécessaire",
             )
 
         try:
