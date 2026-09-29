@@ -916,6 +916,68 @@ class OBSLayoutManager:
                     non_temporary_settings=settings,
                 )
 
+            raw_opacity = settings.get("opacity")
+            opacity_neutral = (
+                isinstance(raw_opacity, (int, float))
+                and not isinstance(raw_opacity, bool)
+                and abs(float(raw_opacity) - 1.0) <= 1e-6
+            )
+            if not opacity_neutral:
+                # A reusable helper must be neutral before it is enabled for a
+                # new transition. This prevents a stale reserved opacity from
+                # affecting a currently visible source during preparation.
+                effect_started = True
+                write_error: Exception | None = None
+                try:
+                    self._fade_send(
+                        "SetSourceFilterSettings",
+                        {
+                            "sourceName": source_alias,
+                            "filterName": identity.filter_name,
+                            "filterSettings": {"opacity": 1.0},
+                            "overlay": True,
+                        },
+                        session_generation=session_generation,
+                    )
+                except Exception as exc:
+                    write_error = exc
+                try:
+                    kind, enabled, settings = self._fade_filter_state(
+                        source_alias,
+                        identity.filter_name,
+                        session_generation=session_generation,
+                    )
+                except Exception as exc:
+                    detail = write_error or exc
+                    raise RuntimeError(
+                        f"Neutralité du helper non vérifiable pour "
+                        f"{source_alias}: {detail}"
+                    ) from exc
+                raw_opacity = settings.get("opacity")
+                if (
+                    kind != identity.filter_kind
+                    or not isinstance(raw_opacity, (int, float))
+                    or isinstance(raw_opacity, bool)
+                    or abs(float(raw_opacity) - 1.0) > 1e-6
+                ):
+                    suffix = (
+                        f" après erreur {write_error}"
+                        if write_error
+                        else ""
+                    )
+                    raise RuntimeError(
+                        f"Neutralité du helper non vérifiée pour "
+                        f"{source_alias}{suffix}"
+                    )
+                if not self._fade_helper_store.settings_compatible(
+                    identity,
+                    settings,
+                ):
+                    raise RuntimeError(
+                        f"Helper de fade modifié pendant neutralisation pour "
+                        f"{source_alias}"
+                    )
+
             if enabled is not True:
                 effect_started = True
                 self._fade_send(
