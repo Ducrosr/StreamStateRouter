@@ -2463,6 +2463,7 @@ class LayoutTests(unittest.TestCase):
         )
         manager._set_source_opacity("[Webcam] Avatar", 0.25)
         client.fail_disable_once = True
+        client.calls.clear()
 
         first = manager.retry_pending_fade_cleanup()
 
@@ -2655,6 +2656,11 @@ class LayoutTests(unittest.TestCase):
             source_alias="[Webcam] Avatar",
             source_kind="image_source",
             session_generation=0,
+        )
+        identity = store.mark_observed(
+            identity.helper_id,
+            source_alias="[Webcam] Avatar",
+            non_temporary_settings={},
         )
         client.source_filters["[Webcam] Avatar"] = {
             identity.filter_name: {
