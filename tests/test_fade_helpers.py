@@ -133,6 +133,52 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
                 )
             )
 
+    def test_prepared_identity_does_not_prove_filter_ownership(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = FadeHelperManifestStore(
+                Path(temp_dir) / "helper-manifest.json"
+            )
+            identity = store.prepare_layout_fade(
+                connection_host="127.0.0.1",
+                connection_port=4455,
+                collection="Collection A",
+                source_uuid="input-uuid",
+                source_alias="Avatar",
+                source_kind="image_source",
+                session_generation=1,
+            )
+
+            self.assertIsNone(
+                store.prove_filter(
+                    connection_host="127.0.0.1",
+                    connection_port=4455,
+                    collection="Collection A",
+                    source_uuid="input-uuid",
+                    source_alias="Avatar",
+                    source_kind="image_source",
+                    filter_name=identity.filter_name,
+                    filter_kind=identity.filter_kind,
+                )
+            )
+
+            observed = store.mark_observed(
+                identity.helper_id,
+                source_alias="Avatar",
+                non_temporary_settings={},
+            )
+            self.assertIsNotNone(
+                store.prove_filter(
+                    connection_host="127.0.0.1",
+                    connection_port=4455,
+                    collection="Collection A",
+                    source_uuid="input-uuid",
+                    source_alias="Avatar",
+                    source_kind="image_source",
+                    filter_name=observed.filter_name,
+                    filter_kind=observed.filter_kind,
+                )
+            )
+
     def test_duplicate_helper_id_is_rejected_as_ambiguous_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "helper-manifest.json"
