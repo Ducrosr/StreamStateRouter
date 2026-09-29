@@ -932,8 +932,9 @@ class OBSLayoutManager:
                     )
                 continue
             pending.attempts += 1
+            previous_error = pending.last_error
             pending.last_error = message
-            if message:
+            if message and message != previous_error:
                 warnings.append(message)
         return tuple(warnings)
 
@@ -1033,6 +1034,10 @@ class OBSLayoutManager:
         """Invalidate transient restore points after an OBS reconnect/session reset."""
         self._snapshot_generation += 1
         self.reset_cache()
+        # Active helper state belongs to one observed OBS session. Durable
+        # ownership remains in the manifest; the next fade must re-resolve and
+        # re-verify the helper before any mutation.
+        self._active_fade_helpers.clear()
 
     def _scene_collection_name(
         self,
