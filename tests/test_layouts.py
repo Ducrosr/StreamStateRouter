@@ -1984,6 +1984,59 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(client.create_count, 1)
         self.assertEqual(identity.state, "observed")
 
+    def test_recovery_retires_prepared_obligation_even_if_source_disappeared(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        manager.import_pending_fade_cleanup(
+            (
+                {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                    "helper_id": identity.helper_id,
+                    "source_uuid": identity.source_uuid,
+                    "source_kind": identity.source_kind,
+                    "connection": {
+                        "host": identity.connection_host,
+                        "port": identity.connection_port,
+                    },
+                    "filter_name": identity.filter_name,
+                    "filter_kind": identity.filter_kind,
+                    "cleanup_action": "neutralize_disable",
+                },
+            )
+        )
+        client.source_kinds.pop("[Webcam] Avatar")
+        client.input_uuids.pop("[Webcam] Avatar")
+        client.calls.clear()
+
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        self.assertFalse(
+            any(
+                request in {
+                    "GetInputList",
+                    "GetSourceFilterList",
+                    "GetSourceFilter",
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
+        )
+
     def test_cleanup_missing_owned_helper_is_terminal_without_create(self):
         client = FakeLayoutClient()
         store = MemoryFadeHelperManifestStore()
