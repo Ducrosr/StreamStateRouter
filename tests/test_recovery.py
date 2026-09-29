@@ -106,8 +106,90 @@ class RuntimeMarkerTests(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(data["cleanup_schema"], CLEANUP_SCHEMA_VERSION)
             self.assertFalse(data["cleanup_complete"])
-            self.assertEqual(data["pending_cleanup"], [fade])
+            self.assertEqual(len(data["pending_cleanup"]), 1)
+            self.assertEqual(
+                data["pending_cleanup"][0]["source"],
+                fade["source"],
+            )
+            self.assertEqual(
+                data["pending_cleanup"][0]["collection"],
+                fade["collection"],
+            )
+            self.assertTrue(data["pending_cleanup"][0]["legacy"])
 
+
+    def test_schema3_layout_fade_identity_round_trips(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            marker = RuntimeMarker()
+            marker.path = path
+            fade = {
+                "kind": "layout_fade",
+                "source": "[Webcam] Avatar",
+                "collection": "Collection A",
+                "helper_id": "abc123",
+                "source_uuid": "input-uuid",
+                "source_kind": "image_source",
+                "connection": {"host": "127.0.0.1", "port": 4455},
+                "filter_name": "[SSR] Layout Fade::abc123",
+                "filter_kind": "color_filter_v2",
+                "cleanup_action": "neutralize_disable",
+                "created_at": 1.0,
+                "attempts": 0,
+                "last_error": "",
+            }
+
+            marker.finish(
+                clean_shutdown=False,
+                cleanup_complete=False,
+                pending_cleanup=(fade,),
+            )
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["cleanup_schema"], CLEANUP_SCHEMA_VERSION)
+            self.assertEqual(data["pending_cleanup"][0]["helper_id"], "abc123")
+            self.assertFalse(data["pending_cleanup"][0]["legacy"])
+
+            resumed = RuntimeMarker()
+            resumed.path = path
+            resumed.start()
+
+            self.assertEqual(len(resumed.previous_pending_cleanup), 1)
+            restored = resumed.previous_pending_cleanup[0]
+            self.assertEqual(restored["helper_id"], "abc123")
+            self.assertEqual(restored["source_uuid"], "input-uuid")
+            self.assertFalse(restored["legacy"])
+
+    def test_invalid_schema3_layout_fade_identity_is_not_replayed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "clean_shutdown": False,
+                        "cleanup_complete": False,
+                        "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                        "pending_cleanup": [
+                            {
+                                "kind": "layout_fade",
+                                "source": "[Webcam] Avatar",
+                                "collection": "Collection A",
+                                "helper_id": "abc123",
+                                "source_uuid": "input-uuid",
+                                "source_kind": "image_source",
+                                # Missing connection/filter identity on purpose.
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            marker = RuntimeMarker()
+            marker.path = path
+
+            marker.start()
+
+            self.assertEqual(marker.previous_pending_cleanup, ())
 
 if __name__ == "__main__":
     unittest.main()
