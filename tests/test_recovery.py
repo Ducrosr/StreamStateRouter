@@ -7,7 +7,11 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from stream_state_router.services.recovery import CLEANUP_SCHEMA_VERSION, RuntimeMarker
+from stream_state_router.services.recovery import (
+    CLEANUP_SCHEMA_VERSION,
+    RuntimeMarker,
+    RuntimeMarkerFormatError,
+)
 
 
 class RuntimeMarkerTests(unittest.TestCase):
@@ -201,36 +205,73 @@ class RuntimeMarkerTests(unittest.TestCase):
                 [],
             )
 
-    def test_invalid_schema3_layout_fade_identity_is_not_replayed(self):
+    def test_invalid_schema3_layout_fade_identity_is_preserved_and_blocks_start(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runtime.json"
-            path.write_text(
-                json.dumps(
+            original = {
+                "clean_shutdown": False,
+                "cleanup_complete": False,
+                "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                "pending_cleanup": [
                     {
-                        "clean_shutdown": False,
-                        "cleanup_complete": False,
-                        "cleanup_schema": CLEANUP_SCHEMA_VERSION,
-                        "pending_cleanup": [
-                            {
-                                "kind": "layout_fade",
-                                "source": "[Webcam] Avatar",
-                                "collection": "Collection A",
-                                "helper_id": "abc123",
-                                "source_uuid": "input-uuid",
-                                "source_kind": "image_source",
-                                # Missing connection/filter identity on purpose.
-                            }
-                        ],
+                        "kind": "layout_fade",
+                        "source": "[Webcam] Avatar",
+                        "collection": "Collection A",
+                        "helper_id": "abc123",
+                        "source_uuid": "input-uuid",
+                        "source_kind": "image_source",
+                        # Missing connection/filter identity on purpose.
                     }
-                ),
-                encoding="utf-8",
-            )
+                ],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
             marker = RuntimeMarker()
             marker.path = path
 
-            marker.start()
+            with self.assertRaisesRegex(
+                RuntimeMarkerFormatError,
+                "inconnue ou incomplète",
+            ):
+                marker.start()
 
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
             self.assertEqual(marker.previous_pending_cleanup, ())
+
+    def test_future_cleanup_schema_is_preserved_and_blocks_downgrade(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            original = {
+                "clean_shutdown": False,
+                "cleanup_complete": False,
+                "cleanup_schema": CLEANUP_SCHEMA_VERSION + 1,
+                "pending_cleanup": [
+                    {
+                        "kind": "future_cleanup_kind",
+                        "opaque": {"do_not_drop": True},
+                    }
+                ],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            marker = RuntimeMarker()
+            marker.path = path
+
+            with self.assertRaisesRegex(RuntimeMarkerFormatError, "schéma futur|cleanup_schema futur"):
+                marker.start()
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
+    def test_corrupt_runtime_marker_is_preserved_and_blocks_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            original = b'{not-json\\x00still-here'
+            path.write_bytes(original)
+            marker = RuntimeMarker()
+            marker.path = path
+
+            with self.assertRaisesRegex(RuntimeMarkerFormatError, "runtime.json illisible"):
+                marker.start()
+
+            self.assertEqual(path.read_bytes(), original)
 
 if __name__ == "__main__":
     unittest.main()
