@@ -1818,6 +1818,39 @@ class LayoutTests(unittest.TestCase):
         )
         self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
 
+    def test_journal_written_then_precreate_inventory_failure_is_disarmed(self):
+        class FilterInventoryFailureClient(FakeLayoutClient):
+            fail_filter_inventory = False
+
+            def send(self, request, data=None):
+                if request == "GetSourceFilterList" and self.fail_filter_inventory:
+                    self.calls.append((request, dict(data or {})))
+                    raise RuntimeError("filter inventory unavailable")
+                return super().send(request, data)
+
+        client = FilterInventoryFailureClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        snapshots = []
+        manager.set_pending_cleanup_changed(
+            lambda: snapshots.append(manager.export_pending_fade_cleanup())
+        )
+        client.fail_filter_inventory = True
+        client.calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "filter inventory unavailable"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertTrue(snapshots)
+        self.assertNotEqual(snapshots[0], ())
+        self.assertEqual(snapshots[-1], ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
     def test_create_response_lost_is_observed_without_second_create(self):
         class LostCreateResponseClient(FakeLayoutClient):
             def __init__(self):
@@ -1900,6 +1933,54 @@ class LayoutTests(unittest.TestCase):
         )
         self.assertEqual(create_count, 1)
         self.assertEqual(snapshots[-1], ())
+
+    def test_transition_opacity_response_loss_keeps_cleanup_and_recovers(self):
+        class LostOpacityResponseClient(FakeLayoutClient):
+            lose_opacity_response = False
+
+            def send(self, request, data=None):
+                payload = data or {}
+                settings = payload.get("filterSettings")
+                opacity = (
+                    settings.get("opacity")
+                    if isinstance(settings, dict)
+                    else None
+                )
+                if (
+                    request == "SetSourceFilterSettings"
+                    and self.lose_opacity_response
+                    and opacity == 0.25
+                ):
+                    self.lose_opacity_response = False
+                    super().send(request, data)
+                    raise RuntimeError("opacity response lost")
+                return super().send(request, data)
+
+        client = LostOpacityResponseClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        client.lose_opacity_response = True
+
+        with self.assertRaisesRegex(RuntimeError, "opacity response lost"):
+            manager._set_source_opacity("[Webcam] Avatar", 0.25)
+
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 0.25)
+
+        client.calls.clear()
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertFalse(state["enabled"])
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
 
     def test_cleanup_opacity_response_loss_uses_readback_before_ack(self):
         class LostNeutralizeResponseClient(FakeLayoutClient):
