@@ -2024,8 +2024,52 @@ class LayoutTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ambigu"):
             manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
 
+        self.assertEqual(manager.pending_fade_cleanup(), ())
         self.assertFalse(
             any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_incompatible_existing_generated_helper_disarms_new_obligation(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=0,
+        )
+        client.source_filters["[Webcam] Avatar"] = {
+            identity.filter_name: {
+                "kind": "unexpected_filter_kind",
+                "enabled": False,
+                "settings": {"opacity": 1.0},
+            }
+        }
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        snapshots = []
+        manager.set_pending_cleanup_changed(
+            lambda: snapshots.append(manager.export_pending_fade_cleanup())
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Kind du helper incompatible"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        self.assertTrue(snapshots)
+        self.assertNotEqual(snapshots[0], ())
+        self.assertEqual(snapshots[-1], ())
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
         )
 
     def test_fade_transition_context_probe_overrides_stale_collection(self):
