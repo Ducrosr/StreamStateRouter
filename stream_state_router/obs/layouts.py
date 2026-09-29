@@ -872,8 +872,8 @@ class OBSLayoutManager:
         Color filters are attached to OBS sources, not scene-item occurrences.
         The inventory therefore records both the live kind of each occurrence and
         how many scene/group items currently reference each source name. Any
-        incomplete topology makes the result non-authoritative so callers fall
-        back to direct mutations instead of guessing.
+        incomplete or ambiguous topology makes the result non-authoritative so
+        callers fall back to direct mutations instead of guessing.
         """
         current_types: dict[tuple[str, str], str] = {}
         source_occurrences: dict[str, int] = {}
@@ -882,32 +882,68 @@ class OBSLayoutManager:
         except Exception:
             return current_types, source_occurrences, False
 
-        scene_names = [
-            str(scene.get("sceneName") or "").strip()
-            for scene in response.get("scenes", []) or []
-            if isinstance(scene, Mapping)
-            and str(scene.get("sceneName") or "").strip()
-        ]
+        raw_scenes = response.get("scenes") if isinstance(response, Mapping) else None
+        if not isinstance(raw_scenes, list):
+            return current_types, source_occurrences, False
+
+        scene_names: list[str] = []
+        complete = True
+        for raw_scene in raw_scenes:
+            if not isinstance(raw_scene, Mapping):
+                complete = False
+                continue
+            scene_name = str(raw_scene.get("sceneName") or "").strip()
+            if not scene_name:
+                complete = False
+                continue
+            scene_names.append(scene_name)
         if not scene_names:
             return current_types, source_occurrences, False
 
         pending_groups: set[str] = set()
-        complete = True
 
-        def collect(container: str, rows: Iterable[Mapping[str, Any]]) -> None:
-            for raw in rows:
+        def inventory_rows(
+            response: Mapping[str, Any] | Any,
+        ) -> tuple[list[Mapping[str, Any]], bool]:
+            if not isinstance(response, Mapping) or "sceneItems" not in response:
+                return [], False
+            raw_rows = response.get("sceneItems")
+            if not isinstance(raw_rows, list):
+                return [], False
+
+            rows: list[Mapping[str, Any]] = []
+            valid = True
+            for raw in raw_rows:
                 if not isinstance(raw, Mapping):
+                    valid = False
                     continue
                 source = str(raw.get("sourceName") or "").strip()
+                kind = self._scene_item_source_kind(raw)
+                if not source or kind == "unknown":
+                    # A row that cannot be identified may hide another occurrence
+                    # or a group subtree. Never let missing topology make the
+                    # source-level fade more permissive.
+                    valid = False
+                rows.append(raw)
+            return rows, valid
+
+        def collect(container: str, rows: Iterable[Mapping[str, Any]]) -> None:
+            nonlocal complete
+            for raw in rows:
+                source = str(raw.get("sourceName") or "").strip()
                 if not source:
+                    complete = False
                     continue
                 kind = self._scene_item_source_kind(raw)
+                if kind == "unknown":
+                    complete = False
                 key = (container, source)
                 previous = current_types.get(key)
                 if previous is None:
                     current_types[key] = kind
                 elif previous != kind:
                     current_types[key] = "unknown"
+                    complete = False
                 source_occurrences[source] = source_occurrences.get(source, 0) + 1
                 if kind == "group":
                     pending_groups.add(source)
@@ -922,11 +958,9 @@ class OBSLayoutManager:
             except Exception:
                 complete = False
                 continue
-            rows = [
-                item
-                for item in scene_response.get("sceneItems", []) or []
-                if isinstance(item, Mapping)
-            ]
+            rows, valid = inventory_rows(scene_response)
+            if not valid:
+                complete = False
             collect(scene, rows)
 
         visited_groups: set[str] = set()
@@ -944,11 +978,9 @@ class OBSLayoutManager:
             except Exception:
                 complete = False
                 continue
-            rows = [
-                item
-                for item in group_response.get("sceneItems", []) or []
-                if isinstance(item, Mapping)
-            ]
+            rows, valid = inventory_rows(group_response)
+            if not valid:
+                complete = False
             collect(group, rows)
 
         return current_types, source_occurrences, complete
@@ -2352,16 +2384,17 @@ class OBSLayoutManager:
                 fallback.append(prepared)
                 continue
 
-            # A0 uses one live classification for every fade phase. Composite,
-            # unknown, stale, or shared targets must never reach source-level
-            # opacity helpers; geometry/visibility still use the direct path.
-            if not bool(prepared.get("fade_eligible", False)):
-                fallback.append(prepared)
-                continue
             if current_enabled is None:
                 warnings.append(
                     f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
                 )
+                fallback.append(prepared)
+                continue
+
+            # A0 uses one live classification for every fade phase. Composite,
+            # unknown, stale, or shared targets must never reach source-level
+            # opacity helpers; geometry/visibility still use the direct path.
+            if not bool(prepared.get("fade_eligible", False)):
                 fallback.append(prepared)
                 continue
 
@@ -2430,8 +2463,10 @@ class OBSLayoutManager:
                 current_enabled = prepared["current_enabled"]
                 if (
                     target_enabled is not None
-                    and current_enabled is not None
-                    and bool(target_enabled) != bool(current_enabled)
+                    and (
+                        current_enabled is None
+                        or bool(target_enabled) != bool(current_enabled)
+                    )
                 ):
                     self._set_enabled(
                         prepared["container"],
@@ -2507,13 +2542,9 @@ class OBSLayoutManager:
                 continue
             if current_enabled is None:
                 warnings.append(
-                    f"Visibilité actuelle inconnue pour {source}; fondu ignoré."
+                    f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
                 )
                 fallback_visibility.add(index)
-                if bool(target_enabled):
-                    self._set_enabled(
-                        prepared["container"], prepared["source"], True
-                    )
                 continue
 
             current_visible = bool(current_enabled)
@@ -2622,7 +2653,7 @@ class OBSLayoutManager:
             for index, prepared in enumerate(prepared_items):
                 target_enabled = prepared["target_enabled"]
                 current_enabled = prepared["current_enabled"]
-                if target_enabled is None or current_enabled is None:
+                if target_enabled is None:
                     continue
                 if index in fade_modes:
                     if bool(target_enabled):
@@ -2633,13 +2664,14 @@ class OBSLayoutManager:
                         )
                         self._set_source_opacity(prepared["source"], 1.0)
                 elif index in fallback_visibility:
-                    if not bool(target_enabled):
+                    if (
+                        current_enabled is None
+                        or bool(target_enabled) != bool(current_enabled)
+                    ):
                         self._set_enabled(
-                            prepared["container"], prepared["source"], False
-                        )
-                    elif bool(target_enabled) != bool(current_enabled):
-                        self._set_enabled(
-                            prepared["container"], prepared["source"], True
+                            prepared["container"],
+                            prepared["source"],
+                            bool(target_enabled),
                         )
         except Exception as exc:
             cleanup_warnings = self._neutralize_fade_sources(
@@ -3114,7 +3146,13 @@ class OBSLayoutManager:
                 "GetSceneItemEnabled", {"sceneName": container, "sceneItemId": item_id}
             )
             if "sceneItemEnabled" in enabled_response:
-                enabled = bool(enabled_response.get("sceneItemEnabled"))
+                raw_enabled = enabled_response.get("sceneItemEnabled")
+                if isinstance(raw_enabled, bool):
+                    enabled = raw_enabled
+                else:
+                    enabled_error = (
+                        "GetSceneItemEnabled a renvoyé une visibilité non booléenne"
+                    )
             else:
                 enabled_error = "GetSceneItemEnabled n'a pas renvoyé sceneItemEnabled"
         except Exception as exc:
