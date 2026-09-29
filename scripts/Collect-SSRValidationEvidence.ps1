@@ -142,17 +142,20 @@ try {
                 }
                 $pending += [ordered]@{
                     kind = $item.kind
-                    source = $item.source
-                    collection = $item.collection
-                    helper_id = $item.helper_id
-                    source_uuid = $item.source_uuid
                     source_kind = $item.source_kind
-                    filter_name = $item.filter_name
                     filter_kind = $item.filter_kind
                     cleanup_action = $item.cleanup_action
-                    legacy = $item.legacy
-                    ambiguous = $item.ambiguous
+                    legacy = [bool]$item.legacy
+                    ambiguous = [bool]$item.ambiguous
                     attempts = $item.attempts
+                    has_source_identity = (
+                        -not [string]::IsNullOrWhiteSpace([string]$item.source) -or
+                        -not [string]::IsNullOrWhiteSpace([string]$item.source_uuid)
+                    )
+                    has_helper_identity = (
+                        -not [string]::IsNullOrWhiteSpace([string]$item.helper_id) -and
+                        -not [string]::IsNullOrWhiteSpace([string]$item.filter_name)
+                    )
                     has_error = -not [string]::IsNullOrWhiteSpace([string]$item.last_error)
                 }
             }
@@ -227,11 +230,15 @@ if (-not $SkipObsInspection) {
         if ($python) {
             $report = Join-Path $destination "fade-inspection.json"
             try {
+                $inspectionArgs = @($inspectionScript, "--report", $report)
+                if ($RawLocal) {
+                    $inspectionArgs += "--raw-local"
+                }
                 if ($python -eq "py") {
-                    & $python -3 $inspectionScript --report $report
+                    & $python -3 @inspectionArgs
                 }
                 else {
-                    & $python $inspectionScript --report $report
+                    & $python @inspectionArgs
                 }
                 $inspectionExitCode = $LASTEXITCODE
                 $script:Summary += "FadeInspectionExitCode=$inspectionExitCode"
@@ -320,9 +327,9 @@ if ($RawLocal) {
     Write-Host "ATTENTION : ce dossier contient des données brutes potentiellement sensibles." -ForegroundColor Yellow
 }
 else {
-    Write-Host "Mode partageable : logs bruts, chemins personnels et command lines omis."
+    Write-Host "Mode partageable : logs bruts, chemins personnels, command lines et identifiants OBS détaillés omis."
 }
-Write-Host "Le collecteur ne modifie ni OBS ni la configuration SSR."
+Write-Host "Le collecteur ne modifie ni OBS ni la configuration SSR ; il écrit uniquement ses artefacts de validation."
 
 if ($script:Partial) {
     exit 2
