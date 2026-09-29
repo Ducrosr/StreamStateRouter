@@ -365,8 +365,14 @@ class OBSLayoutManager:
 
     def _notify_pending_cleanup_changed(self) -> None:
         callback = self._pending_cleanup_changed
-        if callback is not None:
-            callback()
+        if callback is None:
+            if isinstance(self.client, OBSClientManager):
+                raise RuntimeError(
+                    "Journal durable du cleanup fade non configuré; "
+                    "effet temporaire refusé"
+                )
+            return
+        callback()
 
     def _fade_connection_context(self) -> tuple[str, int]:
         config = getattr(self.client, "config", None)
