@@ -183,10 +183,16 @@ class RuntimeMarker:
             normalized: list[dict[str, object]] = []
             for item in pending_cleanup:
                 if not isinstance(item, Mapping):
-                    continue
+                    raise RuntimeMarkerFormatError(
+                        "obligation cleanup runtime non-objet; écriture refusée"
+                    )
                 parsed = _normalize_cleanup_item(item)
-                if parsed is not None:
-                    normalized.append(parsed)
+                if parsed is None:
+                    raise RuntimeMarkerFormatError(
+                        "obligation cleanup runtime inconnue ou incomplète; "
+                        "écriture refusée"
+                    )
+                normalized.append(parsed)
             payload = {
                 "clean_shutdown": bool(clean),
                 "cleanup_complete": bool(cleanup_complete),
