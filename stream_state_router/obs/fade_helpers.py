@@ -408,6 +408,22 @@ class FadeHelperManifestStore:
         helper_ids = [item.helper_id for item in entries]
         if len(helper_ids) != len(set(helper_ids)):
             raise FadeHelperManifestError("helper manifest contains duplicate helper_id")
+
+        ownership_keys = [
+            (
+                item.purpose,
+                item.connection_host,
+                item.connection_port,
+                item.collection,
+                item.source_uuid,
+            )
+            for item in entries
+            if item.purpose == LAYOUT_FADE_PURPOSE
+        ]
+        if len(ownership_keys) != len(set(ownership_keys)):
+            raise FadeHelperManifestError(
+                "helper manifest contains multiple helpers for one qualified source"
+            )
         return entries
 
     def _write(self, entries: list[FadeHelperIdentity]) -> None:
