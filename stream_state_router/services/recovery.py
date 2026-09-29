@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from typing import Mapping
 
@@ -41,27 +42,33 @@ class RuntimeMarker:
         self.previous_cleanup_incomplete = False
         self.previous_pending_cleanup: tuple[dict[str, object], ...] = ()
         self.finalized = False
+        self._write_lock = threading.RLock()
 
     def start(self) -> None:
-        if self.path.exists():
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                self.previous_unclean = data.get("clean_shutdown") is False
-                self.previous_cleanup_incomplete = data.get("cleanup_complete") is False
-                raw_pending = data.get("pending_cleanup", [])
-                if isinstance(raw_pending, list):
-                    normalized: list[dict[str, object]] = []
-                    for item in raw_pending:
-                        if not isinstance(item, Mapping):
-                            continue
-                        parsed = _normalize_cleanup_item(item)
-                        if parsed is not None:
-                            normalized.append(parsed)
-                    self.previous_pending_cleanup = tuple(normalized)
-            except Exception:
-                self.previous_unclean = True
-        self.finalized = False
-        self._write(False, cleanup_complete=False, pending_cleanup=self.previous_pending_cleanup)
+        with self._write_lock:
+            if self.path.exists():
+                try:
+                    data = json.loads(self.path.read_text(encoding="utf-8"))
+                    self.previous_unclean = data.get("clean_shutdown") is False
+                    self.previous_cleanup_incomplete = data.get("cleanup_complete") is False
+                    raw_pending = data.get("pending_cleanup", [])
+                    if isinstance(raw_pending, list):
+                        normalized: list[dict[str, object]] = []
+                        for item in raw_pending:
+                            if not isinstance(item, Mapping):
+                                continue
+                            parsed = _normalize_cleanup_item(item)
+                            if parsed is not None:
+                                normalized.append(parsed)
+                        self.previous_pending_cleanup = tuple(normalized)
+                except Exception:
+                    self.previous_unclean = True
+            self.finalized = False
+            self._write(
+                False,
+                cleanup_complete=False,
+                pending_cleanup=self.previous_pending_cleanup,
+            )
 
     def finish(
         self,
@@ -70,32 +77,47 @@ class RuntimeMarker:
         cleanup_complete: bool,
         pending_cleanup=(),
     ) -> None:
-        self._write(
-            bool(clean_shutdown),
-            cleanup_complete=bool(cleanup_complete),
-            pending_cleanup=pending_cleanup,
-        )
-        self.finalized = True
+        with self._write_lock:
+            self._write(
+                bool(clean_shutdown),
+                cleanup_complete=bool(cleanup_complete),
+                pending_cleanup=pending_cleanup,
+            )
+            # Commit finalization under the same lock as the durable write.
+            # Late worker callbacks must not dirty the marker after shutdown.
+            self.finalized = True
+
+    def checkpoint_pending_cleanup(self, pending_cleanup) -> None:
+        """Durably journal live cleanup obligations without finalizing the session."""
+        with self._write_lock:
+            if self.finalized:
+                return
+            self._write(
+                False,
+                cleanup_complete=False,
+                pending_cleanup=pending_cleanup,
+            )
 
     def clean_shutdown(self) -> None:
         self.finish(clean_shutdown=True, cleanup_complete=True, pending_cleanup=())
 
     def _write(self, clean: bool, *, cleanup_complete: bool, pending_cleanup) -> None:
-        normalized: list[dict[str, object]] = []
-        for item in pending_cleanup:
-            if not isinstance(item, Mapping):
-                continue
-            parsed = _normalize_cleanup_item(item)
-            if parsed is not None:
-                normalized.append(parsed)
-        payload = {
-            "clean_shutdown": bool(clean),
-            "cleanup_complete": bool(cleanup_complete),
-            "cleanup_schema": CLEANUP_SCHEMA_VERSION,
-            "pending_cleanup": normalized,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        temp.replace(self.path)
+        with self._write_lock:
+            normalized: list[dict[str, object]] = []
+            for item in pending_cleanup:
+                if not isinstance(item, Mapping):
+                    continue
+                parsed = _normalize_cleanup_item(item)
+                if parsed is not None:
+                    normalized.append(parsed)
+            payload = {
+                "clean_shutdown": bool(clean),
+                "cleanup_complete": bool(cleanup_complete),
+                "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                "pending_cleanup": normalized,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.path.with_suffix(".tmp")
+            temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            temp.replace(self.path)

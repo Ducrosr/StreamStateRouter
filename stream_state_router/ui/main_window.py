@@ -3357,6 +3357,21 @@ class MainWindow(QMainWindow):
             ),
         )
         self._pending_cleanup_transfer = ()
+        layout_manager = getattr(self._dispatcher, "layout_manager", None)
+        marker = self._runtime_marker
+        if (
+            layout_manager is not None
+            and marker is not None
+            and hasattr(layout_manager, "set_pending_cleanup_changed")
+        ):
+            # The layout manager invokes this before temporary opacity writes
+            # and after successful neutralization. Snapshot all runtime cleanup
+            # obligations so the crash marker is always restart-replayable.
+            layout_manager.set_pending_cleanup_changed(
+                lambda: marker.checkpoint_pending_cleanup(
+                    self._service.pending_cleanup_snapshot()
+                )
+            )
         self._service.on_foreground = self.bridge.foreground.emit
         self._service.on_change = self.bridge.state_change.emit
         self._service.on_dispatch = self.bridge.dispatch.emit
@@ -3547,11 +3562,15 @@ class MainWindow(QMainWindow):
                 self._set_layout_undo_checkpoint(
                     f"Application du layout « {applied_layout} »"
                 )
-            elif (
-                command_success
-                and action == "layout.apply"
-                and not applied_layout
-            ):
+            elif applied_layout:
+                # A partial/failed manual apply has no trustworthy undo ticket
+                # for that operation. Do not leave an older checkpoint exposed
+                # as though it could undo the failed apply.
+                self._invalidate_layout_undo_checkpoint()
+            elif action == "layout.apply" and not applied_layout:
+                # External/API layout.apply requests do not appear in the GUI's
+                # pending map. Whether they succeed or fail, the previous GUI
+                # checkpoint no longer describes the latest layout operation.
                 self._invalidate_layout_undo_checkpoint()
 
             if (
@@ -4012,8 +4031,17 @@ class MainWindow(QMainWindow):
             "Revenir au routage automatique"
         ):
             return
-        self._service.clear_manual_override()
-        self._log("Override manuel désactivé.")
+        try:
+            request_id = self._service.request_clear_manual_override()
+            self._track_obs_request(
+                request_id,
+                busy_text="Retour au routage automatique…",
+            )
+            self._log(
+                f"Retour au routage automatique mis en file ({request_id[:8]})."
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Override manuel", str(exc))
 
     def _force_reapply(self) -> None:
         if not self._service:
@@ -6816,10 +6844,11 @@ class MainWindow(QMainWindow):
             return {"paused": self._service.paused}
         if action == "auto":
             self._service.pause(False)
-            self._service.clear_manual_override()
+            request_id = self._service.request_clear_manual_override()
             return {
                 "paused": False,
-                "manual_override": self._service.manual_override_status(),
+                "request_id": request_id,
+                "status": "accepted",
             }
         if action == "catalog.sync":
             request_id = self._service.request_catalog_sync()

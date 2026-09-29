@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -44,6 +45,43 @@ class RuntimeMarkerTests(unittest.TestCase):
                 marker.previous_pending_cleanup[0]["kind"],
                 "activation_hide",
             )
+
+    def test_finalization_blocks_late_cleanup_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            marker = RuntimeMarker()
+            marker.path = path
+            marker.start()
+
+            late_cleanup = {
+                "kind": "layout_fade",
+                "source": "[Webcam] Avatar",
+                "collection": "Collection A",
+            }
+
+            # Hold the marker lock so the worker-like checkpoint is definitely
+            # pending while finalization commits. RLock lets this thread call
+            # finish() re-entrantly; once released, the late checkpoint must
+            # observe finalized=True and leave the final marker untouched.
+            with marker._write_lock:
+                worker = threading.Thread(
+                    target=marker.checkpoint_pending_cleanup,
+                    args=((late_cleanup,),),
+                )
+                worker.start()
+                marker.finish(
+                    clean_shutdown=True,
+                    cleanup_complete=True,
+                    pending_cleanup=(),
+                )
+
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(data["clean_shutdown"])
+            self.assertTrue(data["cleanup_complete"])
+            self.assertEqual(data["pending_cleanup"], [])
 
     def test_layout_fade_cleanup_is_persisted_with_schema(self):
         with tempfile.TemporaryDirectory() as temp_dir:

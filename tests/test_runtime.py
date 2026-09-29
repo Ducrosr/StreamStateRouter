@@ -85,6 +85,7 @@ class StreamingContextDispatcher(ThreadRecordingDispatcher):
         self.streaming = bool(streaming)
         self.context_calls = 0
         self.cached_context_calls = 0
+        self.context_threads = []
 
     def _context(self):
         return {
@@ -96,6 +97,7 @@ class StreamingContextDispatcher(ThreadRecordingDispatcher):
 
     def obs_context(self, *, force_refresh=False):
         self.context_calls += 1
+        self.context_threads.append(threading.current_thread().name)
         return self._context()
 
     def cached_obs_context(self):
@@ -1147,6 +1149,53 @@ class RuntimeTests(unittest.TestCase):
         finally:
             blocker.release_first_put.set()
             service.stop()
+
+    def test_command_result_retention_never_evicts_accepted_request(self):
+        service = RoutingService(
+            StateRouterEngine(RuleSet([]), debounce_ms=0),
+            CommandDispatcher(),
+            poll_ms=20,
+            provider=FakeProvider(ForegroundApp(1, 1, "terminal.exe")),
+        )
+        service._set_command_status(
+            "long-active",
+            action="layout.apply",
+            status="accepted",
+        )
+        for index in range(220):
+            service._set_command_status(
+                f"done-{index}",
+                action="layout.apply",
+                status="completed",
+            )
+
+        self.assertIsNotNone(service.command_status("long-active"))
+        self.assertEqual(
+            service.command_status("long-active")["status"],
+            "accepted",
+        )
+        self.assertLessEqual(len(service._command_status), 200)
+
+    def test_command_admission_rejects_when_active_capacity_is_full(self):
+        service = RoutingService(
+            StateRouterEngine(RuleSet([]), debounce_ms=0),
+            CommandDispatcher(),
+            poll_ms=20,
+            provider=FakeProvider(ForegroundApp(1, 1, "terminal.exe")),
+        )
+        service._thread = SimpleNamespace(is_alive=lambda: True)
+        service._accept_obs_commands = True
+        for index in range(128):
+            service._set_command_status(
+                f"active-{index}",
+                action="layout.apply",
+                status="accepted",
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "Trop de commandes"):
+            service.submit_obs_command("layout.apply", options={"name": "Test"})
+
+        self.assertEqual(service._runtime_commands.qsize(), 0)
 
     def test_live_obs_profile_command_runs_on_runtime_worker(self):
         app = ForegroundApp(1, 1, "terminal.exe")
@@ -3442,12 +3491,13 @@ class RuntimeTests(unittest.TestCase):
                         "Automatic",
                         automatic,
                         exe="automatic.exe",
+                        conditions={"streaming": True},
                     )
                 ]
             ),
             debounce_ms=150,
         )
-        dispatcher = ThreadRecordingDispatcher()
+        dispatcher = StreamingContextDispatcher(streaming=True)
         service = RoutingService(
             engine,
             dispatcher,
@@ -3467,8 +3517,11 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(dispatcher.changes)
             self.assertEqual(dispatcher.changes[-1].current, manual)
 
-            change = service.clear_manual_override()
-            self.assertIsNotNone(change)
+            request_id = service.request_clear_manual_override()
+            self.assertEqual(
+                service.command_status(request_id)["status"],
+                "accepted",
+            )
 
             deadline = time.monotonic() + 1.0
             while (
@@ -3484,6 +3537,11 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.thread_names,
                 ["SSR-Router", "SSR-Router"],
+            )
+            self.assertTrue(dispatcher.context_threads)
+            self.assertTrue(
+                all(name == "SSR-Router" for name in dispatcher.context_threads),
+                dispatcher.context_threads,
             )
         finally:
             self.assertTrue(service.stop())

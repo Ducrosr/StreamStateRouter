@@ -1143,6 +1143,11 @@ class OBSDispatcher:
                     skipped += 1
                     status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
                     continue
+                # From this point the layout manager may mutate OBS. Forget any
+                # previous acknowledgement before the first possible write so an
+                # interruption, transport failure or partial application leaves
+                # the domain pending instead of falsely proving convergence.
+                self._applied_profiles.pop(domain, None)
                 try:
                     result = self._layout_manager.apply_profile(layout)
                 except Exception as exc:
@@ -1185,6 +1190,7 @@ class OBSDispatcher:
             domain_executed = 0
             domain_skipped = 0
             failed = ""
+            domain_invalidated = False
             variables = self._execution_variables(state)
             for action in profile.actions:
                 self._yield_runtime()
@@ -1199,6 +1205,11 @@ class OBSDispatcher:
                     skipped += 1
                     domain_skipped += 1
                     continue
+                if not domain_invalidated:
+                    # The first executable action can mutate OBS/host state. An
+                    # old acknowledgement must not survive a partial batch.
+                    self._applied_profiles.pop(domain, None)
+                    domain_invalidated = True
                 try:
                     self.execute_action(action, variables=variables)
                 except Exception as exc:
@@ -1335,7 +1346,12 @@ class OBSDispatcher:
             raise ValueError(f"Layout introuvable : {profile_name}")
         profile = resolve_layout_profile(profile_name, self._layout_profiles)
         if isinstance(profile.get("conditions"), Mapping) and not self.conditions_match(profile["conditions"]):
-            return DispatchResult(0, 1, ("layout",))
+            return DispatchResult(
+                0,
+                1,
+                ("layout",),
+                ("conditions OBS non satisfaites",),
+            )
         baseline = ""
         if not preview:
             if self._desired_state is not None:
@@ -1347,16 +1363,23 @@ class OBSDispatcher:
             if preview
             else self._layout_manager.apply_profile(profile)
         )
-        if not preview:
+        incomplete = bool(result.missing_sources or result.warnings)
+        if not preview and not incomplete:
             if baseline and profile_name == baseline:
                 self.clear_manual_layout_hold()
             else:
                 self.set_manual_layout_hold(baseline)
+        warnings = tuple(
+            [
+                *(f"source manquante: {name}" for name in result.missing_sources),
+                *result.warnings,
+            ]
+        )
         return DispatchResult(
             result.elements_applied,
             result.elements_skipped,
             ("layout",),
-            result.warnings,
+            warnings,
         )
 
     def _resolve_action_profile(self, domain: str, name: str) -> OBSProfile | None:

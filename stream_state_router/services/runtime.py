@@ -54,6 +54,10 @@ class _DriftProbeBudgetExceeded(BaseException):
     """Abort a read-only drift probe once its cooperative budget is exhausted."""
 
 
+COMMAND_ADMISSION_LIMIT = 128
+COMMAND_RESULT_LIMIT = 200
+COMMAND_DRAIN_QUANTUM = 16
+
 MANUAL_OVERRIDE_RELEASE_MODES = frozenset(
     {"manual", "duration", "foreground_change", "stream_end"}
 )
@@ -1025,6 +1029,8 @@ class RoutingService:
                 or not thread.is_alive()
             ):
                 raise RuntimeError("Runtime d'activation indisponible ou en arrêt")
+            if self._accepted_command_count_locked() >= COMMAND_ADMISSION_LIMIT:
+                raise RuntimeError("Trop de commandes SSR sont déjà en attente")
             generation = self._command_generation
             # Admission and queue insertion are one atomic lifecycle decision:
             # stop() cannot close admission/increment generation between them.
@@ -1059,6 +1065,8 @@ class RoutingService:
                 or not thread.is_alive()
             ):
                 raise RuntimeError("Runtime OBS indisponible ou en arrêt")
+            if self._accepted_command_count_locked() >= COMMAND_ADMISSION_LIMIT:
+                raise RuntimeError("Trop de commandes SSR sont déjà en attente")
             generation = self._command_generation
             self._set_command_status(request_id, action=str(action), status="accepted")
             self._runtime_commands.put(
@@ -1071,6 +1079,13 @@ class RoutingService:
             )
         self._wake.set()
         return request_id
+
+    def _accepted_command_count_locked(self) -> int:
+        return sum(
+            1
+            for row in self._command_status.values()
+            if str(row.get("status") or "") == "accepted"
+        )
 
     def _set_command_status(
         self,
@@ -1099,8 +1114,18 @@ class RoutingService:
                 row["result"] = str(result)
         with self._lock:
             self._command_status[str(request_id)] = row
-            while len(self._command_status) > 200:
-                self._command_status.pop(next(iter(self._command_status)))
+            while len(self._command_status) > COMMAND_RESULT_LIMIT:
+                terminal_id = next(
+                    (
+                        key
+                        for key, value in self._command_status.items()
+                        if str(value.get("status") or "") != "accepted"
+                    ),
+                    None,
+                )
+                if terminal_id is None:
+                    break
+                self._command_status.pop(terminal_id, None)
 
     def command_status(self, request_id: str) -> dict[str, object] | None:
         with self._lock:
@@ -1197,6 +1222,9 @@ class RoutingService:
         if profile_name:
             options["name"] = str(profile_name)
         return self.submit_obs_command(f"layout.{action}", options=options)
+
+    def request_clear_manual_override(self) -> str:
+        return self.submit_obs_command("override.clear")
 
     def request_layout_catalog(self, scene: str) -> str:
         scene_name = str(scene or "").strip()
@@ -2500,12 +2528,14 @@ class RoutingService:
     def _drain_runtime_commands(self, *, allow_obs: bool = True) -> bool:
         deferred: list[_ActivationCommand | _OBSCommand] = []
         should_stop = False
-        while True:
+        processed = 0
+        while processed < COMMAND_DRAIN_QUANTUM:
             try:
                 command = self._runtime_commands.get_nowait()
             except queue.Empty:
                 break
 
+            processed += 1
             with self._lock:
                 current_generation = self._command_generation
             if command.generation != current_generation:
@@ -3096,6 +3126,8 @@ class RoutingService:
                             for module_name, elements in catalog.items()
                         },
                     }
+                elif command.action == "override.clear":
+                    result = self.clear_manual_override()
                 elif command.action == "layout.apply":
                     result = self.dispatcher.execute_layout_profile(
                         str(command.options.get("name") or "")

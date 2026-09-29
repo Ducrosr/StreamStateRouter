@@ -42,6 +42,7 @@ class PendingFadeCleanup:
     source: str
     collection: str
     created_at: float
+    persisted: bool = False
     attempts: int = 0
     last_error: str = ""
 
@@ -102,6 +103,7 @@ class LayoutSnapshot:
     created_at: float = field(default_factory=time.time)
     collection: str = ""
     generation: int = 0
+    obs_session_generation: int = 0
     complete: bool = True
     warnings: tuple[str, ...] = ()
 
@@ -320,7 +322,18 @@ class OBSLayoutManager:
         self._snapshot_generation = 0
         self._last_discovery_warnings: list[str] = []
         self._pending_fade_cleanup: dict[tuple[str, str], PendingFadeCleanup] = {}
+        self._pending_cleanup_changed = None
+        self._restore_session_generation: int | None = None
         self._last_scene_collection = ""
+
+    def set_pending_cleanup_changed(self, callback) -> None:
+        """Persist cleanup obligations whenever their durable set changes."""
+        self._pending_cleanup_changed = callback
+
+    def _notify_pending_cleanup_changed(self) -> None:
+        callback = self._pending_cleanup_changed
+        if callback is not None:
+            callback()
 
     def pending_fade_cleanup(self) -> tuple[str, ...]:
         """Compatibility view of pending fade sources."""
@@ -370,6 +383,8 @@ class OBSLayoutManager:
                 continue
             self._pending_fade_cleanup[(collection, source)] = pending
             imported += 1
+        if imported:
+            self._notify_pending_cleanup_changed()
         return imported
 
     def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
@@ -395,6 +410,7 @@ class OBSLayoutManager:
                 )
                 continue
             self._pending_fade_cleanup.pop(key, None)
+            self._notify_pending_cleanup_changed()
         return tuple(warnings)
 
     def _fade_collection_context(self, *, probe: bool = False) -> str:
@@ -425,6 +441,12 @@ class OBSLayoutManager:
                 created_at=time.monotonic(),
             )
             self._pending_fade_cleanup[key] = pending
+        if not pending.persisted:
+            # Persistence is part of arming the cleanup obligation, not a
+            # best-effort side effect. If it fails, leave the entry unarmed so
+            # every later attempt must retry before any opacity mutation.
+            self._notify_pending_cleanup_changed()
+            pending.persisted = True
         return pending
 
     def _neutralize_fade_sources(
@@ -476,6 +498,7 @@ class OBSLayoutManager:
                 warnings.append(f"{source}: opacité neutre non acquittée ({exc})")
             else:
                 self._pending_fade_cleanup.pop((collection, source), None)
+                self._notify_pending_cleanup_changed()
         return tuple(warnings)
 
     def set_cooperative_yield(self, callback) -> None:
@@ -508,8 +531,18 @@ class OBSLayoutManager:
         self._snapshot_generation += 1
         self.reset_cache()
 
-    def _scene_collection_name(self) -> str:
-        response = self.client.send("GetSceneCollectionList")
+    def _scene_collection_name(
+        self,
+        *,
+        expected_session_generation: int | None = None,
+    ) -> str:
+        if expected_session_generation is None:
+            response = self.client.send("GetSceneCollectionList")
+        else:
+            response = self.client.send(
+                "GetSceneCollectionList",
+                expected_session_generation=expected_session_generation,
+            )
         collection = str(response.get("currentSceneCollectionName") or "").strip()
         if collection:
             self._last_scene_collection = collection
@@ -552,6 +585,9 @@ class OBSLayoutManager:
             label,
             collection=collection,
             generation=self._snapshot_generation,
+            obs_session_generation=int(
+                getattr(self.client, "session_generation", 0) or 0
+            ),
             complete=complete,
             warnings=tuple(warnings),
         )
@@ -559,10 +595,38 @@ class OBSLayoutManager:
     def _snapshot_context_error(self, snapshot: LayoutSnapshot) -> str:
         if snapshot.generation != self._snapshot_generation:
             return "Snapshot issu d'une session OBS précédente ; restauration refusée."
+        expected_session = int(snapshot.obs_session_generation or 0)
+        if expected_session:
+            current_session = int(
+                getattr(self.client, "session_generation", 0) or 0
+            )
+            if current_session != expected_session:
+                self.invalidate_session()
+                return "Snapshot issu d'une connexion OBS précédente ; restauration refusée."
+            try:
+                # Force a transport round-trip without allowing an implicit
+                # reconnect. This closes the window where OBS restarted but the
+                # periodic runtime probe has not observed the new session yet.
+                self.client.send(
+                    "GetVersion",
+                    expected_session_generation=expected_session,
+                )
+            except Exception as exc:
+                self.invalidate_session()
+                return f"Session OBS non vérifiable ; restauration refusée : {exc}"
         try:
-            current = self._scene_collection_name()
+            current = self._scene_collection_name(
+                expected_session_generation=(
+                    expected_session if expected_session else None
+                )
+            )
         except Exception as exc:
             return f"Scene Collection non lisible ; restauration refusée : {exc}"
+        if expected_session and int(
+            getattr(self.client, "session_generation", 0) or 0
+        ) != expected_session:
+            self.invalidate_session()
+            return "Session OBS modifiée pendant la validation ; restauration refusée."
         if snapshot.collection and current != snapshot.collection:
             return (
                 f"Snapshot lié à la Scene Collection '{snapshot.collection}', "
@@ -576,11 +640,54 @@ class OBSLayoutManager:
         context_error = self._snapshot_context_error(snapshot)
         if context_error:
             return LayoutApplyResult(warnings=(context_error, *snapshot.warnings))
-        return self.apply_profile(
-            snapshot.profile,
-            record_undo=False,
-            transition_override={"mode": "instant", "duration_ms": 0},
-        )
+        expected_session = int(snapshot.obs_session_generation or 0)
+        previous_guard = self._restore_session_generation
+        self._restore_session_generation = expected_session or None
+        try:
+            result = self.apply_profile(
+                snapshot.profile,
+                record_undo=False,
+                transition_override={"mode": "instant", "duration_ms": 0},
+            )
+            if expected_session:
+                try:
+                    # apply_profile may classify an OBS read failure as a
+                    # missing resource. Re-probe the exact guarded transport
+                    # before accepting the restore so a lost/reconnected
+                    # session can never look like a successful partial undo.
+                    self.client.send(
+                        "GetVersion",
+                        expected_session_generation=expected_session,
+                    )
+                except Exception as exc:
+                    self.invalidate_session()
+                    return LayoutApplyResult(
+                        warnings=(
+                            f"Restauration interrompue : session OBS modifiée ou non vérifiable ({exc})",
+                            *snapshot.warnings,
+                        )
+                    )
+                if int(getattr(self.client, "session_generation", 0) or 0) != expected_session:
+                    self.invalidate_session()
+                    return LayoutApplyResult(
+                        warnings=(
+                            "Restauration interrompue : session OBS modifiée pendant l'opération.",
+                            *snapshot.warnings,
+                        )
+                    )
+            return result
+        except Exception as exc:
+            if expected_session:
+                self.invalidate_session()
+                return LayoutApplyResult(
+                    warnings=(
+                        f"Restauration interrompue : session OBS modifiée ou non vérifiable ({exc})",
+                        *snapshot.warnings,
+                    )
+                )
+            raise
+        finally:
+            self._restore_session_generation = previous_guard
 
     def set_runtime_visibility_owners(
         self,
@@ -614,6 +721,16 @@ class OBSLayoutManager:
         """Return current runtime visibility ownership without exposing storage."""
 
         return frozenset(self._runtime_visibility_owners)
+
+    def _send(self, request: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        expected = self._restore_session_generation
+        if expected is None:
+            return self.client.send(request, data)
+        return self.client.send(
+            request,
+            data,
+            expected_session_generation=expected,
+        )
 
     def reset_cache(self) -> None:
         self._scene_item_cache.clear()
@@ -664,17 +781,17 @@ class OBSLayoutManager:
             "sceneItemEnabled": bool(enabled),
         }
         try:
-            self.client.send("SetSceneItemEnabled", payload)
+            self._send("SetSceneItemEnabled", payload)
         except OBSResourceNotFoundError:
             # The graph may have changed between resolution and mutation.
             # Resolve the exact pair once more; confirmed absence then propagates.
             item_id = self._fresh_scene_item_id(container_name, source_name)
             payload["sceneItemId"] = item_id
-            self.client.send("SetSceneItemEnabled", payload)
+            self._send("SetSceneItemEnabled", payload)
 
     def canvas_size(self) -> tuple[int, int] | None:
         try:
-            response = self.client.send("GetVideoSettings")
+            response = self._send("GetVideoSettings")
             width = _int(response.get("baseWidth"))
             height = _int(response.get("baseHeight"))
             return (width, height) if width > 0 and height > 0 else None
@@ -682,7 +799,7 @@ class OBSLayoutManager:
             return None
 
     def list_scenes(self) -> tuple[list[str], str]:
-        response = self.client.send("GetSceneList")
+        response = self._send("GetSceneList")
         names = [
             str(scene.get("sceneName") or "")
             for scene in response.get("scenes", []) or []
@@ -691,7 +808,7 @@ class OBSLayoutManager:
         current = str(response.get("currentProgramSceneName") or "")
         if not current:
             try:
-                current_response = self.client.send("GetCurrentProgramScene")
+                current_response = self._send("GetCurrentProgramScene")
                 current = str(
                     current_response.get("sceneName")
                     or current_response.get("currentProgramSceneName")
@@ -700,6 +817,212 @@ class OBSLayoutManager:
             except Exception:
                 current = ""
         return names, current
+
+    @staticmethod
+    def _scene_item_source_kind(raw: Mapping[str, Any]) -> str:
+        """Classify one *current* OBS scene item without trusting profile metadata.
+
+        Fade admission is deliberately stricter than general OBS discovery. A
+        scene-like source can also be a group, so an absent or malformed isGroup
+        discriminator must not silently turn a group into an ordinary scene.
+        """
+        raw_is_group = raw.get("isGroup") if "isGroup" in raw else None
+        if raw_is_group is not None and not isinstance(raw_is_group, bool):
+            return "unknown"
+        if raw_is_group is True:
+            return "group"
+
+        raw_source_type = raw.get("sourceType")
+        raw_input_kind = raw.get("inputKind")
+        if raw_source_type is not None and not isinstance(raw_source_type, str):
+            return "unknown"
+        if raw_input_kind is not None and not isinstance(raw_input_kind, str):
+            return "unknown"
+
+        source_type = (raw_source_type or "").strip()
+        input_kind = (raw_input_kind or "").strip()
+
+        if input_kind == "scene":
+            return "scene"
+        if source_type == "OBS_SOURCE_TYPE_SCENE":
+            # OBS groups are scene-like sources too. Without an explicit false
+            # isGroup flag (or the explicit inputKind=scene above), the metadata
+            # is ambiguous and cannot authorize a source-level fade.
+            if raw_is_group is False:
+                return "scene"
+            return "unknown"
+        if source_type == "OBS_SOURCE_TYPE_INPUT" or (
+            input_kind and input_kind != "scene"
+        ):
+            return "input"
+        return "unknown"
+
+    @staticmethod
+    def _classify_fade_eligibility(
+        *,
+        profile_source_type: str,
+        current_source_type: str,
+        source_occurrences: int,
+        inventory_complete: bool,
+    ) -> tuple[bool, str]:
+        """Return whether a temporary source-level fade is safe enough for A0.
+
+        A0 intentionally does not introduce a new input-kind whitelist. It keeps
+        the existing input fade behavior only when both the saved profile and the
+        current OBS topology agree that the target is an isolated input. Unknown,
+        stale, composite, or shared targets degrade to direct geometry/visibility.
+        """
+        saved = str(profile_source_type or "").casefold().strip()
+        current = str(current_source_type or "").casefold().strip()
+        if not inventory_complete:
+            return False, "topologie OBS incomplète"
+        if current not in {"input", "scene", "group"}:
+            return False, "type OBS courant inconnu"
+        if saved not in {"input", "scene", "group"}:
+            return False, "type enregistré absent ou inconnu"
+        if saved != current:
+            return False, "type enregistré différent du type OBS courant"
+        if current != "input":
+            return False, f"source composite {current}"
+        if int(source_occurrences) != 1:
+            return False, "source partagée"
+        return True, "input isolé"
+
+    def _fade_runtime_inventory(
+        self,
+    ) -> tuple[dict[tuple[str, str], str], dict[str, int], bool]:
+        """Read current collection topology for source-level fade eligibility.
+
+        Color filters are attached to OBS sources, not scene-item occurrences.
+        The inventory therefore records both the live kind of each occurrence and
+        how many scene/group items currently reference each source name. Any
+        incomplete or ambiguous topology makes the result non-authoritative so
+        callers fall back to direct mutations instead of guessing.
+        """
+        current_types: dict[tuple[str, str], str] = {}
+        source_occurrences: dict[str, int] = {}
+        try:
+            response = self._send("GetSceneList")
+        except Exception:
+            return current_types, source_occurrences, False
+
+        raw_scenes = response.get("scenes") if isinstance(response, Mapping) else None
+        if not isinstance(raw_scenes, list):
+            return current_types, source_occurrences, False
+
+        scene_names: list[str] = []
+        complete = True
+        for raw_scene in raw_scenes:
+            if not isinstance(raw_scene, Mapping):
+                complete = False
+                continue
+            raw_scene_name = raw_scene.get("sceneName")
+            if not isinstance(raw_scene_name, str):
+                complete = False
+                continue
+            scene_name = raw_scene_name.strip()
+            if not scene_name:
+                complete = False
+                continue
+            scene_names.append(scene_name)
+        if not scene_names:
+            return current_types, source_occurrences, False
+
+        scene_name_set = set(scene_names)
+        pending_groups: set[str] = set()
+
+        def inventory_rows(
+            response: Mapping[str, Any] | Any,
+        ) -> tuple[list[Mapping[str, Any]], bool]:
+            if not isinstance(response, Mapping) or "sceneItems" not in response:
+                return [], False
+            raw_rows = response.get("sceneItems")
+            if not isinstance(raw_rows, list):
+                return [], False
+
+            rows: list[Mapping[str, Any]] = []
+            valid = True
+            for raw in raw_rows:
+                if not isinstance(raw, Mapping):
+                    valid = False
+                    continue
+                raw_source = raw.get("sourceName")
+                source = raw_source.strip() if isinstance(raw_source, str) else ""
+                kind = self._scene_item_source_kind(raw)
+                if not source or kind == "unknown":
+                    # A row that cannot be identified may hide another occurrence
+                    # or a group subtree. Never let missing topology make the
+                    # source-level fade more permissive.
+                    valid = False
+                rows.append(raw)
+            return rows, valid
+
+        def collect(container: str, rows: Iterable[Mapping[str, Any]]) -> None:
+            nonlocal complete
+            for raw in rows:
+                raw_source = raw.get("sourceName")
+                if not isinstance(raw_source, str):
+                    complete = False
+                    continue
+                source = raw_source.strip()
+                if not source:
+                    complete = False
+                    continue
+                kind = self._scene_item_source_kind(raw)
+                if kind == "unknown":
+                    complete = False
+                key = (container, source)
+                previous = current_types.get(key)
+                if previous is None:
+                    current_types[key] = kind
+                elif previous != kind:
+                    current_types[key] = "unknown"
+                    complete = False
+                source_occurrences[source] = source_occurrences.get(source, 0) + 1
+                if kind == "group":
+                    pending_groups.add(source)
+                elif kind == "scene" and source not in scene_name_set:
+                    # GetSceneList is the authoritative scene catalogue for this
+                    # inventory. A referenced scene missing from it means a whole
+                    # container may be unobserved, so the topology is incomplete.
+                    complete = False
+
+        for scene in scene_names:
+            self._yield_runtime()
+            try:
+                scene_response = self._send(
+                    "GetSceneItemList",
+                    {"sceneName": scene},
+                )
+            except Exception:
+                complete = False
+                continue
+            rows, valid = inventory_rows(scene_response)
+            if not valid:
+                complete = False
+            collect(scene, rows)
+
+        visited_groups: set[str] = set()
+        while pending_groups:
+            self._yield_runtime()
+            group = pending_groups.pop()
+            if group in visited_groups:
+                continue
+            visited_groups.add(group)
+            try:
+                group_response = self._send(
+                    "GetGroupSceneItemList",
+                    {"sceneName": group},
+                )
+            except Exception:
+                complete = False
+                continue
+            rows, valid = inventory_rows(group_response)
+            if not valid:
+                complete = False
+            collect(group, rows)
+
+        return current_types, source_occurrences, complete
 
     def scan_scene_topology(
         self,
@@ -745,7 +1068,7 @@ class OBSLayoutManager:
             return
         self._yield_runtime()
         if prefetched is None:
-            response = self.client.send("GetSceneItemList", {"sceneName": container})
+            response = self._send("GetSceneItemList", {"sceneName": container})
             items = response.get("sceneItems", []) or []
         else:
             items = prefetched
@@ -783,7 +1106,7 @@ class OBSLayoutManager:
                 continue
             if is_group:
                 try:
-                    group = self.client.send(
+                    group = self._send(
                         "GetGroupSceneItemList",
                         {"sceneName": source},
                     )
@@ -891,7 +1214,7 @@ class OBSLayoutManager:
             return
         self._yield_runtime()
         if prefetched is None:
-            response = self.client.send("GetSceneItemList", {"sceneName": container})
+            response = self._send("GetSceneItemList", {"sceneName": container})
             items = response.get("sceneItems", []) or []
         else:
             items = prefetched
@@ -926,7 +1249,7 @@ class OBSLayoutManager:
                 )
             )
             if imported is not None and not hard_locked:
-                transform_response = self.client.send(
+                transform_response = self._send(
                     "GetSceneItemTransform",
                     {"sceneName": container, "sceneItemId": item_id},
                 )
@@ -960,7 +1283,7 @@ class OBSLayoutManager:
                 continue
             if is_group:
                 try:
-                    group = self.client.send("GetGroupSceneItemList", {"sceneName": source})
+                    group = self._send("GetGroupSceneItemList", {"sceneName": source})
                     children = [item for item in group.get("sceneItems", []) or [] if isinstance(item, Mapping)]
                     self._discover_container(
                         root_scene=root_scene,
@@ -1186,7 +1509,7 @@ class OBSLayoutManager:
             if depth > 10:
                 return
             try:
-                response = self.client.send("GetGroupSceneItemList", {"sceneName": group})
+                response = self._send("GetGroupSceneItemList", {"sceneName": group})
             except Exception as exc:
                 self._last_discovery_warnings.append(
                     f"Groupe de support '{group}' non lisible : {exc}"
@@ -1223,7 +1546,7 @@ class OBSLayoutManager:
                 )
                 source_kind = "group" if is_group else ("scene" if is_scene else "input")
                 if parsed is None:
-                    tr = self.client.send(
+                    tr = self._send(
                         "GetSceneItemTransform",
                         {"sceneName": group, "sceneItemId": item_id},
                     ).get("sceneItemTransform") or {}
@@ -1253,7 +1576,7 @@ class OBSLayoutManager:
                 return
             visited_scenes.add(scene_name)
             try:
-                response = self.client.send("GetSceneItemList", {"sceneName": scene_name})
+                response = self._send("GetSceneItemList", {"sceneName": scene_name})
             except Exception as exc:
                 self._last_discovery_warnings.append(
                     f"Scène de support '{scene_name}' non lisible : {exc}"
@@ -1288,7 +1611,7 @@ class OBSLayoutManager:
                 )
                 source_kind = "group" if is_group else ("scene" if is_scene else "input")
                 if parsed is None:
-                    tr = self.client.send(
+                    tr = self._send(
                         "GetSceneItemTransform",
                         {"sceneName": scene_name, "sceneItemId": item_id},
                     ).get("sceneItemTransform") or {}
@@ -1425,7 +1748,7 @@ class OBSLayoutManager:
                 "source_type": (
                     "group"
                     if source in group_sources
-                    else str(raw.get("source_type") or "input")
+                    else str(raw.get("source_type") or "")
                 ),
                 "path": list(raw.get("path") or ()),
                 "transform": update,
@@ -1803,6 +2126,16 @@ class OBSLayoutManager:
             _int(transition.get("steps"), 8),
         )
 
+        fade_current_types: dict[tuple[str, str], str] = {}
+        fade_source_occurrences: dict[str, int] = {}
+        fade_inventory_complete = False
+        if mode in {"fade", "move_fade"} and duration_ms > 0:
+            (
+                fade_current_types,
+                fade_source_occurrences,
+                fade_inventory_complete,
+            ) = self._fade_runtime_inventory()
+
         applied = 0
         skipped = 0
         modules_for_skip = profile.get("modules") if isinstance(profile.get("modules"), Mapping) else {}
@@ -1846,10 +2179,25 @@ class OBSLayoutManager:
             )
             target_enabled = item["enabled"]
             current_enabled = current.get("enabled")
+            profile_source_type = str(item.get("source_type") or "")
+            current_source_type = fade_current_types.get(
+                (container, source),
+                "unknown",
+            )
+            fade_eligible, fade_reason = self._classify_fade_eligibility(
+                profile_source_type=profile_source_type,
+                current_source_type=current_source_type,
+                source_occurrences=fade_source_occurrences.get(source, 0),
+                inventory_complete=fade_inventory_complete,
+            )
             return {
                 "item": item,
                 "container": container,
                 "source": source,
+                "source_type": profile_source_type,
+                "current_source_type": current_source_type,
+                "fade_eligible": fade_eligible,
+                "fade_reason": fade_reason,
                 "current_transform": current["transform"],
                 "target_transform": target_transform,
                 "transform_changed": self._transform_needs_update(
@@ -2074,10 +2422,18 @@ class OBSLayoutManager:
             if target_enabled is None:
                 fallback.append(prepared)
                 continue
+
             if current_enabled is None:
                 warnings.append(
                     f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
                 )
+                fallback.append(prepared)
+                continue
+
+            # A0 uses one live classification for every fade phase. Composite,
+            # unknown, stale, or shared targets must never reach source-level
+            # opacity helpers; geometry/visibility still use the direct path.
+            if not bool(prepared.get("fade_eligible", False)):
                 fallback.append(prepared)
                 continue
 
@@ -2119,6 +2475,8 @@ class OBSLayoutManager:
                     continue
                 if bool(target_enabled) == bool(current_enabled):
                     continue
+                if not bool(prepared.get("fade_eligible", False)):
+                    continue
                 if bool(target_enabled):
                     try:
                         self._set_source_opacity(prepared["source"], 0.0)
@@ -2144,8 +2502,10 @@ class OBSLayoutManager:
                 current_enabled = prepared["current_enabled"]
                 if (
                     target_enabled is not None
-                    and current_enabled is not None
-                    and bool(target_enabled) != bool(current_enabled)
+                    and (
+                        current_enabled is None
+                        or bool(target_enabled) != bool(current_enabled)
+                    )
                 ):
                     self._set_enabled(
                         prepared["container"],
@@ -2221,18 +2581,24 @@ class OBSLayoutManager:
                 continue
             if current_enabled is None:
                 warnings.append(
-                    f"Visibilité actuelle inconnue pour {source}; fondu ignoré."
+                    f"Visibilité actuelle inconnue pour {source}; bascule directe utilisée."
                 )
                 fallback_visibility.add(index)
-                if bool(target_enabled):
-                    self._set_enabled(
-                        prepared["container"], prepared["source"], True
-                    )
                 continue
 
             current_visible = bool(current_enabled)
             target_visible = bool(target_enabled)
             if not current_visible and not target_visible:
+                continue
+
+            # Reuse the same A0 classification as fade/reposition. No opacity
+            # write is allowed for composite, unknown, stale, or shared targets.
+            if not bool(prepared.get("fade_eligible", False)):
+                fallback_visibility.add(index)
+                if target_visible and not current_visible:
+                    self._set_enabled(
+                        prepared["container"], prepared["source"], True
+                    )
                 continue
 
             touched_fades.add(source)
@@ -2326,7 +2692,7 @@ class OBSLayoutManager:
             for index, prepared in enumerate(prepared_items):
                 target_enabled = prepared["target_enabled"]
                 current_enabled = prepared["current_enabled"]
-                if target_enabled is None or current_enabled is None:
+                if target_enabled is None:
                     continue
                 if index in fade_modes:
                     if bool(target_enabled):
@@ -2337,13 +2703,14 @@ class OBSLayoutManager:
                         )
                         self._set_source_opacity(prepared["source"], 1.0)
                 elif index in fallback_visibility:
-                    if not bool(target_enabled):
+                    if (
+                        current_enabled is None
+                        or bool(target_enabled) != bool(current_enabled)
+                    ):
                         self._set_enabled(
-                            prepared["container"], prepared["source"], False
-                        )
-                    elif bool(target_enabled) != bool(current_enabled):
-                        self._set_enabled(
-                            prepared["container"], prepared["source"], True
+                            prepared["container"],
+                            prepared["source"],
+                            bool(target_enabled),
                         )
         except Exception as exc:
             cleanup_warnings = self._neutralize_fade_sources(
@@ -2618,7 +2985,7 @@ class OBSLayoutManager:
                         "source_type": (
                             "group"
                             if source in group_sources
-                            else str(element.get("source_type") or "input")
+                            else str(element.get("source_type") or "")
                         ),
                         "transform": update,
                         "enabled": enabled,
@@ -2800,25 +3167,31 @@ class OBSLayoutManager:
         # cached item look missing.
         item_id = self._scene_item_id(container, source)
         try:
-            transform_response = self.client.send(
+            transform_response = self._send(
                 "GetSceneItemTransform", {"sceneName": container, "sceneItemId": item_id}
             )
         except Exception:
             self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             item_id = self._scene_item_id(container, source)
-            transform_response = self.client.send(
+            transform_response = self._send(
                 "GetSceneItemTransform", {"sceneName": container, "sceneItemId": item_id}
             )
         enabled = None
         enabled_error = ""
         self._yield_runtime()
         try:
-            enabled_response = self.client.send(
+            enabled_response = self._send(
                 "GetSceneItemEnabled", {"sceneName": container, "sceneItemId": item_id}
             )
             if "sceneItemEnabled" in enabled_response:
-                enabled = bool(enabled_response.get("sceneItemEnabled"))
+                raw_enabled = enabled_response.get("sceneItemEnabled")
+                if isinstance(raw_enabled, bool):
+                    enabled = raw_enabled
+                else:
+                    enabled_error = (
+                        "GetSceneItemEnabled a renvoyé une visibilité non booléenne"
+                    )
             else:
                 enabled_error = "GetSceneItemEnabled n'a pas renvoyé sceneItemEnabled"
         except Exception as exc:
@@ -2841,12 +3214,12 @@ class OBSLayoutManager:
             "sceneItemTransform": dict(transform),
         }
         try:
-            self.client.send("SetSceneItemTransform", payload)
+            self._send("SetSceneItemTransform", payload)
         except Exception:
             self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             payload["sceneItemId"] = self._scene_item_id(container, source)
-            self.client.send("SetSceneItemTransform", payload)
+            self._send("SetSceneItemTransform", payload)
 
     def _set_enabled(self, container: str, source: str, enabled: bool) -> None:
         self._yield_runtime()
@@ -2857,12 +3230,12 @@ class OBSLayoutManager:
             "sceneItemEnabled": bool(enabled),
         }
         try:
-            self.client.send("SetSceneItemEnabled", payload)
+            self._send("SetSceneItemEnabled", payload)
         except Exception:
             self._yield_runtime()
             self._invalidate_scene_item_id(container, source)
             payload["sceneItemId"] = self._scene_item_id(container, source)
-            self.client.send("SetSceneItemEnabled", payload)
+            self._send("SetSceneItemEnabled", payload)
 
     def _animate_transform(
         self,
@@ -2895,14 +3268,14 @@ class OBSLayoutManager:
         Filter creation is a bounded recovery path. Transport/protocol errors
         are not interpreted as absence and therefore propagate unchanged.
         """
-        response = self.client.send("GetSourceFilterList", {"sourceName": source})
+        response = self._send("GetSourceFilterList", {"sourceName": source})
         filters = response.get("filters", []) or []
         found = any(
             isinstance(item, Mapping) and str(item.get("filterName") or "") == SSR_FADE_FILTER
             for item in filters
         )
         if not found:
-            self.client.send(
+            self._send(
                 "CreateSourceFilter",
                 {
                     "sourceName": source,
@@ -2914,7 +3287,7 @@ class OBSLayoutManager:
                 },
             )
             return
-        self.client.send(
+        self._send(
             "SetSourceFilterEnabled",
             {"sourceName": source, "filterName": SSR_FADE_FILTER, "filterEnabled": True},
         )
@@ -2927,13 +3300,13 @@ class OBSLayoutManager:
             "overlay": True,
         }
         try:
-            self.client.send("SetSourceFilterSettings", payload)
+            self._send("SetSourceFilterSettings", payload)
             return
         except OBSResourceNotFoundError:
             # Confirmed absence is the only error that may create/re-enable the
             # helper filter. Retry the settings write once, never recursively.
             self._ensure_fade_filter(source, opacity)
-        self.client.send("SetSourceFilterSettings", payload)
+        self._send("SetSourceFilterSettings", payload)
 
     def _animate_opacity(self, source: str, start: float, end: float, duration_ms: int, steps: int) -> None:
         self._ensure_fade_filter(source, start)
@@ -2950,7 +3323,7 @@ class OBSLayoutManager:
     def _fresh_scene_item_id(self, container: str, source: str) -> int:
         self._yield_runtime()
         self._invalidate_scene_item_id(container, source)
-        response = self.client.send(
+        response = self._send(
             "GetSceneItemId",
             {"sceneName": container, "sourceName": source},
         )
@@ -2969,7 +3342,7 @@ class OBSLayoutManager:
         cached = self._scene_item_cache.get(key)
         if cached:
             return cached
-        response = self.client.send(
+        response = self._send(
             "GetSceneItemId",
             {"sceneName": container, "sourceName": source},
         )

@@ -932,6 +932,111 @@ class OBSDispatcherTests(unittest.TestCase):
 
         self.assertEqual(client.calls, [])
 
+    def test_partial_action_batch_invalidates_previous_acknowledgement(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "A": {
+                        "actions": [
+                            {"type": "set_program_scene", "params": {"scene": "A"}}
+                        ]
+                    },
+                    "B": {
+                        "actions": [
+                            {"type": "set_program_scene", "params": {"scene": "B"}},
+                            {"type": "wait_ms", "params": {"duration_ms": 100}},
+                        ]
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        state_a = StreamState(overlay_profile="A")
+        state_b = StreamState(overlay_profile="B")
+        dispatcher.dispatch_state(state_a)
+
+        def preempt_after_b_write():
+            if any(
+                request == "SetCurrentProgramScene"
+                and payload["sceneName"] == "B"
+                for request, payload in client.calls
+            ):
+                raise RuntimeError("preempted")
+
+        dispatcher.set_cooperative_yield(preempt_after_b_write)
+        with self.assertRaisesRegex(RuntimeError, "preempted"):
+            dispatcher.dispatch_state(state_b)
+        dispatcher.set_cooperative_yield(None)
+
+        self.assertNotEqual(
+            dispatcher.applied_profiles().get("overlay"),
+            "A",
+        )
+        self.assertEqual(dispatcher.pending_domains(state_a), ("overlay",))
+
+        result = dispatcher.dispatch_state(state_a)
+
+        self.assertEqual(result.executed, 1)
+        writes = [
+            payload["sceneName"]
+            for request, payload in client.calls
+            if request == "SetCurrentProgramScene"
+        ]
+        self.assertEqual(writes[-2:], ["B", "A"])
+        self.assertEqual(dispatcher.pending_domains(state_a), ())
+
+    def test_failed_action_after_first_write_leaves_domain_pending(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "overlay": {
+                    "A": {
+                        "actions": [
+                            {"type": "set_program_scene", "params": {"scene": "A"}}
+                        ]
+                    },
+                    "B": {
+                        "actions": [
+                            {"type": "set_program_scene", "params": {"scene": "B"}},
+                            {"type": "nope", "params": {}},
+                        ]
+                    },
+                }
+            }
+        )
+        dispatcher = OBSDispatcher(client, profiles)
+        state_a = StreamState(overlay_profile="A")
+        state_b = StreamState(overlay_profile="B")
+        dispatcher.dispatch_state(state_a)
+
+        result = dispatcher.dispatch_state(state_b)
+
+        self.assertTrue(result.warnings)
+        self.assertNotIn("overlay", dispatcher.applied_profiles())
+        self.assertEqual(dispatcher.pending_domains(state_a), ("overlay",))
+
+    def test_manual_layout_apply_surfaces_missing_sources_as_failure_warning(self):
+        dispatcher = OBSDispatcher(
+            FakeClient(),
+            {},
+            {"Manual": {"scene": "Gameplay", "modules": {}}},
+        )
+        dispatcher.layout_manager.apply_profile = lambda _profile: SimpleNamespace(
+            elements_applied=1,
+            elements_skipped=1,
+            missing_sources=("[Webcam] Missing",),
+            warnings=(),
+        )
+
+        result = dispatcher.execute_layout_profile("Manual")
+
+        self.assertEqual(
+            result.warnings,
+            ("source manquante: [Webcam] Missing",),
+        )
+        self.assertFalse(dispatcher._manual_layout_hold_active)
+
     def test_layout_profile_is_dispatched_as_fifth_state_domain(self):
         client = FakeClient()
         layout = {
