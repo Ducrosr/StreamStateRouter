@@ -451,3 +451,20 @@ class FadeHelperManifestStore:
             raise FadeHelperManifestError(
                 f"helper manifest persistence failed: {exc}"
             ) from exc
+
+
+class MemoryFadeHelperManifestStore(FadeHelperManifestStore):
+    """Non-persistent store for injected/fake OBS clients in unit tests."""
+
+    def __init__(self) -> None:
+        self.path = Path("<memory>")
+        self._lock = threading.RLock()
+        self._entries: list[FadeHelperIdentity] = []
+
+    def _load(self) -> list[FadeHelperIdentity]:
+        return [FadeHelperIdentity.from_mapping(item.as_mapping()) for item in self._entries]
+
+    def _write(self, entries: list[FadeHelperIdentity]) -> None:
+        self._entries = [
+            FadeHelperIdentity.from_mapping(item.as_mapping()) for item in entries
+        ]
