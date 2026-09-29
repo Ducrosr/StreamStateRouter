@@ -1851,6 +1851,111 @@ class LayoutTests(unittest.TestCase):
             any(request == "CreateSourceFilter" for request, _ in client.calls)
         )
 
+    def test_prepared_manifest_never_adopts_preexisting_generated_filter(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        client.source_filters["[Webcam] Avatar"] = {
+            identity.filter_name: {
+                "kind": identity.filter_kind,
+                "enabled": True,
+                "settings": {"opacity": 0.4},
+            }
+        }
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        snapshots = []
+        manager.set_pending_cleanup_changed(
+            lambda: snapshots.append(manager.export_pending_fade_cleanup())
+        )
+        client.calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "existant non prouvé"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 0.4)
+        self.assertTrue(state["enabled"])
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
+        )
+        self.assertTrue(snapshots)
+        self.assertNotEqual(snapshots[0], ())
+        self.assertEqual(snapshots[-1], ())
+
+    def test_recovery_never_mutates_unobserved_prepared_helper(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        client.source_filters["[Webcam] Avatar"] = {
+            identity.filter_name: {
+                "kind": identity.filter_kind,
+                "enabled": True,
+                "settings": {"opacity": 0.4},
+            }
+        }
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        manager.import_pending_fade_cleanup(
+            (
+                {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                    "helper_id": identity.helper_id,
+                    "source_uuid": identity.source_uuid,
+                    "source_kind": identity.source_kind,
+                    "connection": {
+                        "host": identity.connection_host,
+                        "port": identity.connection_port,
+                    },
+                    "filter_name": identity.filter_name,
+                    "filter_kind": identity.filter_kind,
+                    "cleanup_action": "neutralize_disable",
+                },
+            )
+        )
+        client.calls.clear()
+
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 0.4)
+        self.assertTrue(state["enabled"])
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
+        )
+
     def test_create_response_lost_is_observed_without_second_create(self):
         class LostCreateResponseClient(FakeLayoutClient):
             def __init__(self):
