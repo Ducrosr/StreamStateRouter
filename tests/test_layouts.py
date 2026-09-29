@@ -2683,7 +2683,7 @@ class LayoutTests(unittest.TestCase):
         warnings = manager.retry_pending_fade_cleanup()
 
         self.assertTrue(
-            any("identité helper contradictoire" in item for item in warnings),
+            any("manifeste helper non fiable" in item for item in warnings),
             warnings,
         )
         self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
