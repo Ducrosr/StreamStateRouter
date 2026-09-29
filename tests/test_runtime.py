@@ -741,6 +741,8 @@ class CleanupLayoutManager:
         self._yield = None
         self.imported = []
         self.exported = []
+        self.retry_calls = 0
+        self.invalidate_calls = 0
 
     def set_cooperative_yield(self, callback):
         self._yield = callback
@@ -752,6 +754,17 @@ class CleanupLayoutManager:
 
     def export_pending_fade_cleanup(self):
         return tuple(dict(item) for item in self.exported)
+
+    def pending_fade_cleanup(self):
+        return tuple(str(item.get("source") or "") for item in self.exported)
+
+    def retry_pending_fade_cleanup(self):
+        self.retry_calls += 1
+        self.exported.clear()
+        return ()
+
+    def invalidate_session(self):
+        self.invalidate_calls += 1
 
 
 class CleanupDispatcher(FakeDispatcher):
@@ -1071,6 +1084,54 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(dispatcher.layout_manager.imported, [fade])
         self.assertEqual(service.pending_cleanup_snapshot(), (fade,))
+
+    def test_obs_reconnect_retries_contextual_fade_cleanup(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = FakeHeartbeatDispatcher()
+        dispatcher.layout_manager = CleanupLayoutManager()
+        fade = {
+            "kind": "layout_fade",
+            "source": "[Webcam] Avatar",
+            "collection": "Collection A",
+            "helper_id": "helper-1",
+        }
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+            pending_cleanup=(fade,),
+        )
+
+        self.assertEqual(service.pending_cleanup_snapshot(), (fade,))
+        service._probe_obs_if_due()
+
+        self.assertEqual(dispatcher.layout_manager.invalidate_calls, 1)
+        self.assertEqual(dispatcher.layout_manager.retry_calls, 1)
+        self.assertEqual(service.pending_cleanup_snapshot(), ())
+
+    def test_shutdown_result_preserves_contextual_fade_backlog(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CleanupDispatcher()
+        fade = {
+            "kind": "layout_fade",
+            "source": "[Webcam] Avatar",
+            "collection": "Collection A",
+            "helper_id": "helper-1",
+        }
+        dispatcher.layout_manager.exported = [fade]
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(app),
+        )
+
+        result = service.stop()
+
+        self.assertTrue(result)
+        self.assertFalse(result.cleanup_complete)
+        self.assertEqual(result.pending_cleanup, (fade,))
 
     def test_shutdown_snapshot_combines_activation_and_fade_obligations(self):
         app = ForegroundApp(1, 1, "terminal.exe")
