@@ -195,6 +195,11 @@ class ImporterTests(unittest.TestCase):
             source_kind="game_capture",
             session_generation=1,
         )
+        identity = store.mark_observed(
+            identity.helper_id,
+            source_alias="Game Capture",
+            non_temporary_settings={},
+        )
 
         class OwnedHelperClient(_ImportClient):
             config = SimpleNamespace(
@@ -252,6 +257,67 @@ class ImporterTests(unittest.TestCase):
             skipped,
         )
         self.assertIn("Tone Map", rendered)
+
+    def test_scene_collection_treats_prepared_helper_as_ambiguous(self):
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Streaming",
+            source_uuid="input-1",
+            source_alias="Game Capture",
+            source_kind="game_capture",
+            session_generation=1,
+        )
+
+        class PreparedHelperClient(_ImportClient):
+            config = SimpleNamespace(
+                enabled=True,
+                host="127.0.0.1",
+                port=4455,
+            )
+
+            def send(self, request, data=None):
+                if (
+                    request == "GetSourceFilterList"
+                    and data
+                    and data.get("sourceName") == "Game Capture"
+                ):
+                    return {
+                        "filters": [
+                            {
+                                "filterName": identity.filter_name,
+                                "filterKind": identity.filter_kind,
+                                "filterEnabled": True,
+                            }
+                        ]
+                    }
+                if request == "GetSourceFilter" and data:
+                    if data.get("filterName") == identity.filter_name:
+                        return {
+                            "filterName": identity.filter_name,
+                            "filterKind": identity.filter_kind,
+                            "filterEnabled": True,
+                            "filterSettings": {"opacity": 1.0},
+                        }
+                return super().send(request, data)
+
+        snapshot = SceneCollectionImporter(
+            PreparedHelperClient(),
+            fade_helper_store=store,
+        ).snapshot()
+
+        helper = next(
+            item for item in snapshot.filters
+            if item.name == identity.filter_name
+        )
+        self.assertEqual(helper.helper_status, "ambiguous_helper")
+        actions, skipped = SceneCollectionImporter.actions_from_snapshot(snapshot)
+        self.assertNotIn(identity.filter_name, str(actions))
+        self.assertTrue(
+            any("helper-like ambigu" in item for item in skipped),
+            skipped,
+        )
 
     def test_scene_collection_reports_unproven_helper_lookalike_without_action(self):
         class LegacyHelperClient(_ImportClient):
