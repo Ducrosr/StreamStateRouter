@@ -89,3 +89,130 @@ Record:
 - ambiguities still requiring a human decision
 
 A technically complete feature that requires unnecessary manual configuration is not product-complete.
+
+## Current guided-capture baseline observed in the code
+
+The existing `CurrentStateCaptureDialog` already auto-detects and displays:
+
+- foreground process
+- process path
+- foreground window title
+- current OBS scene
+- matching process rules
+- suggested configuration name
+
+This is good and should be preserved.
+
+The simple-user burden is still higher than necessary because the dialog exposes:
+
+- choose target rule when several rules match
+- configuration name for a new rule
+- include source settings?
+- include OBS mute/volume?
+- include filters?
+- include Scene Item visibility?
+- include layout?
+- choose domain for source settings
+- choose domain for audio
+- choose domain for filters
+- choose domain for visibility
+
+The four domain selectors already have semantic defaults in the UI:
+
+- source settings -> GameProfile
+- OBS audio -> AudioProfile
+- filters -> CaptureProfile
+- visibility -> OverlayProfile
+- layout -> LayoutProfile
+
+These defaults are evidence that simple mode does not need to ask the user to understand the domains.
+
+## Recommended future simple-mode capture
+
+No implementation before the B1 gate.
+
+### Normal case: no existing rule
+
+1. Detect application and current scene.
+2. Generate the name automatically.
+3. Capture the observable state.
+4. Infer the standard domain placement.
+5. Exclude proven SSR-internal/transient resources.
+6. Show a concise diff/proposal.
+7. User presses "Créer ce setup".
+
+Mandatory decisions: 1 confirmation.
+
+The generated name remains editable, but editing is optional rather than required.
+
+### Normal case: exactly one matching rule
+
+1. Detect the unique existing rule.
+2. Build an update proposal automatically.
+3. Show only the meaningful differences.
+4. User presses "Mettre à jour ce setup".
+
+Mandatory decisions: 1 confirmation.
+
+### Ambiguous case: multiple matching rules
+
+Only here ask:
+
+"Quelle configuration voulez-vous mettre à jour ?"
+
+Then show the same proposal/confirmation.
+
+Mandatory decisions: 1 rule selection + 1 confirmation.
+
+### Advanced mode
+
+Keep explicit controls for:
+
+- inclusion/exclusion by category
+- domain placement
+- inheritance target
+- raw technical warnings
+- ownership details
+
+Advanced controls must not weaken safety checks.
+
+## Immediate UX metrics to preserve for later B1 acceptance
+
+Track these values before/after B1:
+
+| Workflow | Current possible explicit decisions | Target simple-mode decisions |
+|---|---:|---:|
+| New setup, normal case | name + 5 include toggles + 4 domain selectors | 1 confirmation |
+| Update unique matching rule | 5 include toggles + 4 domain selectors | 1 confirmation |
+| Multiple matching rules | rule + 5 include toggles + 4 domain selectors | rule + confirmation |
+| Layout-only capture | profile/scene/options available in dedicated editor | capture + confirmation, advanced options optional |
+
+The target does not mean hiding uncertainty. Any genuine ambiguity must still become an explicit question.
+
+## Things SSR can infer without new architecture
+
+These are already available in the current implementation and therefore do not need to become user inputs:
+
+- foreground executable
+- process path
+- window title
+- current OBS scene
+- existing rules for the process
+- a unique matching rule
+- a suggested unique configuration name
+- default semantic domain placement
+
+These can be used immediately by future UI work once its roadmap gate opens.
+
+## Things that should wait for later primitives
+
+Do not fake these before their respective gates:
+
+- safe exclusion of SSR-owned helpers -> A1
+- durable resource identity/rename repair -> A2
+- typed property capture/diff -> B0
+- parent-difference minimization and richer guided draft -> B1/B2
+- Windows audio session inference -> C0
+- HDR policy inference -> C1
+
+This avoids creating a "simple" UI that silently guesses beyond what SSR can currently prove.
