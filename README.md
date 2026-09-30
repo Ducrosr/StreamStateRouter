@@ -548,7 +548,7 @@ python main.py --system-check
 Le contrôle est volontairement en lecture seule. Il vérifie :
 
 - la validité de la configuration ;
-- la connexion OBS WebSocket et un inventaire compact scènes/inputs/Scene Items ;
+- la connexion OBS WebSocket et un inventaire read-only scènes/groupes/inputs/Scene Items, avec détection d'inventaire partiel ;
 - SoundVolumeView uniquement si une action `app_audio_output` est configurée ;
 - la prise en charge et l’état HDR du moniteur principal uniquement si une
   action `windows_hdr` est configurée.

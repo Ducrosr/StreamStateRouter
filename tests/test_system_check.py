@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from stream_state_router.services.system_check import (
     probe_host_capabilities,
@@ -23,6 +24,7 @@ class _FakeOBSClient:
     def __init__(self, config) -> None:
         self.config = config
         self.closed = False
+        self.session_generation = 7
         self.requests: list[tuple[str, object]] = []
         self.__class__.instances.append(self)
 
@@ -31,29 +33,58 @@ class _FakeOBSClient:
 
     def send(self, request: str, data=None):
         self.requests.append((request, data))
+        if request == "GetVersion":
+            return {"availableRequests": [
+                "GetVersion", "GetSceneCollectionList", "GetSceneList",
+                "GetGroupList", "GetSceneItemList", "GetGroupSceneItemList",
+                "GetInputList", "GetSceneTransitionList", "GetVideoSettings",
+            ]}
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": "Streaming"}
         if request == "GetSceneList":
             return {
+                "currentProgramSceneName": "In Game",
+                "currentProgramSceneUuid": "scene-1",
                 "scenes": [
-                    {"sceneName": "In Game"},
-                    {"sceneName": "Just Chatting"},
-                ]
+                    {"sceneName": "In Game", "sceneUuid": "scene-1", "sceneIndex": 0},
+                    {"sceneName": "Just Chatting", "sceneUuid": "scene-2", "sceneIndex": 1},
+                ],
             }
-        if request == "GetInputList":
-            return {
-                "inputs": [
-                    {"inputName": "Game Capture"},
-                    {"inputName": "Micro"},
-                ]
-            }
+        if request == "GetGroupList":
+            return {"groups": ["Group A"]}
         if request == "GetSceneItemList":
             scene = str((data or {}).get("sceneName") or "")
-            return {
-                "sceneItems": (
-                    [{"sceneItemId": 1}, {"sceneItemId": 2}]
-                    if scene == "In Game"
-                    else [{"sceneItemId": 3}]
-                )
-            }
+            if scene == "In Game":
+                return {"sceneItems": [
+                    {"sceneItemId": 1, "sourceName": "Game Capture", "sourceUuid": "input-game", "inputKind": "game_capture", "sceneItemEnabled": True},
+                    {"sceneItemId": 2, "sourceName": "Group A", "sourceUuid": "group-a", "isGroup": True, "sceneItemEnabled": True},
+                ]}
+            return {"sceneItems": [
+                {"sceneItemId": 3, "sourceName": "Micro", "sourceUuid": "input-mic", "inputKind": "wasapi_input_capture", "sceneItemEnabled": True}
+            ]}
+        if request == "GetGroupSceneItemList":
+            group = str((data or {}).get("sceneName") or "")
+            if group == "Group A":
+                return {"sceneItems": [
+                    {"sceneItemId": 4, "sourceName": "Group B", "sourceUuid": "group-b", "isGroup": True, "sceneItemEnabled": True}
+                ]}
+            if group == "Group B":
+                return {"sceneItems": [
+                    {"sceneItemId": 5, "sourceName": "Overlay", "sourceUuid": "input-overlay", "inputKind": "browser_source", "sceneItemEnabled": True}
+                ]}
+            raise AssertionError(f"Unexpected group: {group}")
+        if request == "GetInputList":
+            return {"inputs": [
+                {"inputName": "Game Capture", "inputKind": "game_capture", "inputUuid": "input-game"},
+                {"inputName": "Micro", "inputKind": "wasapi_input_capture", "inputUuid": "input-mic"},
+                {"inputName": "Overlay", "inputKind": "browser_source", "inputUuid": "input-overlay"},
+            ]}
+        if request == "GetSceneTransitionList":
+            return {"transitions": [
+                {"transitionName": "Fade", "transitionKind": "fade_transition", "transitionUuid": "transition-fade"}
+            ]}
+        if request == "GetVideoSettings":
+            return {"baseWidth": 2560, "baseHeight": 1440}
         raise AssertionError(f"Unexpected request: {request}")
 
     def close(self) -> None:
@@ -151,23 +182,22 @@ class SystemCheckTests(unittest.TestCase):
         self.assertEqual(len(_FakeOBSClient.instances), 1)
         client = _FakeOBSClient.instances[0]
         self.assertTrue(client.closed)
-        self.assertEqual(
-            [request for request, _data in client.requests],
-            [
-                "GetSceneList",
-                "GetInputList",
-                "GetSceneItemList",
-                "GetSceneItemList",
-            ],
-        )
-        self.assertFalse(
-            any(
-                request.startswith("Set")
-                or request.startswith("Create")
-                or request.startswith("Remove")
-                for request, _data in client.requests
-            )
-        )
+        requests = [request for request, _data in client.requests]
+        self.assertTrue(requests)
+        self.assertTrue(all(request.startswith("Get") for request in requests))
+        for required in (
+            "GetVersion",
+            "GetSceneCollectionList",
+            "GetSceneList",
+            "GetGroupList",
+            "GetSceneItemList",
+            "GetGroupSceneItemList",
+            "GetInputList",
+            "GetSceneTransitionList",
+            "GetVideoSettings",
+        ):
+            self.assertIn(required, requests)
+        self.assertEqual(requests.count("GetGroupSceneItemList"), 2)
         self.assertEqual(controller.audio_router.resolve_calls, 1)
         self.assertEqual(
             controller.hdr_controller.status_calls,
@@ -177,7 +207,9 @@ class SystemCheckTests(unittest.TestCase):
         self.assertEqual(items["obs"].status, "ready")
         self.assertEqual(items["catalog"].status, "ready")
         self.assertIn("2 scène(s)", items["catalog"].detail)
-        self.assertIn("3 Scene Item(s)", items["catalog"].detail)
+        self.assertIn("2 groupe(s)", items["catalog"].detail)
+        self.assertIn("3 input(s)", items["catalog"].detail)
+        self.assertIn("5 Scene Item(s)", items["catalog"].detail)
         self.assertEqual(items["audio"].status, "ready")
         self.assertEqual(items["hdr"].status, "ready")
         self.assertTrue(report.ok)
@@ -254,6 +286,39 @@ class SystemCheckTests(unittest.TestCase):
         self.assertIn("timed out", items["obs"].detail)
         self.assertFalse(report.ok)
         self.assertTrue(FailingOBS.instances[-1].closed)
+
+    def test_catalog_probe_fails_closed_if_reader_attempts_mutation(self) -> None:
+        config = _config()
+        config["obs"]["enabled"] = True
+
+        class MutatingReader:
+            def __init__(self, client) -> None:
+                self.client = client
+
+            def sync(self):
+                self.client.send(
+                    "SetInputMute",
+                    {"inputName": "Micro", "inputMuted": True},
+                )
+                raise AssertionError("mutation should have been rejected")
+
+        with patch(
+            "stream_state_router.services.system_check.OBSResourceCatalogReader",
+            MutatingReader,
+        ):
+            report = run_system_check(
+                config,
+                obs_client_factory=_FakeOBSClient,
+            )
+
+        client = _FakeOBSClient.instances[-1]
+        self.assertFalse(
+            any(request.startswith("Set") for request, _data in client.requests)
+        )
+        items = {item.key: item for item in report.capabilities.items}
+        self.assertEqual(items["obs"].status, "ready")
+        self.assertEqual(items["catalog"].status, "warning")
+        self.assertIn("read-only", items["catalog"].detail)
 
     def test_catalog_failure_is_warning_not_mutation(self) -> None:
         config = _config()

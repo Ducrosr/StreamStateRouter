@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
+from ..obs.catalog import OBSResourceCatalogReader
 from ..obs.client import OBSClientManager
 from .config import (
     build_host_controller,
@@ -68,42 +69,55 @@ class SystemCheckReport:
         }
 
 
-def _sequence(value: object) -> list[Mapping[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, Mapping)]
+class _ReadOnlyOBSClient:
+    """Fail closed if a diagnostic reader ever attempts an OBS mutation."""
+
+    def __init__(self, client: OBSClientManager):
+        self._client = client
+
+    @property
+    def session_generation(self) -> int:
+        return int(getattr(self._client, "session_generation", 0) or 0)
+
+    def send(
+        self,
+        request: str,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        name = str(request or "").strip()
+        if not name.startswith("Get"):
+            raise RuntimeError(
+                f"Contrôle système read-only : requête OBS refusée ({name or '<vide>'})"
+            )
+        return self._client.send(name, data)
 
 
 def _probe_obs_catalog(client: OBSClientManager) -> dict[str, object]:
-    """Read a compact OBS inventory without mutating OBS."""
+    """Read the lightweight OBS catalog through a read-only fail-closed guard."""
 
     try:
-        scenes_response = client.send("GetSceneList")
-        inputs_response = client.send("GetInputList")
-        scenes = _sequence(scenes_response.get("scenes"))
-        inputs = _sequence(inputs_response.get("inputs"))
-
-        scene_items = 0
-        for scene in scenes:
-            name = str(scene.get("sceneName") or "").strip()
-            if not name:
-                continue
-            response = client.send(
-                "GetSceneItemList",
-                {"sceneName": name},
+        catalog = OBSResourceCatalogReader(_ReadOnlyOBSClient(client)).sync()
+        partial_reasons = list(catalog.warnings)
+        if catalog.unreadable_containers:
+            partial_reasons.append(
+                "conteneur(s) illisible(s) : "
+                + ", ".join(sorted(catalog.unreadable_containers, key=str.casefold))
             )
-            scene_items += len(_sequence(response.get("sceneItems")))
-
         return {
             "available": True,
             "stale": False,
-            "scenes": len(scenes),
-            "inputs": len(inputs),
-            "scene_items": scene_items,
+            "partial": bool(partial_reasons),
+            "partial_reason": "; ".join(partial_reasons),
+            "collection": catalog.collection,
+            "session_generation": catalog.session_generation,
+            "scenes": len(catalog.scenes),
+            "groups": len(catalog.groups),
+            "inputs": len(catalog.inputs),
+            "scene_items": len(catalog.scene_items),
+            "transitions": len(catalog.transitions),
+            "available_requests": len(catalog.available_requests),
         }
     except Exception as exc:
-        # A partial/failed inventory is diagnostic only. Preserve the OBS
-        # connection result and expose the read failure separately.
         return {
             "available": True,
             "stale": True,

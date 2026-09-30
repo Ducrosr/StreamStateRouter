@@ -1351,10 +1351,22 @@ def build_capability_report(
             "Catalogue OBS périmé : "
             + str(catalog.get("stale_reason") or "resynchronisation requise")
         )
+    elif bool(catalog.get("partial", False)):
+        catalog_status_name = "warning"
+        catalog_detail = (
+            "Catalogue OBS partiel : "
+            + str(catalog.get("partial_reason") or "lecture incomplète")
+        )
     else:
         catalog_status_name = "ready"
+        groups = (
+            f", {int(catalog.get('groups', 0) or 0)} groupe(s)"
+            if "groups" in catalog
+            else ""
+        )
         catalog_detail = (
-            f"{int(catalog.get('scenes', 0) or 0)} scène(s), "
+            f"{int(catalog.get('scenes', 0) or 0)} scène(s)"
+            f"{groups}, "
             f"{int(catalog.get('inputs', 0) or 0)} input(s), "
             f"{int(catalog.get('scene_items', 0) or 0)} Scene Item(s)."
         )

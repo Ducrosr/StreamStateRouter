@@ -103,3 +103,27 @@ The post-A1 integration should explicitly exercise:
 - `--system-check` / `--system-check-json` as strictly read-only commands.
 
 Until those gates are complete, all post-A1 work remains preparatory.
+
+## Precomputed overlap with frozen A1
+
+This overlap was computed without rebasing or modifying PR #152. Frozen A1 head:
+`0a6f9c9a2ac4725dbbb4318ff5f37d9e97b5fbf1`. Prepared PR #153 head at the
+time of the check: `1c6ddedfa5964d42b9cb4f97db85d90523f389a3`.
+
+Only four files are modified by both A1 and the current #153 delta:
+
+| File | A1 invariant to preserve | #153 concern |
+| --- | --- | --- |
+| `main.py` | Fail closed on unreadable recovery marker; preserve recovered cleanup backlog in headless mode. | Diagnostic CLI modes must exit before single-instance/runtime startup. |
+| `stream_state_router/ui/main_window.py` | Do not finalize the recovery marker while runtime shutdown is non-quiescent; checkpoint pending cleanup instead. | Shared read-only host capability probe. |
+| `tests/test_main_cli.py` | Recovery-marker startup/headless backlog regressions remain authoritative. | System-check early-exit and invalid-config diagnostics. |
+| `tests/test_runtime.py` | Reconnect cleanup retry and shutdown backlog preservation remain authoritative. | Manual-override observability tests. |
+
+Post-A1 integration rule: resolve these overlaps by preserving the approved A1
+lifecycle/recovery behavior first, then replay the #153 diagnostic/observability
+changes around it. No conflict resolution may weaken A1's worker-serialization,
+cleanup durability, Scene Collection qualification, or fail-closed behavior.
+
+The remaining #153 files do not currently overlap the A1 delta. This is only a
+conflict map, not proof that a later rebase will be conflict-free.
+
