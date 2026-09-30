@@ -862,7 +862,12 @@ class OBSLayoutManager:
                 pending.filter_kind,
                 pending.cleanup_action,
             )
-            if pending.legacy or pending.ambiguous or observed != expected:
+            if (
+                pending.legacy
+                or pending.ambiguous
+                or pending.context_uncertain
+                or observed != expected
+            ):
                 raise RuntimeError(
                     f"Obligation fade contradictoire pour {identity.source_alias}; "
                     "mutation du helper refusée"
@@ -897,20 +902,74 @@ class OBSLayoutManager:
             return
         self._remove_pending_fade(key)
 
-    def _quarantine_fade_context_uncertainty(
+    def _set_fade_context_uncertain(
         self,
         identity: FadeHelperIdentity,
-        detail: str,
+        uncertain: bool,
+        *,
+        detail: str = "",
     ) -> None:
-        """Persist fail-closed state for a request that crossed collections."""
+        """Durably fence a mutation before it can affect an unknown collection."""
         key = (identity.collection, identity.helper_id)
         pending = self._pending_fade_cleanup.get(key)
         if pending is None:
-            return
-        pending.ambiguous = True
-        pending.last_error = str(detail)
-        self._notify_pending_cleanup_changed()
+            raise RuntimeError(
+                f"Obligation fade absente pour {identity.source_alias}"
+            )
+        previous_uncertain = pending.context_uncertain
+        previous_error = pending.last_error
+        pending.context_uncertain = bool(uncertain)
+        if uncertain and detail:
+            pending.last_error = str(detail)
+        try:
+            self._notify_pending_cleanup_changed()
+        except Exception:
+            pending.context_uncertain = previous_uncertain
+            pending.last_error = previous_error
+            raise
         pending.persisted = True
+
+    def _fade_mutation_send(
+        self,
+        identity: FadeHelperIdentity,
+        request: str,
+        data: dict[str, Any],
+        *,
+        session_generation: int,
+        collection_generation: int,
+    ) -> dict[str, Any]:
+        """Write-ahead fence one potentially cross-collection OBS mutation."""
+        self._yield_runtime()
+        self._set_fade_context_uncertain(
+            identity,
+            True,
+            detail=f"mutation {request} en attente de qualification finale",
+        )
+        try:
+            response = self._fade_send(
+                request,
+                data,
+                session_generation=session_generation,
+                expected_collection=identity.collection,
+                expected_collection_generation=collection_generation,
+                post_runtime_yield=False,
+            )
+        except OBSRequestError:
+            # OBS explicitly rejected the request and the client completed the
+            # post-response event barrier, so no effect needs quarantine.
+            self._set_fade_context_uncertain(identity, False)
+            raise
+        except BaseException:
+            # Transport failure, collection invalidation or cooperative
+            # cancellation keeps the already durable fence intact.
+            raise
+
+        # Clear the fence durably only after the response has crossed the
+        # monotonic event barrier.  If this persistence fails, the conservative
+        # on-disk state remains context_uncertain=True.
+        self._set_fade_context_uncertain(identity, False)
+        self._yield_runtime()
+        return response
 
     def _prepare_fade_filter(
         self,
@@ -937,7 +996,9 @@ class OBSLayoutManager:
                 "nouveau helper refusé"
             )
         host, port = self._fade_connection_context()
-        current_collection = self._scene_collection_name()
+        current_collection, collection_generation = (
+            self._capture_fade_collection_context(collection)
+        )
         if current_collection != collection:
             raise RuntimeError(
                 f"Scene Collection modifiée avant le fade "
@@ -950,16 +1011,9 @@ class OBSLayoutManager:
             source,
             session_generation=session_generation,
             expected_collection=collection,
+                expected_collection_generation=collection_generation,
+            expected_collection_generation=collection_generation,
         )
-        if session_generation and isinstance(self.client, OBSClientManager):
-            verified_collection = self._scene_collection_name(
-                expected_session_generation=session_generation,
-            )
-            if verified_collection != collection:
-                raise RuntimeError(
-                    f"Scene Collection modifiée pendant la préparation du fade "
-                    f"({collection} != {verified_collection})"
-                )
 
         # Revalidate immediately before durable preparation. A blocking OBS
         # qualification above may have overlapped a shutdown request.
@@ -992,6 +1046,7 @@ class OBSLayoutManager:
                 source_uuid=identity.source_uuid,
                 session_generation=session_generation,
                 expected_collection=collection,
+                expected_collection_generation=collection_generation,
             )
             expected_rows = [
                 row
@@ -1029,6 +1084,7 @@ class OBSLayoutManager:
                         rows,
                         session_generation=session_generation,
                         expected_collection=collection,
+                expected_collection_generation=collection_generation,
                     )
                     if candidates or unreadable:
                         names = candidates or unreadable
@@ -1053,6 +1109,7 @@ class OBSLayoutManager:
                         },
                         session_generation=session_generation,
                         expected_collection=collection,
+                expected_collection_generation=collection_generation,
                     )
                 except _FadeContextChangedAfterRequest:
                     # The request was submitted, but its collection boundary
@@ -1080,6 +1137,7 @@ class OBSLayoutManager:
                         source_uuid=identity.source_uuid,
                         session_generation=session_generation,
                         expected_collection=collection,
+                expected_collection_generation=collection_generation,
                     )
                     expected_rows = [
                         row
@@ -1095,6 +1153,7 @@ class OBSLayoutManager:
                         source_uuid=identity.source_uuid,
                         session_generation=session_generation,
                         expected_collection=collection,
+                expected_collection_generation=collection_generation,
                     )
                     expected_rows = [
                         row
@@ -1114,6 +1173,7 @@ class OBSLayoutManager:
                 source_uuid=identity.source_uuid,
                 session_generation=session_generation,
                 expected_collection=collection,
+                expected_collection_generation=collection_generation,
             )
             if kind != identity.filter_kind:
                 raise RuntimeError(
@@ -1152,7 +1212,8 @@ class OBSLayoutManager:
                 effect_started = True
                 write_error: Exception | None = None
                 try:
-                    self._fade_send(
+                    self._fade_mutation_send(
+                        identity,
                         "SetSourceFilterSettings",
                         {
                             "sourceName": source_alias,
@@ -1163,6 +1224,7 @@ class OBSLayoutManager:
                         },
                         session_generation=session_generation,
                         expected_collection=collection,
+                expected_collection_generation=collection_generation,
                     )
                 except _FadeContextChangedAfterRequest:
                     raise
@@ -1175,6 +1237,7 @@ class OBSLayoutManager:
                         source_uuid=identity.source_uuid,
                         session_generation=session_generation,
                         expected_collection=collection,
+                expected_collection_generation=collection_generation,
                     )
                 except Exception as exc:
                     detail = write_error or exc
@@ -1209,7 +1272,8 @@ class OBSLayoutManager:
 
             if enabled is not True:
                 effect_started = True
-                self._fade_send(
+                self._fade_mutation_send(
+                    identity,
                     "SetSourceFilterEnabled",
                     {
                         "sourceName": source_alias,
@@ -1218,14 +1282,14 @@ class OBSLayoutManager:
                         "filterEnabled": True,
                     },
                     session_generation=session_generation,
-                    expected_collection=collection,
+                    collection_generation=collection_generation,
                 )
                 kind, enabled, settings = self._fade_filter_state(
                     source_alias,
                     identity.filter_name,
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
-                    expected_collection=collection,
+                    collection_generation=collection_generation,
                 )
                 if kind != identity.filter_kind or enabled is not True:
                     raise RuntimeError(
@@ -1243,22 +1307,11 @@ class OBSLayoutManager:
 
             self._active_fade_helpers[source_alias] = identity
             self._active_fade_sessions[source_alias] = session_generation
+            self._active_fade_collection_generations[source_alias] = (
+                collection_generation
+            )
             return identity
         except Exception as exc:
-            if effect_started and isinstance(
-                exc,
-                _FadeContextChangedAfterRequest,
-            ):
-                try:
-                    self._quarantine_fade_context_uncertainty(
-                        identity,
-                        str(exc),
-                    )
-                except Exception as quarantine_exc:
-                    raise RuntimeError(
-                        f"{exc}; quarantaine durable du contexte impossible: "
-                        f"{quarantine_exc}"
-                    ) from exc
             if not effect_started and not obligation_preexisting:
                 try:
                     self._discard_unmutated_fade_obligation(identity)
