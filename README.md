@@ -536,6 +536,35 @@ Les statistiques d'actions comptent chaque déclaration une seule fois. La class
 profil tient toutefois compte de ses actions héritées via `extends`. Les valeurs arbitraires de
 `set_input_settings` ne sont jamais incluses dans le rapport.
 
+## Contrôle système read-only
+
+Pour vérifier la configuration et les dépendances réellement utilisées sans
+démarrer le runtime ni modifier OBS :
+
+```powershell
+python main.py --system-check
+```
+
+Le contrôle est volontairement en lecture seule. Il vérifie :
+
+- la validité de la configuration ;
+- la connexion OBS WebSocket et un inventaire compact scènes/inputs/Scene Items ;
+- SoundVolumeView uniquement si une action `app_audio_output` est configurée ;
+- la prise en charge et l’état HDR du moniteur principal uniquement si une
+  action `windows_hdr` est configurée.
+
+Il n’exécute aucune action de profil, ne route aucun flux audio, ne bascule pas
+HDR et n’écrit rien dans OBS. Le mode JSON est prévu pour les scripts et
+diagnostics automatisés :
+
+```powershell
+python main.py --system-check-json
+```
+
+Le code de sortie vaut `0` en l’absence d’erreur bloquante et `1` lorsqu’une
+capacité effectivement utilisée ou la configuration est en erreur. Les simples
+avertissements restent non bloquants.
+
 ## Validation développeur
 
 ```powershell
