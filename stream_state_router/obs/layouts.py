@@ -964,11 +964,16 @@ class OBSLayoutManager:
     ) -> dict[str, Any]:
         """Write-ahead fence one potentially cross-collection OBS mutation."""
         self._yield_runtime()
-        self._set_fade_context_uncertain(
-            identity,
-            True,
-            detail=f"mutation {request} en attente de qualification finale",
+        durable_context_fence = isinstance(
+            self.client,
+            OBSClientManager,
         )
+        if durable_context_fence:
+            self._set_fade_context_uncertain(
+                identity,
+                True,
+                detail=f"mutation {request} en attente de qualification finale",
+            )
         try:
             response = self._fade_send(
                 request,
@@ -981,7 +986,8 @@ class OBSLayoutManager:
         except OBSRequestError:
             # OBS explicitly rejected the request and the client completed the
             # post-response event barrier, so no effect needs quarantine.
-            self._set_fade_context_uncertain(identity, False)
+            if durable_context_fence:
+                self._set_fade_context_uncertain(identity, False)
             raise
         except BaseException:
             # Transport failure, collection invalidation or cooperative
@@ -991,7 +997,8 @@ class OBSLayoutManager:
         # Clear the fence durably only after the response has crossed the
         # monotonic event barrier.  If this persistence fails, the conservative
         # on-disk state remains context_uncertain=True.
-        self._set_fade_context_uncertain(identity, False)
+        if durable_context_fence:
+            self._set_fade_context_uncertain(identity, False)
         self._yield_runtime()
         return response
 
@@ -1128,6 +1135,24 @@ class OBSLayoutManager:
                 except OBSRequestError:
                     effect_started = False
                     raise
+                except Exception:
+                    pending = self._pending_fade_cleanup.get(
+                        (identity.collection, identity.helper_id)
+                    )
+                    if pending is not None and pending.context_uncertain:
+                        raise
+                    if (
+                        int(
+                            getattr(
+                                self.client,
+                                "session_generation",
+                                0,
+                            )
+                            or 0
+                        )
+                        != session_generation
+                    ):
+                        raise
 
                 rows = self._fade_filter_rows(
                     source_alias,
@@ -1187,19 +1212,28 @@ class OBSLayoutManager:
             )
             if not opacity_neutral:
                 effect_started = True
-                self._fade_mutation_send(
-                    identity,
-                    "SetSourceFilterSettings",
-                    {
-                        "sourceName": source_alias,
-                        "sourceUuid": identity.source_uuid,
-                        "filterName": identity.filter_name,
-                        "filterSettings": {"opacity": 1.0},
-                        "overlay": True,
-                    },
-                    session_generation=session_generation,
-                    collection_generation=collection_generation,
-                )
+                write_error: Exception | None = None
+                try:
+                    self._fade_mutation_send(
+                        identity,
+                        "SetSourceFilterSettings",
+                        {
+                            "sourceName": source_alias,
+                            "sourceUuid": identity.source_uuid,
+                            "filterName": identity.filter_name,
+                            "filterSettings": {"opacity": 1.0},
+                            "overlay": True,
+                        },
+                        session_generation=session_generation,
+                        collection_generation=collection_generation,
+                    )
+                except Exception as exc:
+                    pending = self._pending_fade_cleanup.get(
+                        (identity.collection, identity.helper_id)
+                    )
+                    if pending is not None and pending.context_uncertain:
+                        raise
+                    write_error = exc
                 kind, enabled, settings = self._fade_filter_state(
                     source_alias,
                     identity.filter_name,
