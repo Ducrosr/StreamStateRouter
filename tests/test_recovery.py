@@ -451,6 +451,44 @@ class RuntimeMarkerTests(unittest.TestCase):
             rewritten = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(rewritten["cleanup_schema"], CLEANUP_SCHEMA_VERSION)
 
+    def test_legacy_cleanup_cannot_promote_helper_ownership(self):
+        for legacy_schema in (None, 2):
+            with self.subTest(schema=legacy_schema), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "runtime.json"
+                item = {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                    "helper_id": "abc123",
+                    "source_uuid": "input-uuid",
+                    "source_kind": "image_source",
+                    "connection": {"host": "127.0.0.1", "port": 4455},
+                    "filter_name": "[SSR] Layout Fade::abc123",
+                    "filter_kind": "color_filter_v2",
+                    "cleanup_action": "neutralize_disable",
+                }
+                original = {
+                    "clean_shutdown": False,
+                    "cleanup_complete": False,
+                    "pending_cleanup": [item],
+                }
+                if legacy_schema is not None:
+                    original["cleanup_schema"] = legacy_schema
+                path.write_text(json.dumps(original), encoding="utf-8")
+                marker = RuntimeMarker()
+                marker.path = path
+
+                with self.assertRaisesRegex(
+                    RuntimeMarkerFormatError,
+                    "legacy contient une identité helper",
+                ):
+                    marker.start()
+
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    original,
+                )
+
     def test_malformed_schema2_cleanup_is_preserved_and_blocks_rewrite(self):
         malformed_pending = (
             {"unexpected": "mapping"},
