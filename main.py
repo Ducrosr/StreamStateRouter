@@ -171,11 +171,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.headless:
             code = run_headless(config)
             if not marker.finalized:
-                # Headless mode never starts the OBS runtime, so a normal
-                # return is sufficient proof that there is no runtime cleanup
-                # obligation left behind. Exceptions deliberately keep the
-                # marker dirty.
-                marker.clean_shutdown()
+                # Headless mode never starts the OBS runtime. It may mark its
+                # own process exit as clean, but it cannot discharge cleanup
+                # obligations recovered from an earlier GUI/OBS session.
+                pending_cleanup = tuple(marker.previous_pending_cleanup)
+                if pending_cleanup:
+                    marker.finish(
+                        clean_shutdown=True,
+                        cleanup_complete=False,
+                        pending_cleanup=pending_cleanup,
+                    )
+                else:
+                    marker.clean_shutdown()
             return code
 
         # GUI cleanup is owned by MainWindow/RoutingService. Do not infer a
