@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QDialog,
+    QDockWidget,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -77,7 +78,6 @@ from ..services.config import (
 )
 from ..services.config_insights import (
     apply_reference_repairs,
-    build_capability_report,
     build_config_change_review,
     build_effective_dependency_tree,
     build_effective_provenance,
@@ -93,7 +93,7 @@ from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
-from ..services.system_check import probe_host_capabilities
+from ..services.system_check import run_system_check
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
@@ -101,6 +101,15 @@ from .dialogs import (
     CollectionLogicImportDialog,
     ModuleLayoutDialog,
     RuleDialog,
+)
+from .ergonomics import (
+    build_attention_items,
+    build_contextual_action,
+    build_decision_trail,
+    build_draft_banner,
+    build_rule_health,
+    build_status_strip,
+    humanize_rule,
 )
 from .presentation import (
     UserActivityEntry,
@@ -152,6 +161,25 @@ class MainWindow(QMainWindow):
         self._expert_mode = bool(
             self._window_settings.value("main_window/expert_mode", False, type=bool)
         )
+        self._favorite_targets: list[tuple[str, str, str]] = []
+        raw_favorites = self._window_settings.value(
+            "main_window/favorites",
+            "[]",
+        )
+        try:
+            decoded_favorites = json.loads(str(raw_favorites or "[]"))
+            if isinstance(decoded_favorites, list):
+                for raw in decoded_favorites:
+                    if (
+                        isinstance(raw, list)
+                        and len(raw) == 3
+                        and all(isinstance(item, str) for item in raw)
+                    ):
+                        self._favorite_targets.append(
+                            (raw[0], raw[1], raw[2])
+                        )
+        except (TypeError, ValueError):
+            self._favorite_targets = []
         self._edit_mode = False
         self._edit_mode_owned_pause = False
         self.config = copy.deepcopy(config)
@@ -190,6 +218,12 @@ class MainWindow(QMainWindow):
         self._user_activity_history: list[
             tuple[str, UserActivityEntry, int, float]
         ] = []
+        self._last_system_check_report = None
+        self._recent_inspector_targets: list[
+            tuple[str, str, str]
+        ] = []
+        self._inspector_context: tuple[str, str, str] | None = None
+        self._inspector_payload: Mapping[str, object] | None = None
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -225,7 +259,7 @@ class MainWindow(QMainWindow):
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(18, 16, 18, 18)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
         self.setCentralWidget(root)
 
         top = QHBoxLayout()
@@ -233,30 +267,126 @@ class MainWindow(QMainWindow):
         title.setObjectName("Title")
         top.addWidget(title)
         top.addStretch(1)
-        self.obs_status = QLabel("OBS : —")
-        self.obs_status.setObjectName("Muted")
-        top.addWidget(self.obs_status)
+
+        def status_box(
+            caption: str,
+            value: QLabel,
+            action: QPushButton | None = None,
+        ) -> QFrame:
+            frame = QFrame()
+            frame.setObjectName("StatusBox")
+            box = QVBoxLayout(frame)
+            box.setContentsMargins(10, 6, 10, 6)
+            box.setSpacing(2)
+            header = QLabel(caption)
+            header.setObjectName("Muted")
+            box.addWidget(header)
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            row.addWidget(value)
+            if action is not None:
+                action.setObjectName("Compact")
+                row.addWidget(action)
+            box.addLayout(row)
+            return frame
+
+        self.interface_status = QLabel("—")
+        self.interface_status.setObjectName("Good")
         self.mode_button = QPushButton()
         self.mode_button.clicked.connect(self._toggle_ui_mode)
-        top.addWidget(self.mode_button)
-        self.edit_mode_button = QPushButton("Mode édition")
-        self.edit_mode_button.setToolTip(
-            "Geler le routage automatique pendant la configuration de SSR/OBS."
+        top.addWidget(
+            status_box("Interface", self.interface_status, self.mode_button)
         )
+
+        self.config_status = QLabel("—")
+        self.config_status.setObjectName("Good")
+        self.edit_mode_button = QPushButton()
         self.edit_mode_button.clicked.connect(self._toggle_edit_mode)
-        top.addWidget(self.edit_mode_button)
-        self.pause_button = QPushButton("Suspendre")
+        top.addWidget(
+            status_box(
+                "Configuration",
+                self.config_status,
+                self.edit_mode_button,
+            )
+        )
+
+        self.routing_status_label = QLabel("—")
+        self.routing_status_label.setObjectName("Good")
+        self.pause_button = QPushButton()
         self.pause_button.clicked.connect(self._toggle_pause)
-        top.addWidget(self.pause_button)
+        top.addWidget(
+            status_box(
+                "Routage",
+                self.routing_status_label,
+                self.pause_button,
+            )
+        )
+
+        self.obs_status = QLabel("—")
+        self.obs_status.setObjectName("Muted")
+        top.addWidget(status_box("OBS", self.obs_status))
         layout.addLayout(top)
+
+        self.edit_banner = QFrame()
+        self.edit_banner.setObjectName("EditBanner")
+        edit_row = QHBoxLayout(self.edit_banner)
+        edit_row.setContentsMargins(12, 8, 12, 8)
+        self.edit_banner_label = QLabel(
+            "MODE ÉDITION — routage automatique gelé — "
+            "les changements restent dans le brouillon."
+        )
+        self.edit_banner_label.setObjectName("Warn")
+        self.edit_banner_label.setWordWrap(True)
+        edit_row.addWidget(self.edit_banner_label, 1)
+        edit_exit = QPushButton("Quitter l’édition")
+        edit_exit.setObjectName("Compact")
+        edit_exit.clicked.connect(self._toggle_edit_mode)
+        edit_row.addWidget(edit_exit)
+        self.edit_banner.setVisible(False)
+        layout.addWidget(self.edit_banner)
+
+        self.draft_banner = QFrame()
+        self.draft_banner.setObjectName("DraftBanner")
+        draft_row = QHBoxLayout(self.draft_banner)
+        draft_row.setContentsMargins(12, 8, 12, 8)
+        draft_text = QVBoxLayout()
+        draft_text.setSpacing(1)
+        self.unsaved = QLabel("")
+        self.unsaved.setObjectName("Warn")
+        self.draft_detail = QLabel("")
+        self.draft_detail.setObjectName("Muted")
+        self.draft_detail.setWordWrap(True)
+        draft_text.addWidget(self.unsaved)
+        draft_text.addWidget(self.draft_detail)
+        draft_row.addLayout(draft_text, 1)
+        self.review_draft_button = QPushButton("Revoir…")
+        self.review_draft_button.clicked.connect(
+            self._show_draft_change_review
+        )
+        draft_row.addWidget(self.review_draft_button)
+        self.discard_draft_button = QPushButton("Abandonner")
+        self.discard_draft_button.clicked.connect(self._discard_draft)
+        draft_row.addWidget(self.discard_draft_button)
+        self.save_button = QPushButton("Enregistrer et appliquer")
+        self.save_button.setObjectName("Primary")
+        self.save_button.clicked.connect(self.save_and_apply)
+        draft_row.addWidget(self.save_button)
+        self.draft_banner.setVisible(False)
+        layout.addWidget(self.draft_banner)
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
         self.dashboard_tab_index = self.tabs.addTab(
-            self._scrollable_tab(self._build_dashboard()), "Dashboard"
+            self._scrollable_tab(self._build_dashboard()), "Accueil"
         )
         self.automations_tab_index = self.tabs.addTab(
-            self._scrollable_tab(self._build_automations_tab()), "Automatisations"
+            self._scrollable_tab(self._build_automations_tab()),
+            "Automatisations",
+        )
+        self.configure_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_configure_tab()),
+            "Configurer",
         )
         self.rules_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_rules_tab()), "Règles"
@@ -267,31 +397,17 @@ class MainWindow(QMainWindow):
         self.layouts_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_layouts_tab()), "Layouts"
         )
+        self.diagnostics_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self._build_diagnostics_tab()),
+            "Diagnostics",
+        )
         self.settings_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_settings_tab()), "Paramètres"
         )
         self.logs_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_logs_tab()), "Journal"
         )
-
-        footer = QHBoxLayout()
-        self.unsaved = QLabel("")
-        self.unsaved.setObjectName("Warn")
-        footer.addWidget(self.unsaved)
-        footer.addStretch(1)
-        self.review_draft_button = QPushButton("Revoir les changements…")
-        self.review_draft_button.clicked.connect(
-            self._show_draft_change_review
-        )
-        footer.addWidget(self.review_draft_button)
-        self.discard_draft_button = QPushButton("Abandonner le brouillon")
-        self.discard_draft_button.clicked.connect(self._discard_draft)
-        footer.addWidget(self.discard_draft_button)
-        self.save_button = QPushButton("Enregistrer et appliquer")
-        self.save_button.setObjectName("Primary")
-        self.save_button.clicked.connect(self.save_and_apply)
-        footer.addWidget(self.save_button)
-        layout.addLayout(footer)
+        self._build_inspector_dock()
 
     def _scrollable_tab(self, page: QWidget) -> QScrollArea:
         scroll = QScrollArea()
@@ -322,6 +438,123 @@ class MainWindow(QMainWindow):
         self._window_settings.sync()
         self._apply_ui_mode()
 
+    def _set_status_label(
+        self,
+        label: QLabel,
+        text: str,
+        style: str,
+    ) -> None:
+        label.setText(str(text))
+        label.setObjectName(str(style or "Muted"))
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _refresh_status_strip(self) -> None:
+        if not hasattr(self, "interface_status"):
+            return
+        service = self._service
+        client = self._client
+        obs_raw = self.config.get("obs")
+        obs_enabled = bool(
+            client.config.enabled
+            if client is not None
+            else (
+                obs_raw.get("enabled", False)
+                if isinstance(obs_raw, Mapping)
+                else False
+            )
+        )
+        view = build_status_strip(
+            expert_mode=self._expert_mode,
+            edit_mode=self._edit_mode,
+            paused=bool(service.paused) if service is not None else False,
+            obs_enabled=obs_enabled,
+            obs_connected=bool(client and client.connected),
+            routing_incomplete=self._routing_incomplete,
+            runtime_available=service is not None,
+        )
+        self._set_status_label(
+            self.interface_status,
+            view.interface_text,
+            "Good" if self._expert_mode else "Muted",
+        )
+        self.mode_button.setText(view.interface_action)
+        self.mode_button.setToolTip(
+            "Afficher tous les écrans techniques."
+            if not self._expert_mode
+            else "Revenir aux parcours essentiels."
+        )
+        self._set_status_label(
+            self.config_status,
+            view.config_text,
+            view.config_style,
+        )
+        self.edit_mode_button.setText(view.config_action)
+        self.edit_mode_button.setToolTip(
+            "Le mode édition gèle le routage automatique et autorise "
+            "les modifications du brouillon."
+        )
+        self._set_status_label(
+            self.routing_status_label,
+            view.routing_text,
+            view.routing_style,
+        )
+        self.pause_button.setText(view.routing_action)
+        self.pause_button.setEnabled(
+            service is not None and not self._edit_mode
+        )
+        self._set_status_label(
+            self.obs_status,
+            view.obs_text,
+            view.obs_style,
+        )
+        if hasattr(self, "edit_banner"):
+            self.edit_banner.setVisible(self._edit_mode)
+        if hasattr(self, "configure_requirements"):
+            if not obs_enabled:
+                self.configure_requirements.setText(
+                    "Activez « Piloter OBS » dans Paramètres avant de capturer."
+                )
+                self.configure_requirements.setObjectName("Warn")
+            elif not bool(client and client.connected):
+                self.configure_requirements.setText(
+                    "OBS doit être connecté. Testez la connexion dans Paramètres."
+                )
+                self.configure_requirements.setObjectName("Warn")
+            elif self._edit_mode:
+                self.configure_requirements.setText(
+                    "Mode édition actif : la capture modifiera uniquement le brouillon."
+                )
+                self.configure_requirements.setObjectName("Warn")
+            else:
+                self.configure_requirements.setText(
+                    "Prêt. L’assistant activera automatiquement le Mode édition avant de modifier le brouillon."
+                )
+                self.configure_requirements.setObjectName("Good")
+            self.configure_requirements.style().unpolish(
+                self.configure_requirements
+            )
+            self.configure_requirements.style().polish(
+                self.configure_requirements
+            )
+        if hasattr(self, "layout_obs_hint"):
+            if not obs_enabled:
+                hint = "Pilotage OBS désactivé : activez-le dans Paramètres."
+                style = "Warn"
+            elif not bool(client and client.connected):
+                hint = "OBS déconnecté : synchronisation et application indisponibles."
+                style = "Warn"
+            else:
+                hint = (
+                    "Synchroniser lit uniquement OBS. Capturer écrit dans le "
+                    "brouillon. Appliquer modifie OBS immédiatement."
+                )
+                style = "Good"
+            self.layout_obs_hint.setText(hint)
+            self.layout_obs_hint.setObjectName(style)
+            self.layout_obs_hint.style().unpolish(self.layout_obs_hint)
+            self.layout_obs_hint.style().polish(self.layout_obs_hint)
+
     def _apply_ui_mode(self) -> None:
         if not hasattr(self, "tabs"):
             return
@@ -329,6 +562,7 @@ class MainWindow(QMainWindow):
             self.rules_tab_index,
             self.profiles_tab_index,
             self.layouts_tab_index,
+            self.diagnostics_tab_index,
             self.logs_tab_index,
         )
         for index in expert_only:
@@ -339,17 +573,25 @@ class MainWindow(QMainWindow):
                 widget.setVisible(self._expert_mode)
         self.tabs.setTabVisible(self.dashboard_tab_index, True)
         self.tabs.setTabVisible(self.automations_tab_index, True)
+        self.tabs.setTabVisible(self.configure_tab_index, True)
         self.tabs.setTabVisible(self.settings_tab_index, True)
-        self.mode_button.setText(
-            "Mode simple" if self._expert_mode else "Mode expert"
-        )
-        self.mode_button.setToolTip(
-            "Masquer les écrans techniques."
-            if self._expert_mode
-            else "Afficher les règles, profils, layouts et le journal technique."
-        )
-        if not self._expert_mode and self.tabs.currentIndex() in expert_only:
+
+        for widget_name in (
+            "router_settings_card",
+            "api_settings_card",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(self._expert_mode)
+
+        if (
+            not self._expert_mode
+            and self.tabs.currentIndex() in expert_only
+        ):
             self.tabs.setCurrentIndex(self.dashboard_tab_index)
+        if hasattr(self, "inspector_dock") and not self._expert_mode:
+            self.inspector_dock.hide()
+        self._refresh_status_strip()
         if hasattr(self, "unsaved"):
             self._refresh_config_revision_status()
 
@@ -485,6 +727,27 @@ class MainWindow(QMainWindow):
 
             control.setEnabled(enabled)
             control.setToolTip(tooltip)
+
+        if hasattr(self, "history_undo_status"):
+            if checkpoint is None:
+                self.history_undo_status.setText(
+                    "Dernière opération réversible : aucune"
+                )
+                self.history_undo_status.setObjectName("Muted")
+            else:
+                label = str(
+                    checkpoint.get("label") or "dernière opération"
+                )
+                self.history_undo_status.setText(
+                    f"Dernière opération réversible : {label}"
+                )
+                self.history_undo_status.setObjectName("Good")
+            self.history_undo_status.style().unpolish(
+                self.history_undo_status
+            )
+            self.history_undo_status.style().polish(
+                self.history_undo_status
+            )
 
     def _set_config_undo_checkpoint(
         self,
@@ -723,22 +986,34 @@ class MainWindow(QMainWindow):
             return
         service = self._service
         client = self._client
+        self._refresh_status_strip()
         if service is None:
             self.dashboard_health.setText("Runtime indisponible")
             self.dashboard_health.setObjectName("Bad")
             self.dashboard_decision.setText("Décision : —")
-            self.dashboard_reason.setText("Pourquoi : le moteur de routage n’est pas actif.")
+            self.dashboard_reason.setText(
+                "Pourquoi : le moteur de routage n’est pas actif."
+            )
             self.dashboard_override_row.setVisible(False)
             self.dashboard_diff.clear()
             if hasattr(self, "drift_card"):
                 self.drift_card.setVisible(False)
+            if hasattr(self, "diagnostics_status"):
+                self.diagnostics_status.setText(
+                    "Runtime indisponible"
+                )
+                self.diagnostics_detail.setText(
+                    "Le moteur de routage n’est pas actif."
+                )
             return
 
         try:
             explanation = service.explain_decision()
             routing_status = service.routing_status()
         except Exception as exc:
-            self.dashboard_health.setText("Diagnostic indisponible")
+            self.dashboard_health.setText(
+                "Diagnostic indisponible"
+            )
             self.dashboard_health.setObjectName("Warn")
             self.dashboard_decision.setText("Décision : —")
             self.dashboard_reason.setText(f"Pourquoi : {exc}")
@@ -754,29 +1029,33 @@ class MainWindow(QMainWindow):
             obs_enabled=bool(client and client.config.enabled),
             obs_connected=bool(client and client.connected),
         )
-        self.dashboard_health.setText(snapshot.health_text)
-        self.dashboard_health.setObjectName(snapshot.health_style)
-        self.dashboard_health.style().unpolish(self.dashboard_health)
-        self.dashboard_health.style().polish(self.dashboard_health)
-        self.dashboard_decision.setText(f"Décision : {snapshot.decision}")
-        self.dashboard_reason.setText(f"Pourquoi : {snapshot.reason}")
+        self._set_status_label(
+            self.dashboard_health,
+            snapshot.health_text,
+            snapshot.health_style,
+        )
+        self.dashboard_decision.setText(
+            f"Décision : {snapshot.decision}"
+        )
+        self.dashboard_reason.setText(
+            f"Pourquoi : {snapshot.reason}"
+        )
+        self._refresh_decision_trail(explanation)
 
         override_view = build_manual_override_presentation(
             service.manual_override_status()
         )
-        self.dashboard_override_row.setVisible(override_view.active)
+        self.dashboard_override_row.setVisible(
+            override_view.active
+        )
         if override_view.active:
-            self.dashboard_override_label.setText(
-                f"{override_view.title} · {override_view.detail}"
-            )
-            self.dashboard_override_label.setObjectName(
-                override_view.style
-            )
-            self.dashboard_override_label.style().unpolish(
-                self.dashboard_override_label
-            )
-            self.dashboard_override_label.style().polish(
-                self.dashboard_override_label
+            self._set_status_label(
+                self.dashboard_override_label,
+                (
+                    f"{override_view.title} · "
+                    f"{override_view.detail}"
+                ),
+                override_view.style,
             )
 
         self.dashboard_diff.clear()
@@ -793,8 +1072,9 @@ class MainWindow(QMainWindow):
                 item.setToolTip(3, difference.message)
             self.dashboard_diff.addTopLevelItem(item)
 
+        drift_status = service.drift_status()
         drift_view = build_obs_drift_presentation(
-            service.drift_status(),
+            drift_status,
             ignored_signature=self._ignored_drift_signature,
         )
         self.drift_card.setVisible(drift_view.visible)
@@ -803,10 +1083,187 @@ class MainWindow(QMainWindow):
             self.drift_detail.setText(
                 drift_view.detail
                 or (
-                    "OBS ne correspond plus à une partie de la cible gérée "
-                    "par SSR."
+                    "OBS ne correspond plus à une partie de la "
+                    "cible gérée par SSR."
                 )
             )
+
+        self._refresh_dashboard_context_action(
+            snapshot,
+            override_active=override_view.active,
+            drift_detected=drift_view.visible,
+            drift_count=(
+                int(drift_status.get("count", 0) or 0)
+                if isinstance(drift_status, Mapping)
+                else 0
+            ),
+        )
+        if hasattr(self, "diagnostics_status"):
+            self._set_status_label(
+                self.diagnostics_status,
+                snapshot.health_text,
+                snapshot.health_style,
+            )
+            self.diagnostics_detail.setText(
+                f"{snapshot.decision} · {snapshot.reason}"
+            )
+
+    def _clear_layout(self, layout: QHBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _open_rule_by_name(self, name: str) -> None:
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.rules_tab_index)
+        for row, rule in enumerate(self.config.get("rules", [])):
+            if (
+                isinstance(rule, Mapping)
+                and str(rule.get("name") or "") == str(name)
+            ):
+                self.rules_table.selectRow(row)
+                item = self.rules_table.item(row, 1)
+                if item is not None:
+                    self.rules_table.scrollToItem(item)
+                return
+
+    def _open_profile_target(
+        self,
+        domain: str,
+        name: str,
+    ) -> None:
+        self._ensure_expert_mode()
+        if domain == "layout":
+            self.tabs.setCurrentIndex(self.layouts_tab_index)
+            self.layout_profile_name.setCurrentText(str(name))
+            self._refresh_layout_profile_view()
+            return
+        self.tabs.setCurrentIndex(self.profiles_tab_index)
+        index = self.profile_domain.findData(str(domain))
+        if index >= 0:
+            self.profile_domain.setCurrentIndex(index)
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(str(name))
+
+    def _refresh_decision_trail(
+        self,
+        explanation: Mapping[str, object],
+    ) -> None:
+        layout = getattr(self, "dashboard_trail_layout", None)
+        if layout is None:
+            return
+        self._clear_layout(layout)
+        trail = build_decision_trail(explanation)
+        if not trail:
+            empty = QLabel("Aucune décision active")
+            empty.setObjectName("Muted")
+            layout.addWidget(empty)
+            layout.addStretch(1)
+            return
+        for index, step in enumerate(trail):
+            if index:
+                arrow = QLabel("→")
+                arrow.setObjectName("Muted")
+                layout.addWidget(arrow)
+            button = QPushButton(step.label)
+            button.setObjectName("Compact")
+            if step.kind == "rule":
+                button.clicked.connect(
+                    lambda _checked=False, name=step.target:
+                    self._open_rule_by_name(name)
+                )
+            elif step.kind == "profile":
+                button.clicked.connect(
+                    lambda _checked=False,
+                    domain=step.domain,
+                    name=step.target:
+                    self._open_profile_target(domain, name)
+                )
+            else:
+                button.setEnabled(False)
+            layout.addWidget(button)
+        layout.addStretch(1)
+
+    def _execute_dashboard_action(self) -> None:
+        key = str(
+            getattr(self, "_dashboard_context_action_key", "")
+            or ""
+        )
+        if key == "obs_settings":
+            self.tabs.setCurrentIndex(self.settings_tab_index)
+        elif key == "obs_test":
+            self.tabs.setCurrentIndex(self.settings_tab_index)
+            self._test_obs()
+        elif key == "review_draft":
+            self._show_draft_change_review()
+        elif key == "apply_config":
+            self.save_and_apply()
+        elif key == "resume":
+            if self._service is not None and self._service.paused:
+                self._toggle_pause()
+        elif key == "clear_override":
+            self._clear_override()
+        elif key == "reapply":
+            self._force_reapply()
+        elif key == "diagnose":
+            self._show_guided_diagnostic()
+
+    def _refresh_dashboard_context_action(
+        self,
+        snapshot,
+        *,
+        override_active: bool,
+        drift_detected: bool,
+        drift_count: int = 0,
+    ) -> None:
+        client = self._client
+        service = self._service
+        view = build_contextual_action(
+            obs_enabled=bool(client and client.config.enabled),
+            obs_connected=bool(client and client.connected),
+            paused=bool(service and service.paused),
+            draft_dirty=self._draft_dirty,
+            revision_mismatch=(
+                bool(self._saved_revision)
+                and bool(self._applied_revision)
+                and self._saved_revision != self._applied_revision
+            ),
+            override_active=override_active,
+            drift_detected=drift_detected,
+            difference_statuses=tuple(
+                difference.status
+                for difference in snapshot.differences
+            ),
+            difference_count=(
+                max(0, int(drift_count or 0))
+                if drift_detected
+                else sum(
+                    1
+                    for difference in snapshot.differences
+                    if difference.status_label
+                    not in {"Conforme", "Non géré"}
+                )
+            ),
+        )
+        self._dashboard_context_action_key = view.key
+        self.dashboard_action_title.setText(view.title)
+        self.dashboard_action_detail.setText(view.detail)
+        self.dashboard_action_button.setVisible(view.actionable)
+        self.dashboard_action_button.setText(view.button_text)
+        object_name = {
+            "Good": "ActionCardGood",
+            "Warn": "ActionCardWarn",
+            "Bad": "ActionCardBad",
+        }.get(view.style, "ActionCardGood")
+        self.dashboard_action_card.setObjectName(object_name)
+        self.dashboard_action_card.style().unpolish(
+            self.dashboard_action_card
+        )
+        self.dashboard_action_card.style().polish(
+            self.dashboard_action_card
+        )
 
     def _ignore_current_obs_drift(self) -> None:
         service = self._service
@@ -831,24 +1288,10 @@ class MainWindow(QMainWindow):
         client = self._client
         self._collect_settings()
 
-        audio_probe, hdr_probe = probe_host_capabilities(
-            self.config
-        )
-
-        catalog_status = (
-            service.obs_catalog_status()
-            if service is not None
-            else {"available": False, "stale": False}
-        )
-        report = build_capability_report(
-            self.config,
-            obs_enabled=bool(client and client.config.enabled),
-            obs_connected=bool(client and client.connected),
-            obs_error=str(client.last_error if client else ""),
-            catalog_status=catalog_status,
-            audio_probe=audio_probe,
-            hdr_probe=hdr_probe,
-        )
+        system_report = run_system_check(self.config)
+        self._last_system_check_report = system_report
+        self._populate_attention_center(system_report)
+        report = system_report.capabilities
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Santé et capacités SSR")
@@ -859,6 +1302,15 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 15pt; font-weight: 700;")
         root.addWidget(title)
 
+        if system_report.config_errors:
+            validation = QLabel(
+                "Configuration invalide :\n• "
+                + "\n• ".join(system_report.config_errors)
+            )
+            validation.setWordWrap(True)
+            validation.setObjectName("Bad")
+            root.addWidget(validation)
+
         capabilities = QTreeWidget()
         capabilities.setColumnCount(4)
         capabilities.setHeaderLabels(
@@ -867,16 +1319,20 @@ class MainWindow(QMainWindow):
         capabilities.setRootIsDecorated(False)
         capabilities.setAlternatingRowColors(True)
         for item in report.items:
-            capabilities.addTopLevelItem(
-                QTreeWidgetItem(
-                    [
-                        item.label,
-                        item.status_label,
-                        item.detail,
-                        item.action,
-                    ]
-                )
+            row = QTreeWidgetItem(
+                [
+                    item.label,
+                    item.status_label,
+                    item.detail,
+                    item.action,
+                ]
             )
+            row.setData(0, Qt.UserRole, item.key)
+            row.setToolTip(
+                0,
+                "Double-cliquez pour ouvrir l’écran le plus pertinent.",
+            )
+            capabilities.addTopLevelItem(row)
         capabilities.header().setSectionResizeMode(
             0,
             QHeaderView.ResizeMode.ResizeToContents,
@@ -944,7 +1400,26 @@ class MainWindow(QMainWindow):
             )
             root.addWidget(findings)
 
+        def navigate_capability(*_args) -> None:
+            selected = capabilities.currentItem()
+            if selected is None:
+                return
+            key = str(selected.data(0, Qt.UserRole) or "")
+            dialog.accept()
+            if key in {"obs", "audio", "hdr"}:
+                self.tabs.setCurrentIndex(self.settings_tab_index)
+            elif key == "obs_references":
+                self.tabs.setCurrentIndex(self.configure_tab_index)
+            else:
+                self._open_diagnostics_tab()
+
+        capabilities.itemDoubleClicked.connect(navigate_capability)
+
         actions = QHBoxLayout()
+        open_related = QPushButton("Ouvrir l’emplacement")
+        open_related.clicked.connect(navigate_capability)
+        actions.addWidget(open_related)
+
         if service is not None and client is not None and client.connected:
             sync_catalog = QPushButton("Synchroniser le catalogue OBS")
             def sync_and_close() -> None:
@@ -993,6 +1468,22 @@ class MainWindow(QMainWindow):
             )
         copy_diagnostic.clicked.connect(copy_diagnostic_text)
         actions.addWidget(copy_diagnostic)
+
+        open_settings = QPushButton("Ouvrir Paramètres")
+        open_settings.clicked.connect(dialog.accept)
+        open_settings.clicked.connect(
+            lambda: self.tabs.setCurrentIndex(
+                self.settings_tab_index
+            )
+        )
+        actions.addWidget(open_settings)
+
+        open_diagnostics = QPushButton("Ouvrir Diagnostics")
+        open_diagnostics.clicked.connect(dialog.accept)
+        open_diagnostics.clicked.connect(
+            self._open_diagnostics_tab
+        )
+        actions.addWidget(open_diagnostics)
 
         actions.addStretch(1)
         close = QPushButton("Fermer")
@@ -1147,9 +1638,9 @@ class MainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        expert = QPushButton("Ouvrir le mode Expert")
+        expert = QPushButton("Ouvrir Diagnostics")
         expert.clicked.connect(dialog.accept)
-        expert.clicked.connect(self._ensure_expert_mode)
+        expert.clicked.connect(self._open_diagnostics_tab)
         actions.addWidget(expert)
         close = QPushButton("Fermer")
         close.clicked.connect(dialog.accept)
@@ -1390,14 +1881,471 @@ class MainWindow(QMainWindow):
         lay.addWidget(label)
         return frame, lay
 
+    @staticmethod
+    def _set_action_risk(
+        button: QPushButton,
+        risk: str,
+        detail: str = "",
+    ) -> None:
+        normalized = str(risk or "").strip().casefold()
+        names = {
+            "read": "ReadOnlyAction",
+            "draft": "DraftAction",
+            "live": "LiveAction",
+        }
+        prefixes = {
+            "read": "Lecture seule",
+            "draft": "Modifie le brouillon SSR",
+            "live": "Peut modifier OBS immédiatement",
+        }
+        if normalized in names:
+            button.setObjectName(names[normalized])
+            prefix = prefixes[normalized]
+            button.setToolTip(
+                prefix + (f" · {detail}" if detail else "")
+            )
+
+
+    def _build_inspector_dock(self) -> None:
+        self.inspector_dock = QDockWidget("Inspecteur", self)
+        self.inspector_dock.setObjectName("InspectorDock")
+        self.inspector_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        body = QWidget()
+        root = QVBoxLayout(body)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        self.inspector_title = QLabel("Aucun élément sélectionné")
+        self.inspector_title.setStyleSheet(
+            "font-size: 14pt; font-weight: 700;"
+        )
+        self.inspector_health = QLabel("—")
+        self.inspector_health.setObjectName("Muted")
+        self.inspector_summary = QLabel(
+            "Sélectionnez une règle, un profil ou un layout."
+        )
+        self.inspector_summary.setObjectName("Muted")
+        self.inspector_summary.setWordWrap(True)
+        root.addWidget(self.inspector_title)
+        root.addWidget(self.inspector_health)
+        root.addWidget(self.inspector_summary)
+
+        self.inspector_tree = QTreeWidget()
+        self.inspector_tree.setColumnCount(2)
+        self.inspector_tree.setHeaderLabels(["Information", "Valeur"])
+        self.inspector_tree.setRootIsDecorated(False)
+        self.inspector_tree.setAlternatingRowColors(True)
+        self.inspector_tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.inspector_tree.header().setStretchLastSection(True)
+        root.addWidget(self.inspector_tree, 1)
+
+        actions = QHBoxLayout()
+        self.inspector_open_button = QPushButton("Ouvrir")
+        self.inspector_open_button.clicked.connect(
+            self._open_inspector_target
+        )
+        actions.addWidget(self.inspector_open_button)
+        self.inspector_favorite_button = QPushButton("☆ Épingler")
+        self.inspector_favorite_button.clicked.connect(
+            self._toggle_inspector_favorite
+        )
+        actions.addWidget(self.inspector_favorite_button)
+        self.inspector_impact_button = QPushButton("Impact / dépendances")
+        self.inspector_impact_button.clicked.connect(
+            self._show_inspector_impact
+        )
+        actions.addWidget(self.inspector_impact_button)
+        raw = QPushButton("JSON…")
+        raw.clicked.connect(self._show_inspector_raw)
+        actions.addWidget(raw)
+        actions.addStretch(1)
+        root.addLayout(actions)
+
+        self.inspector_dock.setWidget(body)
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.inspector_dock,
+        )
+        self.inspector_dock.hide()
+
+    def _remember_inspector_target(
+        self,
+        kind: str,
+        domain: str,
+        target: str,
+    ) -> None:
+        item = (
+            str(kind or ""),
+            str(domain or ""),
+            str(target or ""),
+        )
+        if not item[2]:
+            return
+        self._recent_inspector_targets = [
+            current
+            for current in self._recent_inspector_targets
+            if current != item
+        ]
+        self._recent_inspector_targets.insert(0, item)
+        self._recent_inspector_targets = self._recent_inspector_targets[:8]
+
+    def _set_inspector(
+        self,
+        *,
+        kind: str,
+        title: str,
+        domain: str = "",
+        target: str = "",
+        summary: str = "",
+        health_text: str = "—",
+        health_style: str = "Muted",
+        rows: list[tuple[str, str]] | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
+        if not hasattr(self, "inspector_dock"):
+            return
+        self._inspector_context = (
+            str(kind or ""),
+            str(domain or ""),
+            str(target or title),
+        )
+        self._inspector_payload = (
+            copy.deepcopy(dict(payload))
+            if isinstance(payload, Mapping)
+            else None
+        )
+        self._remember_inspector_target(
+            kind,
+            domain,
+            target or title,
+        )
+        self.inspector_title.setText(title)
+        self._set_status_label(
+            self.inspector_health,
+            health_text,
+            health_style,
+        )
+        self.inspector_summary.setText(summary or "—")
+        self.inspector_tree.clear()
+        for label, value in rows or []:
+            self.inspector_tree.addTopLevelItem(
+                QTreeWidgetItem([str(label), str(value)])
+            )
+        self.inspector_open_button.setEnabled(bool(target))
+        self.inspector_impact_button.setEnabled(
+            kind in {"profile", "layout"}
+        )
+        favorite_key = (
+            str(kind or ""),
+            str(domain or ""),
+            str(target or title),
+        )
+        self.inspector_favorite_button.setEnabled(bool(favorite_key[2]))
+        self.inspector_favorite_button.setText(
+            "★ Épinglé"
+            if favorite_key in self._favorite_targets
+            else "☆ Épingler"
+        )
+        if self._expert_mode:
+            self.inspector_dock.show()
+
+    def _inspect_selected_rule(self) -> None:
+        if not hasattr(self, "rules_table"):
+            return
+        idx = self._selected_rule_index()
+        if idx is None:
+            return
+        raw_rules = self.config.get("rules")
+        if not isinstance(raw_rules, list) or not 0 <= idx < len(raw_rules):
+            return
+        rule = raw_rules[idx]
+        if not isinstance(rule, Mapping):
+            return
+        name = str(rule.get("name") or f"Règle {idx + 1}")
+        health = build_rule_health(rule, self.config)
+        conditions = (
+            rule.get("conditions")
+            if isinstance(rule.get("conditions"), Mapping)
+            else {}
+        )
+        state = (
+            rule.get("state")
+            if isinstance(rule.get("state"), Mapping)
+            else {}
+        )
+        rows = [
+            ("Priorité", str(rule.get("priority", 0))),
+            (
+                "État",
+                "Active" if bool(rule.get("enabled", True)) else "Désactivée",
+            ),
+            ("Comportement", str(rule.get("behavior") or "match")),
+            ("Processus", str(rule.get("exe") or "—")),
+            ("Chemin", str(rule.get("path") or "—")),
+            ("Titre", str(rule.get("title_regex") or "—")),
+        ]
+        for key, value in conditions.items():
+            rows.append((f"Condition · {key}", str(value)))
+        for key, value in state.items():
+            rows.append((f"Profil · {key}", str(value)))
+        self._set_inspector(
+            kind="rule",
+            title=name,
+            target=name,
+            summary=humanize_rule(rule),
+            health_text=health.text,
+            health_style=health.style,
+            rows=rows,
+            payload=rule,
+        )
+        if hasattr(self, "rule_human_summary"):
+            self.rule_human_summary.setText(humanize_rule(rule))
+            self._set_status_label(
+                self.rule_health_badge,
+                health.text,
+                health.style,
+            )
+            self.rule_health_badge.setToolTip(health.detail)
+
+    def _inspect_current_profile(self) -> None:
+        current = self._current_profile()
+        if current is None:
+            return
+        domain, name, profile = current
+        lineage = profile_lineage(self.config, domain, name)
+        usages = profile_usages(self.config, domain, name)
+        entries = profile_content_entries(self.config, domain, name)
+        rows = [
+            ("Domaine", DOMAIN_LABELS.get(domain, domain)),
+            ("Héritage", " ← ".join(lineage) if lineage else name),
+            ("Actions locales", str(len(profile.get("actions") or []))),
+            ("Contenu effectif", str(len(entries))),
+            ("Utilisé par", str(len(usages))),
+        ]
+        for usage in usages[:8]:
+            rows.append(
+                (
+                    f"Dépendance · {usage.kind}",
+                    f"{usage.owner} · {usage.detail}",
+                )
+            )
+        parent = str(profile.get("extends") or "").strip()
+        pool = self._profiles_for_domain(domain)
+        if parent and parent not in pool:
+            health_text = "⚠ Base introuvable"
+            health_style = "Bad"
+            health_detail = f"Le profil parent « {parent} » n’existe pas."
+        else:
+            health_text = "✓ Configuré"
+            health_style = "Good"
+            health_detail = (
+                "Héritage résolu."
+                if parent
+                else "Profil autonome."
+            )
+        if hasattr(self, "profile_health_badge"):
+            self._set_status_label(
+                self.profile_health_badge,
+                health_text,
+                health_style,
+            )
+            self.profile_health_badge.setToolTip(health_detail)
+        self._set_inspector(
+            kind="profile",
+            domain=domain,
+            title=f"{DOMAIN_LABELS.get(domain, domain)} · {name}",
+            target=name,
+            summary=(
+                f"{len(entries)} élément(s) effectif(s) · "
+                f"{len(usages)} dépendance(s)"
+            ),
+            health_text=health_text,
+            health_style=health_style,
+            rows=rows,
+            payload=profile,
+        )
+
+    def _inspect_current_layout(self) -> None:
+        current = self._current_layout_profile()
+        if current is None:
+            return
+        name, profile = current
+        lineage = profile_lineage(self.config, "layout", name)
+        usages = profile_usages(self.config, "layout", name)
+        modules = (
+            profile.get("modules")
+            if isinstance(profile.get("modules"), Mapping)
+            else {}
+        )
+        rows = [
+            ("Héritage", " ← ".join(lineage) if lineage else name),
+            ("Modules locaux", str(len(modules))),
+            ("Utilisé par", str(len(usages))),
+            (
+                "Transition",
+                str(
+                    (
+                        profile.get("transition")
+                        if isinstance(profile.get("transition"), Mapping)
+                        else {}
+                    ).get("mode")
+                    or "instant"
+                ),
+            ),
+        ]
+        for usage in usages[:8]:
+            rows.append(
+                (
+                    f"Dépendance · {usage.kind}",
+                    f"{usage.owner} · {usage.detail}",
+                )
+            )
+        parent = str(profile.get("extends") or "").strip()
+        pool = self._layout_profiles()
+        if parent and parent not in pool:
+            health_text = "⚠ Base introuvable"
+            health_style = "Bad"
+            health_detail = f"Le layout parent « {parent} » n’existe pas."
+        else:
+            health_text = "✓ Configuré"
+            health_style = "Good"
+            health_detail = (
+                "Héritage résolu."
+                if parent
+                else "Layout autonome."
+            )
+        if hasattr(self, "layout_health_badge"):
+            self._set_status_label(
+                self.layout_health_badge,
+                health_text,
+                health_style,
+            )
+            self.layout_health_badge.setToolTip(health_detail)
+        self._set_inspector(
+            kind="layout",
+            domain="layout",
+            title=f"Layout · {name}",
+            target=name,
+            summary=(
+                f"{len(modules)} module(s) local(aux) · "
+                f"{len(usages)} dépendance(s)"
+            ),
+            health_text=health_text,
+            health_style=health_style,
+            rows=rows,
+            payload=profile,
+        )
+
+    def _save_favorite_targets(self) -> None:
+        self._window_settings.setValue(
+            "main_window/favorites",
+            json.dumps(
+                [list(item) for item in self._favorite_targets],
+                ensure_ascii=False,
+            ),
+        )
+        self._window_settings.sync()
+
+    def _toggle_inspector_favorite(self) -> None:
+        context = self._inspector_context
+        if context is None:
+            return
+        if context in self._favorite_targets:
+            self._favorite_targets = [
+                item
+                for item in self._favorite_targets
+                if item != context
+            ]
+        else:
+            self._favorite_targets.insert(0, context)
+            self._favorite_targets = self._favorite_targets[:20]
+        self._save_favorite_targets()
+        self.inspector_favorite_button.setText(
+            "★ Épinglé"
+            if context in self._favorite_targets
+            else "☆ Épingler"
+        )
+
+    def _open_saved_target(
+        self,
+        kind: str,
+        domain: str,
+        target: str,
+    ) -> None:
+        if kind == "rule":
+            self._open_rule_by_name(target)
+        elif kind in {"profile", "layout"}:
+            self._open_profile_target(domain, target)
+
+    def _open_inspector_target(self) -> None:
+        context = self._inspector_context
+        if context is None:
+            return
+        kind, domain, target = context
+        if kind == "rule":
+            self._open_rule_by_name(target)
+        elif kind in {"profile", "layout"}:
+            self._open_profile_target(domain, target)
+
+    def _show_inspector_impact(self) -> None:
+        context = self._inspector_context
+        if context is None:
+            return
+        kind, domain, target = context
+        if kind == "profile":
+            self._show_profile_impact(domain, target)
+        elif kind == "layout":
+            self._show_profile_impact("layout", target)
+
+    def _show_inspector_raw(self) -> None:
+        payload = self._inspector_payload
+        if not isinstance(payload, Mapping):
+            QMessageBox.information(
+                self,
+                "Inspecteur",
+                "Aucune donnée brute disponible pour cette sélection.",
+            )
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Inspecteur brut")
+        dialog.resize(760, 620)
+        root = QVBoxLayout(dialog)
+        note = QLabel(
+            "Vue technique en lecture seule de l’objet sélectionné."
+        )
+        note.setObjectName("Muted")
+        root.addWidget(note)
+        raw = QPlainTextEdit()
+        raw.setReadOnly(True)
+        raw.setPlainText(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        root.addWidget(raw, 1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        root.addWidget(close, alignment=Qt.AlignRight)
+        dialog.exec()
+
     def _build_dashboard(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
         root.setSpacing(12)
 
-        summary_card, summary_lay = self._card("Vue d’ensemble")
+        summary_card, summary_lay = self._card("État actuel")
         self.dashboard_health = QLabel("Initialisation…")
-        self.dashboard_health.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        self.dashboard_health.setStyleSheet(
+            "font-size: 15pt; font-weight: 700;"
+        )
         self.dashboard_decision = QLabel("Décision : —")
         self.dashboard_decision.setStyleSheet("font-weight: 700;")
         self.dashboard_reason = QLabel("Pourquoi : —")
@@ -1407,6 +2355,17 @@ class MainWindow(QMainWindow):
         summary_lay.addWidget(self.dashboard_decision)
         summary_lay.addWidget(self.dashboard_reason)
 
+        trail_title = QLabel("Chemin de décision")
+        trail_title.setObjectName("Muted")
+        summary_lay.addWidget(trail_title)
+        self.dashboard_trail_widget = QWidget()
+        self.dashboard_trail_layout = QHBoxLayout(
+            self.dashboard_trail_widget
+        )
+        self.dashboard_trail_layout.setContentsMargins(0, 0, 0, 0)
+        self.dashboard_trail_layout.setSpacing(5)
+        summary_lay.addWidget(self.dashboard_trail_widget)
+
         self.dashboard_override_row = QWidget()
         override_row_lay = QHBoxLayout(self.dashboard_override_row)
         override_row_lay.setContentsMargins(0, 4, 0, 4)
@@ -1414,7 +2373,9 @@ class MainWindow(QMainWindow):
         self.dashboard_override_label.setWordWrap(True)
         self.dashboard_override_label.setObjectName("Warn")
         override_row_lay.addWidget(self.dashboard_override_label, 1)
-        dashboard_auto = QPushButton("Revenir au routage automatique")
+        dashboard_auto = QPushButton(
+            "Revenir au routage automatique"
+        )
         dashboard_auto.clicked.connect(self._clear_override)
         override_row_lay.addWidget(dashboard_auto)
         self.dashboard_override_row.setVisible(False)
@@ -1422,7 +2383,9 @@ class MainWindow(QMainWindow):
 
         self.dashboard_diff = QTreeWidget()
         self.dashboard_diff.setColumnCount(4)
-        self.dashboard_diff.setHeaderLabels(["Élément", "Attendu", "Actuel", "État"])
+        self.dashboard_diff.setHeaderLabels(
+            ["Élément", "Cible SSR", "Appliqué", "État"]
+        )
         self.dashboard_diff.setRootIsDecorated(False)
         self.dashboard_diff.setAlternatingRowColors(True)
         self.dashboard_diff.setMaximumHeight(190)
@@ -1434,27 +2397,70 @@ class MainWindow(QMainWindow):
 
         summary_actions = QHBoxLayout()
         refresh_summary = QPushButton("Actualiser")
-        refresh_summary.clicked.connect(self._refresh_dashboard_summary)
+        refresh_summary.clicked.connect(
+            self._refresh_dashboard_summary
+        )
         summary_actions.addWidget(refresh_summary)
-        explain_summary = QPushButton("Pourquoi cette décision ?")
-        explain_summary.clicked.connect(self._explain_current_decision)
+        explain_summary = QPushButton("Pourquoi ?")
+        explain_summary.clicked.connect(
+            self._explain_current_decision
+        )
         summary_actions.addWidget(explain_summary)
-        diagnose_summary = QPushButton("Pourquoi ça ne marche pas ?")
-        diagnose_summary.clicked.connect(self._show_guided_diagnostic)
-        summary_actions.addWidget(diagnose_summary)
-        preview_summary = QPushButton("Prévisualiser sans appliquer")
-        preview_summary.clicked.connect(self._show_routing_preview)
-        summary_actions.addWidget(preview_summary)
-        repair_summary = QPushButton("Corriger les différences")
-        repair_summary.setObjectName("Primary")
-        repair_summary.clicked.connect(self._force_reapply)
-        summary_actions.addWidget(repair_summary)
-        self._register_obs_connected_control(repair_summary)
+        details = QPushButton("Détails et outils…")
+        details_menu = QMenu(details)
+        preview = details_menu.addAction(
+            "Prévisualiser sans appliquer"
+        )
+        preview.triggered.connect(self._show_routing_preview)
+        diagnose = details_menu.addAction(
+            "Pourquoi ça ne marche pas ?"
+        )
+        diagnose.triggered.connect(self._show_guided_diagnostic)
+        details_menu.addSeparator()
+        provenance = details_menu.addAction("Qui contrôle quoi ?")
+        provenance.triggered.connect(
+            self._show_effective_provenance
+        )
+        dependencies = details_menu.addAction(
+            "Arbre des dépendances"
+        )
+        dependencies.triggered.connect(self._show_dependency_tree)
+        details.setMenu(details_menu)
+        summary_actions.addWidget(details)
         summary_actions.addStretch(1)
         summary_lay.addLayout(summary_actions)
         root.addWidget(summary_card)
 
-        self.drift_card, drift_lay = self._card("Écart OBS détecté")
+        self.dashboard_action_card = QFrame()
+        self.dashboard_action_card.setObjectName("ActionCardGood")
+        action_lay = QHBoxLayout(self.dashboard_action_card)
+        action_lay.setContentsMargins(14, 10, 14, 10)
+        action_text = QVBoxLayout()
+        action_text.setSpacing(2)
+        self.dashboard_action_title = QLabel(
+            "Aucune action requise"
+        )
+        self.dashboard_action_title.setStyleSheet(
+            "font-weight: 700;"
+        )
+        self.dashboard_action_detail = QLabel("")
+        self.dashboard_action_detail.setObjectName("Muted")
+        self.dashboard_action_detail.setWordWrap(True)
+        action_text.addWidget(self.dashboard_action_title)
+        action_text.addWidget(self.dashboard_action_detail)
+        action_lay.addLayout(action_text, 1)
+        self.dashboard_action_button = QPushButton("")
+        self.dashboard_action_button.setObjectName("Primary")
+        self.dashboard_action_button.clicked.connect(
+            self._execute_dashboard_action
+        )
+        self.dashboard_action_button.setVisible(False)
+        action_lay.addWidget(self.dashboard_action_button)
+        root.addWidget(self.dashboard_action_card)
+
+        self.drift_card, drift_lay = self._card(
+            "Écart OBS détecté"
+        )
         self.drift_title = QLabel("")
         self.drift_title.setStyleSheet("font-weight: 700;")
         self.drift_detail = QLabel("")
@@ -1465,78 +2471,44 @@ class MainWindow(QMainWindow):
 
         drift_actions = QHBoxLayout()
         drift_reapply = QPushButton("Réappliquer SSR")
-        drift_reapply.setObjectName("Primary")
+        drift_reapply.setObjectName("LiveAction")
         drift_reapply.clicked.connect(self._force_reapply)
         self._register_obs_connected_control(drift_reapply)
         drift_actions.addWidget(drift_reapply)
 
         drift_adopt = QPushButton("Adopter l’état OBS…")
-        drift_adopt.clicked.connect(self._guided_capture_current_state)
-        self._register_obs_connected_control(
-            drift_adopt,
-            requires_edit_mode=True,
+        drift_adopt.setObjectName("DraftAction")
+        drift_adopt.clicked.connect(
+            self._configure_current_application
         )
+        self._register_obs_connected_control(drift_adopt)
         drift_actions.addWidget(drift_adopt)
 
         drift_ignore = QPushButton("Ignorer cet écart")
-        drift_ignore.clicked.connect(self._ignore_current_obs_drift)
+        drift_ignore.clicked.connect(
+            self._ignore_current_obs_drift
+        )
         drift_actions.addWidget(drift_ignore)
         drift_actions.addStretch(1)
         drift_lay.addLayout(drift_actions)
         self.drift_card.setVisible(False)
         root.addWidget(self.drift_card)
 
-        maintenance_card, maintenance_lay = self._card("Santé et maintenance")
-        maintenance_hint = QLabel(
-            "Vérifiez les capacités réellement utilisées, comprenez l’origine "
-            "des profils actifs et recherchez les références OBS devenues invalides."
+        activity_card, activity_lay = self._card(
+            "Activité récente"
         )
-        maintenance_hint.setWordWrap(True)
-        maintenance_hint.setObjectName("Muted")
-        maintenance_lay.addWidget(maintenance_hint)
-        maintenance_actions = QHBoxLayout()
-        capabilities = QPushButton("Vérifier les capacités")
-        capabilities.setObjectName("Primary")
-        capabilities.clicked.connect(self._show_capability_report)
-        maintenance_actions.addWidget(capabilities)
-        provenance = QPushButton("Qui contrôle quoi ?")
-        provenance.clicked.connect(self._show_effective_provenance)
-        maintenance_actions.addWidget(provenance)
-        dependencies = QPushButton("Arbre des dépendances")
-        dependencies.clicked.connect(self._show_dependency_tree)
-        maintenance_actions.addWidget(dependencies)
-        self.manual_undo_button = QPushButton(
-            "Annuler la dernière opération"
-        )
-        self.manual_undo_button.clicked.connect(
-            self._undo_last_manual_operation
-        )
-        maintenance_actions.addWidget(self.manual_undo_button)
-        self._register_manual_undo_control(self.manual_undo_button)
-        self.repair_refs_button = QPushButton("Réparer les références OBS…")
-        self.repair_refs_button.clicked.connect(
-            self._start_reference_repair
-        )
-        maintenance_actions.addWidget(self.repair_refs_button)
-        self._register_obs_connected_control(
-            self.repair_refs_button,
-            requires_edit_mode=True,
-        )
-        maintenance_actions.addStretch(1)
-        maintenance_lay.addLayout(maintenance_actions)
-        root.addWidget(maintenance_card)
-
-        activity_card, activity_lay = self._card("Activité récente")
         activity_hint = QLabel(
-            "Les événements importants sont résumés ici. "
-            "Le journal technique complet reste disponible en mode Expert."
+            "Les événements importants sont traduits en langage "
+            "utilisateur. Le journal technique reste en mode Expert."
         )
         activity_hint.setWordWrap(True)
         activity_hint.setObjectName("Muted")
         activity_lay.addWidget(activity_hint)
         self.user_activity_tree = QTreeWidget()
         self.user_activity_tree.setColumnCount(3)
-        self.user_activity_tree.setHeaderLabels(["Heure", "Événement", "Détail"])
+        self.user_activity_tree.setHeaderLabels(
+            ["Heure", "Événement", "Détail"]
+        )
         self.user_activity_tree.setRootIsDecorated(False)
         self.user_activity_tree.setAlternatingRowColors(True)
         self.user_activity_tree.setMaximumHeight(180)
@@ -1547,53 +2519,39 @@ class MainWindow(QMainWindow):
         activity_lay.addWidget(self.user_activity_tree)
         root.addWidget(activity_card)
 
-        import_card, import_lay = self._card("Configurer SSR depuis OBS")
-        import_hint = QLabel(
-            "Pour configurer une application rapidement, capturez l’état actuel. "
-            "SSR peut aussi analyser la collection OBS complète en lecture seule "
-            "pour les migrations plus avancées."
+        app_card, app_lay = self._card(
+            "Application au premier plan"
         )
-        import_hint.setWordWrap(True)
-        import_hint.setObjectName("Muted")
-        import_lay.addWidget(import_hint)
-        import_actions = QHBoxLayout()
-        self.capture_current_button = QPushButton("Capturer l’état actuel")
-        self.capture_current_button.setObjectName("Primary")
-        self.capture_current_button.clicked.connect(
-            self._guided_capture_current_state
-        )
-        import_actions.addWidget(self.capture_current_button)
-        self._register_obs_connected_control(
-            self.capture_current_button,
-            requires_edit_mode=True,
-        )
-        analyze_import = QPushButton("Analyser ma collection OBS")
-        analyze_import.clicked.connect(self._guided_analyze_collection)
-        import_actions.addWidget(analyze_import)
-        self._register_obs_connected_control(analyze_import)
-        import_actions.addStretch(1)
-        import_lay.addLayout(import_actions)
-        root.addWidget(import_card)
-
-        app_card, app_lay = self._card("Application au premier plan")
         self.app_card = app_card
         self.fg_exe = QLabel("—")
-        self.fg_exe.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        self.fg_exe.setStyleSheet(
+            "font-size: 15pt; font-weight: 700;"
+        )
         self.fg_title = QLabel("—")
         self.fg_title.setObjectName("Muted")
         self.fg_path = QLabel("—")
         self.fg_path.setObjectName("Muted")
-        self.fg_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.fg_path.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
         app_lay.addWidget(self.fg_exe)
         app_lay.addWidget(self.fg_title)
         app_lay.addWidget(self.fg_path)
         root.addWidget(app_card)
 
-        state_card, state_lay = self._card("État logique courant")
+        state_card, state_lay = self._card(
+            "État logique courant"
+        )
         self.state_card = state_card
         self.state_labels: dict[str, QLabel] = {}
         state_form = QFormLayout()
-        for key in ("Game", "OverlayProfile", "CaptureProfile", "AudioProfile", "LayoutProfile"):
+        for key in (
+            "Game",
+            "OverlayProfile",
+            "CaptureProfile",
+            "AudioProfile",
+            "LayoutProfile",
+        ):
             value = QLabel("—")
             value.setStyleSheet("font-weight: 700;")
             self.state_labels[key] = value
@@ -1604,7 +2562,9 @@ class MainWindow(QMainWindow):
         state_lay.addWidget(self.rule_label)
         root.addWidget(state_card)
 
-        override_card, override_lay = self._card("Override manuel")
+        override_card, override_lay = self._card(
+            "Override manuel"
+        )
         self.override_card = override_card
         form = QFormLayout()
         self.override_boxes: dict[str, QComboBox] = {}
@@ -1636,19 +2596,23 @@ class MainWindow(QMainWindow):
         self.override_duration.setEnabled(False)
         self.override_release_mode.currentIndexChanged.connect(
             lambda *_args: self.override_duration.setEnabled(
-                self.override_release_mode.currentData() == "duration"
+                self.override_release_mode.currentData()
+                == "duration"
             )
         )
         form.addRow("Fin de l’override", self.override_release_mode)
         form.addRow("Durée", self.override_duration)
         override_lay.addLayout(form)
         actions = QHBoxLayout()
-        apply_button = QPushButton("Appliquer l'override")
-        apply_button.setObjectName("Primary")
+        apply_button = QPushButton("Appliquer l’override")
+        apply_button.setObjectName("LiveAction")
         apply_button.clicked.connect(self._apply_override)
-        clear_button = QPushButton("Revenir au routage automatique")
+        clear_button = QPushButton(
+            "Revenir au routage automatique"
+        )
         clear_button.clicked.connect(self._clear_override)
         reapply_button = QPushButton("Réappliquer à OBS")
+        reapply_button.setObjectName("LiveAction")
         reapply_button.clicked.connect(self._force_reapply)
         self._register_obs_connected_control(reapply_button)
         actions.addWidget(apply_button)
@@ -2095,9 +3059,651 @@ class MainWindow(QMainWindow):
         name, _profile = current
         self._show_profile_impact("layout", name)
 
+    def _build_configure_tab(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setSpacing(12)
+
+        intro = QLabel(
+            "Configurez SSR par intention : choisissez ce que vous voulez "
+            "obtenir, puis laissez l’assistant produire le brouillon. "
+            "Les écrans Règles/Profils/Layouts restent disponibles en "
+            "mode Expert pour les cas avancés."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        app_card, app_lay = self._card(
+            "Configurer l’application courante"
+        )
+        self.configure_app_label = QLabel(
+            "Aucune application détectée"
+        )
+        self.configure_app_label.setStyleSheet(
+            "font-size: 14pt; font-weight: 700;"
+        )
+        self.configure_app_detail = QLabel(
+            "Placez l’application à configurer au premier plan."
+        )
+        self.configure_app_detail.setWordWrap(True)
+        self.configure_app_detail.setObjectName("Muted")
+        self.configure_requirements = QLabel("")
+        self.configure_requirements.setObjectName("Muted")
+        self.configure_requirements.setWordWrap(True)
+        app_lay.addWidget(self.configure_app_label)
+        app_lay.addWidget(self.configure_app_detail)
+        app_lay.addWidget(self.configure_requirements)
+        row = QHBoxLayout()
+        self.capture_current_button = QPushButton(
+            "Configurer cette application…"
+        )
+        self.capture_current_button.setObjectName("Primary")
+        self.capture_current_button.clicked.connect(
+            self._configure_current_application
+        )
+        self._register_obs_connected_control(
+            self.capture_current_button
+        )
+        row.addWidget(self.capture_current_button)
+        simulate = QPushButton("Tester un scénario…")
+        simulate.clicked.connect(self._show_scenario_simulator)
+        row.addWidget(simulate)
+        row.addStretch(1)
+        app_lay.addLayout(row)
+        root.addWidget(app_card)
+
+        collection_card, collection_lay = self._card(
+            "Comprendre ou importer la collection OBS"
+        )
+        collection_hint = QLabel(
+            "L’analyse est strictement en lecture seule. Une migration "
+            "ne crée ensuite un brouillon que pour les éléments que SSR "
+            "peut représenter sans ambiguïté."
+        )
+        collection_hint.setWordWrap(True)
+        collection_hint.setObjectName("Muted")
+        collection_lay.addWidget(collection_hint)
+        row = QHBoxLayout()
+        analyze = QPushButton("Analyser ma collection OBS")
+        self._set_action_risk(
+            analyze,
+            "read",
+            "Aucune mutation OBS ni configuration.",
+        )
+        analyze.clicked.connect(self._guided_analyze_collection)
+        self._register_obs_connected_control(analyze)
+        row.addWidget(analyze)
+        advanced = QPushButton("Outils d’import avancés…")
+        advanced.clicked.connect(self._open_import_tools)
+        row.addWidget(advanced)
+        row.addStretch(1)
+        collection_lay.addLayout(row)
+        root.addWidget(collection_card)
+
+        recipes_card, recipes_lay = self._card(
+            "Recettes rapides"
+        )
+        recipes_hint = QLabel(
+            "Ces recettes produisent des objets SSR ordinaires : aucune "
+            "couche simplifiée séparée n’est créée, et tout reste éditable "
+            "dans les écrans Expert."
+        )
+        recipes_hint.setWordWrap(True)
+        recipes_hint.setObjectName("Muted")
+        recipes_lay.addWidget(recipes_hint)
+        recipe_row = QHBoxLayout()
+        duplicate_profile = QPushButton("Variante de profil…")
+        self._set_action_risk(duplicate_profile, "draft")
+        duplicate_profile.clicked.connect(
+            self._recipe_duplicate_profile
+        )
+        recipe_row.addWidget(duplicate_profile)
+        duplicate_rule = QPushButton("Variante de règle…")
+        self._set_action_risk(duplicate_rule, "draft")
+        duplicate_rule.clicked.connect(self._recipe_duplicate_rule)
+        recipe_row.addWidget(duplicate_rule)
+        layout_recipe = QPushButton("Nouveau layout depuis OBS…")
+        self._set_action_risk(layout_recipe, "draft")
+        layout_recipe.clicked.connect(self._recipe_layout_from_obs)
+        self._register_obs_connected_control(layout_recipe)
+        recipe_row.addWidget(layout_recipe)
+        recipe_row.addStretch(1)
+        recipes_lay.addLayout(recipe_row)
+        root.addWidget(recipes_card)
+
+        repair_card, repair_lay = self._card(
+            "Réparer une configuration devenue obsolète"
+        )
+        repair_hint = QLabel(
+            "Utilisez ce parcours si des scènes, sources, groupes ou "
+            "filtres ont été renommés dans OBS."
+        )
+        repair_hint.setWordWrap(True)
+        repair_hint.setObjectName("Muted")
+        repair_lay.addWidget(repair_hint)
+        row = QHBoxLayout()
+        repair = QPushButton("Examiner les références OBS…")
+        self._set_action_risk(repair, "draft")
+        repair.clicked.connect(self._configure_repair_refs)
+        self._register_obs_connected_control(repair)
+        row.addWidget(repair)
+        capabilities = QPushButton("Vérifier les capacités")
+        self._set_action_risk(capabilities, "read")
+        capabilities.clicked.connect(self._show_capability_report)
+        row.addWidget(capabilities)
+        row.addStretch(1)
+        repair_lay.addLayout(row)
+        root.addWidget(repair_card)
+
+        legend_card, legend_lay = self._card(
+            "Comment lire les actions"
+        )
+        legend = QLabel(
+            "Bleu = lecture seule · Or = modifie le brouillon SSR · "
+            "Rouge = peut modifier OBS immédiatement. Les actions OBS "
+            "restent protégées par Safe Live lorsqu’il est activé."
+        )
+        legend.setWordWrap(True)
+        legend.setObjectName("Muted")
+        legend_lay.addWidget(legend)
+        root.addWidget(legend_card)
+        root.addStretch(1)
+        return page
+
+    def _populate_attention_center(self, report) -> None:
+        if not hasattr(self, "attention_tree"):
+            return
+        self.attention_tree.clear()
+        issues = build_attention_items(report.as_mapping())
+        severity_labels = {
+            "error": "Erreur",
+            "warning": "À vérifier",
+            "info": "Information",
+        }
+        for issue in issues:
+            item = QTreeWidgetItem(
+                [
+                    severity_labels.get(
+                        issue.severity,
+                        issue.severity,
+                    ),
+                    issue.title,
+                    issue.detail,
+                    issue.action or "—",
+                ]
+            )
+            item.setData(0, Qt.UserRole, issue.key)
+            self.attention_tree.addTopLevelItem(item)
+
+        if issues:
+            errors = sum(
+                1 for issue in issues if issue.severity == "error"
+            )
+            warnings = sum(
+                1 for issue in issues if issue.severity == "warning"
+            )
+            self.attention_summary.setText(
+                f"{len(issues)} point(s) à examiner · "
+                f"{errors} erreur(s) · {warnings} avertissement(s). "
+                "Double-cliquez pour aller au bon endroit."
+            )
+            self.attention_summary.setObjectName(
+                "Bad" if errors else "Warn"
+            )
+        else:
+            self.attention_summary.setText(
+                "✓ Rien à corriger : aucun problème actionnable détecté."
+            )
+            self.attention_summary.setObjectName("Good")
+        self.attention_summary.style().unpolish(
+            self.attention_summary
+        )
+        self.attention_summary.style().polish(
+            self.attention_summary
+        )
+
+    def _refresh_attention_center(self) -> None:
+        self._collect_settings()
+        try:
+            report = run_system_check(self.config)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "À corriger",
+                str(exc),
+            )
+            return
+        self._last_system_check_report = report
+        self._populate_attention_center(report)
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good" if report.ok else "Warn",
+                "Diagnostic système actualisé",
+                report.capabilities.summary,
+            )
+        )
+
+    def _navigate_attention_key(self, key: str) -> None:
+        normalized = str(key or "").strip()
+        if normalized == "config":
+            self._show_draft_change_review()
+            return
+        if normalized == "obs_references":
+            self.tabs.setCurrentIndex(self.configure_tab_index)
+            return
+        if normalized in {"obs", "audio", "hdr"}:
+            self.tabs.setCurrentIndex(self.settings_tab_index)
+            return
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.diagnostics_tab_index)
+
+    def _open_attention_item(self, *_args) -> None:
+        if not hasattr(self, "attention_tree"):
+            return
+        item = self.attention_tree.currentItem()
+        if item is None:
+            return
+        self._navigate_attention_key(
+            str(item.data(0, Qt.UserRole) or "")
+        )
+
+    def _ensure_recipe_edit_mode(self, operation: str) -> bool:
+        if self._edit_mode:
+            return True
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                operation,
+                "Le runtime SSR doit être disponible pour entrer en Mode édition.",
+            )
+            return False
+        self._toggle_edit_mode()
+        return self._edit_mode
+
+    def _recipe_duplicate_profile(self) -> None:
+        if not self._ensure_recipe_edit_mode(
+            "Créer une variante de profil"
+        ):
+            return
+
+        domains = [
+            domain
+            for domain in PROFILE_DOMAINS
+            if self._profiles_for_domain(domain)
+        ]
+        if not domains:
+            QMessageBox.information(
+                self,
+                "Variante de profil",
+                "Aucun profil existant ne peut servir de base.",
+            )
+            return
+        labels = [
+            DOMAIN_LABELS.get(domain, domain)
+            for domain in domains
+        ]
+        label, ok = QInputDialog.getItem(
+            self,
+            "Variante de profil",
+            "Domaine",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        domain = domains[labels.index(label)]
+        profiles = self._profiles_for_domain(domain)
+        names = sorted(profiles, key=str.casefold)
+        base_name, ok = QInputDialog.getItem(
+            self,
+            "Variante de profil",
+            "Profil de départ",
+            names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Variante de profil",
+            "Nom de la nouvelle variante",
+            text=f"{base_name} - Variante",
+        )
+        new_name = new_name.strip()
+        if not ok or not new_name:
+            return
+        if new_name in profiles:
+            QMessageBox.warning(
+                self,
+                "Variante de profil",
+                "Ce profil existe déjà.",
+            )
+            return
+
+        previous = copy.deepcopy(self.config)
+        profiles[new_name] = copy.deepcopy(profiles[base_name])
+        errors = validate_config(self.config)
+        if errors:
+            self.config = previous
+            QMessageBox.critical(
+                self,
+                "Variante de profil",
+                "\n".join(errors),
+            )
+            return
+        self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            f"Création de la variante {domain}/{new_name}",
+            previous,
+        )
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.profiles_tab_index)
+        index = self.profile_domain.findData(domain)
+        if index >= 0:
+            self.profile_domain.setCurrentIndex(index)
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(new_name)
+        self._inspect_current_profile()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Variante de profil créée",
+                f"{domain}/{base_name} → {new_name}",
+            )
+        )
+
+    def _recipe_duplicate_rule(self) -> None:
+        if not self._ensure_recipe_edit_mode(
+            "Créer une variante de règle"
+        ):
+            return
+        rules = self.config.get("rules")
+        if not isinstance(rules, list) or not rules:
+            QMessageBox.information(
+                self,
+                "Variante de règle",
+                "Aucune règle existante ne peut servir de base.",
+            )
+            return
+        names = [
+            str(rule.get("name") or f"Règle {index + 1}")
+            for index, rule in enumerate(rules)
+            if isinstance(rule, Mapping)
+        ]
+        if not names:
+            return
+        base_name, ok = QInputDialog.getItem(
+            self,
+            "Variante de règle",
+            "Règle de départ",
+            names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        source_index = next(
+            (
+                index
+                for index, rule in enumerate(rules)
+                if isinstance(rule, Mapping)
+                and str(rule.get("name") or f"Règle {index + 1}")
+                == base_name
+            ),
+            None,
+        )
+        if source_index is None:
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Variante de règle",
+            "Nom de la nouvelle règle",
+            text=f"{base_name} - Variante",
+        )
+        new_name = new_name.strip()
+        if not ok or not new_name:
+            return
+        if any(
+            isinstance(rule, Mapping)
+            and str(rule.get("name") or "") == new_name
+            for rule in rules
+        ):
+            QMessageBox.warning(
+                self,
+                "Variante de règle",
+                "Une règle porte déjà ce nom.",
+            )
+            return
+
+        previous = copy.deepcopy(self.config)
+        clone = copy.deepcopy(rules[source_index])
+        clone["name"] = new_name
+        clone["enabled"] = False
+        rules.insert(source_index + 1, clone)
+        errors = validate_config(self.config)
+        if errors:
+            self.config = previous
+            QMessageBox.critical(
+                self,
+                "Variante de règle",
+                "\n".join(errors),
+            )
+            return
+        self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            f"Création de la variante de règle {new_name}",
+            previous,
+        )
+        self._refresh_rules_table()
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.rules_tab_index)
+        self.rules_table.selectRow(source_index + 1)
+        self._inspect_selected_rule()
+        QMessageBox.information(
+            self,
+            "Variante de règle",
+            (
+                f"« {new_name} » a été créée désactivée dans le brouillon.\n\n"
+                "Modifiez ses conditions/profils puis activez-la lorsque "
+                "vous êtes prêt."
+            ),
+        )
+
+    def _recipe_layout_from_obs(self) -> None:
+        if not self._ensure_recipe_edit_mode(
+            "Créer un layout depuis OBS"
+        ):
+            return
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.layouts_tab_index)
+        self._sync_obs_modules()
+        before = set(self._layout_profiles())
+        self._new_layout_profile()
+        after = set(self._layout_profiles())
+        created = sorted(after - before, key=str.casefold)
+        if created:
+            self.layout_profile_name.setCurrentText(created[0])
+            self._refresh_layout_profile_view()
+            self.statusBar().showMessage(
+                "Sélectionnez les éléments OBS à inclure puis utilisez "
+                f"« Capturer OBS → {created[0]} ».",
+                10000,
+            )
+
+    def _build_diagnostics_tab(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setSpacing(12)
+
+        intro = QLabel(
+            "Les diagnostics regroupent les outils d’explication et de "
+            "maintenance. Ils n’encombrent plus l’Accueil, mais restent "
+            "accessibles ici en mode Expert."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        attention_card, attention_lay = self._card(
+            "À corriger"
+        )
+        self.attention_summary = QLabel(
+            "Cliquez sur « Actualiser » pour vérifier la configuration, "
+            "les capacités et les références OBS."
+        )
+        self.attention_summary.setWordWrap(True)
+        self.attention_summary.setObjectName("Muted")
+        attention_lay.addWidget(self.attention_summary)
+        self.attention_tree = QTreeWidget()
+        self.attention_tree.setColumnCount(4)
+        self.attention_tree.setHeaderLabels(
+            ["Niveau", "Élément", "Détail", "Action recommandée"]
+        )
+        self.attention_tree.setRootIsDecorated(False)
+        self.attention_tree.setAlternatingRowColors(True)
+        self.attention_tree.setMaximumHeight(240)
+        self.attention_tree.header().setSectionResizeMode(
+            0,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.attention_tree.header().setSectionResizeMode(
+            1,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.attention_tree.header().setStretchLastSection(True)
+        self.attention_tree.itemDoubleClicked.connect(
+            self._open_attention_item
+        )
+        attention_lay.addWidget(self.attention_tree)
+        attention_actions = QHBoxLayout()
+        refresh_attention = QPushButton("Actualiser")
+        refresh_attention.setObjectName("ReadOnlyAction")
+        refresh_attention.clicked.connect(
+            self._refresh_attention_center
+        )
+        attention_actions.addWidget(refresh_attention)
+        open_attention = QPushButton("Ouvrir l’élément")
+        open_attention.clicked.connect(self._open_attention_item)
+        attention_actions.addWidget(open_attention)
+        attention_actions.addStretch(1)
+        attention_lay.addLayout(attention_actions)
+        root.addWidget(attention_card)
+
+        status_card, status_lay = self._card(
+            "Diagnostic guidé"
+        )
+        self.diagnostics_status = QLabel("État en cours…")
+        self.diagnostics_status.setStyleSheet(
+            "font-size: 14pt; font-weight: 700;"
+        )
+        self.diagnostics_detail = QLabel(
+            "SSR actualise cette synthèse depuis l’Accueil."
+        )
+        self.diagnostics_detail.setObjectName("Muted")
+        self.diagnostics_detail.setWordWrap(True)
+        status_lay.addWidget(self.diagnostics_status)
+        status_lay.addWidget(self.diagnostics_detail)
+        row = QHBoxLayout()
+        guided = QPushButton("Diagnostiquer maintenant")
+        guided.setObjectName("Primary")
+        guided.clicked.connect(self._show_guided_diagnostic)
+        row.addWidget(guided)
+        capabilities = QPushButton("Santé et capacités…")
+        capabilities.clicked.connect(self._show_capability_report)
+        row.addWidget(capabilities)
+        row.addStretch(1)
+        status_lay.addLayout(row)
+        root.addWidget(status_card)
+
+        explain_card, explain_lay = self._card(
+            "Comprendre la configuration"
+        )
+        row = QHBoxLayout()
+        provenance = QPushButton("Qui contrôle quoi ?")
+        provenance.clicked.connect(
+            self._show_effective_provenance
+        )
+        row.addWidget(provenance)
+        dependencies = QPushButton("Arbre des dépendances")
+        dependencies.clicked.connect(self._show_dependency_tree)
+        row.addWidget(dependencies)
+        references = QPushButton("Références OBS…")
+        references.clicked.connect(self._configure_repair_refs)
+        self._register_obs_connected_control(references)
+        row.addWidget(references)
+        self.manual_undo_button = QPushButton(
+            "Annuler la dernière opération"
+        )
+        self.manual_undo_button.clicked.connect(
+            self._undo_last_manual_operation
+        )
+        self._register_manual_undo_control(
+            self.manual_undo_button
+        )
+        row.addWidget(self.manual_undo_button)
+        row.addStretch(1)
+        explain_lay.addLayout(row)
+        root.addWidget(explain_card)
+
+        activity_card, activity_lay = self._card(
+            "Historique des opérations et restauration"
+        )
+        self.history_undo_status = QLabel(
+            "Dernière opération réversible : —"
+        )
+        self.history_undo_status.setObjectName("Muted")
+        activity_lay.addWidget(self.history_undo_status)
+        self.diagnostics_activity_tree = QTreeWidget()
+        self.diagnostics_activity_tree.setColumnCount(3)
+        self.diagnostics_activity_tree.setHeaderLabels(
+            ["Heure", "Événement", "Détail"]
+        )
+        self.diagnostics_activity_tree.setRootIsDecorated(False)
+        self.diagnostics_activity_tree.setAlternatingRowColors(True)
+        self.diagnostics_activity_tree.setMaximumHeight(220)
+        self.diagnostics_activity_tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.diagnostics_activity_tree.header().setStretchLastSection(
+            True
+        )
+        activity_lay.addWidget(self.diagnostics_activity_tree)
+        history_actions = QHBoxLayout()
+        history_undo = QPushButton("Annuler la dernière opération")
+        history_undo.clicked.connect(self._undo_last_manual_operation)
+        self._register_manual_undo_control(history_undo)
+        history_actions.addWidget(history_undo)
+        backups = QPushButton("Sauvegardes…")
+        backups.clicked.connect(self._restore_config_backup)
+        history_actions.addWidget(backups)
+        review = QPushButton("Revoir le brouillon")
+        review.clicked.connect(self._show_draft_change_review)
+        history_actions.addWidget(review)
+        open_log = QPushButton("Journal technique")
+        open_log.clicked.connect(self._open_logs_tab)
+        history_actions.addWidget(open_log)
+        history_actions.addStretch(1)
+        activity_lay.addLayout(history_actions)
+        root.addWidget(activity_card)
+        root.addStretch(1)
+        return page
+
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
+
+        intro = QLabel(
+            "Les règles sont évaluées par priorité. La vue "
+            "Automatisations est préférable pour comprendre le résultat ; "
+            "cet écran sert à l’édition détaillée."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
         self.rules_table = QTableWidget(0, 11)
         self.rules_table.setHorizontalHeaderLabels(
             [
@@ -2115,29 +3721,67 @@ class MainWindow(QMainWindow):
             ]
         )
         self.rules_table.setAlternatingRowColors(True)
-        self.rules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.rules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.rules_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.rules_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.rules_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
         self.rules_table.horizontalHeader().setStretchLastSection(True)
         self.rules_table.doubleClicked.connect(self._edit_rule)
+        self.rules_table.itemSelectionChanged.connect(
+            self._inspect_selected_rule
+        )
         root.addWidget(self.rules_table, 1)
 
+        rule_summary_row = QHBoxLayout()
+        self.rule_health_badge = QLabel("—")
+        self.rule_health_badge.setObjectName("Muted")
+        rule_summary_row.addWidget(self.rule_health_badge)
+        self.rule_human_summary = QLabel(
+            "Sélectionnez une règle pour afficher sa lecture humaine."
+        )
+        self.rule_human_summary.setWordWrap(True)
+        self.rule_human_summary.setObjectName("Muted")
+        rule_summary_row.addWidget(self.rule_human_summary, 1)
+        root.addLayout(rule_summary_row)
+
         buttons = QHBoxLayout()
-        for text, slot, primary in [
-            ("Ajouter", self._add_rule, True),
-            ("Modifier", self._edit_rule, False),
-            ("Dupliquer", self._duplicate_rule, False),
-            ("Activer/Désactiver", self._toggle_rule, False),
-            ("Tester sur l’app courante", self._test_rule, False),
-            ("Supprimer", self._delete_rule, False),
-        ]:
-            b = QPushButton(text)
-            if primary:
-                b.setObjectName("Primary")
-            if text == "Supprimer":
-                b.setObjectName("Danger")
-            b.clicked.connect(slot)
-            buttons.addWidget(b)
+        add = QPushButton("Ajouter")
+        add.setObjectName("DraftAction")
+        add.clicked.connect(self._add_rule)
+        buttons.addWidget(add)
+
+        edit = QPushButton("Modifier")
+        edit.clicked.connect(self._edit_rule)
+        buttons.addWidget(edit)
+
+        test = QPushButton("Tester sur l’app courante")
+        self._set_action_risk(
+            test,
+            "read",
+            "Évalue la règle sans appliquer un profil à OBS.",
+        )
+        test.clicked.connect(self._test_rule)
+        buttons.addWidget(test)
+
+        more = QPushButton("⋯")
+        more.setToolTip("Actions supplémentaires sur la règle sélectionnée")
+        menu = QMenu(more)
+        duplicate = menu.addAction("Dupliquer")
+        duplicate.triggered.connect(self._duplicate_rule)
+        toggle = menu.addAction("Activer / désactiver")
+        toggle.triggered.connect(self._toggle_rule)
+        bulk = menu.addAction("Actions groupées…")
+        bulk.triggered.connect(self._bulk_edit_rules)
+        menu.addSeparator()
+        delete = menu.addAction("Supprimer")
+        delete.triggered.connect(self._delete_rule)
+        more.setMenu(menu)
+        buttons.addWidget(more)
         buttons.addStretch(1)
         root.addLayout(buttons)
         return page
@@ -2146,90 +3790,178 @@ class MainWindow(QMainWindow):
         page = QWidget()
         root = QVBoxLayout(page)
 
+        intro = QLabel(
+            "Un profil décrit ce que SSR doit appliquer pour un domaine. "
+            "Les actions rares sont regroupées dans ⋯ pour garder "
+            "l’opération courante lisible."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
         top = QHBoxLayout()
         top.addWidget(QLabel("Domaine"))
         self.profile_domain = QComboBox()
         for domain in PROFILE_DOMAINS:
-            self.profile_domain.addItem(DOMAIN_LABELS[domain], domain)
-        self.profile_domain.currentIndexChanged.connect(self._refresh_profile_names)
+            self.profile_domain.addItem(
+                DOMAIN_LABELS[domain],
+                domain,
+            )
+        self.profile_domain.currentIndexChanged.connect(
+            self._refresh_profile_names
+        )
         top.addWidget(self.profile_domain)
         top.addWidget(QLabel("Profil"))
         self.profile_name = QComboBox()
-        self.profile_name.currentIndexChanged.connect(self._refresh_actions_table)
+        self.profile_name.currentIndexChanged.connect(
+            self._refresh_actions_table
+        )
         top.addWidget(self.profile_name, 1)
-        for text, slot in [
-            ("Nouveau", self._new_profile),
-            ("Dupliquer", self._duplicate_profile),
-            ("Renommer", self._rename_profile),
-            ("Supprimer", self._delete_profile),
-            ("Tester", self._test_profile),
-            ("Impact", self._show_current_profile_impact),
-        ]:
-            b = QPushButton(text)
-            if text == "Nouveau":
-                b.setObjectName("Primary")
-            if text == "Supprimer":
-                b.setObjectName("Danger")
-            b.clicked.connect(slot)
-            if text == "Tester":
-                self._register_obs_connected_control(b)
-            top.addWidget(b)
+        self.profile_health_badge = QLabel("—")
+        self.profile_health_badge.setObjectName("Muted")
+        top.addWidget(self.profile_health_badge)
+
+        new_profile = QPushButton("Nouveau")
+        self._set_action_risk(new_profile, "draft")
+        new_profile.clicked.connect(self._new_profile)
+        top.addWidget(new_profile)
+
+        self.profile_test_button = QPushButton("Tester dans OBS")
+        self._set_action_risk(
+            self.profile_test_button,
+            "live",
+            "Exécute directement le profil sélectionné.",
+        )
+        self.profile_test_button.clicked.connect(self._test_profile)
+        self._register_obs_connected_control(
+            self.profile_test_button
+        )
+        top.addWidget(self.profile_test_button)
+
+        more = QPushButton("⋯")
+        more.setToolTip("Gestion du profil sélectionné")
+        menu = QMenu(more)
+        impact = menu.addAction("Voir l’impact…")
+        impact.triggered.connect(self._show_current_profile_impact)
+        duplicate = menu.addAction("Dupliquer")
+        duplicate.triggered.connect(self._duplicate_profile)
+        rename = menu.addAction("Renommer")
+        rename.triggered.connect(self._rename_profile)
+        menu.addSeparator()
+        delete = menu.addAction("Supprimer")
+        delete.triggered.connect(self._delete_profile)
+        more.setMenu(menu)
+        top.addWidget(more)
         root.addLayout(top)
 
         inheritance = QHBoxLayout()
         inheritance.addWidget(QLabel("Hérite de"))
         self.profile_parent = QComboBox()
         self.profile_parent.addItem("— Aucun —", "")
-        self.profile_parent.currentIndexChanged.connect(self._profile_parent_changed)
+        self.profile_parent.currentIndexChanged.connect(
+            self._profile_parent_changed
+        )
         inheritance.addWidget(self.profile_parent, 1)
         detach_profile = QPushButton("Détacher de la base")
-        detach_profile.clicked.connect(self._detach_current_profile)
+        detach_profile.clicked.connect(
+            self._detach_current_profile
+        )
         inheritance.addWidget(detach_profile)
-        hint = QLabel("Les actions du parent sont exécutées avant celles de ce profil.")
+        hint = QLabel(
+            "Les actions du parent sont exécutées avant celles de ce profil."
+        )
         hint.setObjectName("Muted")
         inheritance.addWidget(hint)
         root.addLayout(inheritance)
-        self.profile_inheritance_hint = QLabel("Héritage effectif : —")
+        self.profile_inheritance_hint = QLabel(
+            "Héritage effectif : —"
+        )
         self.profile_inheritance_hint.setWordWrap(True)
         self.profile_inheritance_hint.setObjectName("Muted")
         root.addWidget(self.profile_inheritance_hint)
 
+        profile_scope = QHBoxLayout()
+        local_hint = QLabel(
+            "Actions locales — différences propres à ce profil"
+        )
+        local_hint.setObjectName("Section")
+        profile_scope.addWidget(local_hint)
+        effective = QPushButton("Voir le contenu effectif…")
+        effective.clicked.connect(self._show_current_profile_impact)
+        profile_scope.addWidget(effective)
+        profile_scope.addStretch(1)
+        root.addLayout(profile_scope)
+
         self.actions_table = QTableWidget(0, 4)
-        self.actions_table.setHorizontalHeaderLabels(["Actif", "Type", "Nom", "Paramètres"])
-        self.actions_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.actions_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.actions_table.setHorizontalHeaderLabels(
+            ["Actif", "Type", "Nom", "Paramètres"]
+        )
+        self.actions_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.actions_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
         self.actions_table.setAlternatingRowColors(True)
-        self.actions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.actions_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
         self.actions_table.horizontalHeader().setStretchLastSection(True)
         self.actions_table.doubleClicked.connect(self._edit_action)
         root.addWidget(self.actions_table, 1)
 
         buttons = QHBoxLayout()
-        for text, slot in [
-            ("Ajouter une action", self._add_action),
-            ("Importer collection OBS…", self._import_collection_to_profile),
-            ("Migrer logique collection / ASC…", self._migrate_collection_logic),
-            ("Modifier", self._edit_action),
-            ("Dupliquer", self._duplicate_action),
-            ("Activer/Désactiver", self._toggle_action),
-            ("Supprimer", self._delete_action),
-            ("Monter", lambda: self._move_action(-1)),
-            ("Descendre", lambda: self._move_action(1)),
-        ]:
-            b = QPushButton(text)
-            if text == "Ajouter une action":
-                b.setObjectName("Primary")
-            if text == "Supprimer":
-                b.setObjectName("Danger")
-            b.clicked.connect(slot)
-            if text in {
-                "Importer collection OBS…",
-                "Migrer logique collection / ASC…",
-            }:
-                self._register_obs_connected_control(b)
-            buttons.addWidget(b)
+        add_action = QPushButton("Ajouter une action")
+        self._set_action_risk(add_action, "draft")
+        add_action.clicked.connect(self._add_action)
+        buttons.addWidget(add_action)
+
+        edit_action = QPushButton("Modifier")
+        edit_action.clicked.connect(self._edit_action)
+        buttons.addWidget(edit_action)
+
+        more_actions = QPushButton("⋯")
+        more_actions.setToolTip(
+            "Import, duplication, activation et ordre des actions"
+        )
+        action_menu = QMenu(more_actions)
+        import_collection = action_menu.addAction(
+            "Importer collection OBS…"
+        )
+        import_collection.triggered.connect(
+            self._import_collection_to_profile
+        )
+        self._register_obs_connected_control(import_collection)
+        migrate = action_menu.addAction(
+            "Migrer logique collection / ASC…"
+        )
+        migrate.triggered.connect(self._migrate_collection_logic)
+        self._register_obs_connected_control(migrate)
+        action_menu.addSeparator()
+        duplicate_action = action_menu.addAction("Dupliquer")
+        duplicate_action.triggered.connect(self._duplicate_action)
+        toggle_action = action_menu.addAction("Activer / désactiver")
+        toggle_action.triggered.connect(self._toggle_action)
+        move_up = action_menu.addAction("Monter")
+        move_up.triggered.connect(lambda: self._move_action(-1))
+        move_down = action_menu.addAction("Descendre")
+        move_down.triggered.connect(lambda: self._move_action(1))
+        action_menu.addSeparator()
+        delete_action = action_menu.addAction("Supprimer")
+        delete_action.triggered.connect(self._delete_action)
+        more_actions.setMenu(action_menu)
+        buttons.addWidget(more_actions)
         buttons.addStretch(1)
         root.addLayout(buttons)
+
+        risk = QLabel(
+            "Le brouillon n’agit pas sur OBS tant que vous n’utilisez pas "
+            "« Enregistrer et appliquer ». « Tester dans OBS » est l’exception "
+            "et exécute immédiatement le profil."
+        )
+        risk.setWordWrap(True)
+        risk.setObjectName("Muted")
+        root.addWidget(risk)
         return page
 
     def _build_layouts_tab(self) -> QWidget:
@@ -2238,137 +3970,262 @@ class MainWindow(QMainWindow):
         root.setSpacing(10)
 
         intro = QLabel(
-            "Les sources OBS nommées « [Type de module] Nom du module » sont détectées automatiquement. "
-            "Le préfixe entre crochets sert uniquement de catégorie ; chaque source OBS reste un module distinct. "
-            "Un LayoutProfile mémorise sa position, sa taille et sa visibilité."
+            "Un LayoutProfile mémorise position, taille et visibilité. "
+            "Le flux est volontairement séparé : lire OBS, modifier le "
+            "brouillon SSR, puis éventuellement appliquer à OBS."
         )
         intro.setWordWrap(True)
         intro.setObjectName("Muted")
         root.addWidget(intro)
 
+        source_title = QLabel("1. Source OBS — lecture seule")
+        source_title.setObjectName("Section")
+        root.addWidget(source_title)
         obs_row = QHBoxLayout()
         obs_row.addWidget(QLabel("Scène OBS"))
         self.layout_scene = QComboBox()
         self.layout_scene.setMinimumWidth(260)
-        self.layout_scene.currentIndexChanged.connect(self._layout_scene_changed)
+        self.layout_scene.currentIndexChanged.connect(
+            self._layout_scene_changed
+        )
         obs_row.addWidget(self.layout_scene, 1)
-        sync = QPushButton("Synchroniser avec OBS")
-        sync.setObjectName("Primary")
+        sync = QPushButton("Lire / synchroniser OBS")
+        self._set_action_risk(
+            sync,
+            "read",
+            "Met à jour le catalogue affiché sans modifier OBS.",
+        )
         sync.clicked.connect(self._sync_obs_modules)
         obs_row.addWidget(sync)
         self._register_obs_connected_control(sync)
         root.addLayout(obs_row)
+        self.layout_obs_hint = QLabel(
+            "Synchroniser lit uniquement la structure OBS."
+        )
+        self.layout_obs_hint.setObjectName("Muted")
+        root.addWidget(self.layout_obs_hint)
 
+        profile_title = QLabel("2. Layout SSR — brouillon")
+        profile_title.setObjectName("Section")
+        root.addWidget(profile_title)
         profile_row = QHBoxLayout()
         profile_row.addWidget(QLabel("LayoutProfile"))
         self.layout_profile_name = QComboBox()
-        self.layout_profile_name.currentIndexChanged.connect(self._refresh_layout_profile_view)
+        self.layout_profile_name.currentIndexChanged.connect(
+            self._refresh_layout_profile_view
+        )
         profile_row.addWidget(self.layout_profile_name, 1)
-        for text, slot in [
-            ("Nouveau", self._new_layout_profile),
-            ("Dupliquer", self._duplicate_layout_profile),
-            ("Renommer", self._rename_layout_profile),
-            ("Supprimer", self._delete_layout_profile),
-            ("Capturer depuis OBS", self._capture_layout_profile),
-            ("Appliquer maintenant", self._apply_layout_profile),
-            ("Éditer dans OBS", self._edit_layout_in_obs),
-            ("Impact", self._show_current_layout_impact),
-        ]:
-            button = QPushButton(text)
-            if text == "Capturer depuis OBS":
-                button.setObjectName("Primary")
-            elif text == "Supprimer":
-                button.setObjectName("Danger")
-            button.clicked.connect(slot)
-            if text in {
-                "Capturer depuis OBS",
-                "Appliquer maintenant",
-                "Éditer dans OBS",
-            }:
-                self._register_obs_connected_control(button)
-            profile_row.addWidget(button)
+        self.layout_health_badge = QLabel("—")
+        self.layout_health_badge.setObjectName("Muted")
+        profile_row.addWidget(self.layout_health_badge)
+
+        new_layout = QPushButton("Nouveau")
+        self._set_action_risk(new_layout, "draft")
+        new_layout.clicked.connect(self._new_layout_profile)
+        profile_row.addWidget(new_layout)
+
+        self.layout_capture_button = QPushButton(
+            "Capturer OBS dans le brouillon"
+        )
+        self._set_action_risk(
+            self.layout_capture_button,
+            "draft",
+            "Lit OBS puis remplace le contenu du LayoutProfile dans le brouillon.",
+        )
+        self.layout_capture_button.clicked.connect(
+            self._capture_layout_profile
+        )
+        self._register_obs_connected_control(
+            self.layout_capture_button
+        )
+        profile_row.addWidget(self.layout_capture_button)
+
+        self.layout_apply_button = QPushButton("Appliquer à OBS")
+        self._set_action_risk(
+            self.layout_apply_button,
+            "live",
+            "Modifie immédiatement la géométrie/visibilité OBS.",
+        )
+        self.layout_apply_button.clicked.connect(
+            self._apply_layout_profile
+        )
+        self._register_obs_connected_control(
+            self.layout_apply_button
+        )
+        profile_row.addWidget(self.layout_apply_button)
+
+        more = QPushButton("⋯")
+        more.setToolTip("Gestion et outils du LayoutProfile")
+        menu = QMenu(more)
+        impact = menu.addAction("Voir l’impact…")
+        impact.triggered.connect(self._show_current_layout_impact)
+        duplicate = menu.addAction("Dupliquer")
+        duplicate.triggered.connect(self._duplicate_layout_profile)
+        rename = menu.addAction("Renommer")
+        rename.triggered.connect(self._rename_layout_profile)
+        menu.addSeparator()
+        edit_obs = menu.addAction("Éditer dans OBS…")
+        edit_obs.triggered.connect(self._edit_layout_in_obs)
+        self._register_obs_connected_control(edit_obs)
+        menu.addSeparator()
+        delete = menu.addAction("Supprimer")
+        delete.triggered.connect(self._delete_layout_profile)
+        more.setMenu(menu)
+        profile_row.addWidget(more)
         root.addLayout(profile_row)
 
         options = QHBoxLayout()
         options.addWidget(QLabel("Base"))
         self.layout_parent = QComboBox()
         self.layout_parent.addItem("— Aucune —", "")
-        self.layout_parent.currentIndexChanged.connect(self._layout_option_changed)
+        self.layout_parent.currentIndexChanged.connect(
+            self._layout_option_changed
+        )
         options.addWidget(self.layout_parent)
         detach_layout = QPushButton("Détacher de la base")
-        detach_layout.clicked.connect(self._detach_current_layout_profile)
+        detach_layout.clicked.connect(
+            self._detach_current_layout_profile
+        )
         options.addWidget(detach_layout)
         options.addWidget(QLabel("Coordonnées"))
         self.layout_coordinate_mode = QComboBox()
-        self.layout_coordinate_mode.addItem("Normalisées", "normalized")
+        self.layout_coordinate_mode.addItem(
+            "Normalisées",
+            "normalized",
+        )
         self.layout_coordinate_mode.addItem("Absolues", "absolute")
-        self.layout_coordinate_mode.currentIndexChanged.connect(self._layout_option_changed)
+        self.layout_coordinate_mode.currentIndexChanged.connect(
+            self._layout_option_changed
+        )
         options.addWidget(self.layout_coordinate_mode)
         options.addWidget(QLabel("Transition"))
         self.layout_transition = QComboBox()
-        for label, value in [("Instantanée", "instant"), ("Déplacement", "move"), ("Fondu", "fade"), ("Déplacement + fondu", "move_fade")]:
+        for label, value in [
+            ("Instantanée", "instant"),
+            ("Déplacement", "move"),
+            ("Fondu", "fade"),
+            ("Déplacement + fondu", "move_fade"),
+        ]:
             self.layout_transition.addItem(label, value)
-        self.layout_transition.currentIndexChanged.connect(self._layout_option_changed)
+        self.layout_transition.currentIndexChanged.connect(
+            self._layout_option_changed
+        )
         options.addWidget(self.layout_transition)
         self.layout_transition_ms = QSpinBox()
         self.layout_transition_ms.setRange(0, 10000)
         self.layout_transition_ms.setSuffix(" ms")
-        self.layout_transition_ms.valueChanged.connect(self._layout_option_changed)
+        self.layout_transition_ms.valueChanged.connect(
+            self._layout_option_changed
+        )
         options.addWidget(self.layout_transition_ms)
         options.addStretch(1)
         root.addLayout(options)
-        self.layout_inheritance_hint = QLabel("Héritage effectif : —")
+        self.layout_inheritance_hint = QLabel(
+            "Héritage effectif : —"
+        )
         self.layout_inheritance_hint.setWordWrap(True)
         self.layout_inheritance_hint.setObjectName("Muted")
         root.addWidget(self.layout_inheritance_hint)
 
         tools = QHBoxLayout()
-        for text, slot in [
-            ("Prévisualiser", self._preview_layout_profile),
-            ("Annuler aperçu", self._cancel_layout_preview),
-            ("Undo OBS", self._undo_layout_obs),
-            ("Comparer à OBS", self._diff_layout_with_obs),
-            ("Comparer 2 layouts", self._diff_two_layouts),
-            ("Valider", self._validate_layout_profile),
-            ("Restaurer version précédente", self._restore_layout_revision),
-        ]:
-            button = QPushButton(text)
-            button.clicked.connect(slot)
-            if text in {
-                "Prévisualiser",
-                "Annuler aperçu",
-                "Undo OBS",
-                "Comparer à OBS",
-                "Valider",
-            }:
-                self._register_obs_connected_control(button)
-            tools.addWidget(button)
+        preview = QPushButton("Prévisualiser dans OBS")
+        self._set_action_risk(preview, "live")
+        preview.clicked.connect(self._preview_layout_profile)
+        self._register_obs_connected_control(preview)
+        tools.addWidget(preview)
+
+        compare_obs = QPushButton("Comparer à OBS")
+        self._set_action_risk(compare_obs, "read")
+        compare_obs.clicked.connect(self._diff_layout_with_obs)
+        self._register_obs_connected_control(compare_obs)
+        tools.addWidget(compare_obs)
+
+        more_tools = QPushButton("⋯")
+        more_tools.setToolTip("Outils avancés du layout")
+        tools_menu = QMenu(more_tools)
+        cancel_preview = tools_menu.addAction("Annuler aperçu OBS")
+        cancel_preview.triggered.connect(self._cancel_layout_preview)
+        self._register_obs_connected_control(cancel_preview)
+        undo_obs = tools_menu.addAction("Restaurer l’OBS précédent")
+        undo_obs.triggered.connect(self._undo_layout_obs)
+        self._register_obs_connected_control(undo_obs)
+        tools_menu.addSeparator()
+        compare_two = tools_menu.addAction("Comparer 2 layouts")
+        compare_two.triggered.connect(self._diff_two_layouts)
+        validate = tools_menu.addAction("Valider le layout")
+        validate.triggered.connect(self._validate_layout_profile)
+        self._register_obs_connected_control(validate)
+        tools_menu.addSeparator()
+        restore = tools_menu.addAction(
+            "Restaurer la version précédente du brouillon"
+        )
+        restore.triggered.connect(self._restore_layout_revision)
+        more_tools.setMenu(tools_menu)
+        tools.addWidget(more_tools)
         tools.addStretch(1)
         root.addLayout(tools)
 
+        content_title = QLabel(
+            "3. Contenu local du layout — différences et géométrie"
+        )
+        content_title.setObjectName("Section")
+        root.addWidget(content_title)
         content = QHBoxLayout()
 
-        catalog_card, catalog_lay = self._card("Catalogue OBS — éléments à inclure lors de la capture")
+        catalog_card, catalog_lay = self._card(
+            "Catalogue OBS — sélection pour la prochaine capture"
+        )
         self.module_tree = QTreeWidget()
-        self.module_tree.setHeaderLabels(["Type / module", "Source OBS"])
-        self.module_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.module_tree.setHeaderLabels(
+            ["Type / module", "Source OBS"]
+        )
+        self.module_tree.header().setSectionResizeMode(
+            0,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
         self.module_tree.header().setStretchLastSection(True)
-        self.module_tree.itemChanged.connect(self._catalog_item_changed)
+        self.module_tree.itemChanged.connect(
+            self._catalog_item_changed
+        )
         catalog_lay.addWidget(self.module_tree)
         content.addWidget(catalog_card, 1)
 
-        layout_card, layout_lay = self._card("Modules mémorisés dans le LayoutProfile")
+        layout_card, layout_lay = self._card(
+            "Modules mémorisés dans le brouillon"
+        )
         self.layout_modules_table = QTableWidget(0, 8)
         self.layout_modules_table.setHorizontalHeaderLabels(
-            ["Module OBS", "Éléments", "X", "Y", "Largeur", "Hauteur", "Visible", "Ancre"]
+            [
+                "Module OBS",
+                "Éléments",
+                "X",
+                "Y",
+                "Largeur",
+                "Hauteur",
+                "Visible",
+                "Ancre",
+            ]
         )
-        self.layout_modules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.layout_modules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.layout_modules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.layout_modules_table.horizontalHeader().setStretchLastSection(True)
-        self.layout_modules_table.doubleClicked.connect(self._edit_layout_module)
+        self.layout_modules_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.layout_modules_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.layout_modules_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.layout_modules_table.horizontalHeader().setStretchLastSection(
+            True
+        )
+        self.layout_modules_table.doubleClicked.connect(
+            self._edit_layout_module
+        )
         layout_lay.addWidget(self.layout_modules_table)
-        edit = QPushButton("Modifier position, taille et éléments…")
+        edit = QPushButton(
+            "Modifier position, taille et éléments…"
+        )
+        self._set_action_risk(edit, "draft")
         edit.clicked.connect(self._edit_layout_module)
         layout_lay.addWidget(edit, alignment=Qt.AlignLeft)
         content.addWidget(layout_card, 2)
@@ -2381,6 +4238,7 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(page)
 
         router_card, router_lay = self._card("Moteur de routage")
+        self.router_settings_card = router_card
         form = QFormLayout()
         self.poll_ms = QSpinBox()
         self.poll_ms.setRange(20, 5000)
@@ -2441,6 +4299,7 @@ class MainWindow(QMainWindow):
         root.addWidget(host_card)
 
         api_card, api_lay = self._card("API locale / Stream Deck")
+        self.api_settings_card = api_card
         api_form = QFormLayout()
         self.api_enabled = QCheckBox("Activer l’API locale")
         self.api_port = QSpinBox()
@@ -2542,6 +4401,16 @@ class MainWindow(QMainWindow):
                     requires_edit_mode=True,
                 )
 
+        view_menu = self.menuBar().addMenu("Affichage")
+        inspector = QAction("Inspecteur contextuel", self)
+        inspector.triggered.connect(self._show_inspector_from_menu)
+        view_menu.addAction(inspector)
+
+    def _show_inspector_from_menu(self) -> None:
+        self._ensure_expert_mode()
+        self.inspector_dock.show()
+        self.inspector_dock.raise_()
+
     def _show_command_palette(self) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Palette de commandes")
@@ -2550,7 +4419,7 @@ class MainWindow(QMainWindow):
 
         search = QLineEdit()
         search.setPlaceholderText(
-            "Rechercher une règle, un profil, un layout ou une commande…"
+            "Rechercher une règle, un profil, un layout, un problème ou une activité…"
         )
         root.addWidget(search)
 
@@ -2565,12 +4434,23 @@ class MainWindow(QMainWindow):
         entries.extend(
             [
                 (
-                    "Navigation · Dashboard",
+                    "Navigation · Accueil",
                     lambda: navigate_tab(self.dashboard_tab_index),
                 ),
                 (
                     "Navigation · Automatisations",
                     lambda: navigate_tab(self.automations_tab_index),
+                ),
+                (
+                    "Navigation · Configurer",
+                    lambda: navigate_tab(self.configure_tab_index),
+                ),
+                (
+                    "Navigation · Diagnostics",
+                    lambda: (
+                        self._ensure_expert_mode(),
+                        navigate_tab(self.diagnostics_tab_index),
+                    ),
                 ),
                 (
                     "Navigation · Paramètres",
@@ -2631,8 +4511,13 @@ class MainWindow(QMainWindow):
                         self.rules_table.scrollToItem(
                             self.rules_table.item(rule_index, 1)
                         )
+                health = build_rule_health(rule, self.config)
                 entries.append(
-                    (f"Règle · {name}", open_rule)
+                    (
+                        f"Règle · {name} · {health.text} · "
+                        f"{humanize_rule(rule)} · {health.detail}",
+                        open_rule,
+                    )
                 )
 
         profiles = self.config.get("profiles")
@@ -2656,10 +4541,23 @@ class MainWindow(QMainWindow):
                             self.profile_domain.setCurrentIndex(domain_index)
                         self._refresh_profile_names()
                         self.profile_name.setCurrentText(wanted_name)
+                    profile = domain_profiles.get(name)
+                    parent = (
+                        str(profile.get("extends") or "").strip()
+                        if isinstance(profile, Mapping)
+                        else ""
+                    )
+                    actions = (
+                        profile.get("actions")
+                        if isinstance(profile, Mapping)
+                        and isinstance(profile.get("actions"), list)
+                        else []
+                    )
                     entries.append(
                         (
                             f"Profil {DOMAIN_LABELS.get(domain_name, domain_name)}"
-                            f" · {profile_name}",
+                            f" · {profile_name} · {len(actions)} action(s)"
+                            + (f" · hérite de {parent}" if parent else ""),
                             open_profile,
                         )
                     )
@@ -2675,8 +4573,98 @@ class MainWindow(QMainWindow):
                     self.tabs.setCurrentIndex(self.layouts_tab_index)
                     self.layout_profile_name.setCurrentText(wanted_name)
                     self._refresh_layout_profile_view()
+                layout_profile = layouts.get(name)
+                modules = (
+                    layout_profile.get("modules")
+                    if isinstance(layout_profile, Mapping)
+                    and isinstance(layout_profile.get("modules"), Mapping)
+                    else {}
+                )
+                parent = (
+                    str(layout_profile.get("extends") or "").strip()
+                    if isinstance(layout_profile, Mapping)
+                    else ""
+                )
                 entries.append(
-                    (f"Layout · {layout_name}", open_layout)
+                    (
+                        f"Layout · {layout_name} · {len(modules)} module(s)"
+                        + (f" · hérite de {parent}" if parent else ""),
+                        open_layout,
+                    )
+                )
+
+        for kind, domain, target in self._favorite_targets:
+            label = (
+                f"★ Favori · {DOMAIN_LABELS.get(domain, domain)} · {target}"
+                if domain
+                else f"★ Favori · {kind} · {target}"
+            )
+            entries.append(
+                (
+                    label,
+                    lambda wanted_kind=kind,
+                    wanted_domain=domain,
+                    wanted_target=target:
+                    self._open_saved_target(
+                        wanted_kind,
+                        wanted_domain,
+                        wanted_target,
+                    ),
+                )
+            )
+
+        for kind, domain, target in self._recent_inspector_targets:
+            label = (
+                f"Récent · {DOMAIN_LABELS.get(domain, domain)} · {target}"
+                if domain
+                else f"Récent · {kind} · {target}"
+            )
+            def open_recent(
+                wanted_kind=kind,
+                wanted_domain=domain,
+                wanted_target=target,
+            ) -> None:
+                if wanted_kind == "rule":
+                    self._open_rule_by_name(wanted_target)
+                elif wanted_kind in {"profile", "layout"}:
+                    self._open_profile_target(
+                        wanted_domain,
+                        wanted_target,
+                    )
+            entries.append((label, open_recent))
+
+        for timestamp, entry, repeat_count, _seen_at in reversed(
+            self._user_activity_history
+        ):
+            repeat = f" ×{repeat_count}" if repeat_count > 1 else ""
+            label = (
+                f"Activité · {timestamp} · {entry.message}{repeat}"
+                + (f" · {entry.detail}" if entry.detail else "")
+            )
+            entries.append(
+                (
+                    label,
+                    lambda: (
+                        self._ensure_expert_mode(),
+                        navigate_tab(self.diagnostics_tab_index),
+                    ),
+                )
+            )
+
+        if self._last_system_check_report is not None:
+            for issue in build_attention_items(
+                self._last_system_check_report.as_mapping()
+            ):
+                label = (
+                    f"À corriger · {issue.title} · {issue.detail} · "
+                    f"{issue.action}"
+                )
+                entries.append(
+                    (
+                        label,
+                        lambda key=issue.key:
+                        self._navigate_attention_key(key),
+                    )
                 )
 
         visible_entries: list[tuple[str, object]] = []
@@ -3370,11 +5358,32 @@ class MainWindow(QMainWindow):
             self.fg_exe.setText("Aucune fenêtre exploitable")
             self.fg_title.setText("—")
             self.fg_path.setText("—")
+            if hasattr(self, "configure_app_label"):
+                self.configure_app_label.setText(
+                    "Aucune application détectée"
+                )
+                self.configure_app_detail.setText(
+                    "Placez l’application à configurer au premier plan."
+                )
             self._schedule_dashboard_refresh()
             return
         self.fg_exe.setText(app.exe_name or f"PID {app.pid}")
         self.fg_title.setText(app.window_title or "(sans titre)")
-        self.fg_path.setText(app.process_path or "(chemin indisponible)")
+        self.fg_path.setText(
+            app.process_path or "(chemin indisponible)"
+        )
+        if hasattr(self, "configure_app_label"):
+            self.configure_app_label.setText(
+                app.exe_name or f"PID {app.pid}"
+            )
+            details = [
+                str(app.window_title or "").strip(),
+                str(app.process_path or "").strip(),
+            ]
+            self.configure_app_detail.setText(
+                " · ".join(item for item in details if item)
+                or "Application prête à être configurée."
+            )
         self._schedule_dashboard_refresh()
 
     def _on_state_change(self, change: StateChange) -> None:
@@ -3552,30 +5561,10 @@ class MainWindow(QMainWindow):
                 self._routing_incomplete = False
             self._update_obs_status()
         elif event.kind == "obs_error":
-            self.obs_status.setText("OBS : erreur")
-            self.obs_status.setObjectName("Bad")
-            self.obs_status.style().unpolish(self.obs_status)
-            self.obs_status.style().polish(self.obs_status)
-            self._refresh_obs_connected_controls()
+            self._update_obs_status()
 
     def _update_obs_status(self) -> None:
-        if not self._client:
-            self._refresh_obs_connected_controls()
-            return
-        if not self._client.config.enabled:
-            text, style = "OBS : désactivé", "Muted"
-        elif self._client.connected and self._routing_incomplete:
-            text, style = "OBS : connecté · application incomplète", "Warn"
-        elif self._client.connected:
-            text, style = "OBS : connecté", "Good"
-        elif self._client.last_error:
-            text, style = "OBS : déconnecté", "Bad"
-        else:
-            text, style = "OBS : connexion…", "Warn"
-        self.obs_status.setText(text)
-        self.obs_status.setObjectName(style)
-        self.obs_status.style().unpolish(self.obs_status)
-        self.obs_status.style().polish(self.obs_status)
+        self._refresh_status_strip()
         self._refresh_obs_connected_controls()
 
     def _record_user_activity(self, entry: UserActivityEntry) -> None:
@@ -3603,32 +5592,47 @@ class MainWindow(QMainWindow):
                 return
 
         self._user_activity_history.append((timestamp, entry, 1, now))
-        self._user_activity_history = self._user_activity_history[-8:]
+        self._user_activity_history = self._user_activity_history[-40:]
         self._refresh_user_activity()
 
     def _refresh_user_activity(self) -> None:
-        tree = getattr(self, "user_activity_tree", None)
-        if tree is None:
+        trees = [
+            tree
+            for tree in (
+                getattr(self, "user_activity_tree", None),
+                getattr(self, "diagnostics_activity_tree", None),
+            )
+            if tree is not None
+        ]
+        if not trees:
             return
-        tree.clear()
         markers = {
             "Good": "✓",
             "Warn": "⚠",
             "Bad": "✕",
             "Muted": "•",
         }
-        for timestamp, entry, repeat_count, _seen_at in reversed(
-            self._user_activity_history
-        ):
-            repeat = f" ×{repeat_count}" if repeat_count > 1 else ""
-            item = QTreeWidgetItem(
-                [
-                    timestamp,
-                    f"{markers.get(entry.style, '•')} {entry.message}{repeat}",
-                    entry.detail or "—",
-                ]
-            )
-            tree.addTopLevelItem(item)
+        rows = list(reversed(self._user_activity_history))
+        for tree in trees:
+            tree.clear()
+            for timestamp, entry, repeat_count, _seen_at in rows:
+                repeat = (
+                    f" ×{repeat_count}"
+                    if repeat_count > 1
+                    else ""
+                )
+                tree.addTopLevelItem(
+                    QTreeWidgetItem(
+                        [
+                            timestamp,
+                            (
+                                f"{markers.get(entry.style, '•')} "
+                                f"{entry.message}{repeat}"
+                            ),
+                            entry.detail or "—",
+                        ]
+                    )
+                )
 
     def _show_routing_preview(self) -> None:
         service = self._service
@@ -3987,11 +5991,16 @@ class MainWindow(QMainWindow):
                 service.pause(True)
             self.edit_mode_button.setText("Quitter l’édition")
             self.edit_mode_button.setObjectName("Primary")
-            self.edit_mode_button.style().unpolish(self.edit_mode_button)
-            self.edit_mode_button.style().polish(self.edit_mode_button)
             self.pause_button.setText("Suspendu (édition)")
             self.pause_button.setEnabled(False)
             self._apply_edit_mode_surfaces()
+            refresh_status = getattr(
+                self,
+                "_refresh_status_strip",
+                None,
+            )
+            if callable(refresh_status):
+                refresh_status()
             self.statusBar().showMessage(
                 "Mode édition actif — routage automatique gelé",
                 5000,
@@ -4010,8 +6019,6 @@ class MainWindow(QMainWindow):
         self._edit_mode_owned_pause = False
         self.edit_mode_button.setText("Mode édition")
         self.edit_mode_button.setObjectName("")
-        self.edit_mode_button.style().unpolish(self.edit_mode_button)
-        self.edit_mode_button.style().polish(self.edit_mode_button)
         self.pause_button.setEnabled(True)
         self._apply_edit_mode_surfaces()
         if owned_pause and service.paused:
@@ -4019,6 +6026,13 @@ class MainWindow(QMainWindow):
         self.pause_button.setText(
             "Reprendre" if service.paused else "Suspendre"
         )
+        refresh_status = getattr(
+            self,
+            "_refresh_status_strip",
+            None,
+        )
+        if callable(refresh_status):
+            refresh_status()
         self.statusBar().showMessage(
             "Mode édition terminé",
             3000,
@@ -4031,13 +6045,47 @@ class MainWindow(QMainWindow):
         )
 
     def _toggle_pause(self) -> None:
-        if not self._service:
-            return
-        if self._edit_mode:
+        if not self._service or self._edit_mode:
             return
         new_value = not self._service.paused
         self._service.pause(new_value)
-        self.pause_button.setText("Reprendre" if new_value else "Suspendre")
+        self.pause_button.setText(
+            "Reprendre" if new_value else "Suspendre"
+        )
+        refresh_status = getattr(
+            self,
+            "_refresh_status_strip",
+            None,
+        )
+        if callable(refresh_status):
+            refresh_status()
+        schedule = getattr(
+            self,
+            "_schedule_dashboard_refresh",
+            None,
+        )
+        if callable(schedule):
+            schedule()
+
+    def _configure_current_application(self) -> None:
+        if not self._edit_mode:
+            self._toggle_edit_mode()
+        if self._edit_mode:
+            self._guided_capture_current_state()
+
+    def _configure_repair_refs(self) -> None:
+        if not self._edit_mode:
+            self._toggle_edit_mode()
+        if self._edit_mode:
+            self._start_reference_repair()
+
+    def _open_logs_tab(self) -> None:
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.logs_tab_index)
+
+    def _open_diagnostics_tab(self) -> None:
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.diagnostics_tab_index)
 
     # ---------- rules ----------
     def _refresh_rules_table(self) -> None:
@@ -4077,9 +6125,11 @@ class MainWindow(QMainWindow):
                 if rule.get("behavior", "match") == "match"
                 else "—"
             )
+            health = build_rule_health(rule, self.config)
+            name = str(rule.get("name") or "")
             values = [
                 "✓" if rule.get("enabled", True) else "",
-                rule.get("name", ""),
+                f"{health.text.split()[0]} {name}".strip(),
                 rule.get("behavior", "match"),
                 str(rule.get("priority", 0)),
                 process_display,
@@ -4095,6 +6145,12 @@ class MainWindow(QMainWindow):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 if str(value):
                     item.setToolTip(str(value))
+                if col == 1:
+                    item.setToolTip(
+                        humanize_rule(rule)
+                        + "\n\n"
+                        + health.detail
+                    )
                 self.rules_table.setItem(row, col, item)
         self._refresh_automations_view()
 
@@ -4187,6 +6243,141 @@ class MainWindow(QMainWindow):
             message = f"La règle ne correspond pas à {subject}."
         QMessageBox.information(self, "Test de règle", message)
 
+    def _bulk_edit_rules(self) -> None:
+        if not self._require_edit_mode("Actions groupées sur les règles"):
+            return
+        rules = self.config.get("rules")
+        if not isinstance(rules, list) or not rules:
+            QMessageBox.information(
+                self,
+                "Actions groupées",
+                "Aucune règle disponible.",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Actions groupées sur les règles")
+        dialog.resize(620, 620)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Sélectionnez les règles à modifier. Cette opération ne touche "
+            "que le brouillon SSR et peut être annulée via l’historique."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Opération"))
+        mode = QComboBox()
+        mode.addItem("Activer les règles sélectionnées", True)
+        mode.addItem("Désactiver les règles sélectionnées", False)
+        mode_row.addWidget(mode, 1)
+        root.addLayout(mode_row)
+
+        items = QListWidget()
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, Mapping):
+                continue
+            name = str(rule.get("name") or f"Règle {index + 1}")
+            health = build_rule_health(rule, self.config)
+            item = QListWidgetItem(
+                f"{health.text.split()[0]} {name}"
+            )
+            item.setData(Qt.UserRole, index)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setToolTip(humanize_rule(rule))
+            items.addItem(item)
+        root.addWidget(items, 1)
+
+        impact = QLabel("0 règle sélectionnée")
+        impact.setObjectName("Muted")
+        root.addWidget(impact)
+
+        def refresh_impact(*_args) -> None:
+            count = sum(
+                1
+                for index in range(items.count())
+                if items.item(index).checkState() == Qt.Checked
+            )
+            impact.setText(
+                f"{count} règle(s) seront "
+                + (
+                    "activée(s)."
+                    if bool(mode.currentData())
+                    else "désactivée(s)."
+                )
+            )
+            impact.setObjectName("Warn" if count else "Muted")
+            impact.style().unpolish(impact)
+            impact.style().polish(impact)
+
+        items.itemChanged.connect(refresh_impact)
+        mode.currentIndexChanged.connect(refresh_impact)
+
+        actions = QHBoxLayout()
+        select_all = QPushButton("Tout sélectionner")
+        def mark_all() -> None:
+            for index in range(items.count()):
+                items.item(index).setCheckState(Qt.Checked)
+        select_all.clicked.connect(mark_all)
+        actions.addWidget(select_all)
+        actions.addStretch(1)
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(dialog.reject)
+        actions.addWidget(cancel)
+        apply_button = QPushButton("Appliquer au brouillon")
+        apply_button.setObjectName("DraftAction")
+        apply_button.clicked.connect(dialog.accept)
+        actions.addWidget(apply_button)
+        root.addLayout(actions)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected = [
+            int(items.item(index).data(Qt.UserRole))
+            for index in range(items.count())
+            if items.item(index).checkState() == Qt.Checked
+        ]
+        if not selected:
+            return
+        previous = copy.deepcopy(self.config)
+        enabled = bool(mode.currentData())
+        for index in selected:
+            if 0 <= index < len(rules) and isinstance(rules[index], dict):
+                rules[index]["enabled"] = enabled
+        errors = validate_config(self.config)
+        if errors:
+            self.config = previous
+            QMessageBox.critical(
+                self,
+                "Actions groupées",
+                "\n".join(errors),
+            )
+            return
+        self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            (
+                f"{'Activation' if enabled else 'Désactivation'} "
+                f"groupée de {len(selected)} règle(s)"
+            ),
+            previous,
+        )
+        self._refresh_rules_table()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Actions groupées appliquées au brouillon",
+                (
+                    f"{len(selected)} règle(s) "
+                    + ("activée(s)" if enabled else "désactivée(s)")
+                ),
+            )
+        )
+
     def _delete_rule(self) -> None:
         idx = self._selected_rule_index()
         if idx is None:
@@ -4267,8 +6458,17 @@ class MainWindow(QMainWindow):
                 self.profile_inheritance_hint.setText(
                     "Héritage effectif : —"
                 )
+        if hasattr(self, "profile_test_button"):
+            self.profile_test_button.setText(
+                (
+                    f"Tester « {current[1]} » dans OBS"
+                    if current
+                    else "Tester dans OBS"
+                )
+            )
         actions = current[2].setdefault("actions", []) if current else []
         self.actions_table.setRowCount(len(actions))
+        self._inspect_current_profile()
         for row, action in enumerate(actions):
             values = [
                 "✓" if action.get("enabled", True) else "",
@@ -5687,10 +7887,27 @@ class MainWindow(QMainWindow):
             return
         current = self._current_layout_profile()
         self._refresh_layout_options(current)
+        if hasattr(self, "layout_capture_button"):
+            self.layout_capture_button.setText(
+                (
+                    f"Capturer OBS → « {current[0]} »"
+                    if current
+                    else "Capturer OBS dans le brouillon"
+                )
+            )
+        if hasattr(self, "layout_apply_button"):
+            self.layout_apply_button.setText(
+                (
+                    f"Appliquer « {current[0]} » à OBS"
+                    if current
+                    else "Appliquer à OBS"
+                )
+            )
         modules = current[1].get("modules", {}) if current else {}
         if not isinstance(modules, dict):
             modules = {}
         self.layout_modules_table.setRowCount(len(modules))
+        self._inspect_current_layout()
         for row, (module_name, module) in enumerate(sorted(modules.items(), key=lambda item: item[0].casefold())):
             geometry = module.get("geometry", {}) if isinstance(module, dict) else {}
             elements = module.get("elements", []) if isinstance(module, dict) else []
@@ -6982,14 +9199,36 @@ class MainWindow(QMainWindow):
         saved = self._saved_revision or "—"
         applied = self._applied_revision or "—"
 
+        change_categories: list[str] = []
+        if self._draft_dirty:
+            try:
+                report = build_config_change_review(
+                    self._last_saved_config,
+                    self.config,
+                )
+                change_categories = [
+                    change.category for change in report.changes
+                ]
+            except Exception:
+                change_categories = []
+
+        banner = build_draft_banner(
+            draft_dirty=self._draft_dirty,
+            saved_revision=self._saved_revision,
+            applied_revision=self._applied_revision,
+            change_categories=change_categories,
+        )
+
         if self._expert_mode:
             if self._draft_dirty:
                 text = (
-                    f"Brouillon modifié · enregistré {saved} · "
+                    f"{banner.title} · enregistré {saved} · "
                     f"appliqué {applied}"
                 )
             elif saved != applied:
-                text = f"Enregistré {saved} · runtime encore sur {applied}"
+                text = (
+                    f"Enregistré {saved} · runtime encore sur {applied}"
+                )
             else:
                 text = f"Enregistré / appliqué {applied}"
         else:
@@ -6999,14 +9238,35 @@ class MainWindow(QMainWindow):
                 text = "Configuration enregistrée · application en attente"
             else:
                 text = "Configuration à jour"
+
         self.unsaved.setText(text)
         self.unsaved.setToolTip(
-            f"Révision enregistrée : {saved}\nRévision runtime : {applied}"
+            f"Révision enregistrée : {saved}\n"
+            f"Révision runtime : {applied}"
         )
+        if hasattr(self, "draft_detail"):
+            self.draft_detail.setText(
+                (
+                    f"{banner.title} · {banner.detail}"
+                    if self._draft_dirty
+                    else banner.detail
+                )
+            )
+        if hasattr(self, "draft_banner"):
+            self.draft_banner.setVisible(banner.visible)
         if hasattr(self, "review_draft_button"):
             self.review_draft_button.setEnabled(self._draft_dirty)
         if hasattr(self, "discard_draft_button"):
             self.discard_draft_button.setEnabled(self._draft_dirty)
+        if hasattr(self, "save_button"):
+            self.save_button.setEnabled(
+                self._draft_dirty
+                or (
+                    bool(self._saved_revision)
+                    and bool(self._applied_revision)
+                    and self._saved_revision != self._applied_revision
+                )
+            )
 
     def _mark_dirty(self, *_args) -> None:
         self._refresh_config_revision_status(draft_dirty=True)

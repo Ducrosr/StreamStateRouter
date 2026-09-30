@@ -19,6 +19,36 @@ QLabel#Muted { color: #8da2b2; }
 QLabel#Good { color: #70d69a; font-weight: 700; }
 QLabel#Warn { color: #e7c781; font-weight: 700; }
 QLabel#Bad { color: #e58b91; font-weight: 700; }
+QFrame#StatusBox {
+    background: #121c25;
+    border: 1px solid #263848;
+    border-radius: 7px;
+}
+QFrame#EditBanner {
+    background: #2b2519;
+    border: 1px solid #8d7441;
+    border-radius: 7px;
+}
+QFrame#DraftBanner {
+    background: #25231a;
+    border: 1px solid #6f6442;
+    border-radius: 7px;
+}
+QFrame#ActionCardGood {
+    background: #14241d;
+    border: 1px solid #315e48;
+    border-radius: 8px;
+}
+QFrame#ActionCardWarn {
+    background: #292317;
+    border: 1px solid #77613a;
+    border-radius: 8px;
+}
+QFrame#ActionCardBad {
+    background: #2a1b1e;
+    border: 1px solid #744149;
+    border-radius: 8px;
+}
 QPushButton {
     background: #1a2733;
     border: 1px solid #314656;
@@ -36,6 +66,21 @@ QPushButton#Primary:hover { background: #d6b978; }
 QPushButton#Danger {
     color: #f3c2c6;
     border-color: #7e4149;
+}
+QPushButton#ReadOnlyAction {
+    color: #9ddfea;
+    border-color: #3b7180;
+}
+QPushButton#DraftAction {
+    color: #ead39d;
+    border-color: #7b6740;
+}
+QPushButton#LiveAction {
+    color: #f1b8bd;
+    border-color: #884b54;
+}
+QPushButton#Compact {
+    padding: 4px 8px;
 }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit {
     background: #121c25;
