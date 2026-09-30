@@ -135,21 +135,16 @@ class RuntimeMarker:
                 self.previous_cleanup_incomplete = data.get("cleanup_complete") is False
                 raw_pending = data.get("pending_cleanup", [])
                 if not isinstance(raw_pending, list):
-                    if strict_current_schema:
-                        raise RuntimeMarkerFormatError(
-                            "pending_cleanup invalide pour le schéma courant; fichier préservé"
-                        )
-                    raw_pending = []
+                    raise RuntimeMarkerFormatError(
+                        "pending_cleanup invalide; runtime.json préservé"
+                    )
 
                 normalized: list[dict[str, object]] = []
                 for item in raw_pending:
                     if not isinstance(item, Mapping):
-                        if strict_current_schema:
-                            raise RuntimeMarkerFormatError(
-                                "obligation cleanup non-objet dans le schéma courant; "
-                                "runtime.json préservé"
-                            )
-                        continue
+                        raise RuntimeMarkerFormatError(
+                            "obligation cleanup non-objet; runtime.json préservé"
+                        )
                     if (
                         strict_current_schema
                         and _strict_text(item.get("kind")).casefold() == "layout_fade"
@@ -163,12 +158,10 @@ class RuntimeMarker:
                             )
                     parsed = _normalize_cleanup_item(item)
                     if parsed is None:
-                        if strict_current_schema:
-                            raise RuntimeMarkerFormatError(
-                                "obligation cleanup inconnue ou incomplète dans le schéma "
-                                "courant; runtime.json préservé"
-                            )
-                        continue
+                        raise RuntimeMarkerFormatError(
+                            "obligation cleanup inconnue ou incomplète; "
+                            "runtime.json préservé"
+                        )
                     normalized.append(parsed)
                 self.previous_pending_cleanup = tuple(normalized)
 
