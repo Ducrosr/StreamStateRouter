@@ -1465,6 +1465,7 @@ class OBSLayoutManager:
                 kind, enabled, settings = self._fade_filter_state(
                     source_alias,
                     identity.filter_name,
+                    source_uuid=identity.source_uuid,
                     session_generation=session_generation,
                 )
             except Exception as exc:
@@ -1538,6 +1539,7 @@ class OBSLayoutManager:
                 kind, enabled, settings = self._fade_filter_state(
                     source_alias,
                     identity.filter_name,
+                    source_uuid=identity.source_uuid,
                     session_generation=session_generation,
                 )
             except Exception as exc:
