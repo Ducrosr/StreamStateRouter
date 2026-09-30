@@ -128,10 +128,16 @@ class OBSClientManager:
             self._event_condition.notify_all()
 
     def on_custom_event(self, data) -> None:
-        payload = getattr(data, "event_data", None)
-        if not isinstance(payload, dict):
-            return
-        token = payload.get(self._BARRIER_KEY)
+        # obsws-python exposes CustomEvent.eventData fields directly on the
+        # callback dataclass. Keep the nested fake/legacy form as fallback.
+        token = getattr(data, self._BARRIER_KEY, None)
+        if not isinstance(token, str) or not token:
+            payload = getattr(data, "event_data", None)
+            token = (
+                payload.get(self._BARRIER_KEY)
+                if isinstance(payload, dict)
+                else None
+            )
         if not isinstance(token, str) or not token:
             return
         with self._event_condition:
