@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -562,12 +563,12 @@ class A1R3ContextTests(unittest.TestCase):
 
                     stopper = threading.Thread(target=stop_service)
                     stopper.start()
-                    deadline = __import__("time").monotonic() + 1.0
+                    deadline = time.monotonic() + 1.0
                     while (
                         not service._stopping
-                        and __import__("time").monotonic() < deadline
+                        and time.monotonic() < deadline
                     ):
-                        __import__("time").sleep(0.01)
+                        time.sleep(0.01)
                     self.assertTrue(
                         service._stopping,
                         "RoutingService.stop did not close admission",
