@@ -10,6 +10,7 @@ from stream_state_router.services.config import (
     ConfigError,
     build_ruleset,
     load_config,
+    load_config_unvalidated,
     validate_config,
 )
 from stream_state_router.services.logging_setup import configure_logging
@@ -128,7 +129,11 @@ def run_gui(config: dict, *, minimized: bool, marker: RuntimeMarker) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        config = load_config()
+        config = (
+            load_config_unvalidated()
+            if args.system_check or args.system_check_json
+            else load_config()
+        )
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
