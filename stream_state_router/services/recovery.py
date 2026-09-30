@@ -143,6 +143,7 @@ class RuntimeMarker:
                             )
                         except LayoutFadeCleanupFormatError as exc:
                             raise RuntimeMarkerFormatError(
+                                "obligation cleanup inconnue ou incomplète: "
                                 f"{exc}; runtime.json préservé"
                             ) from exc
                     else:
