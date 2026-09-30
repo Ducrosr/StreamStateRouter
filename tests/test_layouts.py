@@ -3592,5 +3592,99 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(writes[0]["sourceUuid"], identity.source_uuid)
 
 
+    def test_fully_renamed_observed_helper_is_quarantined_without_recreate(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        manager._set_source_opacity("[Webcam] Avatar", 0.3)
+
+        filters = client.source_filters["[Webcam] Avatar"]
+        renamed = "Renamed correction"
+        filters[renamed] = filters.pop(identity.filter_name)
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(
+            any("renommage possible" in warning for warning in warnings),
+            warnings,
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        renamed_state = filters[renamed]
+        self.assertAlmostEqual(
+            float(renamed_state["settings"]["opacity"]),
+            0.3,
+        )
+        self.assertTrue(renamed_state["enabled"])
+        self.assertFalse(
+            any(
+                request in {
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                    "CreateSourceFilter",
+                }
+                for request, _ in client.calls
+            )
+        )
+
+        client.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "possiblement renommé"):
+            manager._prepare_fade_filter(
+                "[Webcam] Avatar",
+                "Collection A",
+            )
+
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+        self.assertEqual(set(filters), {renamed})
+
+    def test_same_kind_user_filter_is_never_adopted_as_renamed_helper(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        manager._set_source_opacity("[Webcam] Avatar", 0.4)
+
+        filters = client.source_filters["[Webcam] Avatar"]
+        filters.pop(identity.filter_name)
+        filters["User Color"] = {
+            "kind": identity.filter_kind,
+            "enabled": True,
+            "settings": {"opacity": 1.0},
+        }
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(warnings)
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertTrue(filters["User Color"]["enabled"])
+        self.assertAlmostEqual(
+            float(filters["User Color"]["settings"]["opacity"]),
+            1.0,
+        )
+        self.assertFalse(
+            any(
+                request in {
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                    "CreateSourceFilter",
+                }
+                for request, _ in client.calls
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
