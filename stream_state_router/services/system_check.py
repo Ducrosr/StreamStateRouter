@@ -111,6 +111,41 @@ def _probe_obs_catalog(client: OBSClientManager) -> dict[str, object]:
         }
 
 
+def _configured_hdr_scope(config: Mapping[str, Any]) -> str:
+    """Return the broadest HDR scope requested by configured HDR actions."""
+
+    profiles = config.get("profiles")
+    if not isinstance(profiles, Mapping):
+        return "primary"
+    for domain_profiles in profiles.values():
+        if not isinstance(domain_profiles, Mapping):
+            continue
+        for profile in domain_profiles.values():
+            if not isinstance(profile, Mapping):
+                continue
+            actions = profile.get("actions")
+            if not isinstance(actions, list):
+                continue
+            for action in actions:
+                if not isinstance(action, Mapping):
+                    continue
+                if (
+                    str(action.get("type") or "").strip().casefold()
+                    != "windows_hdr"
+                ):
+                    continue
+                params = action.get("params")
+                if (
+                    isinstance(params, Mapping)
+                    and str(params.get("display") or "primary")
+                    .strip()
+                    .casefold()
+                    == "all"
+                ):
+                    return "all"
+    return "primary"
+
+
 def probe_host_capabilities(
     config: Mapping[str, Any],
     *,
@@ -181,7 +216,8 @@ def probe_host_capabilities(
     hdr_probe: dict[str, object] = {}
     if hdr_used:
         try:
-            rows = controller.hdr_controller.status(scope="primary")
+            scope = _configured_hdr_scope(config)
+            rows = controller.hdr_controller.status(scope=scope)
             supported = [
                 row for row in rows
                 if bool(row.get("supported", False))
