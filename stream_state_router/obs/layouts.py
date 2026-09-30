@@ -11,7 +11,12 @@ from ..recovery_schema import (
     LayoutFadeCleanupFormatError,
     normalize_layout_fade_cleanup,
 )
-from .client import OBSClientManager, OBSResourceNotFoundError
+from .client import (
+    OBSClientManager,
+    OBSRequestError,
+    OBSResourceNotFoundError,
+    OBSSceneCollectionContextChangedError,
+)
 from .fade_helpers import (
     FadeHelperIdentity,
     FadeHelperManifestError,
@@ -69,6 +74,7 @@ class PendingFadeCleanup:
     cleanup_action: str = "neutralize_disable"
     legacy: bool = False
     ambiguous: bool = False
+    context_uncertain: bool = False
     persisted: bool = False
     attempts: int = 0
     last_error: str = ""
@@ -368,6 +374,7 @@ class OBSLayoutManager:
         )
         self._active_fade_helpers: dict[str, FadeHelperIdentity] = {}
         self._active_fade_sessions: dict[str, int] = {}
+        self._active_fade_collection_generations: dict[str, int] = {}
 
     def set_pending_cleanup_changed(self, callback) -> None:
         """Persist cleanup obligations whenever their durable set changes."""
@@ -627,6 +634,7 @@ class OBSLayoutManager:
                         "cleanup_action": item.cleanup_action,
                         "legacy": False,
                         "ambiguous": bool(item.ambiguous),
+                        "context_uncertain": bool(item.context_uncertain),
                     }
                 )
             rows.append(row)
@@ -683,6 +691,9 @@ class OBSLayoutManager:
                 ),
                 legacy=bool(normalized.get("legacy", not helper_id)),
                 ambiguous=bool(normalized.get("ambiguous", False)),
+                context_uncertain=bool(
+                    normalized.get("context_uncertain", False)
+                ),
                 persisted=True,
                 attempts=int(normalized["attempts"]),
                 last_error=str(normalized["last_error"]),
@@ -705,6 +716,7 @@ class OBSLayoutManager:
                     and previous.filter_kind == pending.filter_kind
                     and previous.cleanup_action == pending.cleanup_action
                     and previous.legacy == pending.legacy
+                    and previous.context_uncertain == pending.context_uncertain
                 )
                 previous.ambiguous = True
                 previous.last_error = (
@@ -801,6 +813,7 @@ class OBSLayoutManager:
             raise
         self._active_fade_helpers.pop(pending.source, None)
         self._active_fade_sessions.pop(pending.source, None)
+        self._active_fade_collection_generations.pop(pending.source, None)
 
     def _discard_unmutated_fade_obligation(
         self,
