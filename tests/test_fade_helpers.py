@@ -291,6 +291,28 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
                 with self.assertRaises(FadeHelperManifestError):
                     store.entries()
 
+    def test_manifest_schema_requires_exact_integer_type(self):
+        for invalid_schema in (True, 1.0):
+            with self.subTest(schema=invalid_schema), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "helper-manifest.json"
+                original = {
+                    "schema": invalid_schema,
+                    "helpers": [],
+                }
+                path.write_text(json.dumps(original), encoding="utf-8")
+                store = FadeHelperManifestStore(path)
+
+                with self.assertRaisesRegex(
+                    FadeHelperManifestError,
+                    "unsupported helper manifest schema",
+                ):
+                    store.entries()
+
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    original,
+                )
+
     def test_future_manifest_is_rejected_without_overwrite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "helper-manifest.json"

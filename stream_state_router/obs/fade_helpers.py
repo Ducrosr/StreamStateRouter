@@ -423,7 +423,11 @@ class FadeHelperManifestStore:
         if not isinstance(raw, Mapping):
             raise FadeHelperManifestError("helper manifest root is not an object")
         schema = raw.get("schema")
-        if schema != HELPER_MANIFEST_SCHEMA_VERSION:
+        if (
+            isinstance(schema, bool)
+            or not isinstance(schema, int)
+            or schema != HELPER_MANIFEST_SCHEMA_VERSION
+        ):
             raise FadeHelperManifestError(
                 f"unsupported helper manifest schema: {schema!r}"
             )
