@@ -492,6 +492,11 @@ class OBSLayoutManager:
         for item in raw:
             if not isinstance(item, Mapping):
                 raise RuntimeError(f"Inventaire des filtres ambigu pour {source}")
+            filter_name = item.get("filterName")
+            if not isinstance(filter_name, str) or not filter_name.strip():
+                raise RuntimeError(
+                    f"Inventaire des filtres ambigu pour {source}: nom de filtre invalide"
+                )
             rows.append(item)
         return rows
 
