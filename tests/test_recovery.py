@@ -15,6 +15,51 @@ from stream_state_router.services.recovery import (
 
 
 class RuntimeMarkerTests(unittest.TestCase):
+    def test_pre_cleanup_legacy_marker_remains_readable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "clean_shutdown": False,
+                        "updated_at": "legacy",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            marker = RuntimeMarker()
+            marker.path = path
+
+            marker.start()
+
+            self.assertTrue(marker.previous_unclean)
+            self.assertFalse(marker.previous_cleanup_incomplete)
+            self.assertEqual(marker.previous_pending_cleanup, ())
+            rewritten = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(rewritten["cleanup_schema"], CLEANUP_SCHEMA_VERSION)
+
+    def test_unversioned_marker_rejects_invalid_state_flags(self):
+        mutations = (
+            {"clean_shutdown": "false"},
+            {"clean_shutdown": False, "cleanup_complete": 0},
+        )
+        for invalid in mutations:
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "runtime.json"
+                original = dict(invalid)
+                original["pending_cleanup"] = []
+                path.write_text(json.dumps(original), encoding="utf-8")
+                marker = RuntimeMarker()
+                marker.path = path
+
+                with self.assertRaises(RuntimeMarkerFormatError):
+                    marker.start()
+
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    original,
+                )
+
     def test_legacy_activation_cleanup_marker_is_normalized(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runtime.json"
@@ -268,7 +313,7 @@ class RuntimeMarkerTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     RuntimeMarkerFormatError,
-                    "état runtime invalide",
+                    "clean_shutdown invalide|cleanup_complete invalide",
                 ):
                     marker.start()
 
