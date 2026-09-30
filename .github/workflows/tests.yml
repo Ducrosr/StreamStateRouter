@@ -44,6 +44,13 @@ jobs:
         run: |
           python main.py --declarative-coverage-json | python -m json.tool | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Invalid coverage JSON output" }
+      - name: System check smoke test
+        run: python main.py --system-check
+      - name: System check JSON smoke test
+        shell: pwsh
+        run: |
+          python main.py --system-check-json | python -m json.tool | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Invalid system check JSON output" }
       - name: PowerShell syntax
         shell: pwsh
         run: |
