@@ -85,6 +85,10 @@ def normalize_layout_fade_cleanup(
     item["source"] = source
     item["collection"] = collection
 
+    if "helper_id" in item and not isinstance(item.get("helper_id"), str):
+        raise LayoutFadeCleanupFormatError(
+            "obligation layout_fade helper_id invalide"
+        )
     helper_id = _strict_text(item.get("helper_id"))
     if schema in {None, 2} and helper_id:
         raise LayoutFadeCleanupFormatError(
