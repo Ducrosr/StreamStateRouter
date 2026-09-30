@@ -2151,6 +2151,45 @@ class LayoutTests(unittest.TestCase):
             1,
         )
 
+    def test_cleanup_rejects_malformed_filter_inventory_without_ack(self):
+        class MalformedFilterInventoryClient(FakeLayoutClient):
+            malformed_inventory = False
+
+            def send(self, request, data=None):
+                if request == "GetSourceFilterList" and self.malformed_inventory:
+                    self.calls.append((request, dict(data or {})))
+                    return {"filters": [{"filterName": 123}]}
+                return super().send(request, data)
+
+        client = MalformedFilterInventoryClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        manager._set_source_opacity("[Webcam] Avatar", 0.25)
+        client.malformed_inventory = True
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(
+            any("inventaire filtres non vérifiable" in item for item in warnings),
+            warnings,
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 0.25)
+        self.assertTrue(state["enabled"])
+        self.assertFalse(
+            any(
+                request in {"SetSourceFilterSettings", "SetSourceFilterEnabled"}
+                for request, _ in client.calls
+            )
+        )
+
     def test_cleanup_missing_owned_helper_is_terminal_without_create(self):
         client = FakeLayoutClient()
         store = MemoryFadeHelperManifestStore()
