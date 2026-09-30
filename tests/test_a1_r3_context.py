@@ -10,9 +10,13 @@ from unittest.mock import patch
 
 from stream_state_router.obs.client import OBSClientManager
 from stream_state_router.obs.fade_helpers import FadeHelperManifestStore
+from stream_state_router.obs.dispatcher import DispatchResult
 from stream_state_router.obs.layouts import OBSLayoutManager
 from stream_state_router.obs.models import OBSConnectionConfig
+from stream_state_router.router.engine import StateRouterEngine
+from stream_state_router.router.rules import RuleSet
 from stream_state_router.services.recovery import RuntimeMarker
+from stream_state_router.services.runtime import RoutingService
 
 
 class _RequestError(Exception):
@@ -201,6 +205,31 @@ class _EventClient:
     def disconnect(self):
         if self.server.event_client is self:
             self.server.event_client = None
+
+
+class _RuntimeDispatcher:
+    def __init__(self, client, layout_manager, source):
+        self.client = client
+        self.layout_manager = layout_manager
+        self.source = source
+
+    def dispatch_change(self, _change):
+        return DispatchResult(0, 0, ())
+
+    def dispatch_state(self, _state, force=False):
+        return DispatchResult(0, 0, ())
+
+    def pending_domains(self, _state=None):
+        return ()
+
+    def execute_layout_profile(self, _name, preview=False):
+        self.layout_manager._set_source_opacity(self.source, 0.0)
+        return SimpleNamespace(warnings=(), missing_sources=())
+
+
+class _NullProvider:
+    def get(self):
+        return None
 
 
 class A1R3ContextTests(unittest.TestCase):
@@ -484,6 +513,88 @@ class A1R3ContextTests(unittest.TestCase):
                     disk_after["pending_cleanup"][0]["context_uncertain"]
                 )
                 client.close()
+
+
+    def test_routing_service_stop_cannot_mask_inflight_collection_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = _Server()
+            p1, p2 = self._patches(server)
+            with p1, p2:
+                client, _store, manager, marker = self._fixture(tmp, server)
+                identity = manager._prepare_fade_filter(
+                    server.source,
+                    "Collection A",
+                )
+                server.collections["Collection B"][server.source] = {
+                    identity.filter_name: {
+                        "kind": identity.filter_kind,
+                        "enabled": True,
+                        "settings": {"opacity": 0.73},
+                    }
+                }
+                server.roundtrip_request = "SetSourceFilterSettings"
+                server.block_request = "SetSourceFilterSettings"
+
+                dispatcher = _RuntimeDispatcher(
+                    client,
+                    manager,
+                    server.source,
+                )
+                service = RoutingService(
+                    StateRouterEngine(RuleSet([]), debounce_ms=0),
+                    dispatcher,
+                    poll_ms=20,
+                    provider=_NullProvider(),
+                    obs_probe_seconds=10.0,
+                )
+                service.start()
+                stop_result = {}
+
+                try:
+                    service.request_layout("apply", "A1 shutdown")
+                    self.assertTrue(
+                        server.request_started.wait(1.0),
+                        "fade mutation never became in-flight",
+                    )
+
+                    def stop_service():
+                        stop_result["value"] = service.stop(timeout=1.0)
+
+                    stopper = threading.Thread(target=stop_service)
+                    stopper.start()
+                    self.assertTrue(
+                        service._stopping,
+                        "RoutingService.stop did not close admission",
+                    )
+
+                    server.release_request.set()
+                    stopper.join(2.0)
+                    self.assertFalse(stopper.is_alive())
+
+                    pending = manager.export_pending_fade_cleanup()
+                    self.assertEqual(len(pending), 1)
+                    self.assertTrue(pending[0]["context_uncertain"])
+                    disk = json.loads(
+                        marker.path.read_text(encoding="utf-8")
+                    )
+                    self.assertTrue(
+                        disk["pending_cleanup"][0]["context_uncertain"]
+                    )
+                    b_state = server.collections["Collection B"][
+                        server.source
+                    ][identity.filter_name]
+                    self.assertAlmostEqual(
+                        float(b_state["settings"]["opacity"]),
+                        0.0,
+                    )
+                    result = stop_result["value"]
+                    self.assertTrue(result.worker_stopped)
+                    self.assertFalse(result.cleanup_complete)
+                finally:
+                    server.release_request.set()
+                    service.stop(timeout=1.0)
+                    client.close()
+
 
 
 if __name__ == "__main__":
