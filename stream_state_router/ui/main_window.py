@@ -4837,8 +4837,18 @@ class MainWindow(QMainWindow):
             self._edit_mode_owned_pause = not service.paused
             if self._edit_mode_owned_pause:
                 service.pause(True)
+            self.edit_mode_button.setText("Quitter l’édition")
+            self.edit_mode_button.setObjectName("Primary")
+            self.pause_button.setText("Suspendu (édition)")
+            self.pause_button.setEnabled(False)
             self._apply_edit_mode_surfaces()
-            self._refresh_status_strip()
+            refresh_status = getattr(
+                self,
+                "_refresh_status_strip",
+                None,
+            )
+            if callable(refresh_status):
+                refresh_status()
             self.statusBar().showMessage(
                 "Mode édition actif — routage automatique gelé",
                 5000,
@@ -4855,10 +4865,22 @@ class MainWindow(QMainWindow):
         owned_pause = self._edit_mode_owned_pause
         self._edit_mode = False
         self._edit_mode_owned_pause = False
+        self.edit_mode_button.setText("Mode édition")
+        self.edit_mode_button.setObjectName("")
+        self.pause_button.setEnabled(True)
         self._apply_edit_mode_surfaces()
         if owned_pause and service.paused:
             service.pause(False)
-        self._refresh_status_strip()
+        self.pause_button.setText(
+            "Reprendre" if service.paused else "Suspendre"
+        )
+        refresh_status = getattr(
+            self,
+            "_refresh_status_strip",
+            None,
+        )
+        if callable(refresh_status):
+            refresh_status()
         self.statusBar().showMessage(
             "Mode édition terminé",
             3000,
@@ -4875,8 +4897,23 @@ class MainWindow(QMainWindow):
             return
         new_value = not self._service.paused
         self._service.pause(new_value)
-        self._refresh_status_strip()
-        self._schedule_dashboard_refresh()
+        self.pause_button.setText(
+            "Reprendre" if new_value else "Suspendre"
+        )
+        refresh_status = getattr(
+            self,
+            "_refresh_status_strip",
+            None,
+        )
+        if callable(refresh_status):
+            refresh_status()
+        schedule = getattr(
+            self,
+            "_schedule_dashboard_refresh",
+            None,
+        )
+        if callable(schedule):
+            schedule()
 
     def _configure_current_application(self) -> None:
         if not self._edit_mode:
@@ -7870,7 +7907,12 @@ class MainWindow(QMainWindow):
             else:
                 text = f"Enregistré / appliqué {applied}"
         else:
-            text = banner.title
+            if self._draft_dirty:
+                text = "Modifications non enregistrées"
+            elif saved != applied:
+                text = "Configuration enregistrée · application en attente"
+            else:
+                text = "Configuration à jour"
 
         self.unsaved.setText(text)
         self.unsaved.setToolTip(
@@ -7878,7 +7920,13 @@ class MainWindow(QMainWindow):
             f"Révision runtime : {applied}"
         )
         if hasattr(self, "draft_detail"):
-            self.draft_detail.setText(banner.detail)
+            self.draft_detail.setText(
+                (
+                    f"{banner.title} · {banner.detail}"
+                    if self._draft_dirty
+                    else banner.detail
+                )
+            )
         if hasattr(self, "draft_banner"):
             self.draft_banner.setVisible(banner.visible)
         if hasattr(self, "review_draft_button"):
