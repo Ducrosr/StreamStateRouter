@@ -3,10 +3,13 @@ from __future__ import annotations
 import unittest
 
 from stream_state_router.ui.ergonomics import (
+    build_attention_items,
     build_contextual_action,
     build_decision_trail,
     build_draft_banner,
+    build_rule_health,
     build_status_strip,
+    humanize_rule,
 )
 
 
@@ -177,6 +180,108 @@ class ErgonomicsPresentationTests(unittest.TestCase):
             drift_detected=True,
         )
         self.assertEqual(drift.key, "reapply")
+
+    def test_humanize_rule_reads_like_when_then(self) -> None:
+        text = humanize_rule(
+            {
+                "behavior": "match",
+                "exe": "Overwatch.exe",
+                "apply_delay_ms": 150,
+                "state": {
+                    "Game": "Overwatch",
+                    "OverlayProfile": "FPS",
+                    "CaptureProfile": "HDR",
+                    "AudioProfile": "Game",
+                    "LayoutProfile": "FPS",
+                },
+            }
+        )
+        self.assertIn("Quand Overwatch.exe au premier plan", text)
+        self.assertIn("Audio=Game", text)
+        self.assertIn("après 150 ms", text)
+
+    def test_rule_health_detects_missing_profile_reference(self) -> None:
+        config = {
+            "profiles": {
+                "game": {"Overwatch": {}},
+                "overlay": {"FPS": {}},
+                "capture": {"HDR": {}},
+                "audio": {"Game": {}},
+            },
+            "layout_profiles": {"FPS": {}},
+        }
+        healthy = build_rule_health(
+            {
+                "enabled": True,
+                "behavior": "match",
+                "state": {
+                    "Game": "Overwatch",
+                    "OverlayProfile": "FPS",
+                    "CaptureProfile": "HDR",
+                    "AudioProfile": "Game",
+                    "LayoutProfile": "FPS",
+                },
+            },
+            config,
+        )
+        self.assertEqual(healthy.style, "Good")
+
+        broken = build_rule_health(
+            {
+                "enabled": True,
+                "behavior": "match",
+                "state": {
+                    "Game": "Missing",
+                    "OverlayProfile": "FPS",
+                    "CaptureProfile": "HDR",
+                    "AudioProfile": "Game",
+                    "LayoutProfile": "FPS",
+                },
+            },
+            config,
+        )
+        self.assertEqual(broken.style, "Bad")
+        self.assertIn("Jeu=Missing", broken.detail)
+
+    def test_attention_items_prioritize_errors_and_dedupe(self) -> None:
+        items = build_attention_items(
+            {
+                "config": {
+                    "valid": False,
+                    "errors": ["rule invalid"],
+                },
+                "capabilities": {
+                    "items": [
+                        {
+                            "key": "obs",
+                            "label": "OBS",
+                            "status": "error",
+                            "detail": "déconnecté",
+                            "action": "Reconnecter",
+                        },
+                        {
+                            "key": "hdr",
+                            "label": "HDR",
+                            "status": "ready",
+                            "detail": "ok",
+                            "action": "",
+                        },
+                    ],
+                    "findings": [
+                        {
+                            "severity": "warning",
+                            "title": "Référence",
+                            "detail": "source manquante",
+                            "action": "Réparer",
+                        }
+                    ],
+                },
+            }
+        )
+        self.assertEqual(items[0].severity, "error")
+        self.assertEqual(items[0].title, "Configuration invalide")
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[-1].severity, "warning")
 
     def test_contextual_action_reports_healthy_state(self) -> None:
         healthy = build_contextual_action(
