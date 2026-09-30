@@ -104,6 +104,8 @@ class _CollectionEventServer:
         self.event_client = None
         self.roundtrip_request = ""
         self.request_error = False
+        self.broadcast_count = 0
+        self.fail_broadcast_at = 0
 
     def emit_collection(self, name):
         event_client = self.event_client
@@ -128,6 +130,12 @@ class _CollectionEventServer:
                 "currentSceneCollectionName": self.current_collection
             }
         if request == "BroadcastCustomEvent":
+            self.broadcast_count += 1
+            if (
+                self.fail_broadcast_at
+                and self.broadcast_count == self.fail_broadcast_at
+            ):
+                raise _FakeRequestError("barrier refused")
             event_client = self.event_client
             if event_client is None:
                 raise RuntimeError("event client unavailable")
@@ -416,6 +424,52 @@ class OBSClientManagerTests(unittest.TestCase):
 
         self.assertTrue(captured.exception.request_submitted)
         self.assertEqual(server.current_collection, "Collection A")
+
+
+    def test_failed_post_barrier_is_reported_as_submitted_context_uncertainty(self):
+        server = _CollectionEventServer()
+        _CollectionReqClient.server = server
+        _CollectionEventClient.server = server
+        fake_obs = SimpleNamespace(
+            ReqClient=_CollectionReqClient,
+            EventClient=_CollectionEventClient,
+        )
+        manager = OBSClientManager(
+            OBSConnectionConfig(enabled=True, timeout_seconds=0.5)
+        )
+
+        with (
+            patch("stream_state_router.obs.client._obs", fake_obs),
+            patch(
+                "stream_state_router.obs.client._OBS_REQUEST_ERRORS",
+                (_FakeRequestError,),
+            ),
+        ):
+            manager.send("GetVersion")
+            session = manager.session_generation
+            _name, generation = manager.scene_collection_context(
+                expected_session_generation=session,
+            )
+
+            # scene_collection_context consumed two barriers; the guarded
+            # request consumes one pre-barrier and then this failing post one.
+            server.fail_broadcast_at = server.broadcast_count + 2
+
+            with self.assertRaises(
+                OBSSceneCollectionContextChangedError
+            ) as captured:
+                manager.send(
+                    "SetSourceFilterSettings",
+                    {
+                        "sourceName": "Input",
+                        "filterName": "Filter",
+                        "filterSettings": {"opacity": 0.2},
+                    },
+                    expected_session_generation=session,
+                    expected_scene_collection_generation=generation,
+                )
+
+        self.assertTrue(captured.exception.request_submitted)
 
 
 if __name__ == "__main__":
