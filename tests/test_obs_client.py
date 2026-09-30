@@ -142,7 +142,7 @@ class _CollectionEventServer:
             event_client.callback.emit(
                 "on_custom_event",
                 SimpleNamespace(
-                    event_data=dict(payload.get("eventData") or {})
+                    **dict(payload.get("eventData") or {})
                 ),
             )
             return {}
@@ -340,6 +340,19 @@ class OBSClientManagerTests(unittest.TestCase):
                 manager.send("GetVersion")
 
         self.assertGreaterEqual(manager.session_generation, 2)
+
+    def test_custom_event_barrier_accepts_real_obsws_payload_shape(self):
+        manager = OBSClientManager(
+            OBSConnectionConfig(enabled=True)
+        )
+        token = "barrier-token"
+        payload = SimpleNamespace(
+            **{manager._BARRIER_KEY: token}
+        )
+
+        manager.on_custom_event(payload)
+
+        self.assertIn(token, manager._event_barriers_seen)
 
     def test_scene_collection_generation_detects_round_trip_during_request(self):
         server = _CollectionEventServer()
