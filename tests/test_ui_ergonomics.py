@@ -27,6 +27,19 @@ class ErgonomicsPresentationTests(unittest.TestCase):
         self.assertEqual(view.routing_action, "Suspendre")
         self.assertEqual(view.obs_text, "Connecté")
 
+    def test_status_strip_never_claims_active_without_runtime(self) -> None:
+        view = build_status_strip(
+            expert_mode=False,
+            edit_mode=False,
+            paused=False,
+            obs_enabled=True,
+            obs_connected=False,
+            runtime_available=False,
+        )
+        self.assertEqual(view.routing_text, "Indisponible")
+        self.assertEqual(view.routing_style, "Bad")
+        self.assertEqual(view.routing_action, "—")
+
     def test_edit_mode_makes_routing_state_explicit(self) -> None:
         view = build_status_strip(
             expert_mode=True,
