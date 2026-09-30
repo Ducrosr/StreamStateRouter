@@ -363,6 +363,57 @@ class RuntimeMarkerTests(unittest.TestCase):
 
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
 
+    def test_explicit_legacy_schema2_remains_readable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            original = {
+                "clean_shutdown": False,
+                "cleanup_complete": False,
+                "cleanup_schema": 2,
+                "pending_cleanup": [
+                    {
+                        "kind": "layout_fade",
+                        "source": "[Webcam] Avatar",
+                        "collection": "Collection A",
+                    }
+                ],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            marker = RuntimeMarker()
+            marker.path = path
+
+            marker.start()
+
+            self.assertEqual(len(marker.previous_pending_cleanup), 1)
+            self.assertTrue(marker.previous_pending_cleanup[0]["legacy"])
+            rewritten = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(rewritten["cleanup_schema"], CLEANUP_SCHEMA_VERSION)
+
+    def test_unknown_explicit_past_schema_is_preserved_and_blocks_rewrite(self):
+        for unsupported_schema in (1, 0, -1):
+            with self.subTest(schema=unsupported_schema), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "runtime.json"
+                original = {
+                    "clean_shutdown": False,
+                    "cleanup_complete": False,
+                    "cleanup_schema": unsupported_schema,
+                    "pending_cleanup": [],
+                }
+                path.write_text(json.dumps(original), encoding="utf-8")
+                marker = RuntimeMarker()
+                marker.path = path
+
+                with self.assertRaisesRegex(
+                    RuntimeMarkerFormatError,
+                    "cleanup_schema inconnu",
+                ):
+                    marker.start()
+
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    original,
+                )
+
     def test_future_cleanup_schema_is_preserved_and_blocks_downgrade(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runtime.json"
