@@ -1700,6 +1700,86 @@ class LayoutTests(unittest.TestCase):
 
         self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
 
+    def test_fade_preparation_stops_after_late_obs_read_before_journal(self):
+        stopping = {"value": False}
+
+        class RuntimeStop(BaseException):
+            pass
+
+        class StopDuringInputListClient(FakeLayoutClient):
+            def send(self, request, data=None):
+                result = super().send(request, data)
+                if request == "GetInputList":
+                    # Deterministic equivalent of stop() being requested while
+                    # the WebSocket read is blocked and the response arriving
+                    # only afterwards.
+                    stopping["value"] = True
+                return result
+
+        client = StopDuringInputListClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        journal_calls = []
+        manager.set_pending_cleanup_changed(
+            lambda: journal_calls.append(manager.export_pending_fade_cleanup())
+        )
+
+        def runtime_checkpoint():
+            if stopping["value"]:
+                raise RuntimeStop("shutdown requested")
+
+        manager.set_cooperative_yield(runtime_checkpoint)
+        client.calls.clear()
+
+        with self.assertRaises(RuntimeStop):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertEqual(store.entries(), ())
+        self.assertEqual(journal_calls, [])
+        self.assertFalse(
+            any(
+                request in {
+                    "CreateSourceFilter",
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _ in client.calls
+            )
+        )
+
+    def test_fade_opacity_rechecks_runtime_before_normal_mutation(self):
+        stopping = {"value": False}
+
+        class RuntimeStop(BaseException):
+            pass
+
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        def runtime_checkpoint():
+            if stopping["value"]:
+                raise RuntimeStop("shutdown requested")
+
+        manager.set_cooperative_yield(runtime_checkpoint)
+        manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        stopping["value"] = True
+        client.calls.clear()
+        with self.assertRaises(RuntimeStop):
+            manager._set_source_opacity("[Webcam] Avatar", 0.25)
+
+        self.assertFalse(
+            any(
+                request == "SetSourceFilterSettings"
+                for request, _ in client.calls
+            )
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
     def test_manifest_then_journal_precede_first_filter_mutation(self):
         events = []
 
