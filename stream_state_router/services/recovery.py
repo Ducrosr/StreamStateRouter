@@ -113,10 +113,11 @@ class RuntimeMarker:
                     )
                 else:
                     schema = int(raw_schema)
-                if schema is not None and schema > CLEANUP_SCHEMA_VERSION:
+                if schema is not None and schema not in {2, CLEANUP_SCHEMA_VERSION}:
+                    direction = "futur" if schema > CLEANUP_SCHEMA_VERSION else "inconnu"
                     raise RuntimeMarkerFormatError(
-                        f"cleanup_schema futur {schema} > {CLEANUP_SCHEMA_VERSION}; "
-                        "downgrade refusé pour préserver le recovery"
+                        f"cleanup_schema {direction} {schema}; "
+                        "réécriture refusée pour préserver le recovery"
                     )
 
                 strict_current_schema = (
