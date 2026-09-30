@@ -1203,6 +1203,9 @@ class RoutingService:
                     "release_mode",
                     "",
                 ),
+                "override_remaining_seconds": override_status.get(
+                    "remaining_seconds",
+                ),
                 "override_stream_seen_active": override_status.get(
                     "stream_seen_active",
                     False,
