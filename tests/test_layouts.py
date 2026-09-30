@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import copy
+import json
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,9 +18,11 @@ from stream_state_router.obs.layouts import (
 )
 from stream_state_router.obs.fade_helpers import (
     FadeHelperManifestError,
+    FadeHelperManifestStore,
     MemoryFadeHelperManifestStore,
     LEGACY_LAYOUT_FADE_FILTER,
 )
+from stream_state_router.services.recovery import RuntimeMarker
 
 
 class FakeLayoutClient:
@@ -217,7 +223,271 @@ class FakeLayoutClient:
         raise AssertionError(f"Unexpected request: {request}")
 
 
+class CollectionSwitchLayoutClient(FakeLayoutClient):
+    """Collection-aware fake able to switch without reconnecting."""
+
+    def __init__(self):
+        super().__init__()
+        self.scene_collection = "Collection A"
+        self.collection_filters = {
+            "Collection A": {},
+            "Collection B": {},
+        }
+        self.source_filters = self.collection_filters[self.scene_collection]
+        self._switch_request = ""
+        self._switch_timing = "after"
+
+    def arm_collection_switch(
+        self,
+        request: str,
+        *,
+        timing: str = "after",
+    ) -> None:
+        self._switch_request = str(request)
+        self._switch_timing = str(timing)
+
+    def _switch_to_b(self) -> None:
+        self.scene_collection = "Collection B"
+        self.source_filters = self.collection_filters[self.scene_collection]
+
+    def send(self, request, data=None):
+        trigger = request == self._switch_request
+        if trigger and self._switch_timing == "before":
+            self._switch_request = ""
+            self._switch_to_b()
+
+        self.source_filters = self.collection_filters[self.scene_collection]
+        response = super().send(request, data)
+
+        if trigger and self._switch_timing == "after":
+            self._switch_request = ""
+            self._switch_to_b()
+
+        return response
+
+
 class LayoutTests(unittest.TestCase):
+    def test_prepare_fade_collection_switch_after_inventory_blocks_create(self):
+        client = CollectionSwitchLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        client.arm_collection_switch(
+            "GetSourceFilterList",
+            timing="after",
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Scene Collection modifiée",
+        ):
+            manager._prepare_fade_filter(
+                "[Webcam] Avatar",
+                "Collection A",
+            )
+
+        self.assertEqual(
+            client.collection_filters["Collection B"],
+            {},
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+        self.assertFalse(
+            any(
+                request == "CreateSourceFilter"
+                for request, _payload in client.calls
+            )
+        )
+
+    def test_prepare_fade_collection_switch_after_inventory_blocks_reuse_mutations(self):
+        client = CollectionSwitchLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+
+        source = "[Webcam] Avatar"
+        client.collection_filters["Collection B"][source] = copy.deepcopy(
+            client.collection_filters["Collection A"][source]
+        )
+        b_state = client.collection_filters["Collection B"][source][
+            identity.filter_name
+        ]
+        b_state["enabled"] = False
+        b_state["settings"]["opacity"] = 0.73
+
+        client.scene_collection = "Collection A"
+        client.source_filters = client.collection_filters["Collection A"]
+        client.calls.clear()
+        client.arm_collection_switch(
+            "GetSourceFilterList",
+            timing="after",
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Scene Collection modifiée",
+        ):
+            manager._prepare_fade_filter(source, "Collection A")
+
+        self.assertFalse(b_state["enabled"])
+        self.assertAlmostEqual(
+            float(b_state["settings"]["opacity"]),
+            0.73,
+        )
+        self.assertFalse(
+            any(
+                request in {
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _payload in client.calls
+            )
+        )
+
+    def test_prepare_fade_collection_switch_after_state_read_blocks_activation(self):
+        client = CollectionSwitchLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        self.assertEqual(manager.retry_pending_fade_cleanup(), ())
+
+        source = "[Webcam] Avatar"
+        client.collection_filters["Collection B"][source] = copy.deepcopy(
+            client.collection_filters["Collection A"][source]
+        )
+        b_state = client.collection_filters["Collection B"][source][
+            identity.filter_name
+        ]
+        b_state["enabled"] = False
+        b_state["settings"]["opacity"] = 1.0
+
+        client.scene_collection = "Collection A"
+        client.source_filters = client.collection_filters["Collection A"]
+        client.calls.clear()
+        client.arm_collection_switch(
+            "GetSourceFilter",
+            timing="after",
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Scene Collection modifiée",
+        ):
+            manager._prepare_fade_filter(source, "Collection A")
+
+        self.assertFalse(b_state["enabled"])
+        self.assertAlmostEqual(
+            float(b_state["settings"]["opacity"]),
+            1.0,
+        )
+        self.assertFalse(
+            any(
+                request in {
+                    "SetSourceFilterSettings",
+                    "SetSourceFilterEnabled",
+                }
+                for request, _payload in client.calls
+            )
+        )
+
+    def test_cleanup_collection_switch_during_absence_keeps_backlog_on_disk(self):
+        for renamed in (False, True):
+            with self.subTest(renamed=renamed), tempfile.TemporaryDirectory() as tmp:
+                client = CollectionSwitchLayoutClient()
+                store = FadeHelperManifestStore(
+                    Path(tmp) / "helper-manifest.json"
+                )
+                manager = OBSLayoutManager(
+                    client,
+                    fade_helper_store=store,
+                )
+                marker = RuntimeMarker()
+                marker.path = Path(tmp) / "runtime.json"
+                marker.start()
+
+                def persist():
+                    marker.checkpoint_pending_cleanup(
+                        manager.export_pending_fade_cleanup()
+                    )
+
+                manager.set_pending_cleanup_changed(persist)
+                identity = manager._prepare_fade_filter(
+                    "[Webcam] Avatar",
+                    "Collection A",
+                )
+                manager._set_source_opacity(
+                    "[Webcam] Avatar",
+                    0.3,
+                )
+
+                a_filters = client.collection_filters["Collection A"][
+                    "[Webcam] Avatar"
+                ]
+                physical_name = identity.filter_name
+                if renamed:
+                    state = a_filters.pop(identity.filter_name)
+                    physical_name = "Renamed correction"
+                    state["settings"]["contrast"] = 0.5
+                    a_filters[physical_name] = state
+
+                client.collection_filters["Collection B"][
+                    "[Webcam] Avatar"
+                ] = {}
+                client.scene_collection = "Collection A"
+                client.source_filters = client.collection_filters[
+                    "Collection A"
+                ]
+                client.calls.clear()
+                client.arm_collection_switch(
+                    "GetSourceFilterList",
+                    timing="before",
+                )
+
+                warnings = manager.retry_pending_fade_cleanup()
+
+                self.assertTrue(warnings)
+                pending = manager.export_pending_fade_cleanup()
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(
+                    pending[0]["helper_id"],
+                    identity.helper_id,
+                )
+
+                a_state = a_filters[physical_name]
+                self.assertTrue(a_state["enabled"])
+                self.assertAlmostEqual(
+                    float(a_state["settings"]["opacity"]),
+                    0.3,
+                )
+                if renamed:
+                    self.assertEqual(
+                        float(a_state["settings"]["contrast"]),
+                        0.5,
+                    )
+
+                on_disk = json.loads(
+                    marker.path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    len(on_disk["pending_cleanup"]),
+                    1,
+                )
+                self.assertEqual(
+                    on_disk["pending_cleanup"][0]["helper_id"],
+                    identity.helper_id,
+                )
+
     def test_module_name_parser(self):
         self.assertEqual(split_module_source("[Webcam] Cadre"), ("Webcam", "Cadre"))
         self.assertIsNone(split_module_source("Webcam Cadre"))
