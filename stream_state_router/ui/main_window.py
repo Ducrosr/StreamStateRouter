@@ -479,6 +479,50 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self, "edit_banner"):
             self.edit_banner.setVisible(self._edit_mode)
+        if hasattr(self, "configure_requirements"):
+            if not obs_enabled:
+                self.configure_requirements.setText(
+                    "Activez « Piloter OBS » dans Paramètres avant de capturer."
+                )
+                self.configure_requirements.setObjectName("Warn")
+            elif not bool(client and client.connected):
+                self.configure_requirements.setText(
+                    "OBS doit être connecté. Testez la connexion dans Paramètres."
+                )
+                self.configure_requirements.setObjectName("Warn")
+            elif self._edit_mode:
+                self.configure_requirements.setText(
+                    "Mode édition actif : la capture modifiera uniquement le brouillon."
+                )
+                self.configure_requirements.setObjectName("Warn")
+            else:
+                self.configure_requirements.setText(
+                    "Prêt. L’assistant activera automatiquement le Mode édition avant de modifier le brouillon."
+                )
+                self.configure_requirements.setObjectName("Good")
+            self.configure_requirements.style().unpolish(
+                self.configure_requirements
+            )
+            self.configure_requirements.style().polish(
+                self.configure_requirements
+            )
+        if hasattr(self, "layout_obs_hint"):
+            if not obs_enabled:
+                hint = "Pilotage OBS désactivé : activez-le dans Paramètres."
+                style = "Warn"
+            elif not bool(client and client.connected):
+                hint = "OBS déconnecté : synchronisation et application indisponibles."
+                style = "Warn"
+            else:
+                hint = (
+                    "Synchroniser lit uniquement OBS. Capturer écrit dans le "
+                    "brouillon. Appliquer modifie OBS immédiatement."
+                )
+                style = "Good"
+            self.layout_obs_hint.setText(hint)
+            self.layout_obs_hint.setObjectName(style)
+            self.layout_obs_hint.style().unpolish(self.layout_obs_hint)
+            self.layout_obs_hint.style().polish(self.layout_obs_hint)
 
     def _apply_ui_mode(self) -> None:
         if not hasattr(self, "tabs"):
@@ -1219,16 +1263,20 @@ class MainWindow(QMainWindow):
         capabilities.setRootIsDecorated(False)
         capabilities.setAlternatingRowColors(True)
         for item in report.items:
-            capabilities.addTopLevelItem(
-                QTreeWidgetItem(
-                    [
-                        item.label,
-                        item.status_label,
-                        item.detail,
-                        item.action,
-                    ]
-                )
+            row = QTreeWidgetItem(
+                [
+                    item.label,
+                    item.status_label,
+                    item.detail,
+                    item.action,
+                ]
             )
+            row.setData(0, Qt.UserRole, item.key)
+            row.setToolTip(
+                0,
+                "Double-cliquez pour ouvrir l’écran le plus pertinent.",
+            )
+            capabilities.addTopLevelItem(row)
         capabilities.header().setSectionResizeMode(
             0,
             QHeaderView.ResizeMode.ResizeToContents,
@@ -1296,7 +1344,26 @@ class MainWindow(QMainWindow):
             )
             root.addWidget(findings)
 
+        def navigate_capability(*_args) -> None:
+            selected = capabilities.currentItem()
+            if selected is None:
+                return
+            key = str(selected.data(0, Qt.UserRole) or "")
+            dialog.accept()
+            if key in {"obs", "audio", "hdr"}:
+                self.tabs.setCurrentIndex(self.settings_tab_index)
+            elif key == "obs_references":
+                self.tabs.setCurrentIndex(self.configure_tab_index)
+            else:
+                self._open_diagnostics_tab()
+
+        capabilities.itemDoubleClicked.connect(navigate_capability)
+
         actions = QHBoxLayout()
+        open_related = QPushButton("Ouvrir l’emplacement")
+        open_related.clicked.connect(navigate_capability)
+        actions.addWidget(open_related)
+
         if service is not None and client is not None and client.connected:
             sync_catalog = QPushButton("Synchroniser le catalogue OBS")
             def sync_and_close() -> None:
@@ -2534,8 +2601,12 @@ class MainWindow(QMainWindow):
         )
         self.configure_app_detail.setWordWrap(True)
         self.configure_app_detail.setObjectName("Muted")
+        self.configure_requirements = QLabel("")
+        self.configure_requirements.setObjectName("Muted")
+        self.configure_requirements.setWordWrap(True)
         app_lay.addWidget(self.configure_app_label)
         app_lay.addWidget(self.configure_app_detail)
+        app_lay.addWidget(self.configure_requirements)
         row = QHBoxLayout()
         self.capture_current_button = QPushButton(
             "Configurer cette application…"
