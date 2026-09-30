@@ -614,5 +614,111 @@ class RuntimeMarkerTests(unittest.TestCase):
 
             self.assertEqual(path.read_bytes(), original)
 
+
+    def test_schema3_requires_pending_cleanup_field(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            original = {
+                "clean_shutdown": False,
+                "cleanup_complete": False,
+                "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            marker = RuntimeMarker()
+            marker.path = path
+
+            with self.assertRaisesRegex(
+                RuntimeMarkerFormatError,
+                "pending_cleanup absent",
+            ):
+                marker.start()
+
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                original,
+            )
+
+    def test_schema3_rejects_invalid_fade_metadata_without_rewrite(self):
+        mutations = (
+            ("created_at", "damaged"),
+            ("created_at", float("inf")),
+            ("attempts", "damaged"),
+            ("attempts", True),
+            ("attempts", -1),
+            ("last_error", {"damaged": True}),
+        )
+        for field, invalid in mutations:
+            with self.subTest(field=field, invalid=invalid), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "runtime.json"
+                item = {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                    "helper_id": "abc123",
+                    "source_uuid": "input-uuid",
+                    "source_kind": "image_source",
+                    "connection": {"host": "127.0.0.1", "port": 4455},
+                    "filter_name": "[SSR] Layout Fade::abc123",
+                    "filter_kind": "color_filter_v2",
+                    "cleanup_action": "neutralize_disable",
+                    "legacy": False,
+                    "ambiguous": False,
+                    "created_at": 1.0,
+                    "attempts": 2,
+                    "last_error": "",
+                }
+                item[field] = invalid
+                original = {
+                    "clean_shutdown": False,
+                    "cleanup_complete": False,
+                    "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                    "pending_cleanup": [item],
+                }
+                original_text = json.dumps(original)
+                path.write_text(original_text, encoding="utf-8")
+                marker = RuntimeMarker()
+                marker.path = path
+
+                with self.assertRaisesRegex(
+                    RuntimeMarkerFormatError,
+                    field,
+                ):
+                    marker.start()
+
+                self.assertEqual(path.read_text(encoding="utf-8"), original_text)
+
+    def test_schema2_fade_migration_writes_canonical_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "clean_shutdown": False,
+                        "cleanup_complete": False,
+                        "cleanup_schema": 2,
+                        "pending_cleanup": [
+                            {
+                                "kind": "layout_fade",
+                                "source": "[Webcam] Avatar",
+                                "collection": "Collection A",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            marker = RuntimeMarker()
+            marker.path = path
+
+            marker.start()
+
+            rewritten = json.loads(path.read_text(encoding="utf-8"))
+            item = rewritten["pending_cleanup"][0]
+            self.assertEqual(rewritten["cleanup_schema"], CLEANUP_SCHEMA_VERSION)
+            self.assertTrue(item["legacy"])
+            self.assertEqual(item["created_at"], 0.0)
+            self.assertEqual(item["attempts"], 0)
+            self.assertEqual(item["last_error"], "")
+
 if __name__ == "__main__":
     unittest.main()
