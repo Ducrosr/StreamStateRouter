@@ -124,6 +124,7 @@ class MainCliTests(unittest.TestCase):
         config = {}
         marker = Mock()
         marker.finalized = False
+        marker.previous_pending_cleanup = ()
         guard = Mock()
         guard.already_running = False
 
