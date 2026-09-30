@@ -989,6 +989,14 @@ class OBSLayoutManager:
             if durable_context_fence:
                 self._set_fade_context_uncertain(identity, False)
             raise
+        except _FadeContextChangedAfterRequest:
+            if not durable_context_fence:
+                self._set_fade_context_uncertain(
+                    identity,
+                    True,
+                    detail=f"mutation {request} au contexte Scene Collection incertain",
+                )
+            raise
         except BaseException:
             # Transport failure, collection invalidation or cooperative
             # cancellation keeps the already durable fence intact.
