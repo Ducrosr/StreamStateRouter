@@ -429,10 +429,17 @@ class OBSClientManager:
             )
 
             if expected_collection_generation is not None:
-                pre_generation = self._collection_event_barrier_locked(
-                    client,
-                    expected_session_generation=session_generation,
-                )
+                try:
+                    pre_generation = self._collection_event_barrier_locked(
+                        client,
+                        expected_session_generation=session_generation,
+                    )
+                except Exception as exc:
+                    raise OBSSceneCollectionContextChangedError(
+                        "Qualification Scene Collection indisponible avant "
+                        "la requête OBS",
+                        request_submitted=False,
+                    ) from exc
                 if pre_generation != expected_collection_generation:
                     raise OBSSceneCollectionContextChangedError(
                         "Scene Collection modifiée avant la requête OBS qualifiée",
@@ -447,10 +454,16 @@ class OBSClientManager:
                 request_error = exc
 
             if expected_collection_generation is not None:
-                post_generation = self._collection_event_barrier_locked(
-                    client,
-                    expected_session_generation=session_generation,
-                )
+                try:
+                    post_generation = self._collection_event_barrier_locked(
+                        client,
+                        expected_session_generation=session_generation,
+                    )
+                except Exception as exc:
+                    raise OBSSceneCollectionContextChangedError(
+                        f"Qualification Scene Collection indisponible après {request}",
+                        request_submitted=True,
+                    ) from exc
                 if post_generation != expected_collection_generation:
                     raise OBSSceneCollectionContextChangedError(
                         f"Scene Collection modifiée pendant {request}",
