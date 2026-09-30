@@ -3775,6 +3775,8 @@ class MainWindow(QMainWindow):
         duplicate.triggered.connect(self._duplicate_rule)
         toggle = menu.addAction("Activer / désactiver")
         toggle.triggered.connect(self._toggle_rule)
+        bulk = menu.addAction("Actions groupées…")
+        bulk.triggered.connect(self._bulk_edit_rules)
         menu.addSeparator()
         delete = menu.addAction("Supprimer")
         delete.triggered.connect(self._delete_rule)
@@ -6206,6 +6208,141 @@ class MainWindow(QMainWindow):
             subject = app.exe_name if app is not None else "les conditions actuelles"
             message = f"La règle ne correspond pas à {subject}."
         QMessageBox.information(self, "Test de règle", message)
+
+    def _bulk_edit_rules(self) -> None:
+        if not self._require_edit_mode("Actions groupées sur les règles"):
+            return
+        rules = self.config.get("rules")
+        if not isinstance(rules, list) or not rules:
+            QMessageBox.information(
+                self,
+                "Actions groupées",
+                "Aucune règle disponible.",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Actions groupées sur les règles")
+        dialog.resize(620, 620)
+        root = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Sélectionnez les règles à modifier. Cette opération ne touche "
+            "que le brouillon SSR et peut être annulée via l’historique."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Opération"))
+        mode = QComboBox()
+        mode.addItem("Activer les règles sélectionnées", True)
+        mode.addItem("Désactiver les règles sélectionnées", False)
+        mode_row.addWidget(mode, 1)
+        root.addLayout(mode_row)
+
+        items = QListWidget()
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, Mapping):
+                continue
+            name = str(rule.get("name") or f"Règle {index + 1}")
+            health = build_rule_health(rule, self.config)
+            item = QListWidgetItem(
+                f"{health.text.split()[0]} {name}"
+            )
+            item.setData(Qt.UserRole, index)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setToolTip(humanize_rule(rule))
+            items.addItem(item)
+        root.addWidget(items, 1)
+
+        impact = QLabel("0 règle sélectionnée")
+        impact.setObjectName("Muted")
+        root.addWidget(impact)
+
+        def refresh_impact(*_args) -> None:
+            count = sum(
+                1
+                for index in range(items.count())
+                if items.item(index).checkState() == Qt.Checked
+            )
+            impact.setText(
+                f"{count} règle(s) seront "
+                + (
+                    "activée(s)."
+                    if bool(mode.currentData())
+                    else "désactivée(s)."
+                )
+            )
+            impact.setObjectName("Warn" if count else "Muted")
+            impact.style().unpolish(impact)
+            impact.style().polish(impact)
+
+        items.itemChanged.connect(refresh_impact)
+        mode.currentIndexChanged.connect(refresh_impact)
+
+        actions = QHBoxLayout()
+        select_all = QPushButton("Tout sélectionner")
+        def mark_all() -> None:
+            for index in range(items.count()):
+                items.item(index).setCheckState(Qt.Checked)
+        select_all.clicked.connect(mark_all)
+        actions.addWidget(select_all)
+        actions.addStretch(1)
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(dialog.reject)
+        actions.addWidget(cancel)
+        apply_button = QPushButton("Appliquer au brouillon")
+        apply_button.setObjectName("DraftAction")
+        apply_button.clicked.connect(dialog.accept)
+        actions.addWidget(apply_button)
+        root.addLayout(actions)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected = [
+            int(items.item(index).data(Qt.UserRole))
+            for index in range(items.count())
+            if items.item(index).checkState() == Qt.Checked
+        ]
+        if not selected:
+            return
+        previous = copy.deepcopy(self.config)
+        enabled = bool(mode.currentData())
+        for index in selected:
+            if 0 <= index < len(rules) and isinstance(rules[index], dict):
+                rules[index]["enabled"] = enabled
+        errors = validate_config(self.config)
+        if errors:
+            self.config = previous
+            QMessageBox.critical(
+                self,
+                "Actions groupées",
+                "\n".join(errors),
+            )
+            return
+        self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            (
+                f"{'Activation' if enabled else 'Désactivation'} "
+                f"groupée de {len(selected)} règle(s)"
+            ),
+            previous,
+        )
+        self._refresh_rules_table()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Actions groupées appliquées au brouillon",
+                (
+                    f"{len(selected)} règle(s) "
+                    + ("activée(s)" if enabled else "désactivée(s)")
+                ),
+            )
+        )
 
     def _delete_rule(self) -> None:
         idx = self._selected_rule_index()
