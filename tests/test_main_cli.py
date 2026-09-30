@@ -80,6 +80,7 @@ class MainCliTests(unittest.TestCase):
         config = {}
         marker = Mock()
         marker.finalized = False
+        marker.previous_pending_cleanup = ()
         guard = Mock()
         guard.already_running = False
 
@@ -137,6 +138,41 @@ class MainCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         marker.start.assert_called_once_with()
         marker.clean_shutdown.assert_called_once_with()
+        guard.close.assert_called_once_with()
+
+
+    def test_headless_preserves_recovered_cleanup_backlog(self):
+        config = {}
+        pending = (
+            {
+                "kind": "layout_fade",
+                "source": "[Webcam] Avatar",
+                "collection": "Collection A",
+                "legacy": True,
+            },
+        )
+        marker = Mock()
+        marker.finalized = False
+        marker.previous_pending_cleanup = pending
+        guard = Mock()
+        guard.already_running = False
+
+        with (
+            patch.object(app_main, "load_config", return_value=config),
+            patch.object(app_main, "RuntimeMarker", return_value=marker),
+            patch.object(app_main, "SingleInstanceGuard", return_value=guard),
+            patch.object(app_main, "run_headless", return_value=0),
+        ):
+            code = app_main.main(["--headless"])
+
+        self.assertEqual(code, 0)
+        marker.start.assert_called_once_with()
+        marker.clean_shutdown.assert_not_called()
+        marker.finish.assert_called_once_with(
+            clean_shutdown=True,
+            cleanup_complete=False,
+            pending_cleanup=pending,
+        )
         guard.close.assert_called_once_with()
 
 
