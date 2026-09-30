@@ -562,6 +562,12 @@ class A1R3ContextTests(unittest.TestCase):
 
                     stopper = threading.Thread(target=stop_service)
                     stopper.start()
+                    deadline = __import__("time").monotonic() + 1.0
+                    while (
+                        not service._stopping
+                        and __import__("time").monotonic() < deadline
+                    ):
+                        __import__("time").sleep(0.01)
                     self.assertTrue(
                         service._stopping,
                         "RoutingService.stop did not close admission",
