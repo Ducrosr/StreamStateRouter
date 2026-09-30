@@ -889,6 +889,20 @@ class OBSLayoutManager:
                             sorted(set(lookalikes), key=str.casefold)
                         )
                     )
+                if identity.state == "observed":
+                    candidates, unreadable = self._possible_renamed_fade_filters(
+                        source_alias,
+                        identity,
+                        rows,
+                        session_generation=session_generation,
+                    )
+                    if candidates or unreadable:
+                        names = candidates or unreadable
+                        raise RuntimeError(
+                            f"Helper de fade possiblement renommé pour "
+                            f"{source_alias}: {', '.join(names)}; "
+                            "recréation automatique refusée"
+                        )
 
                 # From this point on a transport failure may hide an OBS-side
                 # effect, so the durable cleanup obligation must remain.
@@ -1132,6 +1146,46 @@ class OBSLayoutManager:
             session_generation=session_generation,
         )
 
+    def _possible_renamed_fade_filters(
+        self,
+        source: str,
+        identity: FadeHelperIdentity,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        session_generation: int = 0,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        candidates: list[str] = []
+        unreadable: list[str] = []
+        for row in rows:
+            name = str(row.get("filterName") or "").strip()
+            if not name or name == identity.filter_name:
+                continue
+            try:
+                kind, _enabled, settings = self._fade_filter_state(
+                    source,
+                    name,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                )
+            except Exception:
+                # When the expected owned helper vanished, an unreadable filter
+                # cannot be ruled out as a rename. Quarantine rather than infer
+                # absence or adoption.
+                unreadable.append(name)
+                continue
+            if (
+                kind == identity.filter_kind
+                and self._fade_helper_store.settings_compatible(
+                    identity,
+                    settings,
+                )
+            ):
+                candidates.append(name)
+        return (
+            tuple(sorted(set(candidates), key=str.casefold)),
+            tuple(sorted(set(unreadable), key=str.casefold)),
+        )
+
     def _cleanup_filter_absence_status(
         self,
         source: str,
@@ -1167,6 +1221,24 @@ class OBSLayoutManager:
                 f"{source}: helper attendu absent mais filtre(s) helper-like "
                 f"présent(s) ({', '.join(sorted(set(suspicious), key=str.casefold))}); "
                 "cleanup suspendu",
+            )
+        candidates, unreadable = self._possible_renamed_fade_filters(
+            source,
+            identity,
+            rows,
+            session_generation=session_generation,
+        )
+        if candidates:
+            return (
+                False,
+                f"{source}: helper attendu absent mais renommage possible "
+                f"({', '.join(candidates)}); cleanup suspendu sans adoption",
+            )
+        if unreadable:
+            return (
+                False,
+                f"{source}: helper attendu absent mais filtre(s) non vérifiable(s) "
+                f"({', '.join(unreadable)}); absence non prouvée",
             )
         return True, ""
 
