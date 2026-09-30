@@ -154,6 +154,12 @@ def normalize_layout_fade_cleanup(
             "obligation layout_fade ambiguous invalide"
         )
 
+    raw_context_uncertain = item.get("context_uncertain", False)
+    if not isinstance(raw_context_uncertain, bool):
+        raise LayoutFadeCleanupFormatError(
+            "obligation layout_fade context_uncertain invalide"
+        )
+
     connection = item.get("connection")
     if not isinstance(connection, Mapping):
         raise LayoutFadeCleanupFormatError(
@@ -193,4 +199,5 @@ def normalize_layout_fade_cleanup(
     item["cleanup_action"] = cleanup_action
     item["legacy"] = False
     item["ambiguous"] = raw_ambiguous
+    item["context_uncertain"] = raw_context_uncertain
     return item
