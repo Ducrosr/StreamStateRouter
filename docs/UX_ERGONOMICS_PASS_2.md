@@ -192,6 +192,120 @@ The existing Ctrl+K palette remains the fast Expert navigation path and now also
 includes Accueil, Configurer and Diagnostics. Rules, profiles and layouts remain
 directly searchable.
 
+## Contextual inspector
+
+Expert mode now includes a dockable **Inspecteur** that follows the selected
+rule, profile or layout.
+
+It exposes:
+
+- a health badge;
+- a human-readable summary;
+- inheritance and dependency information;
+- direct navigation back to the technical object;
+- profile/layout impact and dependency review;
+- a raw read-only JSON escape hatch for debugging/audit.
+
+The inspector does not create another data model. It is a projection of the
+current draft configuration.
+
+## Favorites and recents
+
+Objects inspected frequently can be pinned with **★ Épinglé**.
+
+Favorites are stored only in desktop UI preferences through `QSettings`; they
+do not change the SSR configuration schema and therefore never affect runtime
+behavior.
+
+Ctrl+K contains:
+
+- pinned objects;
+- recently inspected objects;
+- recent user-facing activity;
+- cached actionable diagnostics;
+- semantic rule/profile/layout text rather than names only.
+
+## Human-readable rules and object health
+
+A selected rule is rendered as a sentence such as:
+
+    Quand Overwatch.exe au premier plan → Jeu=Overwatch · Audio=Game · Layout=FPS
+
+Rules also receive a static health badge. Missing profile references are visible
+before the user opens Diagnostics.
+
+Profiles and layouts expose health next to the current object and distinguish
+local overrides from their effective inherited state.
+
+## Action center
+
+Diagnostics starts with **À corriger**, a prioritized queue built from the same
+read-only `run_system_check` model as the CLI.
+
+It combines:
+
+- configuration errors;
+- missing/incompatible OBS capabilities;
+- broken OBS references;
+- health findings.
+
+Double-clicking an item navigates to the relevant configuration surface.
+
+## Configuration recipes
+
+Configurer includes conservative recipes that generate normal SSR objects:
+
+- create a variant of an existing profile;
+- create a variant of an existing rule;
+- prepare a new layout from OBS.
+
+Rule variants are created disabled by default so a copied rule cannot
+accidentally compete with the original after the draft is applied.
+
+Every recipe:
+
+- enters Edit mode first;
+- modifies only the draft;
+- validates the resulting configuration;
+- creates a safe undo checkpoint;
+- opens the ordinary Expert object afterward.
+
+No recipe owns separate hidden configuration.
+
+## Unified history facade
+
+Diagnostics presents user-facing activity, the current safe rollback checkpoint,
+configuration backups and draft review in one **Historique des opérations et
+restauration** section.
+
+This unifies discovery of the existing recovery mechanisms without pretending
+that they are one transaction engine underneath.
+
+The visible activity history is retained longer for this purpose.
+
+## Bulk rule actions
+
+Rules keep their normal single-selection interaction.
+
+Bulk enable/disable lives behind **⋯ → Actions groupées…** and uses a dedicated
+dialog with explicit checkboxes and an impact count. It changes only the draft,
+validates the result and creates one undo checkpoint.
+
+This preserves a simple default interaction while keeping expert power.
+
+## Deliberately deferred
+
+Two ideas are intentionally not implemented as UI-only changes:
+
+1. **multi-level global Undo/Redo across every subsystem** — this requires a
+   transactional ownership model spanning config, OBS and host mutations;
+2. **bulk replacement of arbitrary profiles/actions across many rules** — this
+   should reuse a future transaction/preview primitive rather than perform
+   wide graph rewrites directly from Qt.
+
+They are candidates for later engine work, not omissions to patch around in the
+desktop layer.
+
 ## Safety invariants
 
 This UX branch must not:
@@ -233,7 +347,14 @@ Real Windows/OBS UX pass before merge:
 - Layout wording never confuses reading OBS, capturing to draft and applying to
   OBS;
 - contextual recommended action matches the current operational problem;
-- Ctrl+K still navigates to all objects;
+- Ctrl+K still navigates to all objects, favorites, recents and cached issues;
+- inspector selection never mutates config or OBS;
+- pinned favorites survive restart without entering the SSR config schema;
+- rule health badges correctly identify missing profile references;
+- À corriger uses only the read-only system check and navigates correctly;
+- recipe-created rule variants start disabled;
+- profile/rule recipe mutations are fully undoable as one draft checkpoint;
+- bulk rule actions affect only explicitly checked rules and remain draft-only;
 - Journal remains accessible but is not required for normal diagnosis.
 
 ## Astra review focus
