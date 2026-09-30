@@ -7,6 +7,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
+from ..recovery_schema import (
+    LayoutFadeCleanupFormatError,
+    normalize_layout_fade_cleanup,
+)
 from .client import OBSClientManager, OBSResourceNotFoundError
 from .fade_helpers import (
     FadeHelperIdentity,
@@ -588,44 +592,54 @@ class OBSLayoutManager:
                 continue
             if str(raw.get("kind") or "").strip().casefold() != "layout_fade":
                 continue
-            source = str(raw.get("source") or "").strip()
-            collection = str(raw.get("collection") or "").strip()
-            if not source or not collection:
-                continue
-            helper_id = str(raw.get("helper_id") or "").strip()
-            legacy = bool(raw.get("legacy", False) or not helper_id)
-            connection = raw.get("connection")
+            helper_claimed = bool(
+                isinstance(raw.get("helper_id"), str)
+                and str(raw.get("helper_id") or "").strip()
+            )
+            try:
+                normalized = normalize_layout_fade_cleanup(
+                    raw,
+                    schema=3 if helper_claimed else 2,
+                    strict_current=False,
+                )
+            except LayoutFadeCleanupFormatError as exc:
+                # RuntimeMarker must never accept an obligation which this
+                # boundary then silently drops. Direct/in-process imports use
+                # the same validator and fail closed as well.
+                raise RuntimeError(
+                    f"Obligation fade importée invalide: {exc}"
+                ) from exc
+
+            source = str(normalized["source"])
+            collection = str(normalized["collection"])
+            helper_id = str(normalized.get("helper_id") or "")
+            connection = normalized.get("connection")
             host = ""
             port = 0
             if isinstance(connection, Mapping):
-                host = str(connection.get("host") or "").strip().casefold()
-                try:
-                    port = int(connection.get("port", 0) or 0)
-                except (TypeError, ValueError, OverflowError):
-                    port = 0
-            try:
-                pending = PendingFadeCleanup(
-                    source=source,
-                    collection=collection,
-                    created_at=float(raw.get("created_at", 0.0) or 0.0),
-                    helper_id=helper_id,
-                    source_uuid=str(raw.get("source_uuid") or "").strip(),
-                    source_kind=str(raw.get("source_kind") or "").strip(),
-                    connection_host=host,
-                    connection_port=port,
-                    filter_name=str(raw.get("filter_name") or "").strip(),
-                    filter_kind=str(raw.get("filter_kind") or "").strip(),
-                    cleanup_action=str(
-                        raw.get("cleanup_action") or "neutralize_disable"
-                    ).strip(),
-                    legacy=legacy,
-                    ambiguous=bool(raw.get("ambiguous", False)),
-                    persisted=True,
-                    attempts=max(0, int(raw.get("attempts", 0) or 0)),
-                    last_error=str(raw.get("last_error") or ""),
-                )
-            except (TypeError, ValueError, OverflowError):
-                continue
+                host = str(connection.get("host") or "")
+                port = int(connection.get("port") or 0)
+
+            pending = PendingFadeCleanup(
+                source=source,
+                collection=collection,
+                created_at=float(normalized["created_at"]),
+                helper_id=helper_id,
+                source_uuid=str(normalized.get("source_uuid") or ""),
+                source_kind=str(normalized.get("source_kind") or ""),
+                connection_host=host,
+                connection_port=port,
+                filter_name=str(normalized.get("filter_name") or ""),
+                filter_kind=str(normalized.get("filter_kind") or ""),
+                cleanup_action=str(
+                    normalized.get("cleanup_action") or "neutralize_disable"
+                ),
+                legacy=bool(normalized.get("legacy", not helper_id)),
+                ambiguous=bool(normalized.get("ambiguous", False)),
+                persisted=True,
+                attempts=int(normalized["attempts"]),
+                last_error=str(normalized["last_error"]),
+            )
             key = (
                 collection,
                 helper_id if helper_id else f"legacy:{source}",
@@ -818,6 +832,11 @@ class OBSLayoutManager:
         # alone is safe because no temporary OBS mutation has occurred.
         self._yield_runtime()
         # The crash obligation must be durable before any Create/Enable/Settings.
+        # A pre-existing obligation may describe an effect left by an earlier
+        # attempt and must never be disarmed merely because this new attempt
+        # fails before making its own mutation.
+        pending_key = (identity.collection, identity.helper_id)
+        obligation_preexisting = pending_key in self._pending_fade_cleanup
         self._ensure_pending_fade(identity)
         effect_started = False
         try:
@@ -1035,7 +1054,7 @@ class OBSLayoutManager:
             self._active_fade_sessions[source_alias] = session_generation
             return identity
         except Exception as exc:
-            if not effect_started:
+            if not effect_started and not obligation_preexisting:
                 try:
                     self._discard_unmutated_fade_obligation(identity)
                 except Exception as discard_exc:
