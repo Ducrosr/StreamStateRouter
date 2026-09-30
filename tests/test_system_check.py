@@ -215,6 +215,27 @@ class SystemCheckTests(unittest.TestCase):
         self.assertEqual(controller.audio_router.resolve_calls, 1)
         self.assertEqual(controller.hdr_controller.status_calls, ["primary"])
 
+    def test_hdr_probe_uses_all_scope_when_any_action_targets_all(self) -> None:
+        config = _config()
+        config["profiles"]["capture"]["Default"]["actions"] = [
+            {
+                "type": "windows_hdr",
+                "params": {
+                    "enabled": True,
+                    "display": "all",
+                },
+            }
+        ]
+        controller = _FakeHostController()
+
+        _audio, hdr = probe_host_capabilities(
+            config,
+            controller_factory=lambda _config: controller,
+        )
+
+        self.assertEqual(hdr["status"], "ready")
+        self.assertEqual(controller.hdr_controller.status_calls, ["all"])
+
     def test_probe_failure_is_reported_without_throwing(self) -> None:
         config = _config()
         config["obs"]["enabled"] = True
