@@ -145,11 +145,18 @@ class RuntimeMarker:
                         raise RuntimeMarkerFormatError(
                             "obligation cleanup non-objet; runtime.json préservé"
                         )
+                    item_kind = _strict_text(item.get("kind")).casefold()
+                    helper_id = _strict_text(item.get("helper_id"))
                     if (
-                        strict_current_schema
-                        and _strict_text(item.get("kind")).casefold() == "layout_fade"
+                        schema in {None, 2}
+                        and item_kind == "layout_fade"
+                        and helper_id
                     ):
-                        helper_id = _strict_text(item.get("helper_id"))
+                        raise RuntimeMarkerFormatError(
+                            "obligation layout_fade legacy contient une identité helper "
+                            "non prouvable; runtime.json préservé"
+                        )
+                    if strict_current_schema and item_kind == "layout_fade":
                         legacy = item.get("legacy")
                         if not isinstance(legacy, bool) or legacy == bool(helper_id):
                             raise RuntimeMarkerFormatError(
