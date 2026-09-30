@@ -398,66 +398,131 @@ class OBSLayoutManager:
         *,
         session_generation: int = 0,
         expected_collection: str = "",
+        expected_collection_generation: int = 0,
+        post_runtime_yield: bool = True,
     ) -> dict[str, Any]:
-        # Fade requests can block inside the WebSocket client. Revalidate the
-        # runtime both before sending and after a successful response so a
-        # shutdown requested while OBS was blocked cannot resume normal fade
-        # work. A Scene Collection switch does not change the WebSocket
-        # generation, so qualified fade requests bracket the OBS request with
-        # collection checks as well.
+        """Send one fade request under a stable OBS/collection context."""
         self._yield_runtime()
-        expected = max(0, int(session_generation or 0))
-        qualified_collection = str(expected_collection or "").strip()
-        if qualified_collection:
-            self._verify_fade_collection(
-                qualified_collection,
-                session_generation=expected,
-            )
-            # The collection probe above can itself block. Re-check runtime
-            # admission once more before the guarded OBS request is submitted.
+        expected_session = max(0, int(session_generation or 0))
+        expected_collection = str(expected_collection or "").strip()
+        expected_collection_generation = max(
+            0,
+            int(expected_collection_generation or 0),
+        )
+
+        if isinstance(self.client, OBSClientManager):
+            try:
+                response = self.client.send(
+                    request,
+                    data,
+                    expected_session_generation=(
+                        expected_session if expected_session else None
+                    ),
+                    expected_scene_collection_generation=(
+                        expected_collection_generation
+                        if expected_collection_generation
+                        else None
+                    ),
+                )
+            except OBSSceneCollectionContextChangedError as exc:
+                if exc.request_submitted:
+                    raise _FadeContextChangedAfterRequest(
+                        f"Scene Collection modifiée pendant {request}; "
+                        "résultat OBS considéré incertain"
+                    ) from exc
+                raise RuntimeError(
+                    f"Scene Collection modifiée avant {request}"
+                ) from exc
+        else:
+            if expected_collection:
+                self._verify_fade_collection(
+                    expected_collection,
+                    session_generation=expected_session,
+                    expected_collection_generation=(
+                        expected_collection_generation
+                    ),
+                )
+                self._yield_runtime()
+            response = self._send(request, data)
+            if expected_session:
+                current_session = int(
+                    getattr(self.client, "session_generation", 0) or 0
+                )
+                if current_session != expected_session:
+                    raise RuntimeError(
+                        "Session OBS modifiée pendant l'opération de fade"
+                    )
+            if expected_collection:
+                try:
+                    self._verify_fade_collection(
+                        expected_collection,
+                        session_generation=expected_session,
+                        expected_collection_generation=(
+                            expected_collection_generation
+                        ),
+                    )
+                except Exception as exc:
+                    raise _FadeContextChangedAfterRequest(
+                        f"Scene Collection modifiée pendant {request}; "
+                        "résultat OBS considéré incertain"
+                    ) from exc
+
+        # Context qualification must happen before cooperative cancellation.
+        # A shutdown requested while OBS was blocked must not hide a collection
+        # change or bypass a pre-armed durable uncertainty fence.
+        if post_runtime_yield:
             self._yield_runtime()
-        if expected and isinstance(self.client, OBSClientManager):
-            response = self.client.send(
-                request,
-                data,
-                expected_session_generation=expected,
+        return response
+
+    def _capture_fade_collection_context(
+        self,
+        expected_collection: str = "",
+        *,
+        session_generation: int = 0,
+    ) -> tuple[str, int]:
+        expected_collection = str(expected_collection or "").strip()
+        if isinstance(self.client, OBSClientManager):
+            current, generation = self.client.scene_collection_context(
+                expected_session_generation=(
+                    int(session_generation or 0) or None
+                ),
             )
         else:
-            response = self._send(request, data)
-        self._yield_runtime()
-        if expected and not isinstance(self.client, OBSClientManager):
-            current = int(
-                getattr(self.client, "session_generation", 0) or 0
+            current = self._scene_collection_name(
+                expected_session_generation=(
+                    int(session_generation or 0) or None
+                )
             )
-            if current != expected:
-                raise RuntimeError(
-                    "Session OBS modifiée pendant l'opération de fade"
-                )
-        if qualified_collection:
-            try:
-                self._verify_fade_collection(
-                    qualified_collection,
-                    session_generation=expected,
-                )
-            except Exception as exc:
-                raise _FadeContextChangedAfterRequest(
-                    f"Scene Collection modifiée pendant {request}; "
-                    "résultat OBS considéré incertain"
-                ) from exc
-        return response
+            generation = int(
+                getattr(self.client, "scene_collection_generation", 0)
+                or 0
+            )
+        if expected_collection and current != expected_collection:
+            raise RuntimeError(
+                f"Scene Collection modifiée pendant l'opération de fade "
+                f"({expected_collection} != {current})"
+            )
+        return current, int(generation)
 
     def _verify_fade_collection(
         self,
         expected_collection: str,
         *,
         session_generation: int = 0,
+        expected_collection_generation: int = 0,
     ) -> None:
-        if session_generation and isinstance(self.client, OBSClientManager):
-            current = self._scene_collection_name(
-                expected_session_generation=session_generation,
+        current, generation = self._capture_fade_collection_context(
+            expected_collection,
+            session_generation=session_generation,
+        )
+        expected_generation = int(
+            expected_collection_generation or 0
+        )
+        if expected_generation and generation != expected_generation:
+            raise RuntimeError(
+                "Scene Collection modifiée pendant l'opération de fade "
+                f"(génération {expected_generation} != {generation})"
             )
-        else:
-            current = self._scene_collection_name()
         if current != expected_collection:
             raise RuntimeError(
                 f"Scene Collection modifiée pendant l'opération de fade "
@@ -485,11 +550,13 @@ class OBSLayoutManager:
         source_uuid: str = "",
         session_generation: int = 0,
         expected_collection: str = "",
+        expected_collection_generation: int = 0,
     ) -> tuple[str, str, str]:
         response = self._fade_send(
             "GetInputList",
             session_generation=session_generation,
             expected_collection=expected_collection,
+            expected_collection_generation=expected_collection_generation,
         )
         raw_inputs = response.get("inputs") if isinstance(response, Mapping) else None
         if not isinstance(raw_inputs, list):
@@ -539,12 +606,14 @@ class OBSLayoutManager:
         source_uuid: str = "",
         session_generation: int = 0,
         expected_collection: str = "",
+        expected_collection_generation: int = 0,
     ) -> list[Mapping[str, Any]]:
         response = self._fade_send(
             "GetSourceFilterList",
             self._fade_source_payload(source, source_uuid),
             session_generation=session_generation,
             expected_collection=expected_collection,
+            expected_collection_generation=expected_collection_generation,
         )
         raw = response.get("filters") if isinstance(response, Mapping) else None
         if not isinstance(raw, list):
@@ -569,6 +638,7 @@ class OBSLayoutManager:
         source_uuid: str = "",
         session_generation: int = 0,
         expected_collection: str = "",
+        expected_collection_generation: int = 0,
     ) -> tuple[str, bool | None, dict[str, Any]]:
         payload = self._fade_source_payload(source, source_uuid)
         payload["filterName"] = filter_name
@@ -577,6 +647,7 @@ class OBSLayoutManager:
             payload,
             session_generation=session_generation,
             expected_collection=expected_collection,
+            expected_collection_generation=expected_collection_generation,
         )
         if not isinstance(response, Mapping):
             raise RuntimeError(f"État du helper illisible pour {source}")
