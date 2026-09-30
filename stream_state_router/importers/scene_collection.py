@@ -86,6 +86,17 @@ class ImportedFilter:
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ImportedFilter":
         settings = raw.get("settings")
+        claimed_helper_status = str(
+            raw.get("helper_status") or ""
+        ).strip()
+        # Ownership is a live proof, not serializable authority. Any helper
+        # claim crossing this generic mapping boundary is untrusted and must
+        # remain visible as an ambiguity rather than silently excluding data.
+        helper_status = (
+            "ambiguous_helper"
+            if claimed_helper_status
+            else ""
+        )
         return cls(
             source=str(raw.get("source") or ""),
             name=str(raw.get("name") or ""),
@@ -100,7 +111,7 @@ class ImportedFilter:
                 if isinstance(settings, Mapping)
                 else {}
             ),
-            helper_status=str(raw.get("helper_status") or "").strip(),
+            helper_status=helper_status,
         )
 
 
@@ -163,7 +174,14 @@ class SceneCollectionSnapshot:
             "collection": self.collection,
             "current_program_scene": self.current_program_scene,
             "inputs": [item.as_mapping() for item in self.inputs],
-            "filters": [item.as_mapping() for item in self.filters],
+            # Consume proven internal-helper ownership while still on the
+            # worker/live side. A serialized snapshot must never carry the
+            # authority to recreate "owned_helper" later in Qt or from disk.
+            "filters": [
+                item.as_mapping()
+                for item in self.filters
+                if item.helper_status != "owned_helper"
+            ],
             "scene_items": [item.as_mapping() for item in self.scene_items],
             "scenes": list(self.scenes),
             "warnings": list(self.warnings),
