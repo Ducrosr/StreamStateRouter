@@ -1173,13 +1173,13 @@ class OBSLayoutManager:
                 # absence or adoption.
                 unreadable.append(name)
                 continue
-            if (
-                kind == identity.filter_kind
-                and self._fade_helper_store.settings_compatible(
-                    identity,
-                    settings,
-                )
-            ):
+            # Once the proven helper name is gone there is no filter UUID
+            # available to distinguish a fully renamed SSR helper from an
+            # unrelated user filter of the same OBS kind. Even incompatible
+            # non-temporary settings (for example an externally changed
+            # contrast) therefore remain ambiguous: quarantine, never adopt,
+            # mutate, acknowledge absence, or recreate automatically.
+            if kind == identity.filter_kind:
                 candidates.append(name)
         return (
             tuple(sorted(set(candidates), key=str.casefold)),
