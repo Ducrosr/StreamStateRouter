@@ -709,6 +709,27 @@ class MainWindow(QMainWindow):
             control.setEnabled(enabled)
             control.setToolTip(tooltip)
 
+        if hasattr(self, "history_undo_status"):
+            if checkpoint is None:
+                self.history_undo_status.setText(
+                    "Dernière opération réversible : aucune"
+                )
+                self.history_undo_status.setObjectName("Muted")
+            else:
+                label = str(
+                    checkpoint.get("label") or "dernière opération"
+                )
+                self.history_undo_status.setText(
+                    f"Dernière opération réversible : {label}"
+                )
+                self.history_undo_status.setObjectName("Good")
+            self.history_undo_status.style().unpolish(
+                self.history_undo_status
+            )
+            self.history_undo_status.style().polish(
+                self.history_undo_status
+            )
+
     def _set_config_undo_checkpoint(
         self,
         label: str,
@@ -1249,6 +1270,8 @@ class MainWindow(QMainWindow):
         self._collect_settings()
 
         system_report = run_system_check(self.config)
+        self._last_system_check_report = system_report
+        self._populate_attention_center(system_report)
         report = system_report.capabilities
 
         dialog = QDialog(self)
@@ -3000,6 +3023,37 @@ class MainWindow(QMainWindow):
         collection_lay.addLayout(row)
         root.addWidget(collection_card)
 
+        recipes_card, recipes_lay = self._card(
+            "Recettes rapides"
+        )
+        recipes_hint = QLabel(
+            "Ces recettes produisent des objets SSR ordinaires : aucune "
+            "couche simplifiée séparée n’est créée, et tout reste éditable "
+            "dans les écrans Expert."
+        )
+        recipes_hint.setWordWrap(True)
+        recipes_hint.setObjectName("Muted")
+        recipes_lay.addWidget(recipes_hint)
+        recipe_row = QHBoxLayout()
+        duplicate_profile = QPushButton("Variante de profil…")
+        self._set_action_risk(duplicate_profile, "draft")
+        duplicate_profile.clicked.connect(
+            self._recipe_duplicate_profile
+        )
+        recipe_row.addWidget(duplicate_profile)
+        duplicate_rule = QPushButton("Variante de règle…")
+        self._set_action_risk(duplicate_rule, "draft")
+        duplicate_rule.clicked.connect(self._recipe_duplicate_rule)
+        recipe_row.addWidget(duplicate_rule)
+        layout_recipe = QPushButton("Nouveau layout depuis OBS…")
+        self._set_action_risk(layout_recipe, "draft")
+        layout_recipe.clicked.connect(self._recipe_layout_from_obs)
+        self._register_obs_connected_control(layout_recipe)
+        recipe_row.addWidget(layout_recipe)
+        recipe_row.addStretch(1)
+        recipes_lay.addLayout(recipe_row)
+        root.addWidget(recipes_card)
+
         repair_card, repair_lay = self._card(
             "Réparer une configuration devenue obsolète"
         )
@@ -3052,6 +3106,51 @@ class MainWindow(QMainWindow):
         intro.setWordWrap(True)
         intro.setObjectName("Muted")
         root.addWidget(intro)
+
+        attention_card, attention_lay = self._card(
+            "À corriger"
+        )
+        self.attention_summary = QLabel(
+            "Cliquez sur « Actualiser » pour vérifier la configuration, "
+            "les capacités et les références OBS."
+        )
+        self.attention_summary.setWordWrap(True)
+        self.attention_summary.setObjectName("Muted")
+        attention_lay.addWidget(self.attention_summary)
+        self.attention_tree = QTreeWidget()
+        self.attention_tree.setColumnCount(4)
+        self.attention_tree.setHeaderLabels(
+            ["Niveau", "Élément", "Détail", "Action recommandée"]
+        )
+        self.attention_tree.setRootIsDecorated(False)
+        self.attention_tree.setAlternatingRowColors(True)
+        self.attention_tree.setMaximumHeight(240)
+        self.attention_tree.header().setSectionResizeMode(
+            0,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.attention_tree.header().setSectionResizeMode(
+            1,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.attention_tree.header().setStretchLastSection(True)
+        self.attention_tree.itemDoubleClicked.connect(
+            self._open_attention_item
+        )
+        attention_lay.addWidget(self.attention_tree)
+        attention_actions = QHBoxLayout()
+        refresh_attention = QPushButton("Actualiser")
+        refresh_attention.setObjectName("ReadOnlyAction")
+        refresh_attention.clicked.connect(
+            self._refresh_attention_center
+        )
+        attention_actions.addWidget(refresh_attention)
+        open_attention = QPushButton("Ouvrir l’élément")
+        open_attention.clicked.connect(self._open_attention_item)
+        attention_actions.addWidget(open_attention)
+        attention_actions.addStretch(1)
+        attention_lay.addLayout(attention_actions)
+        root.addWidget(attention_card)
 
         status_card, status_lay = self._card(
             "Diagnostic guidé"
@@ -3110,8 +3209,13 @@ class MainWindow(QMainWindow):
         root.addWidget(explain_card)
 
         activity_card, activity_lay = self._card(
-            "Activité et preuve technique"
+            "Historique des opérations et restauration"
         )
+        self.history_undo_status = QLabel(
+            "Dernière opération réversible : —"
+        )
+        self.history_undo_status.setObjectName("Muted")
+        activity_lay.addWidget(self.history_undo_status)
         self.diagnostics_activity_tree = QTreeWidget()
         self.diagnostics_activity_tree.setColumnCount(3)
         self.diagnostics_activity_tree.setHeaderLabels(
@@ -3127,9 +3231,22 @@ class MainWindow(QMainWindow):
             True
         )
         activity_lay.addWidget(self.diagnostics_activity_tree)
-        open_log = QPushButton("Ouvrir le journal technique")
+        history_actions = QHBoxLayout()
+        history_undo = QPushButton("Annuler la dernière opération")
+        history_undo.clicked.connect(self._undo_last_manual_operation)
+        self._register_manual_undo_control(history_undo)
+        history_actions.addWidget(history_undo)
+        backups = QPushButton("Sauvegardes…")
+        backups.clicked.connect(self._restore_config_backup)
+        history_actions.addWidget(backups)
+        review = QPushButton("Revoir le brouillon")
+        review.clicked.connect(self._show_draft_change_review)
+        history_actions.addWidget(review)
+        open_log = QPushButton("Journal technique")
         open_log.clicked.connect(self._open_logs_tab)
-        activity_lay.addWidget(open_log, alignment=Qt.AlignLeft)
+        history_actions.addWidget(open_log)
+        history_actions.addStretch(1)
+        activity_lay.addLayout(history_actions)
         root.addWidget(activity_card)
         root.addStretch(1)
         return page
@@ -3824,6 +3941,16 @@ class MainWindow(QMainWindow):
                     requires_edit_mode=True,
                 )
 
+        view_menu = self.menuBar().addMenu("Affichage")
+        inspector = QAction("Inspecteur contextuel", self)
+        inspector.triggered.connect(self._show_inspector_from_menu)
+        view_menu.addAction(inspector)
+
+    def _show_inspector_from_menu(self) -> None:
+        self._ensure_expert_mode()
+        self.inspector_dock.show()
+        self.inspector_dock.raise_()
+
     def _show_command_palette(self) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Palette de commandes")
@@ -3832,7 +3959,7 @@ class MainWindow(QMainWindow):
 
         search = QLineEdit()
         search.setPlaceholderText(
-            "Rechercher une règle, un profil, un layout ou une commande…"
+            "Rechercher une règle, un profil, un layout, un problème ou une activité…"
         )
         root.addWidget(search)
 
@@ -3970,6 +4097,60 @@ class MainWindow(QMainWindow):
                     self._refresh_layout_profile_view()
                 entries.append(
                     (f"Layout · {layout_name}", open_layout)
+                )
+
+        for kind, domain, target in self._recent_inspector_targets:
+            label = (
+                f"Récent · {DOMAIN_LABELS.get(domain, domain)} · {target}"
+                if domain
+                else f"Récent · {kind} · {target}"
+            )
+            def open_recent(
+                wanted_kind=kind,
+                wanted_domain=domain,
+                wanted_target=target,
+            ) -> None:
+                if wanted_kind == "rule":
+                    self._open_rule_by_name(wanted_target)
+                elif wanted_kind in {"profile", "layout"}:
+                    self._open_profile_target(
+                        wanted_domain,
+                        wanted_target,
+                    )
+            entries.append((label, open_recent))
+
+        for timestamp, entry, repeat_count, _seen_at in reversed(
+            self._user_activity_history
+        ):
+            repeat = f" ×{repeat_count}" if repeat_count > 1 else ""
+            label = (
+                f"Activité · {timestamp} · {entry.message}{repeat}"
+                + (f" · {entry.detail}" if entry.detail else "")
+            )
+            entries.append(
+                (
+                    label,
+                    lambda: (
+                        self._ensure_expert_mode(),
+                        navigate_tab(self.diagnostics_tab_index),
+                    ),
+                )
+            )
+
+        if self._last_system_check_report is not None:
+            for issue in build_attention_items(
+                self._last_system_check_report.as_mapping()
+            ):
+                label = (
+                    f"À corriger · {issue.title} · {issue.detail} · "
+                    f"{issue.action}"
+                )
+                entries.append(
+                    (
+                        label,
+                        lambda key=issue.key:
+                        self._navigate_attention_key(key),
+                    )
                 )
 
         visible_entries: list[tuple[str, object]] = []
