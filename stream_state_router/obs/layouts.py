@@ -980,9 +980,8 @@ class OBSLayoutManager:
         if not collection or collection == "<unknown>":
             raise RuntimeError("Scene Collection inconnue pour le helper de fade")
         source = str(source or "").strip()
-        # Do not start qualifying a new temporary effect once runtime shutdown
-        # has closed normal operation admission.
         self._yield_runtime()
+
         legacy_conflicts = [
             pending
             for pending in self._pending_fade_cleanup.values()
@@ -995,6 +994,7 @@ class OBSLayoutManager:
                 f"Obligation fade legacy ambiguë pour {source}; "
                 "nouveau helper refusé"
             )
+
         host, port = self._fade_connection_context()
         current_collection, collection_generation = (
             self._capture_fade_collection_context(collection)
@@ -1007,18 +1007,15 @@ class OBSLayoutManager:
         session_generation = int(
             getattr(self.client, "session_generation", 0) or 0
         )
+
         source_alias, source_uuid, source_kind = self._resolve_fade_input(
             source,
             session_generation=session_generation,
             expected_collection=collection,
-                expected_collection_generation=collection_generation,
             expected_collection_generation=collection_generation,
         )
 
-        # Revalidate immediately before durable preparation. A blocking OBS
-        # qualification above may have overlapped a shutdown request.
         self._yield_runtime()
-        # Durable ownership evidence is written before the cleanup obligation.
         identity = self._fade_helper_store.prepare_layout_fade(
             connection_host=host,
             connection_port=port,
@@ -1028,18 +1025,13 @@ class OBSLayoutManager:
             source_kind=source_kind,
             session_generation=session_generation,
         )
-        # If shutdown started while the manifest write was in flight, stop
-        # before arming or issuing any normal OBS effect. A prepared manifest
-        # alone is safe because no temporary OBS mutation has occurred.
         self._yield_runtime()
-        # The crash obligation must be durable before any Create/Enable/Settings.
-        # A pre-existing obligation may describe an effect left by an earlier
-        # attempt and must never be disarmed merely because this new attempt
-        # fails before making its own mutation.
+
         pending_key = (identity.collection, identity.helper_id)
         obligation_preexisting = pending_key in self._pending_fade_cleanup
         self._ensure_pending_fade(identity)
         effect_started = False
+
         try:
             rows = self._fade_filter_rows(
                 source_alias,
@@ -1084,7 +1076,7 @@ class OBSLayoutManager:
                         rows,
                         session_generation=session_generation,
                         expected_collection=collection,
-                expected_collection_generation=collection_generation,
+                        expected_collection_generation=collection_generation,
                     )
                     if candidates or unreadable:
                         names = candidates or unreadable
@@ -1094,11 +1086,10 @@ class OBSLayoutManager:
                             "recréation automatique refusée"
                         )
 
-                # From this point on a transport failure may hide an OBS-side
-                # effect, so the durable cleanup obligation must remain.
                 effect_started = True
                 try:
-                    self._fade_send(
+                    self._fade_mutation_send(
+                        identity,
                         "CreateSourceFilter",
                         {
                             "sourceName": source_alias,
@@ -1108,64 +1099,29 @@ class OBSLayoutManager:
                             "filterSettings": {"opacity": 1.0},
                         },
                         session_generation=session_generation,
-                        expected_collection=collection,
-                expected_collection_generation=collection_generation,
+                        collection_generation=collection_generation,
                     )
-                except _FadeContextChangedAfterRequest:
-                    # The request was submitted, but its collection boundary
-                    # no longer matches. Preserve the exact uncertainty for
-                    # the outer handler instead of trying to observe in B.
+                except OBSRequestError:
+                    effect_started = False
                     raise
-                except Exception:
-                    # A response loss can make Create outcome uncertain.
-                    # Observe the generated identity once, never issue a second
-                    # Create while the outcome is uncertain.
-                    if (
-                        int(
-                            getattr(
-                                self.client,
-                                "session_generation",
-                                0,
-                            )
-                            or 0
-                        )
-                        != session_generation
-                    ):
-                        raise
-                    rows = self._fade_filter_rows(
-                        source_alias,
-                        source_uuid=identity.source_uuid,
-                        session_generation=session_generation,
-                        expected_collection=collection,
-                expected_collection_generation=collection_generation,
+
+                rows = self._fade_filter_rows(
+                    source_alias,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                    expected_collection=collection,
+                    expected_collection_generation=collection_generation,
+                )
+                expected_rows = [
+                    row
+                    for row in rows
+                    if str(row.get("filterName") or "").strip()
+                    == identity.filter_name
+                ]
+                if len(expected_rows) != 1:
+                    raise RuntimeError(
+                        f"CreateSourceFilter non vérifié pour {source_alias}"
                     )
-                    expected_rows = [
-                        row
-                        for row in rows
-                        if str(row.get("filterName") or "").strip()
-                        == identity.filter_name
-                    ]
-                    if len(expected_rows) != 1:
-                        raise
-                else:
-                    rows = self._fade_filter_rows(
-                        source_alias,
-                        source_uuid=identity.source_uuid,
-                        session_generation=session_generation,
-                        expected_collection=collection,
-                expected_collection_generation=collection_generation,
-                    )
-                    expected_rows = [
-                        row
-                        for row in rows
-                        if str(row.get("filterName") or "").strip()
-                        == identity.filter_name
-                    ]
-                    if len(expected_rows) != 1:
-                        raise RuntimeError(
-                            f"CreateSourceFilter non vérifié pour "
-                            f"{source_alias}"
-                        )
 
             kind, enabled, settings = self._fade_filter_state(
                 source_alias,
@@ -1177,21 +1133,21 @@ class OBSLayoutManager:
             )
             if kind != identity.filter_kind:
                 raise RuntimeError(
-                    f"Kind du helper incompatible pour {source_alias}: "
-                    f"{kind}"
+                    f"Kind du helper incompatible pour {source_alias}: {kind}"
                 )
             if not self._fade_helper_store.settings_compatible(
                 identity,
                 settings,
             ):
                 raise RuntimeError(
-                    f"Helper de fade modifié extérieurement pour "
-                    f"{source_alias}"
+                    f"Helper de fade modifié extérieurement pour {source_alias}"
                 )
+
             if identity.state != "observed":
                 self._verify_fade_collection(
                     collection,
                     session_generation=session_generation,
+                    expected_collection_generation=collection_generation,
                 )
                 identity = self._fade_helper_store.mark_observed(
                     identity.helper_id,
@@ -1206,45 +1162,28 @@ class OBSLayoutManager:
                 and abs(float(raw_opacity) - 1.0) <= 1e-6
             )
             if not opacity_neutral:
-                # A reusable helper must be neutral before it is enabled for a
-                # new transition. This prevents a stale reserved opacity from
-                # affecting a currently visible source during preparation.
                 effect_started = True
-                write_error: Exception | None = None
-                try:
-                    self._fade_mutation_send(
-                        identity,
-                        "SetSourceFilterSettings",
-                        {
-                            "sourceName": source_alias,
-                            "sourceUuid": identity.source_uuid,
-                            "filterName": identity.filter_name,
-                            "filterSettings": {"opacity": 1.0},
-                            "overlay": True,
-                        },
-                        session_generation=session_generation,
-                        expected_collection=collection,
-                expected_collection_generation=collection_generation,
-                    )
-                except _FadeContextChangedAfterRequest:
-                    raise
-                except Exception as exc:
-                    write_error = exc
-                try:
-                    kind, enabled, settings = self._fade_filter_state(
-                        source_alias,
-                        identity.filter_name,
-                        source_uuid=identity.source_uuid,
-                        session_generation=session_generation,
-                        expected_collection=collection,
-                expected_collection_generation=collection_generation,
-                    )
-                except Exception as exc:
-                    detail = write_error or exc
-                    raise RuntimeError(
-                        f"Neutralité du helper non vérifiable pour "
-                        f"{source_alias}: {detail}"
-                    ) from exc
+                self._fade_mutation_send(
+                    identity,
+                    "SetSourceFilterSettings",
+                    {
+                        "sourceName": source_alias,
+                        "sourceUuid": identity.source_uuid,
+                        "filterName": identity.filter_name,
+                        "filterSettings": {"opacity": 1.0},
+                        "overlay": True,
+                    },
+                    session_generation=session_generation,
+                    collection_generation=collection_generation,
+                )
+                kind, enabled, settings = self._fade_filter_state(
+                    source_alias,
+                    identity.filter_name,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                    expected_collection=collection,
+                    expected_collection_generation=collection_generation,
+                )
                 raw_opacity = settings.get("opacity")
                 if (
                     kind != identity.filter_kind
@@ -1252,14 +1191,8 @@ class OBSLayoutManager:
                     or isinstance(raw_opacity, bool)
                     or abs(float(raw_opacity) - 1.0) > 1e-6
                 ):
-                    suffix = (
-                        f" après erreur {write_error}"
-                        if write_error
-                        else ""
-                    )
                     raise RuntimeError(
-                        f"Neutralité du helper non vérifiée pour "
-                        f"{source_alias}{suffix}"
+                        f"Neutralité du helper non vérifiée pour {source_alias}"
                     )
                 if not self._fade_helper_store.settings_compatible(
                     identity,
@@ -1289,12 +1222,12 @@ class OBSLayoutManager:
                     identity.filter_name,
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
-                    collection_generation=collection_generation,
+                    expected_collection=collection,
+                    expected_collection_generation=collection_generation,
                 )
                 if kind != identity.filter_kind or enabled is not True:
                     raise RuntimeError(
-                        f"Activation du helper non vérifiée pour "
-                        f"{source_alias}"
+                        f"Activation du helper non vérifiée pour {source_alias}"
                     )
                 if not self._fade_helper_store.settings_compatible(
                     identity,
@@ -1311,7 +1244,7 @@ class OBSLayoutManager:
                 collection_generation
             )
             return identity
-        except Exception as exc:
+        except BaseException as exc:
             if not effect_started and not obligation_preexisting:
                 try:
                     self._discard_unmutated_fade_obligation(identity)
@@ -1328,19 +1261,30 @@ class OBSLayoutManager:
             raise RuntimeError(
                 f"Aucun helper de fade préparé pour {source}; création implicite interdite"
             )
-        session_generation = self._active_fade_sessions.get(
+        session_generation = self._active_fade_sessions.get(str(source), 0)
+        collection_generation = self._active_fade_collection_generations.get(
             str(source),
             0,
         )
+        if not collection_generation and isinstance(
+            self.client,
+            OBSClientManager,
+        ):
+            raise RuntimeError(
+                f"Contexte Scene Collection absent pour le fade de {source}"
+            )
+
         self._verify_fade_collection(
             identity.collection,
             session_generation=session_generation,
+            expected_collection_generation=collection_generation,
         )
         source_alias, source_uuid, source_kind = self._resolve_fade_input(
             identity.source_alias,
             source_uuid=identity.source_uuid,
             session_generation=session_generation,
             expected_collection=identity.collection,
+            expected_collection_generation=collection_generation,
         )
         if (
             source_uuid != identity.source_uuid
@@ -1349,11 +1293,9 @@ class OBSLayoutManager:
             raise RuntimeError(
                 f"Source OBS remplacée ou kind modifié pendant le fade pour {source}"
             )
-        self._verify_fade_collection(
-            identity.collection,
-            session_generation=session_generation,
-        )
-        self._fade_send(
+
+        self._fade_mutation_send(
+            identity,
             "SetSourceFilterSettings",
             {
                 "sourceName": source_alias,
@@ -1365,7 +1307,7 @@ class OBSLayoutManager:
                 "overlay": True,
             },
             session_generation=session_generation,
-            expected_collection=identity.collection,
+            collection_generation=collection_generation,
         )
 
     def _possible_renamed_fade_filters(
