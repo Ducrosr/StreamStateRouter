@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-import threading
 import unittest
 from unittest.mock import patch
 from pathlib import Path
