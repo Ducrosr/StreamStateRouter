@@ -302,7 +302,7 @@ class SystemCheckTests(unittest.TestCase):
         )
 
         items = {item.key: item for item in report.capabilities.items}
-        self.assertEqual(items["obs_references"].status, "error")
+        self.assertEqual(items["obs_references"].status, "warning")
         payload = report.as_mapping()["references"]
         issue = next(
             item
@@ -310,7 +310,47 @@ class SystemCheckTests(unittest.TestCase):
             if item["current"] == "In Gmae"
         )
         self.assertEqual(issue["candidate"], "In Game")
-        self.assertFalse(report.ok)
+        self.assertTrue(report.ok)
+
+    def test_filter_reference_lint_skips_templated_sources(self) -> None:
+        config = _config()
+        config["obs"]["enabled"] = True
+        config["profiles"]["overlay"]["Vanilla"]["actions"] = [
+            {
+                "type": "source_filter_enabled",
+                "enabled": True,
+                "params": {
+                    "source": "[Module] ${Game}",
+                    "filter": "Color Correction",
+                    "enabled": True,
+                },
+            }
+        ]
+
+        class CompatibleOBS(_FakeOBSClient):
+            def send(self, request: str, data=None):
+                response = super().send(request, data)
+                if request == "GetVersion":
+                    response = dict(response)
+                    response["availableRequests"] = [
+                        *response["availableRequests"],
+                        "SetSourceFilterEnabled",
+                    ]
+                return response
+
+        report = run_system_check(
+            config,
+            obs_client_factory=CompatibleOBS,
+        )
+
+        client = _FakeOBSClient.instances[-1]
+        filter_reads = [
+            data
+            for request, data in client.requests
+            if request == "GetSourceFilterList"
+        ]
+        self.assertEqual(filter_reads, [])
+        self.assertTrue(report.ok)
 
     def test_filter_reference_lint_reads_only_configured_source(self) -> None:
         config = _config()

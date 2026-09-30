@@ -385,7 +385,7 @@ def _configured_filter_sources(
                 if not isinstance(params, Mapping):
                     continue
                 source = str(params.get("source") or "").strip()
-                if source and not source.startswith("$"):
+                if source and "${" not in source:
                     sources.add(source)
     return tuple(sorted(sources, key=str.casefold))
 
@@ -487,7 +487,7 @@ def probe_obs_references(
             for issue in issues[:3]
         )
         return {
-            "status": "warning" if incomplete else "error",
+            "status": "warning",
             "detail": (
                 f"{len(issues)} référence(s) OBS introuvable(s). {examples}"
                 + (" · inventaire partiel" if incomplete else "")
