@@ -96,12 +96,17 @@ class RuntimeMarkerTests(unittest.TestCase):
                 "activation_hide",
             )
 
-    def test_finalization_blocks_late_cleanup_checkpoint(self):
+    def test_finalization_rejects_late_cleanup_checkpoint_explicitly(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runtime.json"
             marker = RuntimeMarker()
             marker.path = path
             marker.start()
+            marker.finish(
+                clean_shutdown=True,
+                cleanup_complete=True,
+                pending_cleanup=(),
+            )
 
             late_cleanup = {
                 "kind": "layout_fade",
@@ -109,24 +114,11 @@ class RuntimeMarkerTests(unittest.TestCase):
                 "collection": "Collection A",
             }
 
-            # Hold the marker lock so the worker-like checkpoint is definitely
-            # pending while finalization commits. RLock lets this thread call
-            # finish() re-entrantly; once released, the late checkpoint must
-            # observe finalized=True and leave the final marker untouched.
-            with marker._write_lock:
-                worker = threading.Thread(
-                    target=marker.checkpoint_pending_cleanup,
-                    args=((late_cleanup,),),
-                )
-                worker.start()
-                marker.finish(
-                    clean_shutdown=True,
-                    cleanup_complete=True,
-                    pending_cleanup=(),
-                )
-
-            worker.join(timeout=2)
-            self.assertFalse(worker.is_alive())
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "déjà finalisé",
+            ):
+                marker.checkpoint_pending_cleanup((late_cleanup,))
 
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue(data["clean_shutdown"])
