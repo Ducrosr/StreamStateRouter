@@ -345,3 +345,203 @@ def build_contextual_action(
         "",
         "Good",
     )
+
+
+
+@dataclass(frozen=True, slots=True)
+class HealthBadgePresentation:
+    text: str
+    style: str
+    detail: str = ""
+
+
+def humanize_rule(rule: Mapping[str, object]) -> str:
+    behavior = str(rule.get("behavior") or "match").strip().casefold()
+    conditions = _mapping(rule.get("conditions"))
+    selectors: list[str] = []
+    exe = str(rule.get("exe") or "").strip()
+    path = str(rule.get("path") or "").strip()
+    title = str(rule.get("title_regex") or "").strip()
+    process = str(conditions.get("process_running") or "").strip()
+    if exe:
+        selectors.append(f"{exe} au premier plan")
+    if path:
+        selectors.append(f"chemin {path}")
+    if title:
+        selectors.append(f"titre /{title}/")
+    if process:
+        selectors.append(f"{process} en cours")
+    if conditions.get("streaming") is True:
+        selectors.append("stream actif")
+    elif conditions.get("streaming") is False:
+        selectors.append("stream inactif")
+    if conditions.get("recording") is True:
+        selectors.append("enregistrement actif")
+    elif conditions.get("recording") is False:
+        selectors.append("enregistrement inactif")
+    program_scene = str(conditions.get("program_scene") or "").strip()
+    if program_scene:
+        selectors.append(f"scène programme {program_scene}")
+
+    when = " + ".join(selectors) if selectors else "conditions générales"
+    if behavior == "ignore":
+        return f"Quand {when} → conserver l’état courant"
+
+    state = _mapping(rule.get("state"))
+    targets = []
+    for _domain, label, key in _STATE_KEYS:
+        value = str(state.get(key) or "").strip()
+        if value:
+            targets.append(f"{label}={value}")
+    then = " · ".join(targets) if targets else "aucun profil défini"
+    delay = int(rule.get("apply_delay_ms") or 0)
+    suffix = f" · après {delay} ms" if delay > 0 else ""
+    return f"Quand {when} → {then}{suffix}"
+
+
+def build_rule_health(
+    rule: Mapping[str, object],
+    config: Mapping[str, object],
+) -> HealthBadgePresentation:
+    if not bool(rule.get("enabled", True)):
+        return HealthBadgePresentation(
+            "○ Désactivée",
+            "Muted",
+            "La règle est conservée dans la configuration mais n’est pas évaluée.",
+        )
+    if str(rule.get("behavior") or "match").strip().casefold() != "match":
+        return HealthBadgePresentation(
+            "✓ Ignore",
+            "Good",
+            "Cette règle conserve volontairement l’état courant.",
+        )
+
+    state = _mapping(rule.get("state"))
+    profiles = _mapping(config.get("profiles"))
+    layouts = _mapping(config.get("layout_profiles"))
+    missing: list[str] = []
+    for domain, label, key in _STATE_KEYS:
+        target = str(state.get(key) or "").strip()
+        if not target:
+            missing.append(f"{label}=<vide>")
+            continue
+        pool = layouts if domain == "layout" else _mapping(profiles.get(domain))
+        if target not in pool:
+            missing.append(f"{label}={target}")
+
+    if missing:
+        return HealthBadgePresentation(
+            "⚠ Référence manquante",
+            "Bad",
+            "Profil(s) introuvable(s) : " + ", ".join(missing),
+        )
+    return HealthBadgePresentation(
+        "✓ Cohérente",
+        "Good",
+        "Toutes les références de profil de cette règle existent.",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AttentionItemPresentation:
+    key: str
+    severity: str
+    title: str
+    detail: str
+    action: str
+    source: str = ""
+
+
+def build_attention_items(
+    report: Mapping[str, object] | None,
+) -> tuple[AttentionItemPresentation, ...]:
+    data = _mapping(report)
+    items: list[AttentionItemPresentation] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    config = _mapping(data.get("config"))
+    errors = config.get("errors")
+    if isinstance(errors, Sequence) and not isinstance(errors, (str, bytes)):
+        for raw in errors:
+            detail = str(raw or "").strip()
+            if not detail:
+                continue
+            key = ("config", "Configuration invalide", detail)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(
+                AttentionItemPresentation(
+                    "config",
+                    "error",
+                    "Configuration invalide",
+                    detail,
+                    "Revoir le brouillon",
+                    "configuration",
+                )
+            )
+
+    capabilities = _mapping(data.get("capabilities"))
+    raw_items = capabilities.get("items")
+    if isinstance(raw_items, Sequence) and not isinstance(raw_items, (str, bytes)):
+        for raw in raw_items:
+            item = _mapping(raw)
+            status = str(item.get("status") or "").strip().casefold()
+            if status not in {"warning", "error"}:
+                continue
+            title = str(item.get("label") or "Capacité").strip()
+            detail = str(item.get("detail") or "").strip()
+            item_key = str(item.get("key") or "capability").strip()
+            dedupe = (item_key, title, detail)
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            items.append(
+                AttentionItemPresentation(
+                    item_key,
+                    status,
+                    title,
+                    detail,
+                    str(item.get("action") or "").strip(),
+                    "capability",
+                )
+            )
+
+    raw_findings = capabilities.get("findings")
+    if isinstance(raw_findings, Sequence) and not isinstance(
+        raw_findings,
+        (str, bytes),
+    ):
+        for raw in raw_findings:
+            finding = _mapping(raw)
+            severity = str(
+                finding.get("severity") or "warning"
+            ).strip().casefold()
+            title = str(finding.get("title") or "Diagnostic").strip()
+            detail = str(finding.get("detail") or "").strip()
+            dedupe = ("finding", title, detail)
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            items.append(
+                AttentionItemPresentation(
+                    "finding",
+                    severity,
+                    title,
+                    detail,
+                    str(finding.get("action") or "").strip(),
+                    "finding",
+                )
+            )
+
+    severity_order = {"error": 0, "warning": 1, "info": 2}
+    return tuple(
+        sorted(
+            items,
+            key=lambda item: (
+                severity_order.get(item.severity, 9),
+                item.title.casefold(),
+                item.detail.casefold(),
+            ),
+        )
+    )
