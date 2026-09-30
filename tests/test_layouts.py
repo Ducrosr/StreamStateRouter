@@ -3431,5 +3431,89 @@ class LayoutTests(unittest.TestCase):
 
 
 
+    def test_failed_new_preparation_preserves_preexisting_fade_obligation(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        snapshots = []
+        manager.set_pending_cleanup_changed(
+            lambda: snapshots.append(manager.export_pending_fade_cleanup())
+        )
+
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        manager._set_source_opacity("[Webcam] Avatar", 0.3)
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        state["settings"]["contrast"] = 0.5
+
+        warnings = manager.retry_pending_fade_cleanup()
+        self.assertTrue(
+            any("modifié extérieurement" in warning for warning in warnings),
+            warnings,
+        )
+        self.assertEqual(len(manager.export_pending_fade_cleanup()), 1)
+        snapshot_count = len(snapshots)
+
+        client.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "modifié extérieurement"):
+            manager._prepare_fade_filter(
+                "[Webcam] Avatar",
+                "Collection A",
+            )
+
+        self.assertEqual(len(manager.export_pending_fade_cleanup()), 1)
+        self.assertEqual(len(snapshots), snapshot_count)
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 0.3)
+        self.assertEqual(float(state["settings"]["contrast"]), 0.5)
+        self.assertTrue(state["enabled"])
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_import_rejects_malformed_fade_metadata_instead_of_dropping_it(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Collection A",
+            source_uuid=client.input_uuids["[Webcam] Avatar"],
+            source_alias="[Webcam] Avatar",
+            source_kind="image_source",
+            session_generation=1,
+        )
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        raw = {
+            "kind": "layout_fade",
+            "source": "[Webcam] Avatar",
+            "collection": "Collection A",
+            "helper_id": identity.helper_id,
+            "source_uuid": identity.source_uuid,
+            "source_kind": identity.source_kind,
+            "connection": {
+                "host": identity.connection_host,
+                "port": identity.connection_port,
+            },
+            "filter_name": identity.filter_name,
+            "filter_kind": identity.filter_kind,
+            "cleanup_action": "neutralize_disable",
+            "legacy": False,
+            "ambiguous": False,
+            "created_at": "damaged",
+            "attempts": 0,
+            "last_error": "",
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "importée invalide.*created_at",
+        ):
+            manager.import_pending_fade_cleanup((raw,))
+
+        self.assertEqual(manager.pending_fade_cleanup(), ())
+
+
 if __name__ == "__main__":
     unittest.main()
