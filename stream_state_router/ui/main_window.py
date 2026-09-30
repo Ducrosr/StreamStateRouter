@@ -3093,6 +3093,328 @@ class MainWindow(QMainWindow):
         root.addStretch(1)
         return page
 
+    def _populate_attention_center(self, report) -> None:
+        if not hasattr(self, "attention_tree"):
+            return
+        self.attention_tree.clear()
+        issues = build_attention_items(report.as_mapping())
+        severity_labels = {
+            "error": "Erreur",
+            "warning": "À vérifier",
+            "info": "Information",
+        }
+        for issue in issues:
+            item = QTreeWidgetItem(
+                [
+                    severity_labels.get(
+                        issue.severity,
+                        issue.severity,
+                    ),
+                    issue.title,
+                    issue.detail,
+                    issue.action or "—",
+                ]
+            )
+            item.setData(0, Qt.UserRole, issue.key)
+            self.attention_tree.addTopLevelItem(item)
+
+        if issues:
+            errors = sum(
+                1 for issue in issues if issue.severity == "error"
+            )
+            warnings = sum(
+                1 for issue in issues if issue.severity == "warning"
+            )
+            self.attention_summary.setText(
+                f"{len(issues)} point(s) à examiner · "
+                f"{errors} erreur(s) · {warnings} avertissement(s). "
+                "Double-cliquez pour aller au bon endroit."
+            )
+            self.attention_summary.setObjectName(
+                "Bad" if errors else "Warn"
+            )
+        else:
+            self.attention_summary.setText(
+                "✓ Rien à corriger : aucun problème actionnable détecté."
+            )
+            self.attention_summary.setObjectName("Good")
+        self.attention_summary.style().unpolish(
+            self.attention_summary
+        )
+        self.attention_summary.style().polish(
+            self.attention_summary
+        )
+
+    def _refresh_attention_center(self) -> None:
+        self._collect_settings()
+        try:
+            report = run_system_check(self.config)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "À corriger",
+                str(exc),
+            )
+            return
+        self._last_system_check_report = report
+        self._populate_attention_center(report)
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good" if report.ok else "Warn",
+                "Diagnostic système actualisé",
+                report.capabilities.summary,
+            )
+        )
+
+    def _navigate_attention_key(self, key: str) -> None:
+        normalized = str(key or "").strip()
+        if normalized == "config":
+            self._show_draft_change_review()
+            return
+        if normalized == "obs_references":
+            self.tabs.setCurrentIndex(self.configure_tab_index)
+            return
+        if normalized in {"obs", "audio", "hdr"}:
+            self.tabs.setCurrentIndex(self.settings_tab_index)
+            return
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.diagnostics_tab_index)
+
+    def _open_attention_item(self, *_args) -> None:
+        if not hasattr(self, "attention_tree"):
+            return
+        item = self.attention_tree.currentItem()
+        if item is None:
+            return
+        self._navigate_attention_key(
+            str(item.data(0, Qt.UserRole) or "")
+        )
+
+    def _ensure_recipe_edit_mode(self, operation: str) -> bool:
+        if self._edit_mode:
+            return True
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                operation,
+                "Le runtime SSR doit être disponible pour entrer en Mode édition.",
+            )
+            return False
+        self._toggle_edit_mode()
+        return self._edit_mode
+
+    def _recipe_duplicate_profile(self) -> None:
+        if not self._ensure_recipe_edit_mode(
+            "Créer une variante de profil"
+        ):
+            return
+
+        domains = [
+            domain
+            for domain in PROFILE_DOMAINS
+            if self._profiles_for_domain(domain)
+        ]
+        if not domains:
+            QMessageBox.information(
+                self,
+                "Variante de profil",
+                "Aucun profil existant ne peut servir de base.",
+            )
+            return
+        labels = [
+            DOMAIN_LABELS.get(domain, domain)
+            for domain in domains
+        ]
+        label, ok = QInputDialog.getItem(
+            self,
+            "Variante de profil",
+            "Domaine",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        domain = domains[labels.index(label)]
+        profiles = self._profiles_for_domain(domain)
+        names = sorted(profiles, key=str.casefold)
+        base_name, ok = QInputDialog.getItem(
+            self,
+            "Variante de profil",
+            "Profil de départ",
+            names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Variante de profil",
+            "Nom de la nouvelle variante",
+            text=f"{base_name} - Variante",
+        )
+        new_name = new_name.strip()
+        if not ok or not new_name:
+            return
+        if new_name in profiles:
+            QMessageBox.warning(
+                self,
+                "Variante de profil",
+                "Ce profil existe déjà.",
+            )
+            return
+
+        previous = copy.deepcopy(self.config)
+        profiles[new_name] = copy.deepcopy(profiles[base_name])
+        errors = validate_config(self.config)
+        if errors:
+            self.config = previous
+            QMessageBox.critical(
+                self,
+                "Variante de profil",
+                "\n".join(errors),
+            )
+            return
+        self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            f"Création de la variante {domain}/{new_name}",
+            previous,
+        )
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.profiles_tab_index)
+        index = self.profile_domain.findData(domain)
+        if index >= 0:
+            self.profile_domain.setCurrentIndex(index)
+        self._refresh_profile_names()
+        self.profile_name.setCurrentText(new_name)
+        self._inspect_current_profile()
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Variante de profil créée",
+                f"{domain}/{base_name} → {new_name}",
+            )
+        )
+
+    def _recipe_duplicate_rule(self) -> None:
+        if not self._ensure_recipe_edit_mode(
+            "Créer une variante de règle"
+        ):
+            return
+        rules = self.config.get("rules")
+        if not isinstance(rules, list) or not rules:
+            QMessageBox.information(
+                self,
+                "Variante de règle",
+                "Aucune règle existante ne peut servir de base.",
+            )
+            return
+        names = [
+            str(rule.get("name") or f"Règle {index + 1}")
+            for index, rule in enumerate(rules)
+            if isinstance(rule, Mapping)
+        ]
+        if not names:
+            return
+        base_name, ok = QInputDialog.getItem(
+            self,
+            "Variante de règle",
+            "Règle de départ",
+            names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        source_index = next(
+            (
+                index
+                for index, rule in enumerate(rules)
+                if isinstance(rule, Mapping)
+                and str(rule.get("name") or f"Règle {index + 1}")
+                == base_name
+            ),
+            None,
+        )
+        if source_index is None:
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Variante de règle",
+            "Nom de la nouvelle règle",
+            text=f"{base_name} - Variante",
+        )
+        new_name = new_name.strip()
+        if not ok or not new_name:
+            return
+        if any(
+            isinstance(rule, Mapping)
+            and str(rule.get("name") or "") == new_name
+            for rule in rules
+        ):
+            QMessageBox.warning(
+                self,
+                "Variante de règle",
+                "Une règle porte déjà ce nom.",
+            )
+            return
+
+        previous = copy.deepcopy(self.config)
+        clone = copy.deepcopy(rules[source_index])
+        clone["name"] = new_name
+        clone["enabled"] = False
+        rules.insert(source_index + 1, clone)
+        errors = validate_config(self.config)
+        if errors:
+            self.config = previous
+            QMessageBox.critical(
+                self,
+                "Variante de règle",
+                "\n".join(errors),
+            )
+            return
+        self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            f"Création de la variante de règle {new_name}",
+            previous,
+        )
+        self._refresh_rules_table()
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.rules_tab_index)
+        self.rules_table.selectRow(source_index + 1)
+        self._inspect_selected_rule()
+        QMessageBox.information(
+            self,
+            "Variante de règle",
+            (
+                f"« {new_name} » a été créée désactivée dans le brouillon.\n\n"
+                "Modifiez ses conditions/profils puis activez-la lorsque "
+                "vous êtes prêt."
+            ),
+        )
+
+    def _recipe_layout_from_obs(self) -> None:
+        if not self._ensure_recipe_edit_mode(
+            "Créer un layout depuis OBS"
+        ):
+            return
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.layouts_tab_index)
+        self._sync_obs_modules()
+        before = set(self._layout_profiles())
+        self._new_layout_profile()
+        after = set(self._layout_profiles())
+        created = sorted(after - before, key=str.casefold)
+        if created:
+            self.layout_profile_name.setCurrentText(created[0])
+            self._refresh_layout_profile_view()
+            self.statusBar().showMessage(
+                "Sélectionnez les éléments OBS à inclure puis utilisez "
+                f"« Capturer OBS → {created[0]} ».",
+                10000,
+            )
+
     def _build_diagnostics_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
