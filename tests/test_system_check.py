@@ -206,6 +206,7 @@ class SystemCheckTests(unittest.TestCase):
         items = {item.key: item for item in report.capabilities.items}
         self.assertEqual(items["obs"].status, "ready")
         self.assertEqual(items["catalog"].status, "ready")
+        self.assertEqual(items["obs_requests"].status, "unused")
         self.assertIn("2 scène(s)", items["catalog"].detail)
         self.assertIn("2 groupe(s)", items["catalog"].detail)
         self.assertIn("3 input(s)", items["catalog"].detail)
@@ -213,6 +214,70 @@ class SystemCheckTests(unittest.TestCase):
         self.assertEqual(items["audio"].status, "ready")
         self.assertEqual(items["hdr"].status, "ready")
         self.assertTrue(report.ok)
+
+    def test_required_obs_request_missing_is_blocking(self) -> None:
+        config = _config()
+        config["obs"]["enabled"] = True
+        config["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "input_mute",
+                "enabled": True,
+                "params": {"input": "Micro", "muted": False},
+            }
+        ]
+
+        report = run_system_check(
+            config,
+            obs_client_factory=_FakeOBSClient,
+        )
+
+        items = {item.key: item for item in report.capabilities.items}
+        self.assertEqual(items["obs_requests"].status, "error")
+        self.assertIn("SetInputMute", items["obs_requests"].detail)
+        self.assertFalse(report.ok)
+        payload = report.as_mapping()["obs_requests"]
+        self.assertEqual(payload["missing"][0]["request"], "SetInputMute")
+
+    def test_required_obs_request_matrix_reports_owners(self) -> None:
+        config = _config()
+        config["obs"]["enabled"] = True
+        config["profiles"]["audio"]["Default"]["actions"] = [
+            {
+                "type": "input_mute",
+                "enabled": True,
+                "params": {"input": "Micro", "muted": False},
+            }
+        ]
+
+        class CompatibleOBS(_FakeOBSClient):
+            def send(self, request: str, data=None):
+                response = super().send(request, data)
+                if request == "GetVersion":
+                    response = dict(response)
+                    response["availableRequests"] = [
+                        *response["availableRequests"],
+                        "SetInputMute",
+                    ]
+                return response
+
+        report = run_system_check(
+            config,
+            obs_client_factory=CompatibleOBS,
+        )
+
+        items = {item.key: item for item in report.capabilities.items}
+        self.assertEqual(items["obs_requests"].status, "ready")
+        required = {
+            row["request"]: row
+            for row in report.as_mapping()["obs_requests"]["required"]
+        }
+        self.assertIn("SetInputMute", required)
+        self.assertTrue(
+            any(
+                "audio/Default" in owner
+                for owner in required["SetInputMute"]["owners"]
+            )
+        )
 
     def test_host_probe_is_shared_and_read_only(self) -> None:
         config = _config()

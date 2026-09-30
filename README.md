@@ -549,6 +549,7 @@ Le contrôle est volontairement en lecture seule. Il vérifie :
 
 - la validité de la configuration ;
 - la connexion OBS WebSocket et un inventaire read-only scènes/groupes/inputs/Scene Items, avec détection d'inventaire partiel ;
+- la présence des requêtes obs-websocket réellement requises par les actions/conditions configurées ;
 - SoundVolumeView uniquement si une action `app_audio_output` est configurée ;
 - la prise en charge et l’état HDR du moniteur principal uniquement si une
   action `windows_hdr` est configurée.

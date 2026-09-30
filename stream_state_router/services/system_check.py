@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
-from ..obs.catalog import OBSResourceCatalogReader
+from ..obs.catalog import OBSResourceCatalog, OBSResourceCatalogReader
 from ..obs.client import OBSClientManager
 from .config import (
     build_host_controller,
@@ -21,6 +21,7 @@ from .config_insights import (
 class SystemCheckReport:
     config_errors: tuple[str, ...]
     capabilities: CapabilityReport
+    obs_requests: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
@@ -42,6 +43,7 @@ class SystemCheckReport:
                 "valid": not self.config_errors,
                 "errors": list(self.config_errors),
             },
+            "obs_requests": dict(self.obs_requests),
             "capabilities": {
                 "status": self.capabilities.status,
                 "summary": self.capabilities.summary,
@@ -92,7 +94,20 @@ class _ReadOnlyOBSClient:
         return self._client.send(name, data)
 
 
-def _probe_obs_catalog(client: OBSClientManager) -> dict[str, object]:
+_OBS_ACTION_REQUESTS: dict[str, tuple[str, ...]] = {
+    "set_program_scene": ("SetCurrentProgramScene",),
+    "scene_item_enabled": ("GetSceneItemId", "SetSceneItemEnabled"),
+    "source_filter_enabled": ("SetSourceFilterEnabled",),
+    "source_filter_settings": ("SetSourceFilterSettings",),
+    "input_mute": ("SetInputMute",),
+    "input_volume_db": ("SetInputVolume",),
+    "set_input_settings": ("SetInputSettings",),
+}
+
+
+def _probe_obs_catalog(
+    client: OBSClientManager,
+) -> tuple[dict[str, object], OBSResourceCatalog | None]:
     """Read the lightweight OBS catalog through a read-only fail-closed guard."""
 
     try:
@@ -103,27 +118,226 @@ def _probe_obs_catalog(client: OBSClientManager) -> dict[str, object]:
                 "conteneur(s) illisible(s) : "
                 + ", ".join(sorted(catalog.unreadable_containers, key=str.casefold))
             )
-        return {
-            "available": True,
-            "stale": False,
-            "partial": bool(partial_reasons),
-            "partial_reason": "; ".join(partial_reasons),
-            "collection": catalog.collection,
-            "session_generation": catalog.session_generation,
-            "scenes": len(catalog.scenes),
-            "groups": len(catalog.groups),
-            "inputs": len(catalog.inputs),
-            "scene_items": len(catalog.scene_items),
-            "transitions": len(catalog.transitions),
-            "available_requests": len(catalog.available_requests),
-        }
+        return (
+            {
+                "available": True,
+                "stale": False,
+                "partial": bool(partial_reasons),
+                "partial_reason": "; ".join(partial_reasons),
+                "collection": catalog.collection,
+                "session_generation": catalog.session_generation,
+                "scenes": len(catalog.scenes),
+                "groups": len(catalog.groups),
+                "inputs": len(catalog.inputs),
+                "scene_items": len(catalog.scene_items),
+                "transitions": len(catalog.transitions),
+                "available_requests": len(catalog.available_requests),
+            },
+            catalog,
+        )
     except Exception as exc:
+        return (
+            {
+                "available": True,
+                "stale": True,
+                "stale_reason": str(exc),
+            },
+            None,
+        )
+
+
+def _add_request_owner(
+    owners: dict[str, set[str]],
+    request: str,
+    owner: str,
+) -> None:
+    owners.setdefault(str(request), set()).add(str(owner))
+
+
+def _configured_obs_request_requirements(
+    config: Mapping[str, Any],
+) -> dict[str, tuple[str, ...]]:
+    """Map configured actions and OBS-dependent conditions to requests."""
+
+    owners: dict[str, set[str]] = {}
+    profiles = config.get("profiles")
+    if isinstance(profiles, Mapping):
+        for domain, domain_profiles in profiles.items():
+            if not isinstance(domain_profiles, Mapping):
+                continue
+            for profile_name, profile in domain_profiles.items():
+                if not isinstance(profile, Mapping):
+                    continue
+                actions = profile.get("actions")
+                if isinstance(actions, list):
+                    for action in actions:
+                        if (
+                            not isinstance(action, Mapping)
+                            or not bool(action.get("enabled", True))
+                        ):
+                            continue
+                        kind = str(action.get("type") or "").strip().casefold()
+                        for request in _OBS_ACTION_REQUESTS.get(kind, ()):
+                            _add_request_owner(
+                                owners,
+                                request,
+                                f"{domain}/{profile_name} · {kind}",
+                            )
+                conditions = profile.get("conditions")
+                if isinstance(conditions, Mapping):
+                    if "streaming" in conditions:
+                        _add_request_owner(
+                            owners,
+                            "GetStreamStatus",
+                            f"{domain}/{profile_name} · condition streaming",
+                        )
+                    if "recording" in conditions:
+                        _add_request_owner(
+                            owners,
+                            "GetRecordStatus",
+                            f"{domain}/{profile_name} · condition recording",
+                        )
+                    if str(conditions.get("program_scene") or "").strip():
+                        _add_request_owner(
+                            owners,
+                            "GetCurrentProgramScene",
+                            f"{domain}/{profile_name} · condition program_scene",
+                        )
+
+    rules = config.get("rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if (
+                not isinstance(rule, Mapping)
+                or not bool(rule.get("enabled", True))
+            ):
+                continue
+            conditions = rule.get("conditions")
+            if not isinstance(conditions, Mapping):
+                continue
+            label = str(rule.get("name") or "Règle")
+            if "streaming" in conditions:
+                _add_request_owner(
+                    owners,
+                    "GetStreamStatus",
+                    f"règle {label} · streaming",
+                )
+            if "recording" in conditions:
+                _add_request_owner(
+                    owners,
+                    "GetRecordStatus",
+                    f"règle {label} · recording",
+                )
+            if str(conditions.get("program_scene") or "").strip():
+                _add_request_owner(
+                    owners,
+                    "GetCurrentProgramScene",
+                    f"règle {label} · program_scene",
+                )
+
+    layouts = config.get("layout_profiles")
+    if isinstance(layouts, Mapping):
+        for name, profile in layouts.items():
+            if not isinstance(profile, Mapping):
+                continue
+            conditions = profile.get("conditions")
+            if not isinstance(conditions, Mapping):
+                continue
+            if "streaming" in conditions:
+                _add_request_owner(
+                    owners,
+                    "GetStreamStatus",
+                    f"layout {name} · condition streaming",
+                )
+            if "recording" in conditions:
+                _add_request_owner(
+                    owners,
+                    "GetRecordStatus",
+                    f"layout {name} · condition recording",
+                )
+            if str(conditions.get("program_scene") or "").strip():
+                _add_request_owner(
+                    owners,
+                    "GetCurrentProgramScene",
+                    f"layout {name} · condition program_scene",
+                )
+
+    return {
+        request: tuple(sorted(values, key=str.casefold))
+        for request, values in sorted(owners.items())
+    }
+
+
+def probe_obs_request_capabilities(
+    config: Mapping[str, Any],
+    catalog: OBSResourceCatalog | None,
+) -> dict[str, object]:
+    requirements = _configured_obs_request_requirements(config)
+    rows = [
+        {"request": request, "owners": list(owners)}
+        for request, owners in requirements.items()
+    ]
+    if not requirements:
         return {
-            "available": True,
-            "stale": True,
-            "stale_reason": str(exc),
+            "status": "unused",
+            "detail": (
+                "Aucune action/condition configurée ne requiert "
+                "d’appel OBS supplémentaire."
+            ),
+            "required": rows,
+            "missing": [],
+        }
+    if catalog is None:
+        return {
+            "status": "warning",
+            "detail": (
+                "Compatibilité des requêtes non vérifiable "
+                "sans catalogue OBS fiable."
+            ),
+            "required": rows,
+            "missing": [],
         }
 
+    available = set(catalog.available_requests)
+    if not available:
+        return {
+            "status": "warning",
+            "detail": (
+                "OBS n’a pas fourni availableRequests ; "
+                "la compatibilité d’exécution ne peut pas être prouvée."
+            ),
+            "required": rows,
+            "missing": [],
+        }
+
+    missing = [
+        {"request": request, "owners": list(requirements[request])}
+        for request in requirements
+        if request not in available
+    ]
+    if missing:
+        names = ", ".join(str(item["request"]) for item in missing)
+        return {
+            "status": "error",
+            "detail": (
+                f"{len(missing)} requête(s) requise(s) absente(s) : {names}."
+            ),
+            "action": (
+                "Vérifiez la version d’OBS/obs-websocket ou retirez "
+                "la fonctionnalité qui dépend de ces requêtes."
+            ),
+            "required": rows,
+            "missing": missing,
+        }
+    return {
+        "status": "ready",
+        "detail": (
+            f"{len(requirements)} requête(s) d’exécution configurée(s), "
+            "toutes annoncées par OBS."
+        ),
+        "required": rows,
+        "missing": [],
+    }
 
 def _configured_hdr_scope(config: Mapping[str, Any]) -> str:
     """Return the broadest HDR scope requested by configured HDR actions."""
@@ -291,6 +505,8 @@ def run_system_check(
         "available": False,
         "stale": False,
     }
+    catalog: OBSResourceCatalog | None = None
+    obs_request_probe: dict[str, object] = {}
 
     client = None
     try:
@@ -300,7 +516,11 @@ def run_system_check(
             client = obs_client_factory(obs_config)
             obs_connected, message = client.probe()
             if obs_connected:
-                catalog_status = _probe_obs_catalog(client)
+                catalog_status, catalog = _probe_obs_catalog(client)
+                obs_request_probe = probe_obs_request_capabilities(
+                    config,
+                    catalog,
+                )
             else:
                 obs_error = str(message or "Connexion OBS indisponible.")
     except Exception as exc:
@@ -329,12 +549,14 @@ def run_system_check(
         obs_connected=obs_connected,
         obs_error=obs_error,
         catalog_status=catalog_status,
+        obs_request_probe=obs_request_probe,
         audio_probe=audio_probe,
         hdr_probe=hdr_probe,
     )
     return SystemCheckReport(
         config_errors=config_errors,
         capabilities=capabilities,
+        obs_requests=obs_request_probe,
     )
 
 

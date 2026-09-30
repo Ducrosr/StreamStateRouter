@@ -1298,6 +1298,7 @@ def build_capability_report(
     obs_connected: bool,
     obs_error: str = "",
     catalog_status: Mapping[str, Any] | None = None,
+    obs_request_probe: Mapping[str, Any] | None = None,
     audio_probe: Mapping[str, Any] | None = None,
     hdr_probe: Mapping[str, Any] | None = None,
 ) -> CapabilityReport:
@@ -1379,6 +1380,31 @@ def build_capability_report(
             "Synchronisez le catalogue OBS si des références ont changé."
             if catalog_status_name == "warning"
             else "",
+        )
+    )
+
+    obs_requests = _mapping(obs_request_probe)
+    if not obs_enabled:
+        request_status = "disabled"
+        request_detail = "Non vérifiable tant qu’OBS est désactivé."
+        request_action = ""
+    elif not obs_connected:
+        request_status = "warning"
+        request_detail = "Non vérifiable sans connexion OBS."
+        request_action = ""
+    else:
+        request_status = str(obs_requests.get("status") or "warning")
+        request_detail = str(
+            obs_requests.get("detail") or "État non vérifié."
+        )
+        request_action = str(obs_requests.get("action") or "")
+    items.append(
+        _capability_item(
+            "obs_requests",
+            "Compatibilité API OBS",
+            request_status,
+            request_detail,
+            request_action,
         )
     )
 
