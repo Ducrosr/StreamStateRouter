@@ -7277,11 +7277,18 @@ class MainWindow(QMainWindow):
         result = self._service.stop()
         marker = self._runtime_marker
         if marker is not None:
-            marker.finish(
-                clean_shutdown=bool(result),
-                cleanup_complete=bool(result.cleanup_complete),
-                pending_cleanup=result.pending_cleanup,
-            )
+            if bool(result):
+                # Finalization is only safe once the runtime worker has stopped
+                # and OBS dispatch is quiescent. If stop() timed out, keep the
+                # marker writable/unclean so a late worker checkpoint can still
+                # durably arm cleanup before any temporary OBS mutation.
+                marker.finish(
+                    clean_shutdown=True,
+                    cleanup_complete=bool(result.cleanup_complete),
+                    pending_cleanup=result.pending_cleanup,
+                )
+            else:
+                marker.checkpoint_pending_cleanup(result.pending_cleanup)
         if not result.cleanup_complete:
             self._log(
                 f"Arrêt avec {len(result.pending_cleanup)} obligation(s) de nettoyage OBS conservée(s)."
