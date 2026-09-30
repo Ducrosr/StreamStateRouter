@@ -68,7 +68,11 @@ class MainCliTests(unittest.TestCase):
         output = io.StringIO()
 
         with (
-            patch.object(app_main, "load_config", return_value=config),
+            patch.object(
+                app_main,
+                "load_config_unvalidated",
+                return_value=config,
+            ),
             patch(
                 "stream_state_router.services.system_check.run_system_check",
                 return_value=report,
@@ -84,6 +88,58 @@ class MainCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "ready")
+
+    def test_system_check_can_report_semantically_invalid_config(self):
+        config = {
+            "schema_version": 999,
+            "router": {},
+            "rules": [],
+            "obs": {"enabled": False},
+            "api": {},
+            "profiles": {},
+            "layout_profiles": {},
+            "activation_policies": {},
+        }
+        report = SimpleNamespace(
+            ok=False,
+            as_mapping=lambda: {
+                "status": "error",
+                "ok": False,
+                "config": {
+                    "valid": False,
+                    "errors": ["schema_version doit valoir 6"],
+                },
+                "capabilities": {
+                    "status": "error",
+                    "summary": "configuration invalide",
+                    "items": [],
+                    "findings": [],
+                },
+            },
+        )
+        output = io.StringIO()
+
+        with (
+            patch.object(
+                app_main,
+                "load_config_unvalidated",
+                return_value=config,
+            ),
+            patch(
+                "stream_state_router.services.system_check.run_system_check",
+                return_value=report,
+            ) as system_check,
+            patch.object(app_main, "SingleInstanceGuard") as guard,
+            redirect_stdout(output),
+        ):
+            code = app_main.main(["--system-check-json"])
+
+        self.assertEqual(code, 1)
+        system_check.assert_called_once_with(config)
+        guard.assert_not_called()
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["config"]["valid"])
+        self.assertTrue(payload["config"]["errors"])
 
     def test_diagnostic_cli_modes_are_mutually_exclusive(self):
         with self.assertRaises(SystemExit):
