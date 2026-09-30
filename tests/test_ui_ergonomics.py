@@ -111,6 +111,37 @@ class ErgonomicsPresentationTests(unittest.TestCase):
         )
         self.assertEqual(dirty.key, "review_draft")
 
+    def test_contextual_action_previews_corrective_impact_count(self) -> None:
+        drift = build_contextual_action(
+            obs_enabled=True,
+            obs_connected=True,
+            paused=False,
+            draft_dirty=False,
+            revision_mismatch=False,
+            override_active=False,
+            drift_detected=True,
+            difference_count=2,
+        )
+        self.assertEqual(drift.button_text, "Réappliquer SSR (2)")
+        self.assertIn("2 différence", drift.detail)
+
+        pending = build_contextual_action(
+            obs_enabled=True,
+            obs_connected=True,
+            paused=False,
+            draft_dirty=False,
+            revision_mismatch=False,
+            override_active=False,
+            drift_detected=False,
+            difference_statuses=("planned", "current"),
+            difference_count=1,
+        )
+        self.assertEqual(
+            pending.button_text,
+            "Corriger les différences (1)",
+        )
+        self.assertIn("1 différence", pending.detail)
+
     def test_contextual_action_surfaces_override_and_drift(self) -> None:
         override = build_contextual_action(
             obs_enabled=True,
