@@ -406,6 +406,9 @@ class OBSLayoutManager:
                 qualified_collection,
                 session_generation=expected,
             )
+            # The collection probe above can itself block. Re-check runtime
+            # admission once more before the guarded OBS request is submitted.
+            self._yield_runtime()
         if expected and isinstance(self.client, OBSClientManager):
             response = self.client.send(
                 request,
@@ -967,6 +970,11 @@ class OBSLayoutManager:
                         session_generation=session_generation,
                         expected_collection=collection,
                     )
+                except _FadeContextChangedAfterRequest:
+                    # The request was submitted, but its collection boundary
+                    # no longer matches. Preserve the exact uncertainty for
+                    # the outer handler instead of trying to observe in B.
+                    raise
                 except Exception:
                     # A response loss can make Create outcome uncertain.
                     # Observe the generated identity once, never issue a second
@@ -1072,6 +1080,8 @@ class OBSLayoutManager:
                         session_generation=session_generation,
                         expected_collection=collection,
                     )
+                except _FadeContextChangedAfterRequest:
+                    raise
                 except Exception as exc:
                     write_error = exc
                 try:
