@@ -441,6 +441,7 @@ class MainWindow(QMainWindow):
             obs_enabled=obs_enabled,
             obs_connected=bool(client and client.connected),
             routing_incomplete=self._routing_incomplete,
+            runtime_available=service is not None,
         )
         self._set_status_label(
             self.interface_status,
