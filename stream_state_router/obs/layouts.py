@@ -443,7 +443,12 @@ class OBSLayoutManager:
                     ),
                 )
                 self._yield_runtime()
-            response = self._send(request, data)
+            request_error: OBSRequestError | None = None
+            response: dict[str, Any] = {}
+            try:
+                response = self._send(request, data)
+            except OBSRequestError as exc:
+                request_error = exc
             if expected_session:
                 current_session = int(
                     getattr(self.client, "session_generation", 0) or 0
@@ -466,6 +471,8 @@ class OBSLayoutManager:
                         f"Scene Collection modifiée pendant {request}; "
                         "résultat OBS considéré incertain"
                     ) from exc
+            if request_error is not None:
+                raise request_error
 
         # Context qualification must happen before cooperative cancellation.
         # A shutdown requested while OBS was blocked must not hide a collection
@@ -921,6 +928,8 @@ class OBSLayoutManager:
         pending.context_uncertain = bool(uncertain)
         if uncertain and detail:
             pending.last_error = str(detail)
+        elif not uncertain and pending.last_error.startswith("mutation "):
+            pending.last_error = ""
         try:
             self._notify_pending_cleanup_changed()
         except Exception:
@@ -1921,6 +1930,7 @@ class OBSLayoutManager:
         # re-verify the helper before any mutation.
         self._active_fade_helpers.clear()
         self._active_fade_sessions.clear()
+        self._active_fade_collection_generations.clear()
 
     def _scene_collection_name(
         self,
