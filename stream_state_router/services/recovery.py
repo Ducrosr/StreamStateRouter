@@ -150,6 +150,17 @@ class RuntimeMarker:
                                 "runtime.json préservé"
                             )
                         continue
+                    if (
+                        strict_current_schema
+                        and _strict_text(item.get("kind")).casefold() == "layout_fade"
+                    ):
+                        helper_id = _strict_text(item.get("helper_id"))
+                        legacy = item.get("legacy")
+                        if not isinstance(legacy, bool) or legacy == bool(helper_id):
+                            raise RuntimeMarkerFormatError(
+                                "obligation layout_fade contradictoire dans le schéma "
+                                "courant; runtime.json préservé"
+                            )
                     parsed = _normalize_cleanup_item(item)
                     if parsed is None:
                         if strict_current_schema:
