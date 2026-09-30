@@ -1318,6 +1318,7 @@ class OBSLayoutManager:
         *,
         session_generation: int = 0,
         expected_collection: str = "",
+        expected_collection_generation: int = 0,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         candidates: list[str] = []
         unreadable: list[str] = []
@@ -1326,25 +1327,19 @@ class OBSLayoutManager:
             if not name or name == identity.filter_name:
                 continue
             try:
-                kind, _enabled, settings = self._fade_filter_state(
+                kind, _enabled, _settings = self._fade_filter_state(
                     source,
                     name,
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
                     expected_collection=expected_collection,
+                    expected_collection_generation=(
+                        expected_collection_generation
+                    ),
                 )
             except Exception:
-                # When the expected owned helper vanished, an unreadable filter
-                # cannot be ruled out as a rename. Quarantine rather than infer
-                # absence or adoption.
                 unreadable.append(name)
                 continue
-            # Once the proven helper name is gone there is no filter UUID
-            # available to distinguish a fully renamed SSR helper from an
-            # unrelated user filter of the same OBS kind. Even incompatible
-            # non-temporary settings (for example an externally changed
-            # contrast) therefore remain ambiguous: quarantine, never adopt,
-            # mutate, acknowledge absence, or recreate automatically.
             if kind == identity.filter_kind:
                 candidates.append(name)
         return (
@@ -1358,12 +1353,14 @@ class OBSLayoutManager:
         identity: FadeHelperIdentity,
         *,
         session_generation: int = 0,
+        collection_generation: int = 0,
     ) -> tuple[bool, str]:
         rows = self._fade_filter_rows(
             source,
             source_uuid=identity.source_uuid,
             session_generation=session_generation,
             expected_collection=identity.collection,
+            expected_collection_generation=collection_generation,
         )
         exact = [
             row
@@ -1372,6 +1369,7 @@ class OBSLayoutManager:
         ]
         if exact:
             return False, ""
+
         suspicious = [
             str(row.get("filterName") or "").strip()
             for row in rows
@@ -1389,12 +1387,14 @@ class OBSLayoutManager:
                 f"présent(s) ({', '.join(sorted(set(suspicious), key=str.casefold))}); "
                 "cleanup suspendu",
             )
+
         candidates, unreadable = self._possible_renamed_fade_filters(
             source,
             identity,
             rows,
             session_generation=session_generation,
             expected_collection=identity.collection,
+            expected_collection_generation=collection_generation,
         )
         if candidates:
             return (
@@ -1408,9 +1408,11 @@ class OBSLayoutManager:
                 f"{source}: helper attendu absent mais filtre(s) non vérifiable(s) "
                 f"({', '.join(unreadable)}); absence non prouvée",
             )
+
         self._verify_fade_collection(
             identity.collection,
             session_generation=session_generation,
+            expected_collection_generation=collection_generation,
         )
         return True, ""
 
@@ -1429,6 +1431,12 @@ class OBSLayoutManager:
                 False,
                 f"{pending.source}: obligation fade dupliquée ou contradictoire; "
                 "aucune mutation automatique",
+            )
+        if pending.context_uncertain:
+            return (
+                False,
+                f"{pending.source}: mutation fade au contexte Scene Collection "
+                "incertain; cleanup automatique suspendu",
             )
         if pending.cleanup_action != "neutralize_disable":
             return (
@@ -1463,11 +1471,8 @@ class OBSLayoutManager:
                 f"{pending.source}: identité helper contradictoire; "
                 "cleanup suspendu",
             )
+
         if identity.state != "observed":
-            # The manifest was durably prepared before Create. If SSR never
-            # persisted an observation, no temporary opacity write could have
-            # been emitted by the normal path. Do not require the external
-            # target to still exist, and never adopt a same-name filter.
             return (
                 True,
                 f"{pending.source}: helper jamais observé; "
@@ -1485,7 +1490,9 @@ class OBSLayoutManager:
             )
 
         try:
-            self._verify_fade_collection(pending.collection)
+            _current, collection_generation = (
+                self._capture_fade_collection_context(pending.collection)
+            )
             session_generation = int(
                 getattr(self.client, "session_generation", 0) or 0
             )
@@ -1494,16 +1501,19 @@ class OBSLayoutManager:
                 source_uuid=pending.source_uuid,
                 session_generation=session_generation,
                 expected_collection=pending.collection,
+                expected_collection_generation=collection_generation,
             )
             self._verify_fade_collection(
                 pending.collection,
                 session_generation=session_generation,
+                expected_collection_generation=collection_generation,
             )
         except Exception as exc:
             return (
                 False,
                 f"{pending.source}: cible/contexte non vérifiable ({exc})",
             )
+
         if source_uuid != pending.source_uuid or source_kind != pending.source_kind:
             return (
                 False,
@@ -1517,12 +1527,14 @@ class OBSLayoutManager:
                 source_uuid=identity.source_uuid,
                 session_generation=session_generation,
                 expected_collection=pending.collection,
+                expected_collection_generation=collection_generation,
             )
         except Exception as exc:
             return (
                 False,
                 f"{pending.source}: inventaire filtres non vérifiable ({exc})",
             )
+
         expected = [
             row
             for row in rows
@@ -1534,6 +1546,7 @@ class OBSLayoutManager:
                     source_alias,
                     identity,
                     session_generation=session_generation,
+                    collection_generation=collection_generation,
                 )
             except Exception as exc:
                 return (
@@ -1544,6 +1557,7 @@ class OBSLayoutManager:
                 return False, ambiguity
             if absent:
                 return True, f"{pending.source}: helper déjà absent"
+
         if len(expected) != 1:
             return (
                 False,
@@ -1557,6 +1571,7 @@ class OBSLayoutManager:
                 source_uuid=identity.source_uuid,
                 session_generation=session_generation,
                 expected_collection=pending.collection,
+                expected_collection_generation=collection_generation,
             )
         except OBSResourceNotFoundError:
             try:
@@ -1564,6 +1579,7 @@ class OBSLayoutManager:
                     source_alias,
                     identity,
                     session_generation=session_generation,
+                    collection_generation=collection_generation,
                 )
             except Exception as exc:
                 return (
@@ -1596,14 +1612,12 @@ class OBSLayoutManager:
             and not isinstance(raw_opacity, bool)
             and abs(float(raw_opacity) - 1.0) <= 1e-6
         )
+
         if not opacity_neutral:
             write_error: Exception | None = None
             try:
-                self._verify_fade_collection(
-                    pending.collection,
-                    session_generation=session_generation,
-                )
-                self._fade_send(
+                self._fade_mutation_send(
+                    identity,
                     "SetSourceFilterSettings",
                     {
                         "sourceName": source_alias,
@@ -1613,7 +1627,7 @@ class OBSLayoutManager:
                         "overlay": True,
                     },
                     session_generation=session_generation,
-                    expected_collection=pending.collection,
+                    collection_generation=collection_generation,
                 )
             except OBSResourceNotFoundError:
                 try:
@@ -1621,6 +1635,7 @@ class OBSLayoutManager:
                         source_alias,
                         identity,
                         session_generation=session_generation,
+                        collection_generation=collection_generation,
                     )
                 except Exception as exc:
                     return (
@@ -1635,6 +1650,12 @@ class OBSLayoutManager:
                         f"{pending.source}: helper disparu pendant neutralisation",
                     )
             except Exception as exc:
+                if pending.context_uncertain:
+                    return (
+                        False,
+                        f"{pending.source}: neutralisation au contexte incertain "
+                        f"({exc}); obligation conservée",
+                    )
                 write_error = exc
 
             try:
@@ -1644,6 +1665,7 @@ class OBSLayoutManager:
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
                     expected_collection=pending.collection,
+                    expected_collection_generation=collection_generation,
                 )
             except Exception as exc:
                 detail = write_error or exc
@@ -1652,6 +1674,7 @@ class OBSLayoutManager:
                     f"{pending.source}: neutralisation/readback incertain "
                     f"({detail})",
                 )
+
             raw_opacity = settings.get("opacity")
             if (
                 kind != identity.filter_kind
@@ -1676,11 +1699,8 @@ class OBSLayoutManager:
         if enabled is not False:
             write_error = None
             try:
-                self._verify_fade_collection(
-                    pending.collection,
-                    session_generation=session_generation,
-                )
-                self._fade_send(
+                self._fade_mutation_send(
+                    identity,
                     "SetSourceFilterEnabled",
                     {
                         "sourceName": source_alias,
@@ -1689,7 +1709,7 @@ class OBSLayoutManager:
                         "filterEnabled": False,
                     },
                     session_generation=session_generation,
-                    expected_collection=pending.collection,
+                    collection_generation=collection_generation,
                 )
             except OBSResourceNotFoundError:
                 try:
@@ -1697,6 +1717,7 @@ class OBSLayoutManager:
                         source_alias,
                         identity,
                         session_generation=session_generation,
+                        collection_generation=collection_generation,
                     )
                 except Exception as exc:
                     return (
@@ -1711,6 +1732,12 @@ class OBSLayoutManager:
                         f"{pending.source}: helper disparu pendant désactivation",
                     )
             except Exception as exc:
+                if pending.context_uncertain:
+                    return (
+                        False,
+                        f"{pending.source}: désactivation au contexte incertain "
+                        f"({exc}); obligation conservée",
+                    )
                 write_error = exc
 
             try:
@@ -1720,6 +1747,7 @@ class OBSLayoutManager:
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
                     expected_collection=pending.collection,
+                    expected_collection_generation=collection_generation,
                 )
             except Exception as exc:
                 detail = write_error or exc
@@ -1748,6 +1776,7 @@ class OBSLayoutManager:
             self._verify_fade_collection(
                 pending.collection,
                 session_generation=session_generation,
+                expected_collection_generation=collection_generation,
             )
         except Exception as exc:
             return (
