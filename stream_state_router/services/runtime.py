@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import queue
 import sys
 import threading
@@ -755,6 +756,8 @@ class RoutingService:
             if duration_seconds is not None
             else None
         )
+        if duration is not None and not math.isfinite(duration):
+            raise ValueError("duration_seconds doit être un nombre fini")
         if mode == "duration":
             if duration is None or duration <= 0:
                 raise ValueError(
