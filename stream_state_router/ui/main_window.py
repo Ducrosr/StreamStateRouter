@@ -4511,8 +4511,13 @@ class MainWindow(QMainWindow):
                         self.rules_table.scrollToItem(
                             self.rules_table.item(rule_index, 1)
                         )
+                health = build_rule_health(rule, self.config)
                 entries.append(
-                    (f"Règle · {name}", open_rule)
+                    (
+                        f"Règle · {name} · {health.text} · "
+                        f"{humanize_rule(rule)} · {health.detail}",
+                        open_rule,
+                    )
                 )
 
         profiles = self.config.get("profiles")
@@ -4536,10 +4541,23 @@ class MainWindow(QMainWindow):
                             self.profile_domain.setCurrentIndex(domain_index)
                         self._refresh_profile_names()
                         self.profile_name.setCurrentText(wanted_name)
+                    profile = domain_profiles.get(name)
+                    parent = (
+                        str(profile.get("extends") or "").strip()
+                        if isinstance(profile, Mapping)
+                        else ""
+                    )
+                    actions = (
+                        profile.get("actions")
+                        if isinstance(profile, Mapping)
+                        and isinstance(profile.get("actions"), list)
+                        else []
+                    )
                     entries.append(
                         (
                             f"Profil {DOMAIN_LABELS.get(domain_name, domain_name)}"
-                            f" · {profile_name}",
+                            f" · {profile_name} · {len(actions)} action(s)"
+                            + (f" · hérite de {parent}" if parent else ""),
                             open_profile,
                         )
                     )
@@ -4555,8 +4573,24 @@ class MainWindow(QMainWindow):
                     self.tabs.setCurrentIndex(self.layouts_tab_index)
                     self.layout_profile_name.setCurrentText(wanted_name)
                     self._refresh_layout_profile_view()
+                layout_profile = layouts.get(name)
+                modules = (
+                    layout_profile.get("modules")
+                    if isinstance(layout_profile, Mapping)
+                    and isinstance(layout_profile.get("modules"), Mapping)
+                    else {}
+                )
+                parent = (
+                    str(layout_profile.get("extends") or "").strip()
+                    if isinstance(layout_profile, Mapping)
+                    else ""
+                )
                 entries.append(
-                    (f"Layout · {layout_name}", open_layout)
+                    (
+                        f"Layout · {layout_name} · {len(modules)} module(s)"
+                        + (f" · hérite de {parent}" if parent else ""),
+                        open_layout,
+                    )
                 )
 
         for kind, domain, target in self._favorite_targets:
