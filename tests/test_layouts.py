@@ -3788,5 +3788,51 @@ class LayoutTests(unittest.TestCase):
         )
 
 
+    def test_cleanup_stops_when_collection_changes_between_effects(self):
+        class SwitchAfterNeutralizeClient(FakeLayoutClient):
+            switch_after_neutralize = False
+
+            def send(self, request, data=None):
+                response = super().send(request, data)
+                payload = data or {}
+                settings = payload.get("filterSettings")
+                if (
+                    request == "SetSourceFilterSettings"
+                    and self.switch_after_neutralize
+                    and isinstance(settings, dict)
+                    and float(settings.get("opacity", -1.0)) == 1.0
+                ):
+                    self.switch_after_neutralize = False
+                    self.scene_collection = "Collection B"
+                return response
+
+        client = SwitchAfterNeutralizeClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        manager._set_source_opacity("[Webcam] Avatar", 0.3)
+        client.switch_after_neutralize = True
+        client.calls.clear()
+
+        warnings = manager.retry_pending_fade_cleanup()
+
+        self.assertTrue(warnings)
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertTrue(state["enabled"])
+        disable_writes = [
+            payload
+            for request, payload in client.calls
+            if request == "SetSourceFilterEnabled"
+            and payload.get("filterEnabled") is False
+        ]
+        self.assertEqual(disable_writes, [])
+
+
 if __name__ == "__main__":
     unittest.main()
