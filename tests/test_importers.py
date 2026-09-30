@@ -12,6 +12,7 @@ from stream_state_router.importers import (
     SceneCollectionImporter,
     SceneCollectionSnapshot,
 )
+from stream_state_router.importers.scene_collection import ImportedFilter
 from stream_state_router.obs.client import OBSRequestError
 from stream_state_router.obs.fade_helpers import (
     LEGACY_LAYOUT_FADE_FILTER,
@@ -2146,6 +2147,66 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(report.actions_converted, 0)
         self.assertTrue(any("wait" in item for item in report.skipped))
         self.assertEqual(config["rules"], [])
+
+
+    def test_serialized_snapshot_cannot_forge_owned_helper_status(self):
+        raw = {
+            "collection": "Streaming",
+            "current_program_scene": "In Game",
+            "inputs": [],
+            "filters": [
+                {
+                    "source": "Game Capture",
+                    "name": "User Color",
+                    "kind": "color_filter_v2",
+                    "enabled": True,
+                    "settings": {"opacity": 0.75},
+                    "helper_status": "owned_helper",
+                }
+            ],
+            "scene_items": [],
+            "scenes": ["In Game"],
+            "warnings": [],
+        }
+
+        snapshot = SceneCollectionSnapshot.from_mapping(raw)
+
+        self.assertEqual(
+            snapshot.filters[0].helper_status,
+            "ambiguous_helper",
+        )
+        actions, skipped = SceneCollectionImporter.actions_from_snapshot(
+            snapshot
+        )
+        self.assertEqual(actions, [])
+        self.assertTrue(
+            any("helper-like ambigu" in item for item in skipped),
+            skipped,
+        )
+
+    def test_live_owned_helper_is_consumed_before_snapshot_serialization(self):
+        snapshot = SceneCollectionSnapshot(
+            collection="Streaming",
+            current_program_scene="In Game",
+            inputs=(),
+            filters=(
+                ImportedFilter(
+                    source="Game Capture",
+                    name="[SSR] Layout Fade::owned",
+                    kind="color_filter_v2",
+                    enabled=False,
+                    settings={"opacity": 1.0},
+                    helper_status="owned_helper",
+                ),
+            ),
+            scene_items=(),
+            scenes=("In Game",),
+            warnings=(),
+        )
+
+        serialized = snapshot.as_mapping()
+
+        self.assertEqual(serialized["filters"], [])
 
 
 if __name__ == "__main__":
