@@ -504,7 +504,10 @@ class A1R3ContextTests(unittest.TestCase):
             p1, p2 = self._patches(server)
             with p1, p2:
                 client, store, manager, marker = self._fixture(tmp, server)
-                manager._prepare_fade_filter(server.source, "Collection A")
+                identity = manager._prepare_fade_filter(
+                    server.source,
+                    "Collection A",
+                )
 
                 fail_clear = {"armed": True}
 
