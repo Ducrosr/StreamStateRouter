@@ -1,0 +1,3 @@
+# Laboratory-only dependency for scripts/benchmark_obs_websocket_animation.py
+# Do not add this file to the production/release dependency closure.
+simpleobsws==1.4.3
