@@ -208,7 +208,9 @@ class RuntimeMarker:
         """Durably journal live cleanup obligations without finalizing the session."""
         with self._write_lock:
             if self.finalized:
-                return
+                raise RuntimeError(
+                    "runtime.json déjà finalisé; checkpoint de cleanup refusé"
+                )
             self._write(
                 False,
                 cleanup_complete=False,
