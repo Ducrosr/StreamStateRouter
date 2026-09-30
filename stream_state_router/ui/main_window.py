@@ -161,6 +161,25 @@ class MainWindow(QMainWindow):
         self._expert_mode = bool(
             self._window_settings.value("main_window/expert_mode", False, type=bool)
         )
+        self._favorite_targets: list[tuple[str, str, str]] = []
+        raw_favorites = self._window_settings.value(
+            "main_window/favorites",
+            "[]",
+        )
+        try:
+            decoded_favorites = json.loads(str(raw_favorites or "[]"))
+            if isinstance(decoded_favorites, list):
+                for raw in decoded_favorites:
+                    if (
+                        isinstance(raw, list)
+                        and len(raw) == 3
+                        and all(isinstance(item, str) for item in raw)
+                    ):
+                        self._favorite_targets.append(
+                            (raw[0], raw[1], raw[2])
+                        )
+        except (TypeError, ValueError):
+            self._favorite_targets = []
         self._edit_mode = False
         self._edit_mode_owned_pause = False
         self.config = copy.deepcopy(config)
@@ -1931,6 +1950,11 @@ class MainWindow(QMainWindow):
             self._open_inspector_target
         )
         actions.addWidget(self.inspector_open_button)
+        self.inspector_favorite_button = QPushButton("☆ Épingler")
+        self.inspector_favorite_button.clicked.connect(
+            self._toggle_inspector_favorite
+        )
+        actions.addWidget(self.inspector_favorite_button)
         self.inspector_impact_button = QPushButton("Impact / dépendances")
         self.inspector_impact_button.clicked.connect(
             self._show_inspector_impact
@@ -2015,6 +2039,17 @@ class MainWindow(QMainWindow):
         self.inspector_open_button.setEnabled(bool(target))
         self.inspector_impact_button.setEnabled(
             kind in {"profile", "layout"}
+        )
+        favorite_key = (
+            str(kind or ""),
+            str(domain or ""),
+            str(target or title),
+        )
+        self.inspector_favorite_button.setEnabled(bool(favorite_key[2]))
+        self.inspector_favorite_button.setText(
+            "★ Épinglé"
+            if favorite_key in self._favorite_targets
+            else "☆ Épingler"
         )
         if self._expert_mode:
             self.inspector_dock.show()
@@ -2163,6 +2198,47 @@ class MainWindow(QMainWindow):
             rows=rows,
             payload=profile,
         )
+
+    def _save_favorite_targets(self) -> None:
+        self._window_settings.setValue(
+            "main_window/favorites",
+            json.dumps(
+                [list(item) for item in self._favorite_targets],
+                ensure_ascii=False,
+            ),
+        )
+        self._window_settings.sync()
+
+    def _toggle_inspector_favorite(self) -> None:
+        context = self._inspector_context
+        if context is None:
+            return
+        if context in self._favorite_targets:
+            self._favorite_targets = [
+                item
+                for item in self._favorite_targets
+                if item != context
+            ]
+        else:
+            self._favorite_targets.insert(0, context)
+            self._favorite_targets = self._favorite_targets[:20]
+        self._save_favorite_targets()
+        self.inspector_favorite_button.setText(
+            "★ Épinglé"
+            if context in self._favorite_targets
+            else "☆ Épingler"
+        )
+
+    def _open_saved_target(
+        self,
+        kind: str,
+        domain: str,
+        target: str,
+    ) -> None:
+        if kind == "rule":
+            self._open_rule_by_name(target)
+        elif kind in {"profile", "layout"}:
+            self._open_profile_target(domain, target)
 
     def _open_inspector_target(self) -> None:
         context = self._inspector_context
@@ -4420,6 +4496,26 @@ class MainWindow(QMainWindow):
                 entries.append(
                     (f"Layout · {layout_name}", open_layout)
                 )
+
+        for kind, domain, target in self._favorite_targets:
+            label = (
+                f"★ Favori · {DOMAIN_LABELS.get(domain, domain)} · {target}"
+                if domain
+                else f"★ Favori · {kind} · {target}"
+            )
+            entries.append(
+                (
+                    label,
+                    lambda wanted_kind=kind,
+                    wanted_domain=domain,
+                    wanted_target=target:
+                    self._open_saved_target(
+                        wanted_kind,
+                        wanted_domain,
+                        wanted_target,
+                    ),
+                )
+            )
 
         for kind, domain, target in self._recent_inspector_targets:
             label = (
