@@ -77,7 +77,6 @@ from ..services.config import (
 )
 from ..services.config_insights import (
     apply_reference_repairs,
-    build_capability_report,
     build_config_change_review,
     build_effective_dependency_tree,
     build_effective_provenance,
@@ -93,7 +92,7 @@ from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
-from ..services.system_check import probe_host_capabilities
+from ..services.system_check import run_system_check
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
@@ -1191,24 +1190,8 @@ class MainWindow(QMainWindow):
         client = self._client
         self._collect_settings()
 
-        audio_probe, hdr_probe = probe_host_capabilities(
-            self.config
-        )
-
-        catalog_status = (
-            service.obs_catalog_status()
-            if service is not None
-            else {"available": False, "stale": False}
-        )
-        report = build_capability_report(
-            self.config,
-            obs_enabled=bool(client and client.config.enabled),
-            obs_connected=bool(client and client.connected),
-            obs_error=str(client.last_error if client else ""),
-            catalog_status=catalog_status,
-            audio_probe=audio_probe,
-            hdr_probe=hdr_probe,
-        )
+        system_report = run_system_check(self.config)
+        report = system_report.capabilities
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Santé et capacités SSR")
@@ -1218,6 +1201,15 @@ class MainWindow(QMainWindow):
         title = QLabel(report.summary)
         title.setStyleSheet("font-size: 15pt; font-weight: 700;")
         root.addWidget(title)
+
+        if system_report.config_errors:
+            validation = QLabel(
+                "Configuration invalide :\n• "
+                + "\n• ".join(system_report.config_errors)
+            )
+            validation.setWordWrap(True)
+            validation.setObjectName("Bad")
+            root.addWidget(validation)
 
         capabilities = QTreeWidget()
         capabilities.setColumnCount(4)
