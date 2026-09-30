@@ -291,6 +291,43 @@ class FadeHelperManifestStoreTests(unittest.TestCase):
                 with self.assertRaises(FadeHelperManifestError):
                     store.entries()
 
+    def test_manifest_requires_explicit_typed_state_and_settings(self):
+        mutations = (
+            ("missing_state", lambda row: row.pop("state")),
+            ("non_string_state", lambda row: row.__setitem__("state", False)),
+            (
+                "missing_non_temporary_settings",
+                lambda row: row.pop("non_temporary_settings"),
+            ),
+            (
+                "invalid_non_temporary_settings",
+                lambda row: row.__setitem__("non_temporary_settings", []),
+            ),
+        )
+
+        for label, mutate in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "helper-manifest.json"
+                store = FadeHelperManifestStore(path)
+                store.prepare_layout_fade(
+                    connection_host="127.0.0.1",
+                    connection_port=4455,
+                    collection="Collection A",
+                    source_uuid="input-uuid",
+                    source_alias="Avatar",
+                    source_kind="image_source",
+                    session_generation=1,
+                )
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                mutate(raw["helpers"][0])
+                path.write_text(json.dumps(raw), encoding="utf-8")
+                before = path.read_bytes()
+
+                with self.assertRaises(FadeHelperManifestError):
+                    store.entries()
+
+                self.assertEqual(path.read_bytes(), before)
+
     def test_manifest_schema_requires_exact_integer_type(self):
         for invalid_schema in (True, 1.0):
             with self.subTest(schema=invalid_schema), tempfile.TemporaryDirectory() as temp_dir:

@@ -105,10 +105,13 @@ class FadeHelperIdentity:
                 "helper creation session generation is invalid"
             )
         session_generation = raw_session_generation
-        state = _text(raw.get("state")) or "prepared"
+        raw_state = raw.get("state")
+        if not isinstance(raw_state, str) or not raw_state.strip():
+            raise FadeHelperManifestError("helper state is invalid")
+        state = raw_state.strip()
+        if "non_temporary_settings" not in raw:
+            raise FadeHelperManifestError("helper non-temporary settings are missing")
         non_temporary = raw.get("non_temporary_settings")
-        if non_temporary is None:
-            non_temporary = {}
         if not isinstance(non_temporary, Mapping):
             raise FadeHelperManifestError("helper non-temporary settings are invalid")
 
