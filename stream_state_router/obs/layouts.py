@@ -35,6 +35,10 @@ SSR_FADE_FILTER_KIND = LAYOUT_FADE_FILTER_KIND
 GROUP_RESIZE_SETTLE_SECONDS = 0.05
 
 
+class _FadeContextChangedAfterRequest(RuntimeError):
+    """An OBS fade request completed after its Scene Collection changed."""
+
+
 @dataclass(frozen=True, slots=True)
 class ModuleSourceName:
     module: str
@@ -386,14 +390,22 @@ class OBSLayoutManager:
         data: dict[str, Any] | None = None,
         *,
         session_generation: int = 0,
+        expected_collection: str = "",
     ) -> dict[str, Any]:
         # Fade requests can block inside the WebSocket client. Revalidate the
         # runtime both before sending and after a successful response so a
         # shutdown requested while OBS was blocked cannot resume normal fade
-        # work. Orderly-shutdown cleanup remains allowed because the runtime
-        # checkpoint explicitly permits its cleanup phase.
+        # work. A Scene Collection switch does not change the WebSocket
+        # generation, so qualified fade requests bracket the OBS request with
+        # collection checks as well.
         self._yield_runtime()
         expected = max(0, int(session_generation or 0))
+        qualified_collection = str(expected_collection or "").strip()
+        if qualified_collection:
+            self._verify_fade_collection(
+                qualified_collection,
+                session_generation=expected,
+            )
         if expected and isinstance(self.client, OBSClientManager):
             response = self.client.send(
                 request,
@@ -411,6 +423,17 @@ class OBSLayoutManager:
                 raise RuntimeError(
                     "Session OBS modifiée pendant l'opération de fade"
                 )
+        if qualified_collection:
+            try:
+                self._verify_fade_collection(
+                    qualified_collection,
+                    session_generation=expected,
+                )
+            except Exception as exc:
+                raise _FadeContextChangedAfterRequest(
+                    f"Scene Collection modifiée pendant {request}; "
+                    "résultat OBS considéré incertain"
+                ) from exc
         return response
 
     def _verify_fade_collection(
@@ -451,10 +474,12 @@ class OBSLayoutManager:
         *,
         source_uuid: str = "",
         session_generation: int = 0,
+        expected_collection: str = "",
     ) -> tuple[str, str, str]:
         response = self._fade_send(
             "GetInputList",
             session_generation=session_generation,
+            expected_collection=expected_collection,
         )
         raw_inputs = response.get("inputs") if isinstance(response, Mapping) else None
         if not isinstance(raw_inputs, list):
@@ -503,11 +528,13 @@ class OBSLayoutManager:
         *,
         source_uuid: str = "",
         session_generation: int = 0,
+        expected_collection: str = "",
     ) -> list[Mapping[str, Any]]:
         response = self._fade_send(
             "GetSourceFilterList",
             self._fade_source_payload(source, source_uuid),
             session_generation=session_generation,
+            expected_collection=expected_collection,
         )
         raw = response.get("filters") if isinstance(response, Mapping) else None
         if not isinstance(raw, list):
@@ -531,6 +558,7 @@ class OBSLayoutManager:
         *,
         source_uuid: str = "",
         session_generation: int = 0,
+        expected_collection: str = "",
     ) -> tuple[str, bool | None, dict[str, Any]]:
         payload = self._fade_source_payload(source, source_uuid)
         payload["filterName"] = filter_name
@@ -538,6 +566,7 @@ class OBSLayoutManager:
             "GetSourceFilter",
             payload,
             session_generation=session_generation,
+            expected_collection=expected_collection,
         )
         if not isinstance(response, Mapping):
             raise RuntimeError(f"État du helper illisible pour {source}")
@@ -781,6 +810,21 @@ class OBSLayoutManager:
             return
         self._remove_pending_fade(key)
 
+    def _quarantine_fade_context_uncertainty(
+        self,
+        identity: FadeHelperIdentity,
+        detail: str,
+    ) -> None:
+        """Persist fail-closed state for a request that crossed collections."""
+        key = (identity.collection, identity.helper_id)
+        pending = self._pending_fade_cleanup.get(key)
+        if pending is None:
+            return
+        pending.ambiguous = True
+        pending.last_error = str(detail)
+        self._notify_pending_cleanup_changed()
+        pending.persisted = True
+
     def _prepare_fade_filter(
         self,
         source: str,
@@ -818,6 +862,7 @@ class OBSLayoutManager:
         source_alias, source_uuid, source_kind = self._resolve_fade_input(
             source,
             session_generation=session_generation,
+            expected_collection=collection,
         )
         if session_generation and isinstance(self.client, OBSClientManager):
             verified_collection = self._scene_collection_name(
@@ -859,6 +904,7 @@ class OBSLayoutManager:
                 source_alias,
                 source_uuid=identity.source_uuid,
                 session_generation=session_generation,
+                expected_collection=collection,
             )
             expected_rows = [
                 row
@@ -895,6 +941,7 @@ class OBSLayoutManager:
                         identity,
                         rows,
                         session_generation=session_generation,
+                        expected_collection=collection,
                     )
                     if candidates or unreadable:
                         names = candidates or unreadable
@@ -918,6 +965,7 @@ class OBSLayoutManager:
                             "filterSettings": {"opacity": 1.0},
                         },
                         session_generation=session_generation,
+                        expected_collection=collection,
                     )
                 except Exception:
                     # A response loss can make Create outcome uncertain.
@@ -939,6 +987,7 @@ class OBSLayoutManager:
                         source_alias,
                         source_uuid=identity.source_uuid,
                         session_generation=session_generation,
+                        expected_collection=collection,
                     )
                     expected_rows = [
                         row
@@ -953,6 +1002,7 @@ class OBSLayoutManager:
                         source_alias,
                         source_uuid=identity.source_uuid,
                         session_generation=session_generation,
+                        expected_collection=collection,
                     )
                     expected_rows = [
                         row
@@ -971,6 +1021,7 @@ class OBSLayoutManager:
                 identity.filter_name,
                 source_uuid=identity.source_uuid,
                 session_generation=session_generation,
+                expected_collection=collection,
             )
             if kind != identity.filter_kind:
                 raise RuntimeError(
@@ -986,6 +1037,10 @@ class OBSLayoutManager:
                     f"{source_alias}"
                 )
             if identity.state != "observed":
+                self._verify_fade_collection(
+                    collection,
+                    session_generation=session_generation,
+                )
                 identity = self._fade_helper_store.mark_observed(
                     identity.helper_id,
                     source_alias=source_alias,
@@ -1015,6 +1070,7 @@ class OBSLayoutManager:
                             "overlay": True,
                         },
                         session_generation=session_generation,
+                        expected_collection=collection,
                     )
                 except Exception as exc:
                     write_error = exc
@@ -1024,6 +1080,7 @@ class OBSLayoutManager:
                         identity.filter_name,
                         source_uuid=identity.source_uuid,
                         session_generation=session_generation,
+                        expected_collection=collection,
                     )
                 except Exception as exc:
                     detail = write_error or exc
@@ -1067,12 +1124,14 @@ class OBSLayoutManager:
                         "filterEnabled": True,
                     },
                     session_generation=session_generation,
+                    expected_collection=collection,
                 )
                 kind, enabled, settings = self._fade_filter_state(
                     source_alias,
                     identity.filter_name,
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
+                    expected_collection=collection,
                 )
                 if kind != identity.filter_kind or enabled is not True:
                     raise RuntimeError(
@@ -1092,6 +1151,20 @@ class OBSLayoutManager:
             self._active_fade_sessions[source_alias] = session_generation
             return identity
         except Exception as exc:
+            if effect_started and isinstance(
+                exc,
+                _FadeContextChangedAfterRequest,
+            ):
+                try:
+                    self._quarantine_fade_context_uncertainty(
+                        identity,
+                        str(exc),
+                    )
+                except Exception as quarantine_exc:
+                    raise RuntimeError(
+                        f"{exc}; quarantaine durable du contexte impossible: "
+                        f"{quarantine_exc}"
+                    ) from exc
             if not effect_started and not obligation_preexisting:
                 try:
                     self._discard_unmutated_fade_obligation(identity)
@@ -1120,6 +1193,7 @@ class OBSLayoutManager:
             identity.source_alias,
             source_uuid=identity.source_uuid,
             session_generation=session_generation,
+            expected_collection=identity.collection,
         )
         if (
             source_uuid != identity.source_uuid
@@ -1144,6 +1218,7 @@ class OBSLayoutManager:
                 "overlay": True,
             },
             session_generation=session_generation,
+            expected_collection=identity.collection,
         )
 
     def _possible_renamed_fade_filters(
@@ -1153,6 +1228,7 @@ class OBSLayoutManager:
         rows: Iterable[Mapping[str, Any]],
         *,
         session_generation: int = 0,
+        expected_collection: str = "",
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         candidates: list[str] = []
         unreadable: list[str] = []
@@ -1166,6 +1242,7 @@ class OBSLayoutManager:
                     name,
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
+                    expected_collection=expected_collection,
                 )
             except Exception:
                 # When the expected owned helper vanished, an unreadable filter
@@ -1197,6 +1274,7 @@ class OBSLayoutManager:
             source,
             source_uuid=identity.source_uuid,
             session_generation=session_generation,
+            expected_collection=identity.collection,
         )
         exact = [
             row
@@ -1227,6 +1305,7 @@ class OBSLayoutManager:
             identity,
             rows,
             session_generation=session_generation,
+            expected_collection=identity.collection,
         )
         if candidates:
             return (
@@ -1240,6 +1319,10 @@ class OBSLayoutManager:
                 f"{source}: helper attendu absent mais filtre(s) non vérifiable(s) "
                 f"({', '.join(unreadable)}); absence non prouvée",
             )
+        self._verify_fade_collection(
+            identity.collection,
+            session_generation=session_generation,
+        )
         return True, ""
 
     def _cleanup_pending_fade(
@@ -1321,6 +1404,7 @@ class OBSLayoutManager:
                 pending.source,
                 source_uuid=pending.source_uuid,
                 session_generation=session_generation,
+                expected_collection=pending.collection,
             )
             self._verify_fade_collection(
                 pending.collection,
@@ -1343,6 +1427,7 @@ class OBSLayoutManager:
                 source_alias,
                 source_uuid=identity.source_uuid,
                 session_generation=session_generation,
+                expected_collection=pending.collection,
             )
         except Exception as exc:
             return (
@@ -1382,6 +1467,7 @@ class OBSLayoutManager:
                 identity.filter_name,
                 source_uuid=identity.source_uuid,
                 session_generation=session_generation,
+                expected_collection=pending.collection,
             )
         except OBSResourceNotFoundError:
             try:
@@ -1438,6 +1524,7 @@ class OBSLayoutManager:
                         "overlay": True,
                     },
                     session_generation=session_generation,
+                    expected_collection=pending.collection,
                 )
             except OBSResourceNotFoundError:
                 try:
@@ -1467,6 +1554,7 @@ class OBSLayoutManager:
                     identity.filter_name,
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
+                    expected_collection=pending.collection,
                 )
             except Exception as exc:
                 detail = write_error or exc
@@ -1512,6 +1600,7 @@ class OBSLayoutManager:
                         "filterEnabled": False,
                     },
                     session_generation=session_generation,
+                    expected_collection=pending.collection,
                 )
             except OBSResourceNotFoundError:
                 try:
@@ -1541,6 +1630,7 @@ class OBSLayoutManager:
                     identity.filter_name,
                     source_uuid=identity.source_uuid,
                     session_generation=session_generation,
+                    expected_collection=pending.collection,
                 )
             except Exception as exc:
                 detail = write_error or exc
