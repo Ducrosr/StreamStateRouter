@@ -401,6 +401,135 @@ class LayoutTests(unittest.TestCase):
             )
         )
 
+    def test_prepare_fade_inflight_collection_switch_quarantines_obligation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CollectionSwitchLayoutClient()
+            store = FadeHelperManifestStore(
+                Path(tmp) / "helper-manifest.json"
+            )
+            manager = OBSLayoutManager(
+                client,
+                fade_helper_store=store,
+            )
+            runtime = RuntimeMarker()
+            runtime.path = Path(tmp) / "runtime.json"
+            runtime.start()
+
+            def persist():
+                runtime.checkpoint_pending_cleanup(
+                    manager.export_pending_fade_cleanup()
+                )
+
+            manager.set_pending_cleanup_changed(persist)
+            client.arm_collection_switch(
+                "CreateSourceFilter",
+                timing="before",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Scene Collection modifiée",
+            ):
+                manager._prepare_fade_filter(
+                    "[Webcam] Avatar",
+                    "Collection A",
+                )
+
+            pending = manager.export_pending_fade_cleanup()
+            self.assertEqual(len(pending), 1)
+            self.assertTrue(pending[0]["ambiguous"])
+            self.assertEqual(
+                pending[0]["collection"],
+                "Collection A",
+            )
+
+            disk = json.loads(
+                runtime.path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(disk["pending_cleanup"]), 1)
+            self.assertTrue(
+                disk["pending_cleanup"][0]["ambiguous"]
+            )
+            self.assertEqual(
+                disk["pending_cleanup"][0]["helper_id"],
+                pending[0]["helper_id"],
+            )
+
+            identity = store.entries()[0]
+            self.assertNotIn(
+                "[Webcam] Avatar",
+                client.collection_filters["Collection A"],
+            )
+            self.assertIn(
+                identity.filter_name,
+                client.collection_filters["Collection B"][
+                    "[Webcam] Avatar"
+                ],
+            )
+
+    def test_cleanup_resource_not_found_after_collection_switch_keeps_obligation(self):
+        phases = (
+            ("state", "GetSourceFilter"),
+            ("neutralize", "SetSourceFilterSettings"),
+            ("disable", "SetSourceFilterEnabled"),
+        )
+        for phase, request in phases:
+            with self.subTest(phase=phase):
+                client = CollectionSwitchLayoutClient()
+                store = MemoryFadeHelperManifestStore()
+                manager = OBSLayoutManager(
+                    client,
+                    fade_helper_store=store,
+                )
+                manager.set_pending_cleanup_changed(lambda: None)
+                identity = manager._prepare_fade_filter(
+                    "[Webcam] Avatar",
+                    "Collection A",
+                )
+                if phase != "disable":
+                    manager._set_source_opacity(
+                        "[Webcam] Avatar",
+                        0.3,
+                    )
+
+                a_state = client.collection_filters[
+                    "Collection A"
+                ]["[Webcam] Avatar"][identity.filter_name]
+                before_opacity = float(
+                    a_state["settings"]["opacity"]
+                )
+                before_enabled = bool(a_state["enabled"])
+                client.collection_filters["Collection B"][
+                    "[Webcam] Avatar"
+                ] = {}
+                client.scene_collection = "Collection A"
+                client.source_filters = client.collection_filters[
+                    "Collection A"
+                ]
+                client.calls.clear()
+                client.arm_collection_switch(
+                    request,
+                    timing="before",
+                )
+
+                warnings = manager.retry_pending_fade_cleanup()
+
+                self.assertTrue(warnings)
+                pending = manager.export_pending_fade_cleanup()
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(
+                    pending[0]["helper_id"],
+                    identity.helper_id,
+                )
+                self.assertAlmostEqual(
+                    float(a_state["settings"]["opacity"]),
+                    before_opacity,
+                )
+                self.assertEqual(
+                    bool(a_state["enabled"]),
+                    before_enabled,
+                )
+
     def test_cleanup_collection_switch_during_absence_keeps_backlog_on_disk(self):
         for renamed in (False, True):
             with self.subTest(renamed=renamed), tempfile.TemporaryDirectory() as tmp:
