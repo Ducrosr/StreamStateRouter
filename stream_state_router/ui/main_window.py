@@ -975,8 +975,9 @@ class MainWindow(QMainWindow):
                 item.setToolTip(3, difference.message)
             self.dashboard_diff.addTopLevelItem(item)
 
+        drift_status = service.drift_status()
         drift_view = build_obs_drift_presentation(
-            service.drift_status(),
+            drift_status,
             ignored_signature=self._ignored_drift_signature,
         )
         self.drift_card.setVisible(drift_view.visible)
@@ -994,6 +995,11 @@ class MainWindow(QMainWindow):
             snapshot,
             override_active=override_view.active,
             drift_detected=drift_view.visible,
+            drift_count=(
+                int(drift_status.get("count", 0) or 0)
+                if isinstance(drift_status, Mapping)
+                else 0
+            ),
         )
         if hasattr(self, "diagnostics_status"):
             self._set_status_label(
@@ -1113,6 +1119,7 @@ class MainWindow(QMainWindow):
         *,
         override_active: bool,
         drift_detected: bool,
+        drift_count: int = 0,
     ) -> None:
         client = self._client
         service = self._service
@@ -1131,6 +1138,16 @@ class MainWindow(QMainWindow):
             difference_statuses=tuple(
                 difference.status
                 for difference in snapshot.differences
+            ),
+            difference_count=(
+                max(0, int(drift_count or 0))
+                if drift_detected
+                else sum(
+                    1
+                    for difference in snapshot.differences
+                    if difference.status_label
+                    not in {"Conforme", "Non géré"}
+                )
             ),
         )
         self._dashboard_context_action_key = view.key
