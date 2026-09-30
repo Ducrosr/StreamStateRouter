@@ -288,7 +288,7 @@ class RuntimeMarkerTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     RuntimeMarkerFormatError,
-                    "inconnue ou incomplète",
+                    "inconnue ou incomplète|contradictoire",
                 ):
                     marker.start()
 
@@ -296,6 +296,44 @@ class RuntimeMarkerTests(unittest.TestCase):
                     json.loads(path.read_text(encoding="utf-8")),
                     original,
                 )
+
+    def test_schema3_cannot_downgrade_owned_fade_to_legacy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            original = {
+                "clean_shutdown": False,
+                "cleanup_complete": False,
+                "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                "pending_cleanup": [
+                    {
+                        "kind": "layout_fade",
+                        "source": "[Webcam] Avatar",
+                        "collection": "Collection A",
+                        "source_uuid": "input-uuid",
+                        "source_kind": "image_source",
+                        "connection": {"host": "127.0.0.1", "port": 4455},
+                        "filter_name": "[SSR] Layout Fade::abc123",
+                        "filter_kind": "color_filter_v2",
+                        "cleanup_action": "neutralize_disable",
+                        "legacy": False,
+                        "ambiguous": False,
+                    }
+                ],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            marker = RuntimeMarker()
+            marker.path = path
+
+            with self.assertRaisesRegex(
+                RuntimeMarkerFormatError,
+                "layout_fade contradictoire",
+            ):
+                marker.start()
+
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                original,
+            )
 
     def test_invalid_schema3_layout_fade_identity_is_preserved_and_blocks_start(self):
         with tempfile.TemporaryDirectory() as temp_dir:
