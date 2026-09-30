@@ -230,6 +230,7 @@ def build_contextual_action(
     override_active: bool,
     drift_detected: bool,
     difference_statuses: Sequence[str] = (),
+    difference_count: int = 0,
 ) -> ContextualActionPresentation:
     statuses = {
         str(item or "").strip().casefold()
@@ -285,11 +286,22 @@ def build_contextual_action(
             "Warn",
         )
     if drift_detected:
+        count = max(0, int(difference_count or 0))
+        detail = (
+            f"{count} différence(s) visible(s) seront réévaluée(s) "
+            "avant la réapplication."
+            if count
+            else "Des propriétés gérées ont été modifiées en dehors de SSR."
+        )
         return ContextualActionPresentation(
             "reapply",
             "OBS ne correspond plus à la cible SSR",
-            "Des propriétés gérées ont été modifiées en dehors de SSR.",
-            "Réappliquer SSR",
+            detail,
+            (
+                f"Réappliquer SSR ({count})"
+                if count
+                else "Réappliquer SSR"
+            ),
             "Warn",
         )
     if statuses & {"failed", "missing", "error", "blocked", "partial"}:
@@ -301,11 +313,23 @@ def build_contextual_action(
             "Bad",
         )
     if statuses & {"pending", "queued", "planned"}:
+        count = max(0, int(difference_count or 0))
         return ContextualActionPresentation(
             "reapply",
             "Des changements OBS sont en attente",
-            "SSR connaît la cible mais elle n’est pas encore totalement appliquée.",
-            "Corriger les différences",
+            (
+                f"{count} différence(s) seront réévaluée(s) avant écriture."
+                if count
+                else (
+                    "SSR connaît la cible mais elle n’est pas encore "
+                    "totalement appliquée."
+                )
+            ),
+            (
+                f"Corriger les différences ({count})"
+                if count
+                else "Corriger les différences"
+            ),
             "Warn",
         )
 
