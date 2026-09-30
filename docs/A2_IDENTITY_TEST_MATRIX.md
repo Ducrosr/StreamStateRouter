@@ -20,6 +20,12 @@ observable safety properties rather than prescribing the future binding schema.
 | transport reconnect | Session discontinuity | Fresh observation/binding required. |
 | legacy name-only profile | Migration ambiguity | Enrich only when unique; otherwise explicit repair. |
 | nested group move | Container/path drift | Container identity must be revalidated. |
+| duplicated Scene Item | Copy/duplicate false identity | The duplicate cannot inherit mutation authority from the original occurrence. |
+| same source in multiple scenes | Container ambiguity | Source identity must remain qualified by the intended scene/container. |
+| duplicated group | Child-name ambiguity | Never select the first matching child across similar groups. |
+| renamed group | Container-name drift | Preserve proven continuity or require requalification; never guess by name. |
+| duplicated/imported collection | Cross-collection false continuity | Invalidate/rebind prepared work in the new collection context. |
+| same name, distinct UUIDs | Legacy migration ambiguity | Block name-only migration until one target is deterministically proven. |
 
 ## How the corpus should be used after A1
 

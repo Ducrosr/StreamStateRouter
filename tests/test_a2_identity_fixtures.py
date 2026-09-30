@@ -16,6 +16,12 @@ _REQUIRED_IDS = {
     "transport_reconnect_same_collection",
     "legacy_name_only_profile",
     "nested_group_move",
+    "duplicate_scene_item_copy",
+    "same_source_multiple_scenes",
+    "duplicate_group_same_children",
+    "group_rename_continuity",
+    "scene_collection_duplicate_or_import",
+    "ambiguous_same_name_distinct_uuid",
 }
 
 
@@ -53,6 +59,8 @@ class A2IdentityFixtureTests(unittest.TestCase):
                 "delete_recreate_same_name_new_uuid",
                 "duplicate_name_occurrences",
                 "legacy_name_only_profile",
+                "duplicate_scene_item_copy",
+                "ambiguous_same_name_distinct_uuid",
             )
         ).casefold()
         self.assertTrue(
