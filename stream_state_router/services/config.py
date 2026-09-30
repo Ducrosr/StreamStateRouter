@@ -314,6 +314,20 @@ def ensure_user_config() -> Path:
     return target
 
 
+def load_config_unvalidated(
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load and migrate JSON without rejecting semantic validation errors.
+
+    Intended for diagnostics that need to report validation failures rather
+    than abort before a structured report can be produced. Syntax/root errors
+    remain fatal because no meaningful configuration object exists.
+    """
+
+    target = Path(path) if path else ensure_user_config()
+    return migrate_config(_read_json(target))
+
+
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     target = Path(path) if path else ensure_user_config()
     data = migrate_config(_read_json(target))
