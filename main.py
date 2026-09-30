@@ -10,6 +10,7 @@ from stream_state_router.services.config import (
     ConfigError,
     build_ruleset,
     load_config,
+    load_config_unvalidated,
     validate_config,
 )
 from stream_state_router.services.logging_setup import configure_logging
@@ -22,17 +23,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--minimized", action="store_true", help="Démarrer dans la zone de notification")
     parser.add_argument("--headless", action="store_true", help="Afficher le routage dans la console sans interface")
-    parser.add_argument("--check-config", action="store_true", help="Valider la configuration puis quitter")
-    coverage = parser.add_mutually_exclusive_group()
-    coverage.add_argument(
+    diagnostics = parser.add_mutually_exclusive_group()
+    diagnostics.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Valider la configuration puis quitter",
+    )
+    diagnostics.add_argument(
         "--declarative-coverage",
         action="store_true",
         help="Afficher un résumé read-only de couverture déclarative puis quitter",
     )
-    coverage.add_argument(
+    diagnostics.add_argument(
         "--declarative-coverage-json",
         action="store_true",
         help="Afficher le rapport read-only de couverture déclarative en JSON puis quitter",
+    )
+    diagnostics.add_argument(
+        "--system-check",
+        action="store_true",
+        help=(
+            "Contrôler en lecture seule la configuration, OBS et les "
+            "capacités Windows utilisées puis quitter"
+        ),
+    )
+    diagnostics.add_argument(
+        "--system-check-json",
+        action="store_true",
+        help="Afficher le contrôle système read-only en JSON puis quitter",
     )
     return parser.parse_args(argv)
 
@@ -111,7 +129,11 @@ def run_gui(config: dict, *, minimized: bool, marker: RuntimeMarker) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        config = load_config()
+        config = (
+            load_config_unvalidated()
+            if args.system_check or args.system_check_json
+            else load_config()
+        )
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -123,6 +145,26 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("Configuration valide.")
         return 0
+
+    if args.system_check or args.system_check_json:
+        from stream_state_router.services.system_check import (
+            render_system_check_report,
+            run_system_check,
+        )
+
+        report = run_system_check(config)
+        if args.system_check_json:
+            print(
+                json.dumps(
+                    report.as_mapping(),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(render_system_check_report(report))
+        return 0 if report.ok else 1
 
     if args.declarative_coverage or args.declarative_coverage_json:
         from stream_state_router.planning import (

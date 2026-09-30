@@ -1,0 +1,156 @@
+{
+  "schema": 1,
+  "purpose": "Preparation-only A2 identity safety corpus. It defines observable safety expectations, not an implementation.",
+  "scenarios": [
+    {
+      "id": "rename_same_uuid",
+      "category": "rename",
+      "setup": "A bound OBS resource has a stable UUID and a human-readable name.",
+      "event": "The resource is renamed while the UUID remains unchanged.",
+      "safety_expectations": [
+        "A rename alone must not silently retarget the binding to another object.",
+        "Diagnostics should surface the new display name without treating the old name as durable identity."
+      ]
+    },
+    {
+      "id": "delete_recreate_same_name_new_uuid",
+      "category": "replacement",
+      "setup": "A profile references an OBS object whose UUID is known.",
+      "event": "The object is deleted and a new object is created with the same name but a different UUID.",
+      "safety_expectations": [
+        "The replacement must never be silently adopted from name equality alone.",
+        "Mutation must block or require an explicit migration/rebind."
+      ]
+    },
+    {
+      "id": "duplicate_name_occurrences",
+      "category": "duplicates",
+      "setup": "Two Scene Items in one container reference sources with the same display name.",
+      "event": "SSR resolves one intended occurrence.",
+      "safety_expectations": [
+        "Name alone is insufficient to authorize a mutation.",
+        "If the intended physical occurrence cannot be proven uniquely, the mutation must fail closed."
+      ]
+    },
+    {
+      "id": "duplicate_reorder",
+      "category": "reorder",
+      "setup": "Several same-name Scene Items are present and the intended occurrence was previously bound.",
+      "event": "The Scene Items are reordered without changing the logical profile.",
+      "safety_expectations": [
+        "Occurrence index alone must not authorize writing to a different physical Scene Item.",
+        "SSR must revalidate identity or block before mutation."
+      ]
+    },
+    {
+      "id": "scene_item_id_renumber",
+      "category": "renumber",
+      "setup": "A Scene Item binding was prepared from a valid catalog snapshot.",
+      "event": "OBS rebuilds or renumbers Scene Item IDs after structural edits.",
+      "safety_expectations": [
+        "A cached sceneItemId is only an optimization, never durable identity.",
+        "SSR must resolve and verify the intended object again before writing."
+      ]
+    },
+    {
+      "id": "collection_round_trip_a_b_a",
+      "category": "scene_collection",
+      "setup": "A prepared operation belongs to Scene Collection A.",
+      "event": "OBS switches A to B and back to A before the operation commits.",
+      "safety_expectations": [
+        "Matching the final collection name is insufficient proof of continuity.",
+        "The prepared operation must be invalidated or requalified before mutation."
+      ]
+    },
+    {
+      "id": "transport_reconnect_same_collection",
+      "category": "reconnect",
+      "setup": "A prepared operation is bound to one OBS transport/session generation.",
+      "event": "The WebSocket session reconnects while OBS remains on a collection with the same name.",
+      "safety_expectations": [
+        "The previous prepared binding must not survive the session-generation change.",
+        "Fresh observation/binding is required before any mutation."
+      ]
+    },
+    {
+      "id": "legacy_name_only_profile",
+      "category": "migration",
+      "setup": "A legacy profile contains only name/occurrence style references and no durable identity metadata.",
+      "event": "A2 loads or migrates the profile against the current OBS collection.",
+      "safety_expectations": [
+        "Migration may enrich identity only when the target is uniquely provable.",
+        "Ambiguous legacy references remain blocked and are reported for explicit repair."
+      ]
+    },
+    {
+      "id": "nested_group_move",
+      "category": "groups",
+      "setup": "The target Scene Item is inside a nested group topology.",
+      "event": "The group tree changes or the item is moved between containers.",
+      "safety_expectations": [
+        "Container identity is part of the binding proof.",
+        "A stale path/container binding must not authorize a write in the new topology."
+      ]
+    },
+    {
+      "id": "duplicate_scene_item_copy",
+      "category": "duplication",
+      "setup": "A bound Scene Item is duplicated or copy/pasted in OBS while the original remains present.",
+      "event": "The duplicate has the same visible source/name characteristics as the original.",
+      "safety_expectations": [
+        "The duplicate must not silently inherit authority to receive mutations intended for the original occurrence.",
+        "If SSR cannot distinguish original and duplicate physical occurrences, the operation must block until identity is requalified."
+      ]
+    },
+    {
+      "id": "same_source_multiple_scenes",
+      "category": "container_identity",
+      "setup": "The same OBS source is referenced by Scene Items in multiple scenes.",
+      "event": "A profile targets one occurrence in one specific scene.",
+      "safety_expectations": [
+        "Source identity alone is insufficient because container identity is part of the intended target.",
+        "A mutation for Scene A must never be redirected to the same source occurrence in Scene B."
+      ]
+    },
+    {
+      "id": "duplicate_group_same_children",
+      "category": "groups",
+      "setup": "A group is duplicated so two containers expose similar child source names.",
+      "event": "SSR resolves a child occurrence after the duplication.",
+      "safety_expectations": [
+        "The child binding must remain qualified by its container rather than by child source name alone.",
+        "Ambiguous duplicated group topology must block mutation instead of selecting the first matching child."
+      ]
+    },
+    {
+      "id": "group_rename_continuity",
+      "category": "rename",
+      "setup": "A target lives inside a group whose human-readable name changes.",
+      "event": "The group is renamed without an intentional target migration.",
+      "safety_expectations": [
+        "A rename must not silently bind the target to a different group that happens to keep the old name.",
+        "If durable container continuity cannot be proven, SSR must require requalification rather than guessing."
+      ]
+    },
+    {
+      "id": "scene_collection_duplicate_or_import",
+      "category": "scene_collection",
+      "setup": "A Scene Collection is duplicated or imported with names similar to an existing collection.",
+      "event": "SSR observes the new collection after previously preparing work in the original collection.",
+      "safety_expectations": [
+        "Collection name similarity is not proof that prepared bindings remain valid.",
+        "Prepared work from the original collection must be invalidated or fully rebound in the duplicated/imported collection."
+      ]
+    },
+    {
+      "id": "ambiguous_same_name_distinct_uuid",
+      "category": "migration",
+      "setup": "Several OBS resources share the same display name but expose different durable UUIDs.",
+      "event": "A legacy name-only reference is migrated or rebound.",
+      "safety_expectations": [
+        "Name equality alone must not select one of several distinct UUID candidates.",
+        "The migration must remain blocked until the user or another deterministic proof identifies the intended resource."
+      ]
+    }
+  ]
+}

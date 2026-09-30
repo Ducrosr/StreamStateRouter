@@ -1298,6 +1298,8 @@ def build_capability_report(
     obs_connected: bool,
     obs_error: str = "",
     catalog_status: Mapping[str, Any] | None = None,
+    obs_request_probe: Mapping[str, Any] | None = None,
+    reference_probe: Mapping[str, Any] | None = None,
     audio_probe: Mapping[str, Any] | None = None,
     hdr_probe: Mapping[str, Any] | None = None,
 ) -> CapabilityReport:
@@ -1351,10 +1353,22 @@ def build_capability_report(
             "Catalogue OBS périmé : "
             + str(catalog.get("stale_reason") or "resynchronisation requise")
         )
+    elif bool(catalog.get("partial", False)):
+        catalog_status_name = "warning"
+        catalog_detail = (
+            "Catalogue OBS partiel : "
+            + str(catalog.get("partial_reason") or "lecture incomplète")
+        )
     else:
         catalog_status_name = "ready"
+        groups = (
+            f", {int(catalog.get('groups', 0) or 0)} groupe(s)"
+            if "groups" in catalog
+            else ""
+        )
         catalog_detail = (
-            f"{int(catalog.get('scenes', 0) or 0)} scène(s), "
+            f"{int(catalog.get('scenes', 0) or 0)} scène(s)"
+            f"{groups}, "
             f"{int(catalog.get('inputs', 0) or 0)} input(s), "
             f"{int(catalog.get('scene_items', 0) or 0)} Scene Item(s)."
         )
@@ -1367,6 +1381,56 @@ def build_capability_report(
             "Synchronisez le catalogue OBS si des références ont changé."
             if catalog_status_name == "warning"
             else "",
+        )
+    )
+
+    obs_requests = _mapping(obs_request_probe)
+    if not obs_enabled:
+        request_status = "disabled"
+        request_detail = "Non vérifiable tant qu’OBS est désactivé."
+        request_action = ""
+    elif not obs_connected:
+        request_status = "warning"
+        request_detail = "Non vérifiable sans connexion OBS."
+        request_action = ""
+    else:
+        request_status = str(obs_requests.get("status") or "warning")
+        request_detail = str(
+            obs_requests.get("detail") or "État non vérifié."
+        )
+        request_action = str(obs_requests.get("action") or "")
+    items.append(
+        _capability_item(
+            "obs_requests",
+            "Compatibilité API OBS",
+            request_status,
+            request_detail,
+            request_action,
+        )
+    )
+
+    references = _mapping(reference_probe)
+    if not obs_enabled:
+        reference_status = "disabled"
+        reference_detail = "Non vérifiable tant qu’OBS est désactivé."
+        reference_action = ""
+    elif not obs_connected:
+        reference_status = "warning"
+        reference_detail = "Non vérifiable sans connexion OBS."
+        reference_action = ""
+    else:
+        reference_status = str(references.get("status") or "warning")
+        reference_detail = str(
+            references.get("detail") or "État non vérifié."
+        )
+        reference_action = str(references.get("action") or "")
+    items.append(
+        _capability_item(
+            "obs_references",
+            "Références OBS",
+            reference_status,
+            reference_detail,
+            reference_action,
         )
     )
 
@@ -1612,7 +1676,7 @@ def _reference_issue(
     candidate_values = {
         str(item).strip() for item in candidates if str(item).strip()
     }
-    if not value or value in candidate_values:
+    if not value or value in candidate_values or "${" in value:
         return None
     candidate, confidence, reason = _best_candidate(value, candidate_values)
     return ReferenceRepair(
@@ -1640,6 +1704,16 @@ def scan_obs_reference_repairs(
         for item in getattr(snapshot, "inputs", ())
         if str(getattr(item, "name", "") or "").strip()
     }
+    groups = {
+        str(item).strip()
+        for item in getattr(snapshot, "groups", ())
+        if str(item).strip()
+    }
+    unreadable_filter_sources = {
+        str(item).strip()
+        for item in getattr(snapshot, "unreadable_filter_sources", ())
+        if str(item).strip()
+    }
     scene_items = tuple(getattr(snapshot, "scene_items", ()) or ())
     scene_sources: dict[str, set[str]] = {}
     all_scene_sources: set[str] = set()
@@ -1660,7 +1734,13 @@ def scan_obs_reference_repairs(
         if source and name:
             filters_by_source.setdefault(source, set()).add(name)
 
-    all_sources = set(inputs) | all_scene_sources | set(filters_by_source) | scenes
+    all_sources = (
+        set(inputs)
+        | all_scene_sources
+        | set(filters_by_source)
+        | scenes
+        | groups
+    )
     issues: list[ReferenceRepair] = []
 
     profiles = _mapping(config.get("profiles"))
@@ -1740,22 +1820,23 @@ def scan_obs_reference_repairs(
                     )
                     if issue:
                         issues.append(issue)
-                    filter_candidates = filters_by_source.get(source, set())
-                    if not filter_candidates:
-                        filter_candidates = {
-                            name
-                            for values in filters_by_source.values()
-                            for name in values
-                        }
-                    issue = _reference_issue(
-                        kind="Filtre",
-                        location=location,
-                        path=(*base, "filter"),
-                        current=str(params.get("filter") or ""),
-                        candidates=filter_candidates,
-                    )
-                    if issue:
-                        issues.append(issue)
+                    if source not in unreadable_filter_sources:
+                        filter_candidates = filters_by_source.get(source, set())
+                        if not filter_candidates:
+                            filter_candidates = {
+                                name
+                                for values in filters_by_source.values()
+                                for name in values
+                            }
+                        issue = _reference_issue(
+                            kind="Filtre",
+                            location=location,
+                            path=(*base, "filter"),
+                            current=str(params.get("filter") or ""),
+                            candidates=filter_candidates,
+                        )
+                        if issue:
+                            issues.append(issue)
                     continue
 
                 if kind in {"input_mute", "input_volume_db", "set_input_settings"}:
@@ -1797,6 +1878,42 @@ def scan_obs_reference_repairs(
                 if not isinstance(element, Mapping):
                     continue
                 source = str(element.get("source") or "").strip()
+                container = str(
+                    element.get("container")
+                    or module.get("container")
+                    or scene
+                ).strip()
+                container_kind = str(
+                    element.get("container_kind")
+                    or module.get("container_kind")
+                    or "scene"
+                ).strip().casefold()
+                container_candidates = (
+                    groups if container_kind == "group" else scenes
+                )
+                if container:
+                    issue = _reference_issue(
+                        kind="Conteneur de layout",
+                        location=f"Layout {profile_name} · {module_name}",
+                        path=(
+                            "layout_profiles",
+                            str(profile_name),
+                            "modules",
+                            str(module_name),
+                            "elements",
+                            index,
+                            "container",
+                        ),
+                        current=container,
+                        candidates=container_candidates,
+                    )
+                    if issue:
+                        issues.append(issue)
+                source_candidates = (
+                    scene_sources.get(container, set())
+                    if container in container_candidates
+                    else all_sources
+                )
                 issue = _reference_issue(
                     kind="Source de layout",
                     location=f"Layout {profile_name} · {module_name}",
@@ -1810,7 +1927,7 @@ def scan_obs_reference_repairs(
                         "source",
                     ),
                     current=source,
-                    candidates=all_sources,
+                    candidates=source_candidates,
                 )
                 if issue:
                     issues.append(issue)
@@ -1827,7 +1944,8 @@ def scan_obs_reference_repairs(
                 continue
             kind = str(target.get("container_kind") or "scene").strip()
             container = str(target.get("container") or "").strip()
-            if kind == "scene":
+            container_candidates = groups if kind == "group" else scenes
+            if kind in {"scene", "group"}:
                 issue = _reference_issue(
                     kind="Conteneur d’activation",
                     location=f"Activation {policy_name} · cible {index + 1}",
@@ -1839,13 +1957,13 @@ def scan_obs_reference_repairs(
                         "container",
                     ),
                     current=container,
-                    candidates=scenes,
+                    candidates=container_candidates,
                 )
                 if issue:
                     issues.append(issue)
             source_candidates = (
                 scene_sources.get(container, set())
-                if kind == "scene" and container in scenes
+                if container in container_candidates
                 else all_sources
             )
             issue = _reference_issue(
