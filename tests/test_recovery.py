@@ -223,6 +223,80 @@ class RuntimeMarkerTests(unittest.TestCase):
                 [],
             )
 
+    def test_schema3_runtime_flags_require_booleans(self):
+        mutations = (
+            ("clean_shutdown", "false"),
+            ("cleanup_complete", 0),
+        )
+        for field, invalid in mutations:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "runtime.json"
+                original = {
+                    "clean_shutdown": False,
+                    "cleanup_complete": False,
+                    "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                    "pending_cleanup": [],
+                }
+                original[field] = invalid
+                path.write_text(json.dumps(original), encoding="utf-8")
+                marker = RuntimeMarker()
+                marker.path = path
+
+                with self.assertRaisesRegex(
+                    RuntimeMarkerFormatError,
+                    "état runtime invalide",
+                ):
+                    marker.start()
+
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    original,
+                )
+
+    def test_schema3_fade_guard_flags_require_boolean_consistency(self):
+        mutations = (
+            ("legacy", True),
+            ("ambiguous", 0),
+        )
+        for field, invalid in mutations:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "runtime.json"
+                item = {
+                    "kind": "layout_fade",
+                    "source": "[Webcam] Avatar",
+                    "collection": "Collection A",
+                    "helper_id": "abc123",
+                    "source_uuid": "input-uuid",
+                    "source_kind": "image_source",
+                    "connection": {"host": "127.0.0.1", "port": 4455},
+                    "filter_name": "[SSR] Layout Fade::abc123",
+                    "filter_kind": "color_filter_v2",
+                    "cleanup_action": "neutralize_disable",
+                    "legacy": False,
+                    "ambiguous": False,
+                }
+                item[field] = invalid
+                original = {
+                    "clean_shutdown": False,
+                    "cleanup_complete": False,
+                    "cleanup_schema": CLEANUP_SCHEMA_VERSION,
+                    "pending_cleanup": [item],
+                }
+                path.write_text(json.dumps(original), encoding="utf-8")
+                marker = RuntimeMarker()
+                marker.path = path
+
+                with self.assertRaisesRegex(
+                    RuntimeMarkerFormatError,
+                    "inconnue ou incomplète",
+                ):
+                    marker.start()
+
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    original,
+                )
+
     def test_invalid_schema3_layout_fade_identity_is_preserved_and_blocks_start(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runtime.json"
