@@ -36,6 +36,7 @@ def build_status_strip(
     obs_enabled: bool,
     obs_connected: bool,
     routing_incomplete: bool = False,
+    runtime_available: bool = True,
 ) -> StatusStripPresentation:
     if edit_mode:
         config_text, config_style, config_action = (
@@ -51,7 +52,11 @@ def build_status_strip(
         )
 
     effective_paused = bool(paused or edit_mode)
-    if effective_paused:
+    if not runtime_available:
+        routing_text = "Indisponible"
+        routing_style = "Bad"
+        routing_action = "—"
+    elif effective_paused:
         routing_text = "Suspendu (édition)" if edit_mode else "Suspendu"
         routing_style = "Warn"
         routing_action = "Reprendre"
