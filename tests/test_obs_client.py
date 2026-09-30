@@ -8,6 +8,7 @@ from stream_state_router.obs.client import (
     OBSClientManager,
     OBSRequestError,
     OBSResourceNotFoundError,
+    OBSSceneCollectionContextChangedError,
     OBSUnavailableError,
 )
 from stream_state_router.obs.models import OBSConnectionConfig
@@ -71,6 +72,113 @@ class _ClosableReqClient:
 
     def disconnect(self):
         self.disconnected = True
+
+
+class _AliveWorker:
+    def is_alive(self):
+        return True
+
+
+class _CallbackRegistry:
+    def __init__(self):
+        self.functions = []
+
+    def register(self, functions):
+        try:
+            values = list(functions)
+        except TypeError:
+            values = [functions]
+        for function in values:
+            if function not in self.functions:
+                self.functions.append(function)
+
+    def emit(self, callback_name, data):
+        for function in tuple(self.functions):
+            if function.__name__ == callback_name:
+                function(data)
+
+
+class _CollectionEventServer:
+    def __init__(self):
+        self.current_collection = "Collection A"
+        self.event_client = None
+        self.roundtrip_request = ""
+        self.request_error = False
+
+    def emit_collection(self, name):
+        event_client = self.event_client
+        if event_client is None:
+            raise RuntimeError("event client unavailable")
+        event_client.callback.emit(
+            "on_current_scene_collection_changing",
+            SimpleNamespace(scene_collection_name=name),
+        )
+        self.current_collection = name
+        event_client.callback.emit(
+            "on_current_scene_collection_changed",
+            SimpleNamespace(scene_collection_name=name),
+        )
+
+    def send(self, request, data=None):
+        payload = dict(data or {})
+        if request == "GetVersion":
+            return {"obsVersion": "32.2.2"}
+        if request == "GetSceneCollectionList":
+            return {
+                "currentSceneCollectionName": self.current_collection
+            }
+        if request == "BroadcastCustomEvent":
+            event_client = self.event_client
+            if event_client is None:
+                raise RuntimeError("event client unavailable")
+            event_client.callback.emit(
+                "on_custom_event",
+                SimpleNamespace(
+                    event_data=dict(payload.get("eventData") or {})
+                ),
+            )
+            return {}
+        if request == self.roundtrip_request:
+            self.emit_collection("Collection B")
+            self.emit_collection("Collection A")
+            if self.request_error:
+                error = _FakeRequestError("source not found")
+                error.code = 600
+                raise error
+            return {
+                "filterName": "Filter",
+                "filterKind": "color_filter_v2",
+                "filterEnabled": False,
+                "filterSettings": {"opacity": 1.0},
+            }
+        return {}
+
+
+class _CollectionReqClient:
+    server = None
+
+    def __init__(self, **_kwargs):
+        self.server = type(self).server
+
+    def send(self, request, data=None, raw=False):
+        return self.server.send(request, data)
+
+    def disconnect(self):
+        pass
+
+
+class _CollectionEventClient:
+    server = None
+
+    def __init__(self, **_kwargs):
+        self.server = type(self).server
+        self.callback = _CallbackRegistry()
+        self.worker = _AliveWorker()
+        self.server.event_client = self
+
+    def disconnect(self):
+        if self.server.event_client is self:
+            self.server.event_client = None
 
 
 class OBSClientManagerTests(unittest.TestCase):
@@ -224,6 +332,91 @@ class OBSClientManagerTests(unittest.TestCase):
                 manager.send("GetVersion")
 
         self.assertGreaterEqual(manager.session_generation, 2)
+
+    def test_scene_collection_generation_detects_round_trip_during_request(self):
+        server = _CollectionEventServer()
+        _CollectionReqClient.server = server
+        _CollectionEventClient.server = server
+        fake_obs = SimpleNamespace(
+            ReqClient=_CollectionReqClient,
+            EventClient=_CollectionEventClient,
+        )
+        manager = OBSClientManager(
+            OBSConnectionConfig(enabled=True, timeout_seconds=0.5)
+        )
+
+        with patch("stream_state_router.obs.client._obs", fake_obs):
+            manager.send("GetVersion")
+            session = manager.session_generation
+            name, generation = manager.scene_collection_context(
+                expected_session_generation=session,
+            )
+            self.assertEqual(name, "Collection A")
+
+            server.roundtrip_request = "GetSourceFilter"
+            with self.assertRaises(
+                OBSSceneCollectionContextChangedError
+            ) as captured:
+                manager.send(
+                    "GetSourceFilter",
+                    {
+                        "sourceName": "Input",
+                        "filterName": "Filter",
+                    },
+                    expected_session_generation=session,
+                    expected_scene_collection_generation=generation,
+                )
+
+        self.assertTrue(captured.exception.request_submitted)
+        self.assertEqual(server.current_collection, "Collection A")
+        self.assertGreater(
+            manager.scene_collection_generation,
+            generation,
+        )
+
+    def test_collection_round_trip_overrides_resource_not_found_absence(self):
+        server = _CollectionEventServer()
+        server.request_error = True
+        _CollectionReqClient.server = server
+        _CollectionEventClient.server = server
+        fake_obs = SimpleNamespace(
+            ReqClient=_CollectionReqClient,
+            EventClient=_CollectionEventClient,
+        )
+        manager = OBSClientManager(
+            OBSConnectionConfig(enabled=True, timeout_seconds=0.5)
+        )
+
+        with (
+            patch("stream_state_router.obs.client._obs", fake_obs),
+            patch(
+                "stream_state_router.obs.client._OBS_REQUEST_ERRORS",
+                (_FakeRequestError,),
+            ),
+        ):
+            manager.send("GetVersion")
+            session = manager.session_generation
+            _name, generation = manager.scene_collection_context(
+                expected_session_generation=session,
+            )
+
+            server.roundtrip_request = "GetSourceFilter"
+            with self.assertRaises(
+                OBSSceneCollectionContextChangedError
+            ) as captured:
+                manager.send(
+                    "GetSourceFilter",
+                    {
+                        "sourceName": "Input",
+                        "filterName": "Filter",
+                    },
+                    expected_session_generation=session,
+                    expected_scene_collection_generation=generation,
+                )
+
+        self.assertTrue(captured.exception.request_submitted)
+        self.assertEqual(server.current_collection, "Collection A")
+
 
 if __name__ == "__main__":
     unittest.main()
