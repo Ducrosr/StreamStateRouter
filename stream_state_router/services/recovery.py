@@ -7,6 +7,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Mapping
 
+from ..recovery_schema import (
+    LayoutFadeCleanupFormatError,
+    normalize_layout_fade_cleanup,
+)
 from .paths import user_data_dir
 
 
@@ -21,7 +25,12 @@ def _strict_text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | None:
+def _normalize_cleanup_item(
+    raw: Mapping[str, object],
+    *,
+    schema: int | None = None,
+    strict_current: bool = False,
+) -> dict[str, object] | None:
     item = dict(raw)
     kind = _strict_text(item.get("kind")).casefold()
     if not kind:
@@ -36,47 +45,14 @@ def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | No
         item["kind"] = "activation_hide"
         return item
     if kind == "layout_fade":
-        source = _strict_text(item.get("source"))
-        collection = _strict_text(item.get("collection"))
-        if not source or not collection:
+        try:
+            return normalize_layout_fade_cleanup(
+                item,
+                schema=schema,
+                strict_current=strict_current,
+            )
+        except LayoutFadeCleanupFormatError:
             return None
-        item["kind"] = "layout_fade"
-
-        helper_id = _strict_text(item.get("helper_id"))
-        if not helper_id:
-            # Schema v2 only knew collection + source. Preserve it for
-            # diagnostics/transfer, but never promote it into helper ownership.
-            item["legacy"] = True
-            return item
-
-        raw_legacy = item.get("legacy", False)
-        if not isinstance(raw_legacy, bool) or raw_legacy:
-            return None
-        raw_ambiguous = item.get("ambiguous", False)
-        if not isinstance(raw_ambiguous, bool):
-            return None
-
-        connection = item.get("connection")
-        if not isinstance(connection, Mapping):
-            return None
-        host = _strict_text(connection.get("host"))
-        raw_port = connection.get("port")
-        if isinstance(raw_port, bool) or not isinstance(raw_port, int):
-            return None
-        port = raw_port
-        required = (
-            _strict_text(item.get("source_uuid")),
-            _strict_text(item.get("source_kind")),
-            _strict_text(item.get("filter_name")),
-            _strict_text(item.get("filter_kind")),
-            _strict_text(item.get("cleanup_action")),
-        )
-        if not host or port <= 0 or not all(required):
-            return None
-        item["connection"] = {"host": host.casefold(), "port": port}
-        item["legacy"] = False
-        item["ambiguous"] = raw_ambiguous
-        return item
     return None
 
 
@@ -141,6 +117,10 @@ class RuntimeMarker:
 
                 self.previous_unclean = data.get("clean_shutdown") is False
                 self.previous_cleanup_incomplete = data.get("cleanup_complete") is False
+                if strict_current_schema and "pending_cleanup" not in data:
+                    raise RuntimeMarkerFormatError(
+                        "pending_cleanup absent du schéma courant; runtime.json préservé"
+                    )
                 raw_pending = data.get("pending_cleanup", [])
                 if not isinstance(raw_pending, list):
                     raise RuntimeMarkerFormatError(
@@ -154,29 +134,28 @@ class RuntimeMarker:
                             "obligation cleanup non-objet; runtime.json préservé"
                         )
                     item_kind = _strict_text(item.get("kind")).casefold()
-                    helper_id = _strict_text(item.get("helper_id"))
-                    if (
-                        schema in {None, 2}
-                        and item_kind == "layout_fade"
-                        and helper_id
-                    ):
-                        raise RuntimeMarkerFormatError(
-                            "obligation layout_fade legacy contient une identité helper "
-                            "non prouvable; runtime.json préservé"
-                        )
-                    if strict_current_schema and item_kind == "layout_fade":
-                        legacy = item.get("legacy")
-                        if not isinstance(legacy, bool) or legacy == bool(helper_id):
-                            raise RuntimeMarkerFormatError(
-                                "obligation layout_fade contradictoire dans le schéma "
-                                "courant; runtime.json préservé"
+                    if item_kind == "layout_fade":
+                        try:
+                            parsed = normalize_layout_fade_cleanup(
+                                item,
+                                schema=schema,
+                                strict_current=strict_current_schema,
                             )
-                    parsed = _normalize_cleanup_item(item)
-                    if parsed is None:
-                        raise RuntimeMarkerFormatError(
-                            "obligation cleanup inconnue ou incomplète; "
-                            "runtime.json préservé"
+                        except LayoutFadeCleanupFormatError as exc:
+                            raise RuntimeMarkerFormatError(
+                                f"{exc}; runtime.json préservé"
+                            ) from exc
+                    else:
+                        parsed = _normalize_cleanup_item(
+                            item,
+                            schema=schema,
+                            strict_current=strict_current_schema,
                         )
+                        if parsed is None:
+                            raise RuntimeMarkerFormatError(
+                                "obligation cleanup inconnue ou incomplète; "
+                                "runtime.json préservé"
+                            )
                     normalized.append(parsed)
                 self.previous_pending_cleanup = tuple(normalized)
 
@@ -228,12 +207,25 @@ class RuntimeMarker:
                     raise RuntimeMarkerFormatError(
                         "obligation cleanup runtime non-objet; écriture refusée"
                     )
-                parsed = _normalize_cleanup_item(item)
-                if parsed is None:
-                    raise RuntimeMarkerFormatError(
-                        "obligation cleanup runtime inconnue ou incomplète; "
-                        "écriture refusée"
-                    )
+                item_kind = _strict_text(item.get("kind")).casefold()
+                if item_kind == "layout_fade":
+                    try:
+                        parsed = normalize_layout_fade_cleanup(
+                            item,
+                            schema=CLEANUP_SCHEMA_VERSION,
+                            strict_current=False,
+                        )
+                    except LayoutFadeCleanupFormatError as exc:
+                        raise RuntimeMarkerFormatError(
+                            f"{exc}; écriture refusée"
+                        ) from exc
+                else:
+                    parsed = _normalize_cleanup_item(item)
+                    if parsed is None:
+                        raise RuntimeMarkerFormatError(
+                            "obligation cleanup runtime inconnue ou incomplète; "
+                            "écriture refusée"
+                        )
                 normalized.append(parsed)
             payload = {
                 "clean_shutdown": bool(clean),
