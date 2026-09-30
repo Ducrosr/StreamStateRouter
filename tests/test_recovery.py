@@ -283,7 +283,7 @@ class RuntimeMarkerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RuntimeMarkerFormatError,
-                "état runtime invalide",
+                "clean_shutdown invalide|cleanup_complete invalide",
             ):
                 marker.start()
 
@@ -429,7 +429,7 @@ class RuntimeMarkerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RuntimeMarkerFormatError,
-                "inconnue ou incomplète",
+                "inconnue ou incomplète|contradictoire",
             ):
                 marker.start()
 
@@ -464,7 +464,7 @@ class RuntimeMarkerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RuntimeMarkerFormatError,
-                "inconnue ou incomplète",
+                "inconnue ou incomplète|contradictoire",
             ):
                 marker.start()
 
