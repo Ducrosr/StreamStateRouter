@@ -409,6 +409,20 @@ class A1R3ContextTests(unittest.TestCase):
                 self.assertTrue(retry)
                 self.assertEqual(len(manager.export_pending_fade_cleanup()), 1)
                 self.assertAlmostEqual(float(b_state["settings"]["opacity"]), 0.0)
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Obligation fade contradictoire",
+                ):
+                    manager._prepare_fade_filter(
+                        server.source,
+                        "Collection A",
+                    )
+                self.assertTrue(
+                    manager.export_pending_fade_cleanup()[0][
+                        "context_uncertain"
+                    ]
+                )
                 client.close()
 
     def test_recovery_mutation_uncertainty_survives_retry(self):
