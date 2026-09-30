@@ -123,12 +123,20 @@ class RuntimeMarker:
                 strict_current_schema = (
                     schema is not None and schema >= CLEANUP_SCHEMA_VERSION
                 )
-                if schema is not None and (
-                    not isinstance(data.get("clean_shutdown"), bool)
-                    or not isinstance(data.get("cleanup_complete"), bool)
+                if not isinstance(data.get("clean_shutdown"), bool):
+                    raise RuntimeMarkerFormatError(
+                        "clean_shutdown invalide; runtime.json préservé"
+                    )
+                if (
+                    schema is not None
+                    and not isinstance(data.get("cleanup_complete"), bool)
+                ) or (
+                    schema is None
+                    and "cleanup_complete" in data
+                    and not isinstance(data.get("cleanup_complete"), bool)
                 ):
                     raise RuntimeMarkerFormatError(
-                        "état runtime invalide pour le schéma connu; fichier préservé"
+                        "cleanup_complete invalide; runtime.json préservé"
                     )
 
                 self.previous_unclean = data.get("clean_shutdown") is False
