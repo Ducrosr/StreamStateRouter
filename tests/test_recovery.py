@@ -223,6 +223,30 @@ class RuntimeMarkerTests(unittest.TestCase):
                 [],
             )
 
+    def test_schema2_runtime_flags_require_booleans(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runtime.json"
+            original = {
+                "clean_shutdown": "false",
+                "cleanup_complete": False,
+                "cleanup_schema": 2,
+                "pending_cleanup": [],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            marker = RuntimeMarker()
+            marker.path = path
+
+            with self.assertRaisesRegex(
+                RuntimeMarkerFormatError,
+                "état runtime invalide",
+            ):
+                marker.start()
+
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                original,
+            )
+
     def test_schema3_runtime_flags_require_booleans(self):
         mutations = (
             ("clean_shutdown", "false"),
