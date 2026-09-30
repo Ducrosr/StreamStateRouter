@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import threading
@@ -447,9 +448,40 @@ class A1R3ContextTests(unittest.TestCase):
                     self.assertTrue(
                         disk["pending_cleanup"][0]["context_uncertain"]
                     )
+                    b_state = server.collections["Collection B"][
+                        server.source
+                    ][identity.filter_name]
+                    a_state = server.collections["Collection A"][
+                        server.source
+                    ][identity.filter_name]
+                    if phase == "neutralize":
+                        self.assertAlmostEqual(
+                            float(b_state["settings"]["opacity"]),
+                            1.0,
+                        )
+                        self.assertTrue(b_state["enabled"])
+                        self.assertAlmostEqual(
+                            float(a_state["settings"]["opacity"]),
+                            0.3,
+                        )
+                        self.assertTrue(a_state["enabled"])
+                    else:
+                        self.assertFalse(b_state["enabled"])
+                        self.assertAlmostEqual(
+                            float(b_state["settings"]["opacity"]),
+                            0.73,
+                        )
+                        self.assertTrue(a_state["enabled"])
+                        self.assertAlmostEqual(
+                            float(a_state["settings"]["opacity"]),
+                            1.0,
+                        )
+
+                    b_before_retry = copy.deepcopy(b_state)
                     second = manager.retry_pending_fade_cleanup()
                     self.assertTrue(second)
                     self.assertEqual(len(manager.export_pending_fade_cleanup()), 1)
+                    self.assertEqual(b_state, b_before_retry)
                     client.close()
 
     def test_failed_uncertainty_clear_survives_real_journal_restart(self):
@@ -504,6 +536,14 @@ class A1R3ContextTests(unittest.TestCase):
                 warnings = restarted.retry_pending_fade_cleanup()
 
                 self.assertTrue(warnings)
+                live_state = server.collections["Collection A"][
+                    server.source
+                ][identity.filter_name]
+                self.assertTrue(live_state["enabled"])
+                self.assertAlmostEqual(
+                    float(live_state["settings"]["opacity"]),
+                    0.2,
+                )
                 pending = restarted.export_pending_fade_cleanup()
                 self.assertEqual(len(pending), 1)
                 self.assertTrue(pending[0]["context_uncertain"])
