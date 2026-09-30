@@ -383,15 +383,23 @@ class OBSLayoutManager:
         *,
         session_generation: int = 0,
     ) -> dict[str, Any]:
+        # Fade requests can block inside the WebSocket client. Revalidate the
+        # runtime both before sending and after a successful response so a
+        # shutdown requested while OBS was blocked cannot resume normal fade
+        # work. Orderly-shutdown cleanup remains allowed because the runtime
+        # checkpoint explicitly permits its cleanup phase.
+        self._yield_runtime()
         expected = max(0, int(session_generation or 0))
         if expected and isinstance(self.client, OBSClientManager):
-            return self.client.send(
+            response = self.client.send(
                 request,
                 data,
                 expected_session_generation=expected,
             )
-        response = self._send(request, data)
-        if expected:
+        else:
+            response = self._send(request, data)
+        self._yield_runtime()
+        if expected and not isinstance(self.client, OBSClientManager):
             current = int(
                 getattr(self.client, "session_generation", 0) or 0
             )
@@ -753,6 +761,9 @@ class OBSLayoutManager:
         if not collection or collection == "<unknown>":
             raise RuntimeError("Scene Collection inconnue pour le helper de fade")
         source = str(source or "").strip()
+        # Do not start qualifying a new temporary effect once runtime shutdown
+        # has closed normal operation admission.
+        self._yield_runtime()
         legacy_conflicts = [
             pending
             for pending in self._pending_fade_cleanup.values()
@@ -789,6 +800,9 @@ class OBSLayoutManager:
                     f"({collection} != {verified_collection})"
                 )
 
+        # Revalidate immediately before durable preparation. A blocking OBS
+        # qualification above may have overlapped a shutdown request.
+        self._yield_runtime()
         # Durable ownership evidence is written before the cleanup obligation.
         identity = self._fade_helper_store.prepare_layout_fade(
             connection_host=host,
@@ -799,6 +813,10 @@ class OBSLayoutManager:
             source_kind=source_kind,
             session_generation=session_generation,
         )
+        # If shutdown started while the manifest write was in flight, stop
+        # before arming or issuing any normal OBS effect. A prepared manifest
+        # alone is safe because no temporary OBS mutation has occurred.
+        self._yield_runtime()
         # The crash obligation must be durable before any Create/Enable/Settings.
         self._ensure_pending_fade(identity)
         effect_started = False
