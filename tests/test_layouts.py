@@ -3606,6 +3606,10 @@ class LayoutTests(unittest.TestCase):
         filters = client.source_filters["[Webcam] Avatar"]
         renamed = "Renamed correction"
         filters[renamed] = filters.pop(identity.filter_name)
+        # Astra's real-world counterexample also changes a non-temporary
+        # setting. That must make ownership *less* provable, never turn the
+        # renamed helper into a confirmed absence.
+        filters[renamed]["settings"]["contrast"] = 0.5
         client.calls.clear()
 
         warnings = manager.retry_pending_fade_cleanup()
@@ -3621,6 +3625,7 @@ class LayoutTests(unittest.TestCase):
             0.3,
         )
         self.assertTrue(renamed_state["enabled"])
+        self.assertEqual(float(renamed_state["settings"]["contrast"]), 0.5)
         self.assertFalse(
             any(
                 request in {
