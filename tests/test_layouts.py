@@ -416,7 +416,10 @@ class LayoutTests(unittest.TestCase):
                 marker.path = Path(tmp) / "runtime.json"
                 marker.start()
 
-                def persist():
+                def persist(
+                    marker=marker,
+                    manager=manager,
+                ):
                     marker.checkpoint_pending_cleanup(
                         manager.export_pending_fade_cleanup()
                     )
