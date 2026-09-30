@@ -937,6 +937,7 @@ class OBSLayoutManager:
                 else:
                     rows = self._fade_filter_rows(
                         source_alias,
+                        source_uuid=identity.source_uuid,
                         session_generation=session_generation,
                     )
                     expected_rows = [
@@ -1056,6 +1057,7 @@ class OBSLayoutManager:
                 kind, enabled, settings = self._fade_filter_state(
                     source_alias,
                     identity.filter_name,
+                    source_uuid=identity.source_uuid,
                     session_generation=session_generation,
                 )
                 if kind != identity.filter_kind or enabled is not True:
