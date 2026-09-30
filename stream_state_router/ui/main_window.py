@@ -2134,6 +2134,27 @@ class MainWindow(QMainWindow):
                     f"{usage.owner} · {usage.detail}",
                 )
             )
+        parent = str(profile.get("extends") or "").strip()
+        pool = self._profiles_for_domain(domain)
+        if parent and parent not in pool:
+            health_text = "⚠ Base introuvable"
+            health_style = "Bad"
+            health_detail = f"Le profil parent « {parent} » n’existe pas."
+        else:
+            health_text = "✓ Configuré"
+            health_style = "Good"
+            health_detail = (
+                "Héritage résolu."
+                if parent
+                else "Profil autonome."
+            )
+        if hasattr(self, "profile_health_badge"):
+            self._set_status_label(
+                self.profile_health_badge,
+                health_text,
+                health_style,
+            )
+            self.profile_health_badge.setToolTip(health_detail)
         self._set_inspector(
             kind="profile",
             domain=domain,
@@ -2143,8 +2164,8 @@ class MainWindow(QMainWindow):
                 f"{len(entries)} élément(s) effectif(s) · "
                 f"{len(usages)} dépendance(s)"
             ),
-            health_text="✓ Configuré",
-            health_style="Good",
+            health_text=health_text,
+            health_style=health_style,
             rows=rows,
             payload=profile,
         )
@@ -2184,6 +2205,27 @@ class MainWindow(QMainWindow):
                     f"{usage.owner} · {usage.detail}",
                 )
             )
+        parent = str(profile.get("extends") or "").strip()
+        pool = self._layout_profiles()
+        if parent and parent not in pool:
+            health_text = "⚠ Base introuvable"
+            health_style = "Bad"
+            health_detail = f"Le layout parent « {parent} » n’existe pas."
+        else:
+            health_text = "✓ Configuré"
+            health_style = "Good"
+            health_detail = (
+                "Héritage résolu."
+                if parent
+                else "Layout autonome."
+            )
+        if hasattr(self, "layout_health_badge"):
+            self._set_status_label(
+                self.layout_health_badge,
+                health_text,
+                health_style,
+            )
+            self.layout_health_badge.setToolTip(health_detail)
         self._set_inspector(
             kind="layout",
             domain="layout",
@@ -2193,8 +2235,8 @@ class MainWindow(QMainWindow):
                 f"{len(modules)} module(s) local(aux) · "
                 f"{len(usages)} dépendance(s)"
             ),
-            health_text="✓ Configuré",
-            health_style="Good",
+            health_text=health_text,
+            health_style=health_style,
             rows=rows,
             payload=profile,
         )
@@ -3773,6 +3815,9 @@ class MainWindow(QMainWindow):
             self._refresh_actions_table
         )
         top.addWidget(self.profile_name, 1)
+        self.profile_health_badge = QLabel("—")
+        self.profile_health_badge.setObjectName("Muted")
+        top.addWidget(self.profile_health_badge)
 
         new_profile = QPushButton("Nouveau")
         self._set_action_risk(new_profile, "draft")
@@ -3832,6 +3877,18 @@ class MainWindow(QMainWindow):
         self.profile_inheritance_hint.setWordWrap(True)
         self.profile_inheritance_hint.setObjectName("Muted")
         root.addWidget(self.profile_inheritance_hint)
+
+        profile_scope = QHBoxLayout()
+        local_hint = QLabel(
+            "Actions locales — différences propres à ce profil"
+        )
+        local_hint.setObjectName("Section")
+        profile_scope.addWidget(local_hint)
+        effective = QPushButton("Voir le contenu effectif…")
+        effective.clicked.connect(self._show_current_profile_impact)
+        profile_scope.addWidget(effective)
+        profile_scope.addStretch(1)
+        root.addLayout(profile_scope)
 
         self.actions_table = QTableWidget(0, 4)
         self.actions_table.setHorizontalHeaderLabels(
@@ -3956,6 +4013,9 @@ class MainWindow(QMainWindow):
             self._refresh_layout_profile_view
         )
         profile_row.addWidget(self.layout_profile_name, 1)
+        self.layout_health_badge = QLabel("—")
+        self.layout_health_badge.setObjectName("Muted")
+        profile_row.addWidget(self.layout_health_badge)
 
         new_layout = QPushButton("Nouveau")
         self._set_action_risk(new_layout, "draft")
@@ -4104,7 +4164,7 @@ class MainWindow(QMainWindow):
         root.addLayout(tools)
 
         content_title = QLabel(
-            "3. Contenu du layout — modules et géométrie"
+            "3. Contenu local du layout — différences et géométrie"
         )
         content_title.setObjectName("Section")
         root.addWidget(content_title)
