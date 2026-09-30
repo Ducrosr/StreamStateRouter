@@ -1337,6 +1337,22 @@ class MainWindow(QMainWindow):
         copy_diagnostic.clicked.connect(copy_diagnostic_text)
         actions.addWidget(copy_diagnostic)
 
+        open_settings = QPushButton("Ouvrir Paramètres")
+        open_settings.clicked.connect(dialog.accept)
+        open_settings.clicked.connect(
+            lambda: self.tabs.setCurrentIndex(
+                self.settings_tab_index
+            )
+        )
+        actions.addWidget(open_settings)
+
+        open_diagnostics = QPushButton("Ouvrir Diagnostics")
+        open_diagnostics.clicked.connect(dialog.accept)
+        open_diagnostics.clicked.connect(
+            self._open_diagnostics_tab
+        )
+        actions.addWidget(open_diagnostics)
+
         actions.addStretch(1)
         close = QPushButton("Fermer")
         close.clicked.connect(dialog.accept)
@@ -1490,9 +1506,9 @@ class MainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        expert = QPushButton("Ouvrir le mode Expert")
+        expert = QPushButton("Ouvrir Diagnostics")
         expert.clicked.connect(dialog.accept)
-        expert.clicked.connect(self._ensure_expert_mode)
+        expert.clicked.connect(self._open_diagnostics_tab)
         actions.addWidget(expert)
         close = QPushButton("Fermer")
         close.clicked.connect(dialog.accept)
@@ -4931,6 +4947,10 @@ class MainWindow(QMainWindow):
         self._ensure_expert_mode()
         self.tabs.setCurrentIndex(self.logs_tab_index)
 
+    def _open_diagnostics_tab(self) -> None:
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.diagnostics_tab_index)
+
     # ---------- rules ----------
     def _refresh_rules_table(self) -> None:
         rules = self.config.setdefault("rules", [])
@@ -5159,6 +5179,14 @@ class MainWindow(QMainWindow):
                 self.profile_inheritance_hint.setText(
                     "Héritage effectif : —"
                 )
+        if hasattr(self, "profile_test_button"):
+            self.profile_test_button.setText(
+                (
+                    f"Tester « {current[1]} » dans OBS"
+                    if current
+                    else "Tester dans OBS"
+                )
+            )
         actions = current[2].setdefault("actions", []) if current else []
         self.actions_table.setRowCount(len(actions))
         for row, action in enumerate(actions):
@@ -6579,6 +6607,22 @@ class MainWindow(QMainWindow):
             return
         current = self._current_layout_profile()
         self._refresh_layout_options(current)
+        if hasattr(self, "layout_capture_button"):
+            self.layout_capture_button.setText(
+                (
+                    f"Capturer OBS → « {current[0]} »"
+                    if current
+                    else "Capturer OBS dans le brouillon"
+                )
+            )
+        if hasattr(self, "layout_apply_button"):
+            self.layout_apply_button.setText(
+                (
+                    f"Appliquer « {current[0]} » à OBS"
+                    if current
+                    else "Appliquer à OBS"
+                )
+            )
         modules = current[1].get("modules", {}) if current else {}
         if not isinstance(modules, dict):
             modules = {}
