@@ -14,6 +14,7 @@ from stream_state_router.services.config import (
     export_config,
     list_valid_backups,
     load_config,
+    load_config_unvalidated,
     migrate_config,
     save_config,
     validate_config,
@@ -105,6 +106,18 @@ class ConfigTests(unittest.TestCase):
         rules, poll, debounce, fallback = build_ruleset(loaded)
         self.assertEqual((poll, debounce, fallback), (50, 150, 350))
         self.assertEqual(len(rules.rules), 2)
+
+    def test_load_config_unvalidated_preserves_semantic_errors(self):
+        data = self.sample()
+        data["schema_version"] = 999
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            loaded = load_config_unvalidated(path)
+
+        self.assertEqual(loaded["schema_version"], 999)
+        self.assertTrue(validate_config(loaded))
 
     def test_schema_v1_is_migrated_with_layout_profiles(self):
         data = self.sample()
