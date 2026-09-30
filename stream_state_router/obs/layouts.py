@@ -486,15 +486,27 @@ class OBSLayoutManager:
             )
         return matches[0]
 
+    @staticmethod
+    def _fade_source_payload(
+        source: str,
+        source_uuid: str = "",
+    ) -> dict[str, str]:
+        payload = {"sourceName": str(source)}
+        qualified_uuid = str(source_uuid or "").strip()
+        if qualified_uuid:
+            payload["sourceUuid"] = qualified_uuid
+        return payload
+
     def _fade_filter_rows(
         self,
         source: str,
         *,
+        source_uuid: str = "",
         session_generation: int = 0,
     ) -> list[Mapping[str, Any]]:
         response = self._fade_send(
             "GetSourceFilterList",
-            {"sourceName": source},
+            self._fade_source_payload(source, source_uuid),
             session_generation=session_generation,
         )
         raw = response.get("filters") if isinstance(response, Mapping) else None
@@ -517,11 +529,14 @@ class OBSLayoutManager:
         source: str,
         filter_name: str,
         *,
+        source_uuid: str = "",
         session_generation: int = 0,
     ) -> tuple[str, bool | None, dict[str, Any]]:
+        payload = self._fade_source_payload(source, source_uuid)
+        payload["filterName"] = filter_name
         response = self._fade_send(
             "GetSourceFilter",
-            {"sourceName": source, "filterName": filter_name},
+            payload,
             session_generation=session_generation,
         )
         if not isinstance(response, Mapping):
@@ -842,6 +857,7 @@ class OBSLayoutManager:
         try:
             rows = self._fade_filter_rows(
                 source_alias,
+                source_uuid=identity.source_uuid,
                 session_generation=session_generation,
             )
             expected_rows = [
@@ -882,6 +898,7 @@ class OBSLayoutManager:
                         "CreateSourceFilter",
                         {
                             "sourceName": source_alias,
+                            "sourceUuid": identity.source_uuid,
                             "filterName": identity.filter_name,
                             "filterKind": identity.filter_kind,
                             "filterSettings": {"opacity": 1.0},
@@ -906,6 +923,7 @@ class OBSLayoutManager:
                         raise
                     rows = self._fade_filter_rows(
                         source_alias,
+                        source_uuid=identity.source_uuid,
                         session_generation=session_generation,
                     )
                     expected_rows = [
@@ -936,6 +954,7 @@ class OBSLayoutManager:
             kind, enabled, settings = self._fade_filter_state(
                 source_alias,
                 identity.filter_name,
+                source_uuid=identity.source_uuid,
                 session_generation=session_generation,
             )
             if kind != identity.filter_kind:
@@ -975,6 +994,7 @@ class OBSLayoutManager:
                         "SetSourceFilterSettings",
                         {
                             "sourceName": source_alias,
+                            "sourceUuid": identity.source_uuid,
                             "filterName": identity.filter_name,
                             "filterSettings": {"opacity": 1.0},
                             "overlay": True,
@@ -987,6 +1007,7 @@ class OBSLayoutManager:
                     kind, enabled, settings = self._fade_filter_state(
                         source_alias,
                         identity.filter_name,
+                        source_uuid=identity.source_uuid,
                         session_generation=session_generation,
                     )
                 except Exception as exc:
@@ -1026,6 +1047,7 @@ class OBSLayoutManager:
                     "SetSourceFilterEnabled",
                     {
                         "sourceName": source_alias,
+                        "sourceUuid": identity.source_uuid,
                         "filterName": identity.filter_name,
                         "filterEnabled": True,
                     },
@@ -1074,10 +1096,31 @@ class OBSLayoutManager:
             str(source),
             0,
         )
+        self._verify_fade_collection(
+            identity.collection,
+            session_generation=session_generation,
+        )
+        source_alias, source_uuid, source_kind = self._resolve_fade_input(
+            identity.source_alias,
+            source_uuid=identity.source_uuid,
+            session_generation=session_generation,
+        )
+        if (
+            source_uuid != identity.source_uuid
+            or source_kind != identity.source_kind
+        ):
+            raise RuntimeError(
+                f"Source OBS remplacée ou kind modifié pendant le fade pour {source}"
+            )
+        self._verify_fade_collection(
+            identity.collection,
+            session_generation=session_generation,
+        )
         self._fade_send(
             "SetSourceFilterSettings",
             {
-                "sourceName": str(source),
+                "sourceName": source_alias,
+                "sourceUuid": identity.source_uuid,
                 "filterName": identity.filter_name,
                 "filterSettings": {
                     "opacity": max(0.0, min(1.0, float(opacity)))
@@ -1096,6 +1139,7 @@ class OBSLayoutManager:
     ) -> tuple[bool, str]:
         rows = self._fade_filter_rows(
             source,
+            source_uuid=identity.source_uuid,
             session_generation=session_generation,
         )
         exact = [
@@ -1223,6 +1267,7 @@ class OBSLayoutManager:
         try:
             rows = self._fade_filter_rows(
                 source_alias,
+                source_uuid=identity.source_uuid,
                 session_generation=session_generation,
             )
         except Exception as exc:
@@ -1261,6 +1306,7 @@ class OBSLayoutManager:
             kind, enabled, settings = self._fade_filter_state(
                 source_alias,
                 identity.filter_name,
+                source_uuid=identity.source_uuid,
                 session_generation=session_generation,
             )
         except OBSResourceNotFoundError:
@@ -1312,6 +1358,7 @@ class OBSLayoutManager:
                     "SetSourceFilterSettings",
                     {
                         "sourceName": source_alias,
+                        "sourceUuid": identity.source_uuid,
                         "filterName": identity.filter_name,
                         "filterSettings": {"opacity": 1.0},
                         "overlay": True,
@@ -1385,6 +1432,7 @@ class OBSLayoutManager:
                     "SetSourceFilterEnabled",
                     {
                         "sourceName": source_alias,
+                        "sourceUuid": identity.source_uuid,
                         "filterName": identity.filter_name,
                         "filterEnabled": False,
                     },
