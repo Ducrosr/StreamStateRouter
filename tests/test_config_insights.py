@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 from stream_state_router.importers.scene_collection import (
@@ -739,6 +740,81 @@ class ConfigInsightsTests(unittest.TestCase):
         self.assertEqual(by_current["Microo"].candidate, "Micro")
         self.assertEqual(by_current["Game Captur"].candidate, "Game Capture")
         self.assertEqual(by_current["HDR Tone Mapp"].candidate, "HDR Tone Map")
+
+    def test_reference_scan_validates_group_containers(self) -> None:
+        config = _config()
+        config["layout_profiles"]["Vanilla"] = {
+            "scene": "In Game",
+            "modules": {
+                "Overlay": {
+                    "container": "Group X",
+                    "container_kind": "group",
+                    "elements": [
+                        {
+                            "source": "Overlay",
+                            "container": "Group X",
+                            "container_kind": "group",
+                        }
+                    ],
+                }
+            },
+        }
+        config["activation_policies"] = {
+            "Overlay": {
+                "targets": [
+                    {
+                        "container": "Group X",
+                        "container_kind": "group",
+                        "source": "Overlay",
+                    }
+                ]
+            }
+        }
+        base = _snapshot()
+        snapshot = SimpleNamespace(
+            scenes=base.scenes,
+            groups=("Group A",),
+            inputs=base.inputs,
+            filters=base.filters,
+            scene_items=(
+                *base.scene_items,
+                ImportedSceneItem(
+                    scene="Group A",
+                    source="Overlay",
+                    occurrence=0,
+                    enabled=True,
+                ),
+            ),
+            unreadable_filter_sources=(),
+        )
+
+        issues = scan_obs_reference_repairs(config, snapshot)
+
+        group_issues = [
+            item
+            for item in issues
+            if item.current == "Group X"
+        ]
+        self.assertGreaterEqual(len(group_issues), 2)
+        self.assertTrue(
+            all(item.candidate == "Group A" for item in group_issues)
+        )
+
+    def test_reference_scan_skips_dynamic_template_values(self) -> None:
+        config = _config()
+        config["profiles"]["game"]["Overwatch"]["actions"] = [
+            {
+                "type": "set_program_scene",
+                "enabled": True,
+                "params": {"scene": "${TargetScene}"},
+            }
+        ]
+
+        issues = scan_obs_reference_repairs(config, _snapshot())
+
+        self.assertFalse(
+            any(item.current == "${TargetScene}" for item in issues)
+        )
 
     def test_apply_reference_repairs_is_copy_on_write_and_checks_current_value(self) -> None:
         config = _config()

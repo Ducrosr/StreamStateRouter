@@ -85,6 +85,17 @@ class _FakeOBSClient:
             ]}
         if request == "GetVideoSettings":
             return {"baseWidth": 2560, "baseHeight": 1440}
+        if request == "GetSourceFilterList":
+            source = str((data or {}).get("sourceName") or "")
+            if source == "Game Capture":
+                return {"filters": [
+                    {
+                        "filterName": "HDR Tone Map",
+                        "filterKind": "shader_filter",
+                        "filterEnabled": True,
+                    }
+                ]}
+            return {"filters": []}
         raise AssertionError(f"Unexpected request: {request}")
 
     def close(self) -> None:
@@ -207,6 +218,7 @@ class SystemCheckTests(unittest.TestCase):
         self.assertEqual(items["obs"].status, "ready")
         self.assertEqual(items["catalog"].status, "ready")
         self.assertEqual(items["obs_requests"].status, "unused")
+        self.assertEqual(items["obs_references"].status, "ready")
         self.assertIn("2 scène(s)", items["catalog"].detail)
         self.assertIn("2 groupe(s)", items["catalog"].detail)
         self.assertIn("3 input(s)", items["catalog"].detail)
@@ -278,6 +290,117 @@ class SystemCheckTests(unittest.TestCase):
                 for owner in required["SetInputMute"]["owners"]
             )
         )
+
+    def test_reference_lint_reports_missing_scene_and_candidate(self) -> None:
+        config = _config()
+        config["obs"]["enabled"] = True
+        config["layout_profiles"]["Vanilla"]["scene"] = "In Gmae"
+
+        report = run_system_check(
+            config,
+            obs_client_factory=_FakeOBSClient,
+        )
+
+        items = {item.key: item for item in report.capabilities.items}
+        self.assertEqual(items["obs_references"].status, "error")
+        payload = report.as_mapping()["references"]
+        issue = next(
+            item
+            for item in payload["issues"]
+            if item["current"] == "In Gmae"
+        )
+        self.assertEqual(issue["candidate"], "In Game")
+        self.assertFalse(report.ok)
+
+    def test_filter_reference_lint_reads_only_configured_source(self) -> None:
+        config = _config()
+        config["obs"]["enabled"] = True
+        config["profiles"]["overlay"]["Vanilla"]["actions"] = [
+            {
+                "type": "source_filter_enabled",
+                "enabled": True,
+                "params": {
+                    "source": "Game Capture",
+                    "filter": "HDR Tone Mapp",
+                    "enabled": True,
+                },
+            }
+        ]
+
+        class CompatibleOBS(_FakeOBSClient):
+            def send(self, request: str, data=None):
+                response = super().send(request, data)
+                if request == "GetVersion":
+                    response = dict(response)
+                    response["availableRequests"] = [
+                        *response["availableRequests"],
+                        "SetSourceFilterEnabled",
+                    ]
+                return response
+
+        report = run_system_check(
+            config,
+            obs_client_factory=CompatibleOBS,
+        )
+
+        client = _FakeOBSClient.instances[-1]
+        filter_reads = [
+            data
+            for request, data in client.requests
+            if request == "GetSourceFilterList"
+        ]
+        self.assertEqual(
+            filter_reads,
+            [{"sourceName": "Game Capture"}],
+        )
+        payload = report.as_mapping()["references"]
+        issue = next(
+            item
+            for item in payload["issues"]
+            if item["current"] == "HDR Tone Mapp"
+        )
+        self.assertEqual(issue["candidate"], "HDR Tone Map")
+
+    def test_reference_lint_remains_read_only(self) -> None:
+        config = _config()
+        config["obs"]["enabled"] = True
+        config["profiles"]["overlay"]["Vanilla"]["actions"] = [
+            {
+                "type": "source_filter_enabled",
+                "enabled": True,
+                "params": {
+                    "source": "Game Capture",
+                    "filter": "HDR Tone Map",
+                    "enabled": True,
+                },
+            }
+        ]
+
+        class CompatibleOBS(_FakeOBSClient):
+            def send(self, request: str, data=None):
+                response = super().send(request, data)
+                if request == "GetVersion":
+                    response = dict(response)
+                    response["availableRequests"] = [
+                        *response["availableRequests"],
+                        "SetSourceFilterEnabled",
+                    ]
+                return response
+
+        report = run_system_check(
+            config,
+            obs_client_factory=CompatibleOBS,
+        )
+
+        client = _FakeOBSClient.instances[-1]
+        self.assertTrue(
+            all(
+                request.startswith("Get")
+                for request, _data in client.requests
+            )
+        )
+        items = {item.key: item for item in report.capabilities.items}
+        self.assertEqual(items["obs_references"].status, "ready")
 
     def test_host_probe_is_shared_and_read_only(self) -> None:
         config = _config()

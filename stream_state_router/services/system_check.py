@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
+from ..importers.scene_collection import ImportedFilter, ImportedInput, ImportedSceneItem
 from ..obs.catalog import OBSResourceCatalog, OBSResourceCatalogReader
 from ..obs.client import OBSClientManager
 from .config import (
@@ -14,6 +15,7 @@ from .config_insights import (
     CapabilityReport,
     build_capability_report,
     configured_action_types,
+    scan_obs_reference_repairs,
 )
 
 
@@ -22,6 +24,7 @@ class SystemCheckReport:
     config_errors: tuple[str, ...]
     capabilities: CapabilityReport
     obs_requests: Mapping[str, object] = field(default_factory=dict)
+    references: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
@@ -44,6 +47,7 @@ class SystemCheckReport:
                 "errors": list(self.config_errors),
             },
             "obs_requests": dict(self.obs_requests),
+            "references": dict(self.references),
             "capabilities": {
                 "status": self.capabilities.status,
                 "summary": self.capabilities.summary,
@@ -92,6 +96,16 @@ class _ReadOnlyOBSClient:
                 f"Contrôle système read-only : requête OBS refusée ({name or '<vide>'})"
             )
         return self._client.send(name, data)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReferenceSnapshot:
+    scenes: tuple[str, ...]
+    groups: tuple[str, ...]
+    inputs: tuple[ImportedInput, ...]
+    filters: tuple[ImportedFilter, ...]
+    scene_items: tuple[ImportedSceneItem, ...]
+    unreadable_filter_sources: frozenset[str] = frozenset()
 
 
 _OBS_ACTION_REQUESTS: dict[str, tuple[str, ...]] = {
@@ -339,6 +353,200 @@ def probe_obs_request_capabilities(
         "missing": [],
     }
 
+def _configured_filter_sources(
+    config: Mapping[str, Any],
+) -> tuple[str, ...]:
+    sources: set[str] = set()
+    profiles = config.get("profiles")
+    if not isinstance(profiles, Mapping):
+        return ()
+    for domain_profiles in profiles.values():
+        if not isinstance(domain_profiles, Mapping):
+            continue
+        for profile in domain_profiles.values():
+            if not isinstance(profile, Mapping):
+                continue
+            actions = profile.get("actions")
+            if not isinstance(actions, list):
+                continue
+            for action in actions:
+                if (
+                    not isinstance(action, Mapping)
+                    or not bool(action.get("enabled", True))
+                ):
+                    continue
+                kind = str(action.get("type") or "").strip().casefold()
+                if kind not in {
+                    "source_filter_enabled",
+                    "source_filter_settings",
+                }:
+                    continue
+                params = action.get("params")
+                if not isinstance(params, Mapping):
+                    continue
+                source = str(params.get("source") or "").strip()
+                if source and not source.startswith("$"):
+                    sources.add(source)
+    return tuple(sorted(sources, key=str.casefold))
+
+
+def _reference_snapshot(
+    config: Mapping[str, Any],
+    client: OBSClientManager,
+    catalog: OBSResourceCatalog,
+) -> _ReferenceSnapshot:
+    reader = OBSResourceCatalogReader(_ReadOnlyOBSClient(client))
+    filters: list[ImportedFilter] = []
+    unreadable: set[str] = set()
+    for source in _configured_filter_sources(config):
+        try:
+            refs = reader.filters_for_source(source)
+        except Exception:
+            unreadable.add(source)
+            continue
+        filters.extend(
+            ImportedFilter(
+                source=source,
+                name=ref.name,
+                kind=ref.kind,
+                enabled=ref.enabled,
+                settings={},
+            )
+            for ref in refs
+        )
+
+    return _ReferenceSnapshot(
+        scenes=tuple(scene.name for scene in catalog.scenes),
+        groups=tuple(catalog.groups),
+        inputs=tuple(
+            ImportedInput(
+                name=item.name,
+                kind=item.kind,
+                uuid=item.uuid,
+                settings={},
+                muted=None,
+                volume_db=None,
+            )
+            for item in catalog.inputs
+        ),
+        filters=tuple(filters),
+        scene_items=tuple(
+            ImportedSceneItem(
+                scene=item.container,
+                source=item.source,
+                occurrence=item.occurrence,
+                enabled=item.enabled,
+            )
+            for item in catalog.scene_items
+        ),
+        unreadable_filter_sources=frozenset(unreadable),
+    )
+
+
+def probe_obs_references(
+    config: Mapping[str, Any],
+    client: OBSClientManager,
+    catalog: OBSResourceCatalog | None,
+) -> dict[str, object]:
+    if catalog is None:
+        return {
+            "status": "warning",
+            "detail": "Références OBS non vérifiables sans catalogue fiable.",
+            "issues": [],
+        }
+
+    snapshot = _reference_snapshot(config, client, catalog)
+    issues = scan_obs_reference_repairs(config, snapshot)
+    rows = [
+        {
+            "kind": issue.kind,
+            "location": issue.location,
+            "current": issue.current,
+            "candidate": issue.candidate,
+            "confidence": issue.confidence,
+            "reason": issue.reason,
+        }
+        for issue in issues
+    ]
+    incomplete = bool(
+        catalog.warnings
+        or catalog.unreadable_containers
+        or snapshot.unreadable_filter_sources
+    )
+
+    if issues:
+        examples = "; ".join(
+            (
+                f"{issue.kind} {issue.location}: {issue.current!r}"
+                + (
+                    f" → {issue.candidate!r}"
+                    if issue.candidate
+                    else ""
+                )
+            )
+            for issue in issues[:3]
+        )
+        return {
+            "status": "warning" if incomplete else "error",
+            "detail": (
+                f"{len(issues)} référence(s) OBS introuvable(s). {examples}"
+                + (" · inventaire partiel" if incomplete else "")
+            ),
+            "action": (
+                "Corrigez ou revalidez ces références dans la collection OBS "
+                "avant d’exécuter les profils concernés."
+            ),
+            "issues": rows,
+            "incomplete": incomplete,
+            "unreadable_filter_sources": sorted(
+                snapshot.unreadable_filter_sources,
+                key=str.casefold,
+            ),
+        }
+
+    if incomplete:
+        details: list[str] = []
+        if snapshot.unreadable_filter_sources:
+            details.append(
+                "filtres non lisibles pour "
+                + ", ".join(
+                    sorted(
+                        snapshot.unreadable_filter_sources,
+                        key=str.casefold,
+                    )
+                )
+            )
+        if catalog.unreadable_containers:
+            details.append(
+                "conteneurs non lisibles : "
+                + ", ".join(
+                    sorted(catalog.unreadable_containers, key=str.casefold)
+                )
+            )
+        suffix = ": " + "; ".join(details) if details else "."
+        return {
+            "status": "warning",
+            "detail": (
+                "Aucune référence cassée prouvée, mais le lint est incomplet"
+                + suffix
+            ),
+            "issues": [],
+            "incomplete": True,
+            "unreadable_filter_sources": sorted(
+                snapshot.unreadable_filter_sources,
+                key=str.casefold,
+            ),
+        }
+
+    return {
+        "status": "ready",
+        "detail": "Les références OBS statiques configurées sont présentes.",
+        "issues": [],
+        "incomplete": False,
+        "unreadable_filter_sources": [],
+    }
+
+
 def _configured_hdr_scope(config: Mapping[str, Any]) -> str:
     """Return the broadest HDR scope requested by configured HDR actions."""
 
@@ -507,6 +715,7 @@ def run_system_check(
     }
     catalog: OBSResourceCatalog | None = None
     obs_request_probe: dict[str, object] = {}
+    reference_probe: dict[str, object] = {}
 
     client = None
     try:
@@ -519,6 +728,11 @@ def run_system_check(
                 catalog_status, catalog = _probe_obs_catalog(client)
                 obs_request_probe = probe_obs_request_capabilities(
                     config,
+                    catalog,
+                )
+                reference_probe = probe_obs_references(
+                    config,
+                    client,
                     catalog,
                 )
             else:
@@ -550,6 +764,7 @@ def run_system_check(
         obs_error=obs_error,
         catalog_status=catalog_status,
         obs_request_probe=obs_request_probe,
+        reference_probe=reference_probe,
         audio_probe=audio_probe,
         hdr_probe=hdr_probe,
     )
@@ -557,6 +772,7 @@ def run_system_check(
         config_errors=config_errors,
         capabilities=capabilities,
         obs_requests=obs_request_probe,
+        references=reference_probe,
     )
 
 
