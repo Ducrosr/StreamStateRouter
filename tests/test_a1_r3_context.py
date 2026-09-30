@@ -548,6 +548,14 @@ class A1R3ContextTests(unittest.TestCase):
                     provider=_NullProvider(),
                     obs_probe_seconds=10.0,
                 )
+                # The helper was prepared immediately before the runtime starts.
+                # Seed the heartbeat cache so startup probing does not
+                # deliberately invalidate that active helper session.
+                service._last_obs_connected = True
+                service._last_obs_session_generation = (
+                    client.session_generation
+                )
+                service._last_obs_probe = time.monotonic()
                 service.start()
                 stop_result = {}
 
