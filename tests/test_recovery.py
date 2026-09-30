@@ -317,6 +317,7 @@ class RuntimeMarkerTests(unittest.TestCase):
         mutations = (
             ("legacy", True),
             ("ambiguous", 0),
+            ("context_uncertain", 0),
         )
         for field, invalid in mutations:
             with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
