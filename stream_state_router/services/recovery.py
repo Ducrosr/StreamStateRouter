@@ -49,6 +49,13 @@ def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | No
             item["legacy"] = True
             return item
 
+        raw_legacy = item.get("legacy", False)
+        if not isinstance(raw_legacy, bool) or raw_legacy:
+            return None
+        raw_ambiguous = item.get("ambiguous", False)
+        if not isinstance(raw_ambiguous, bool):
+            return None
+
         connection = item.get("connection")
         if not isinstance(connection, Mapping):
             return None
@@ -68,6 +75,7 @@ def _normalize_cleanup_item(raw: Mapping[str, object]) -> dict[str, object] | No
             return None
         item["connection"] = {"host": host.casefold(), "port": port}
         item["legacy"] = False
+        item["ambiguous"] = raw_ambiguous
         return item
     return None
 
@@ -111,20 +119,28 @@ class RuntimeMarker:
                         "downgrade refusé pour préserver le recovery"
                     )
 
+                strict_current_schema = (
+                    schema is not None and schema >= CLEANUP_SCHEMA_VERSION
+                )
+                if strict_current_schema and (
+                    not isinstance(data.get("clean_shutdown"), bool)
+                    or not isinstance(data.get("cleanup_complete"), bool)
+                ):
+                    raise RuntimeMarkerFormatError(
+                        "état runtime invalide pour le schéma courant; fichier préservé"
+                    )
+
                 self.previous_unclean = data.get("clean_shutdown") is False
                 self.previous_cleanup_incomplete = data.get("cleanup_complete") is False
                 raw_pending = data.get("pending_cleanup", [])
                 if not isinstance(raw_pending, list):
-                    if schema is not None and schema >= CLEANUP_SCHEMA_VERSION:
+                    if strict_current_schema:
                         raise RuntimeMarkerFormatError(
                             "pending_cleanup invalide pour le schéma courant; fichier préservé"
                         )
                     raw_pending = []
 
                 normalized: list[dict[str, object]] = []
-                strict_current_schema = (
-                    schema is not None and schema >= CLEANUP_SCHEMA_VERSION
-                )
                 for item in raw_pending:
                     if not isinstance(item, Mapping):
                         if strict_current_schema:
