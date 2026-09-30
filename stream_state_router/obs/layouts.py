@@ -1220,7 +1220,6 @@ class OBSLayoutManager:
             )
             if not opacity_neutral:
                 effect_started = True
-                write_error: Exception | None = None
                 try:
                     self._fade_mutation_send(
                         identity,
@@ -1235,13 +1234,12 @@ class OBSLayoutManager:
                         session_generation=session_generation,
                         collection_generation=collection_generation,
                     )
-                except Exception as exc:
+                except Exception:
                     pending = self._pending_fade_cleanup.get(
                         (identity.collection, identity.helper_id)
                     )
                     if pending is not None and pending.context_uncertain:
                         raise
-                    write_error = exc
                 kind, enabled, settings = self._fade_filter_state(
                     source_alias,
                     identity.filter_name,
