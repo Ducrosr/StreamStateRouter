@@ -437,7 +437,8 @@ class LayoutTests(unittest.TestCase):
 
             pending = manager.export_pending_fade_cleanup()
             self.assertEqual(len(pending), 1)
-            self.assertTrue(pending[0]["ambiguous"])
+            self.assertFalse(pending[0]["ambiguous"])
+            self.assertTrue(pending[0]["context_uncertain"])
             self.assertEqual(
                 pending[0]["collection"],
                 "Collection A",
@@ -447,8 +448,11 @@ class LayoutTests(unittest.TestCase):
                 runtime.path.read_text(encoding="utf-8")
             )
             self.assertEqual(len(disk["pending_cleanup"]), 1)
-            self.assertTrue(
+            self.assertFalse(
                 disk["pending_cleanup"][0]["ambiguous"]
+            )
+            self.assertTrue(
+                disk["pending_cleanup"][0]["context_uncertain"]
             )
             self.assertEqual(
                 disk["pending_cleanup"][0]["helper_id"],
