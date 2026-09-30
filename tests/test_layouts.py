@@ -3515,5 +3515,82 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(manager.pending_fade_cleanup(), ())
 
 
+    def test_active_fade_refuses_scene_collection_change_before_opacity_write(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+        manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        client.scene_collection = "Collection B"
+        client.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "Scene Collection modifiée"):
+            manager._set_source_opacity("[Webcam] Avatar", 0.2)
+
+        self.assertFalse(
+            any(
+                request == "SetSourceFilterSettings"
+                for request, _ in client.calls
+            )
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
+    def test_active_fade_refuses_same_alias_with_new_uuid(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+        manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        client.input_uuids["[Webcam] Avatar"] = "uuid-recreated"
+        client.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "non résolu de façon unique"):
+            manager._set_source_opacity("[Webcam] Avatar", 0.2)
+
+        self.assertFalse(
+            any(
+                request == "SetSourceFilterSettings"
+                for request, _ in client.calls
+            )
+        )
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+
+    def test_active_fade_follows_renamed_input_by_uuid(self):
+        client = FakeLayoutClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+
+        old_name = "[Webcam] Avatar"
+        new_name = "[Webcam] Renamed Avatar"
+        client.input_uuids[new_name] = client.input_uuids.pop(old_name)
+        client.source_kinds[new_name] = client.source_kinds.pop(old_name)
+        client.source_filters[new_name] = client.source_filters.pop(old_name)
+        client.calls.clear()
+
+        manager._set_source_opacity(old_name, 0.2)
+
+        state = client.source_filters[new_name][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 0.2)
+        writes = [
+            payload
+            for request, payload in client.calls
+            if request == "SetSourceFilterSettings"
+        ]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0]["sourceName"], new_name)
+        self.assertEqual(writes[0]["sourceUuid"], identity.source_uuid)
+
+
 if __name__ == "__main__":
     unittest.main()
