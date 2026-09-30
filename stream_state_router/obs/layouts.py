@@ -7,7 +7,25 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
-from .client import OBSClientManager, OBSResourceNotFoundError
+from ..recovery_schema import (
+    LayoutFadeCleanupFormatError,
+    normalize_layout_fade_cleanup,
+)
+from .client import (
+    OBSClientManager,
+    OBSRequestError,
+    OBSResourceNotFoundError,
+    OBSSceneCollectionContextChangedError,
+)
+from .fade_helpers import (
+    FadeHelperIdentity,
+    FadeHelperManifestError,
+    FadeHelperManifestStore,
+    LEGACY_LAYOUT_FADE_FILTER,
+    LAYOUT_FADE_FILTER_KIND,
+    MemoryFadeHelperManifestStore,
+    is_layout_fade_name,
+)
 
 
 # [Type] Module name and optional enriched form [Type:flag,flag] Module name.
@@ -17,9 +35,13 @@ _ALIGN_LEFT = 1
 _ALIGN_RIGHT = 2
 _ALIGN_TOP = 4
 _ALIGN_BOTTOM = 8
-SSR_FADE_FILTER = "[SSR] Layout Fade"
-SSR_FADE_FILTER_KIND = "color_filter_v2"
+SSR_FADE_FILTER = LEGACY_LAYOUT_FADE_FILTER
+SSR_FADE_FILTER_KIND = LAYOUT_FADE_FILTER_KIND
 GROUP_RESIZE_SETTLE_SECONDS = 0.05
+
+
+class _FadeContextChangedAfterRequest(RuntimeError):
+    """An OBS fade request completed after its Scene Collection changed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +64,17 @@ class PendingFadeCleanup:
     source: str
     collection: str
     created_at: float
+    helper_id: str = ""
+    source_uuid: str = ""
+    source_kind: str = ""
+    connection_host: str = ""
+    connection_port: int = 0
+    filter_name: str = ""
+    filter_kind: str = ""
+    cleanup_action: str = "neutralize_disable"
+    legacy: bool = False
+    ambiguous: bool = False
+    context_uncertain: bool = False
     persisted: bool = False
     attempts: int = 0
     last_error: str = ""
@@ -312,7 +345,12 @@ def diff_layout_profiles(
 class OBSLayoutManager:
     """Discover, validate, capture, preview and restore OBS module layouts."""
 
-    def __init__(self, client: OBSClientManager):
+    def __init__(
+        self,
+        client: OBSClientManager,
+        *,
+        fade_helper_store: FadeHelperManifestStore | None = None,
+    ):
         self.client = client
         self._scene_item_cache: dict[tuple[str, str], int] = {}
         self._cooperative_yield = None
@@ -325,6 +363,18 @@ class OBSLayoutManager:
         self._pending_cleanup_changed = None
         self._restore_session_generation: int | None = None
         self._last_scene_collection = ""
+        self._fade_helper_store = (
+            fade_helper_store
+            if fade_helper_store is not None
+            else (
+                FadeHelperManifestStore()
+                if isinstance(client, OBSClientManager)
+                else MemoryFadeHelperManifestStore()
+            )
+        )
+        self._active_fade_helpers: dict[str, FadeHelperIdentity] = {}
+        self._active_fade_sessions: dict[str, int] = {}
+        self._active_fade_collection_generations: dict[str, int] = {}
 
     def set_pending_cleanup_changed(self, callback) -> None:
         """Persist cleanup obligations whenever their durable set changes."""
@@ -332,8 +382,306 @@ class OBSLayoutManager:
 
     def _notify_pending_cleanup_changed(self) -> None:
         callback = self._pending_cleanup_changed
-        if callback is not None:
-            callback()
+        if callback is None:
+            if isinstance(self.client, OBSClientManager):
+                raise RuntimeError(
+                    "Journal durable du cleanup fade non configuré; "
+                    "effet temporaire refusé"
+                )
+            return
+        callback()
+
+    def _fade_send(
+        self,
+        request: str,
+        data: dict[str, Any] | None = None,
+        *,
+        session_generation: int = 0,
+        expected_collection: str = "",
+        expected_collection_generation: int = 0,
+        post_runtime_yield: bool = True,
+    ) -> dict[str, Any]:
+        """Send one fade request under a stable OBS/collection context."""
+        self._yield_runtime()
+        expected_session = max(0, int(session_generation or 0))
+        expected_collection = str(expected_collection or "").strip()
+        expected_collection_generation = max(
+            0,
+            int(expected_collection_generation or 0),
+        )
+
+        if isinstance(self.client, OBSClientManager):
+            try:
+                response = self.client.send(
+                    request,
+                    data,
+                    expected_session_generation=(
+                        expected_session if expected_session else None
+                    ),
+                    expected_scene_collection_generation=(
+                        expected_collection_generation
+                        if expected_collection_generation
+                        else None
+                    ),
+                )
+            except OBSSceneCollectionContextChangedError as exc:
+                if exc.request_submitted:
+                    raise _FadeContextChangedAfterRequest(
+                        f"Scene Collection modifiée pendant {request}; "
+                        "résultat OBS considéré incertain"
+                    ) from exc
+                raise RuntimeError(
+                    f"Scene Collection modifiée avant {request}"
+                ) from exc
+        else:
+            if expected_collection:
+                self._verify_fade_collection(
+                    expected_collection,
+                    session_generation=expected_session,
+                    expected_collection_generation=(
+                        expected_collection_generation
+                    ),
+                )
+                self._yield_runtime()
+            request_error: OBSRequestError | None = None
+            response: dict[str, Any] = {}
+            try:
+                response = self._send(request, data)
+            except OBSRequestError as exc:
+                request_error = exc
+            if expected_session:
+                current_session = int(
+                    getattr(self.client, "session_generation", 0) or 0
+                )
+                if current_session != expected_session:
+                    raise RuntimeError(
+                        "Session OBS modifiée pendant l'opération de fade"
+                    )
+            if expected_collection:
+                try:
+                    self._verify_fade_collection(
+                        expected_collection,
+                        session_generation=expected_session,
+                        expected_collection_generation=(
+                            expected_collection_generation
+                        ),
+                    )
+                except Exception as exc:
+                    raise _FadeContextChangedAfterRequest(
+                        f"Scene Collection modifiée pendant {request}; "
+                        "résultat OBS considéré incertain"
+                    ) from exc
+            if request_error is not None:
+                raise request_error
+
+        # Context qualification must happen before cooperative cancellation.
+        # A shutdown requested while OBS was blocked must not hide a collection
+        # change or bypass a pre-armed durable uncertainty fence.
+        if post_runtime_yield:
+            self._yield_runtime()
+        return response
+
+    def _capture_fade_collection_context(
+        self,
+        expected_collection: str = "",
+        *,
+        session_generation: int = 0,
+    ) -> tuple[str, int]:
+        expected_collection = str(expected_collection or "").strip()
+        if isinstance(self.client, OBSClientManager):
+            current, generation = self.client.scene_collection_context(
+                expected_session_generation=(
+                    int(session_generation or 0) or None
+                ),
+            )
+        else:
+            expected_session = int(session_generation or 0)
+            if expected_session:
+                current_session = int(
+                    getattr(self.client, "session_generation", 0) or 0
+                )
+                if current_session != expected_session:
+                    raise RuntimeError(
+                        "Session OBS modifiée pendant la qualification "
+                        "Scene Collection"
+                    )
+            current = self._scene_collection_name()
+            generation = int(
+                getattr(self.client, "scene_collection_generation", 0)
+                or 0
+            )
+            if expected_session:
+                current_session = int(
+                    getattr(self.client, "session_generation", 0) or 0
+                )
+                if current_session != expected_session:
+                    raise RuntimeError(
+                        "Session OBS modifiée pendant la qualification "
+                        "Scene Collection"
+                    )
+        if expected_collection and current != expected_collection:
+            raise RuntimeError(
+                f"Scene Collection modifiée pendant l'opération de fade "
+                f"({expected_collection} != {current})"
+            )
+        return current, int(generation)
+
+    def _verify_fade_collection(
+        self,
+        expected_collection: str,
+        *,
+        session_generation: int = 0,
+        expected_collection_generation: int = 0,
+    ) -> None:
+        current, generation = self._capture_fade_collection_context(
+            expected_collection,
+            session_generation=session_generation,
+        )
+        expected_generation = int(
+            expected_collection_generation or 0
+        )
+        if expected_generation and generation != expected_generation:
+            raise RuntimeError(
+                "Scene Collection modifiée pendant l'opération de fade "
+                f"(génération {expected_generation} != {generation})"
+            )
+        if current != expected_collection:
+            raise RuntimeError(
+                f"Scene Collection modifiée pendant l'opération de fade "
+                f"({expected_collection} != {current})"
+            )
+
+    def _fade_connection_context(self) -> tuple[str, int]:
+        config = getattr(self.client, "config", None)
+        if config is None:
+            raise RuntimeError("Contexte de connexion OBS indisponible pour le helper de fade")
+        enabled = getattr(config, "enabled", True)
+        host = str(getattr(config, "host", "") or "").strip().casefold()
+        try:
+            port = int(getattr(config, "port", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            port = 0
+        if not bool(enabled) or not host or port <= 0:
+            raise RuntimeError("Contexte de connexion OBS incomplet pour le helper de fade")
+        return host, port
+
+    def _resolve_fade_input(
+        self,
+        source: str,
+        *,
+        source_uuid: str = "",
+        session_generation: int = 0,
+        expected_collection: str = "",
+        expected_collection_generation: int = 0,
+    ) -> tuple[str, str, str]:
+        response = self._fade_send(
+            "GetInputList",
+            session_generation=session_generation,
+            expected_collection=expected_collection,
+            expected_collection_generation=expected_collection_generation,
+        )
+        raw_inputs = response.get("inputs") if isinstance(response, Mapping) else None
+        if not isinstance(raw_inputs, list):
+            raise RuntimeError("Inventaire des inputs OBS incomplet")
+        wanted_name = str(source or "").strip()
+        wanted_uuid = str(source_uuid or "").strip()
+        matches: list[tuple[str, str, str]] = []
+        for raw in raw_inputs:
+            if not isinstance(raw, Mapping):
+                raise RuntimeError("Inventaire des inputs OBS ambigu")
+            name = raw.get("inputName")
+            uuid_value = raw.get("inputUuid")
+            kind = raw.get("inputKind")
+            if not isinstance(name, str) or not isinstance(uuid_value, str) or not isinstance(kind, str):
+                raise RuntimeError("Identité d'input OBS incomplète")
+            name = name.strip()
+            uuid_value = uuid_value.strip()
+            kind = kind.strip()
+            if not name or not uuid_value or not kind:
+                raise RuntimeError("Identité d'input OBS incomplète")
+            if wanted_uuid:
+                if uuid_value == wanted_uuid:
+                    matches.append((name, uuid_value, kind))
+            elif name == wanted_name:
+                matches.append((name, uuid_value, kind))
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Input OBS non résolu de façon unique pour le fade : {wanted_name or wanted_uuid}"
+            )
+        return matches[0]
+
+    @staticmethod
+    def _fade_source_payload(
+        source: str,
+        source_uuid: str = "",
+    ) -> dict[str, str]:
+        payload = {"sourceName": str(source)}
+        qualified_uuid = str(source_uuid or "").strip()
+        if qualified_uuid:
+            payload["sourceUuid"] = qualified_uuid
+        return payload
+
+    def _fade_filter_rows(
+        self,
+        source: str,
+        *,
+        source_uuid: str = "",
+        session_generation: int = 0,
+        expected_collection: str = "",
+        expected_collection_generation: int = 0,
+    ) -> list[Mapping[str, Any]]:
+        response = self._fade_send(
+            "GetSourceFilterList",
+            self._fade_source_payload(source, source_uuid),
+            session_generation=session_generation,
+            expected_collection=expected_collection,
+            expected_collection_generation=expected_collection_generation,
+        )
+        raw = response.get("filters") if isinstance(response, Mapping) else None
+        if not isinstance(raw, list):
+            raise RuntimeError(f"Inventaire des filtres incomplet pour {source}")
+        rows: list[Mapping[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise RuntimeError(f"Inventaire des filtres ambigu pour {source}")
+            filter_name = item.get("filterName")
+            if not isinstance(filter_name, str) or not filter_name.strip():
+                raise RuntimeError(
+                    f"Inventaire des filtres ambigu pour {source}: nom de filtre invalide"
+                )
+            rows.append(item)
+        return rows
+
+    def _fade_filter_state(
+        self,
+        source: str,
+        filter_name: str,
+        *,
+        source_uuid: str = "",
+        session_generation: int = 0,
+        expected_collection: str = "",
+        expected_collection_generation: int = 0,
+    ) -> tuple[str, bool | None, dict[str, Any]]:
+        payload = self._fade_source_payload(source, source_uuid)
+        payload["filterName"] = filter_name
+        response = self._fade_send(
+            "GetSourceFilter",
+            payload,
+            session_generation=session_generation,
+            expected_collection=expected_collection,
+            expected_collection_generation=expected_collection_generation,
+        )
+        if not isinstance(response, Mapping):
+            raise RuntimeError(f"État du helper illisible pour {source}")
+        kind = response.get("filterKind")
+        if not isinstance(kind, str) or not kind.strip():
+            raise RuntimeError(f"Kind du helper illisible pour {source}")
+        raw_enabled = response.get("filterEnabled")
+        enabled = bool(raw_enabled) if isinstance(raw_enabled, bool) else None
+        settings = response.get("filterSettings")
+        if not isinstance(settings, Mapping):
+            raise RuntimeError(f"Settings du helper illisibles pour {source}")
+        return kind.strip(), enabled, dict(settings)
 
     def pending_fade_cleanup(self) -> tuple[str, ...]:
         """Compatibility view of pending fade sources."""
@@ -345,8 +693,16 @@ class OBSLayoutManager:
         )
 
     def export_pending_fade_cleanup(self) -> tuple[dict[str, object], ...]:
-        return tuple(
-            {
+        rows: list[dict[str, object]] = []
+        for item in sorted(
+            self._pending_fade_cleanup.values(),
+            key=lambda value: (
+                value.collection.casefold(),
+                value.source.casefold(),
+                value.helper_id,
+            ),
+        ):
+            row: dict[str, object] = {
                 "kind": "layout_fade",
                 "source": item.source,
                 "collection": item.collection,
@@ -354,11 +710,28 @@ class OBSLayoutManager:
                 "attempts": int(item.attempts),
                 "last_error": item.last_error,
             }
-            for item in sorted(
-                self._pending_fade_cleanup.values(),
-                key=lambda value: (value.collection.casefold(), value.source.casefold()),
-            )
-        )
+            if item.legacy or not item.helper_id:
+                row["legacy"] = True
+            else:
+                row.update(
+                    {
+                        "helper_id": item.helper_id,
+                        "source_uuid": item.source_uuid,
+                        "source_kind": item.source_kind,
+                        "connection": {
+                            "host": item.connection_host,
+                            "port": int(item.connection_port),
+                        },
+                        "filter_name": item.filter_name,
+                        "filter_kind": item.filter_kind,
+                        "cleanup_action": item.cleanup_action,
+                        "legacy": False,
+                        "ambiguous": bool(item.ambiguous),
+                        "context_uncertain": bool(item.context_uncertain),
+                    }
+                )
+            rows.append(row)
+        return tuple(rows)
 
     def import_pending_fade_cleanup(self, raw_items) -> int:
         imported = 0
@@ -367,51 +740,88 @@ class OBSLayoutManager:
                 continue
             if str(raw.get("kind") or "").strip().casefold() != "layout_fade":
                 continue
-            source = str(raw.get("source") or "").strip()
-            collection = str(raw.get("collection") or "").strip()
-            if not source or not collection:
-                continue
+            helper_claimed = bool(
+                isinstance(raw.get("helper_id"), str)
+                and str(raw.get("helper_id") or "").strip()
+            )
             try:
-                pending = PendingFadeCleanup(
-                    source=source,
-                    collection=collection,
-                    created_at=float(raw.get("created_at", 0.0) or 0.0),
-                    attempts=max(0, int(raw.get("attempts", 0) or 0)),
-                    last_error=str(raw.get("last_error") or ""),
+                normalized = normalize_layout_fade_cleanup(
+                    raw,
+                    schema=3 if helper_claimed else 2,
+                    strict_current=False,
                 )
-            except (TypeError, ValueError, OverflowError):
+            except LayoutFadeCleanupFormatError as exc:
+                # RuntimeMarker must never accept an obligation which this
+                # boundary then silently drops. Direct/in-process imports use
+                # the same validator and fail closed as well.
+                raise RuntimeError(
+                    f"Obligation fade importée invalide: {exc}"
+                ) from exc
+
+            source = str(normalized["source"])
+            collection = str(normalized["collection"])
+            helper_id = str(normalized.get("helper_id") or "")
+            connection = normalized.get("connection")
+            host = ""
+            port = 0
+            if isinstance(connection, Mapping):
+                host = str(connection.get("host") or "")
+                port = int(connection.get("port") or 0)
+
+            pending = PendingFadeCleanup(
+                source=source,
+                collection=collection,
+                created_at=float(normalized["created_at"]),
+                helper_id=helper_id,
+                source_uuid=str(normalized.get("source_uuid") or ""),
+                source_kind=str(normalized.get("source_kind") or ""),
+                connection_host=host,
+                connection_port=port,
+                filter_name=str(normalized.get("filter_name") or ""),
+                filter_kind=str(normalized.get("filter_kind") or ""),
+                cleanup_action=str(
+                    normalized.get("cleanup_action") or "neutralize_disable"
+                ),
+                legacy=bool(normalized.get("legacy", not helper_id)),
+                ambiguous=bool(normalized.get("ambiguous", False)),
+                context_uncertain=bool(
+                    normalized.get("context_uncertain", False)
+                ),
+                persisted=True,
+                attempts=int(normalized["attempts"]),
+                last_error=str(normalized["last_error"]),
+            )
+            key = (
+                collection,
+                helper_id if helper_id else f"legacy:{source}",
+            )
+            previous = self._pending_fade_cleanup.get(key)
+            if previous is not None:
+                same_identity = (
+                    previous.source == pending.source
+                    and previous.collection == pending.collection
+                    and previous.helper_id == pending.helper_id
+                    and previous.source_uuid == pending.source_uuid
+                    and previous.source_kind == pending.source_kind
+                    and previous.connection_host == pending.connection_host
+                    and previous.connection_port == pending.connection_port
+                    and previous.filter_name == pending.filter_name
+                    and previous.filter_kind == pending.filter_kind
+                    and previous.cleanup_action == pending.cleanup_action
+                    and previous.legacy == pending.legacy
+                    and previous.context_uncertain == pending.context_uncertain
+                )
+                previous.ambiguous = True
+                previous.last_error = (
+                    "obligation fade dupliquée"
+                    if same_identity
+                    else "obligation fade contradictoire dupliquée"
+                )
+                imported += 1
                 continue
-            self._pending_fade_cleanup[(collection, source)] = pending
+            self._pending_fade_cleanup[key] = pending
             imported += 1
-        if imported:
-            self._notify_pending_cleanup_changed()
         return imported
-
-    def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
-        """Retry only obligations belonging to the active Scene Collection."""
-        if not self._pending_fade_cleanup:
-            return ()
-        try:
-            current = self._scene_collection_name()
-        except Exception as exc:
-            return (f"Scene Collection non lisible pour le cleanup fondu ({exc})",)
-
-        warnings: list[str] = []
-        for key, pending in tuple(self._pending_fade_cleanup.items()):
-            if pending.collection != current:
-                continue
-            try:
-                self._set_source_opacity(pending.source, 1.0)
-            except Exception as exc:
-                pending.attempts += 1
-                pending.last_error = str(exc)
-                warnings.append(
-                    f"{pending.source}: neutralisation du fondu impossible ({exc})"
-                )
-                continue
-            self._pending_fade_cleanup.pop(key, None)
-            self._notify_pending_cleanup_changed()
-        return tuple(warnings)
 
     def _fade_collection_context(self, *, probe: bool = False) -> str:
         if probe:
@@ -427,27 +837,1052 @@ class OBSLayoutManager:
         try:
             return self._scene_collection_name()
         except Exception:
-            # Unknown context is deliberately non-replayable. It is still
-            # exported for diagnostics/recovery rather than being silently lost.
             return "<unknown>"
 
-    def _ensure_pending_fade(self, source: str, collection: str) -> PendingFadeCleanup:
-        key = (str(collection), str(source))
+    def _ensure_pending_fade(
+        self,
+        identity: FadeHelperIdentity,
+    ) -> PendingFadeCleanup:
+        key = (identity.collection, identity.helper_id)
         pending = self._pending_fade_cleanup.get(key)
         if pending is None:
             pending = PendingFadeCleanup(
-                source=str(source),
-                collection=str(collection),
-                created_at=time.monotonic(),
+                source=identity.source_alias,
+                collection=identity.collection,
+                created_at=time.time(),
+                helper_id=identity.helper_id,
+                source_uuid=identity.source_uuid,
+                source_kind=identity.source_kind,
+                connection_host=identity.connection_host,
+                connection_port=identity.connection_port,
+                filter_name=identity.filter_name,
+                filter_kind=identity.filter_kind,
+                cleanup_action="neutralize_disable",
+                legacy=False,
             )
             self._pending_fade_cleanup[key] = pending
+        else:
+            expected = (
+                identity.collection,
+                identity.helper_id,
+                identity.source_uuid,
+                identity.source_kind,
+                identity.connection_host,
+                identity.connection_port,
+                identity.filter_name,
+                identity.filter_kind,
+                "neutralize_disable",
+            )
+            observed = (
+                pending.collection,
+                pending.helper_id,
+                pending.source_uuid,
+                pending.source_kind,
+                pending.connection_host,
+                pending.connection_port,
+                pending.filter_name,
+                pending.filter_kind,
+                pending.cleanup_action,
+            )
+            if (
+                pending.legacy
+                or pending.ambiguous
+                or pending.context_uncertain
+                or observed != expected
+            ):
+                raise RuntimeError(
+                    f"Obligation fade contradictoire pour {identity.source_alias}; "
+                    "mutation du helper refusée"
+                )
         if not pending.persisted:
-            # Persistence is part of arming the cleanup obligation, not a
-            # best-effort side effect. If it fails, leave the entry unarmed so
-            # every later attempt must retry before any opacity mutation.
             self._notify_pending_cleanup_changed()
             pending.persisted = True
         return pending
+
+    def _remove_pending_fade(
+        self,
+        key: tuple[str, str],
+    ) -> None:
+        pending = self._pending_fade_cleanup.pop(key)
+        try:
+            self._notify_pending_cleanup_changed()
+        except Exception:
+            self._pending_fade_cleanup[key] = pending
+            raise
+        self._active_fade_helpers.pop(pending.source, None)
+        self._active_fade_sessions.pop(pending.source, None)
+        self._active_fade_collection_generations.pop(pending.source, None)
+
+    def _discard_unmutated_fade_obligation(
+        self,
+        identity: FadeHelperIdentity,
+    ) -> None:
+        """Remove write-ahead state when preparation failed before OBS mutation."""
+        key = (identity.collection, identity.helper_id)
+        pending = self._pending_fade_cleanup.get(key)
+        if pending is None:
+            return
+        self._remove_pending_fade(key)
+
+    def _set_fade_context_uncertain(
+        self,
+        identity: FadeHelperIdentity,
+        uncertain: bool,
+        *,
+        detail: str = "",
+    ) -> None:
+        """Durably fence a mutation before it can affect an unknown collection."""
+        key = (identity.collection, identity.helper_id)
+        pending = self._pending_fade_cleanup.get(key)
+        if pending is None:
+            raise RuntimeError(
+                f"Obligation fade absente pour {identity.source_alias}"
+            )
+        previous_uncertain = pending.context_uncertain
+        previous_error = pending.last_error
+        pending.context_uncertain = bool(uncertain)
+        if uncertain and detail:
+            pending.last_error = str(detail)
+        elif not uncertain and pending.last_error.startswith("mutation "):
+            pending.last_error = ""
+        try:
+            self._notify_pending_cleanup_changed()
+        except Exception:
+            pending.context_uncertain = previous_uncertain
+            pending.last_error = previous_error
+            raise
+        pending.persisted = True
+
+    def _fade_mutation_send(
+        self,
+        identity: FadeHelperIdentity,
+        request: str,
+        data: dict[str, Any],
+        *,
+        session_generation: int,
+        collection_generation: int,
+    ) -> dict[str, Any]:
+        """Write-ahead fence one potentially cross-collection OBS mutation."""
+        self._yield_runtime()
+        durable_context_fence = isinstance(
+            self.client,
+            OBSClientManager,
+        )
+        if durable_context_fence:
+            self._set_fade_context_uncertain(
+                identity,
+                True,
+                detail=f"mutation {request} en attente de qualification finale",
+            )
+        try:
+            response = self._fade_send(
+                request,
+                data,
+                session_generation=session_generation,
+                expected_collection=identity.collection,
+                expected_collection_generation=collection_generation,
+                post_runtime_yield=False,
+            )
+        except OBSRequestError:
+            # OBS explicitly rejected the request and the client completed the
+            # post-response event barrier, so no effect needs quarantine.
+            if durable_context_fence:
+                self._set_fade_context_uncertain(identity, False)
+            raise
+        except _FadeContextChangedAfterRequest:
+            if not durable_context_fence:
+                self._set_fade_context_uncertain(
+                    identity,
+                    True,
+                    detail=f"mutation {request} au contexte Scene Collection incertain",
+                )
+            raise
+        except BaseException:
+            # Transport failure, collection invalidation or cooperative
+            # cancellation keeps the already durable fence intact.
+            raise
+
+        # Clear the fence durably only after the response has crossed the
+        # monotonic event barrier.  If this persistence fails, the conservative
+        # on-disk state remains context_uncertain=True.
+        if durable_context_fence:
+            self._set_fade_context_uncertain(identity, False)
+        self._yield_runtime()
+        return response
+
+    def _prepare_fade_filter(
+        self,
+        source: str,
+        collection: str,
+    ) -> FadeHelperIdentity:
+        collection = str(collection or "").strip()
+        if not collection or collection == "<unknown>":
+            raise RuntimeError("Scene Collection inconnue pour le helper de fade")
+        source = str(source or "").strip()
+        self._yield_runtime()
+
+        legacy_conflicts = [
+            pending
+            for pending in self._pending_fade_cleanup.values()
+            if pending.legacy
+            and pending.collection == collection
+            and pending.source == source
+        ]
+        if legacy_conflicts:
+            raise RuntimeError(
+                f"Obligation fade legacy ambiguë pour {source}; "
+                "nouveau helper refusé"
+            )
+
+        host, port = self._fade_connection_context()
+        current_collection, collection_generation = (
+            self._capture_fade_collection_context(collection)
+        )
+        if current_collection != collection:
+            raise RuntimeError(
+                f"Scene Collection modifiée avant le fade "
+                f"({collection} != {current_collection})"
+            )
+        session_generation = int(
+            getattr(self.client, "session_generation", 0) or 0
+        )
+
+        source_alias, source_uuid, source_kind = self._resolve_fade_input(
+            source,
+            session_generation=session_generation,
+            expected_collection=collection,
+            expected_collection_generation=collection_generation,
+        )
+
+        self._yield_runtime()
+        identity = self._fade_helper_store.prepare_layout_fade(
+            connection_host=host,
+            connection_port=port,
+            collection=collection,
+            source_uuid=source_uuid,
+            source_alias=source_alias,
+            source_kind=source_kind,
+            session_generation=session_generation,
+        )
+        self._yield_runtime()
+
+        pending_key = (identity.collection, identity.helper_id)
+        obligation_preexisting = pending_key in self._pending_fade_cleanup
+        self._ensure_pending_fade(identity)
+        effect_started = False
+
+        try:
+            rows = self._fade_filter_rows(
+                source_alias,
+                source_uuid=identity.source_uuid,
+                session_generation=session_generation,
+                expected_collection=collection,
+                expected_collection_generation=collection_generation,
+            )
+            expected_rows = [
+                row
+                for row in rows
+                if str(row.get("filterName") or "").strip()
+                == identity.filter_name
+            ]
+            if len(expected_rows) > 1:
+                raise RuntimeError(
+                    f"Helper de fade dupliqué pour {source_alias}"
+                )
+            if expected_rows and identity.state != "observed":
+                raise RuntimeError(
+                    f"Helper de fade existant non prouvé pour {source_alias}; "
+                    "adoption interdite"
+                )
+
+            if not expected_rows:
+                lookalikes = [
+                    str(row.get("filterName") or "").strip()
+                    for row in rows
+                    if is_layout_fade_name(row.get("filterName"))
+                ]
+                if lookalikes:
+                    raise RuntimeError(
+                        f"Helper de fade ambigu pour {source_alias}: "
+                        + ", ".join(
+                            sorted(set(lookalikes), key=str.casefold)
+                        )
+                    )
+                if identity.state == "observed":
+                    candidates, unreadable = self._possible_renamed_fade_filters(
+                        source_alias,
+                        identity,
+                        rows,
+                        session_generation=session_generation,
+                        expected_collection=collection,
+                        expected_collection_generation=collection_generation,
+                    )
+                    if candidates or unreadable:
+                        names = candidates or unreadable
+                        raise RuntimeError(
+                            f"Helper de fade possiblement renommé pour "
+                            f"{source_alias}: {', '.join(names)}; "
+                            "recréation automatique refusée"
+                        )
+
+                effect_started = True
+                try:
+                    self._fade_mutation_send(
+                        identity,
+                        "CreateSourceFilter",
+                        {
+                            "sourceName": source_alias,
+                            "sourceUuid": identity.source_uuid,
+                            "filterName": identity.filter_name,
+                            "filterKind": identity.filter_kind,
+                            "filterSettings": {"opacity": 1.0},
+                        },
+                        session_generation=session_generation,
+                        collection_generation=collection_generation,
+                    )
+                except OBSRequestError:
+                    effect_started = False
+                    raise
+                except Exception:
+                    pending = self._pending_fade_cleanup.get(
+                        (identity.collection, identity.helper_id)
+                    )
+                    if pending is not None and pending.context_uncertain:
+                        raise
+                    if (
+                        int(
+                            getattr(
+                                self.client,
+                                "session_generation",
+                                0,
+                            )
+                            or 0
+                        )
+                        != session_generation
+                    ):
+                        raise
+
+                rows = self._fade_filter_rows(
+                    source_alias,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                    expected_collection=collection,
+                    expected_collection_generation=collection_generation,
+                )
+                expected_rows = [
+                    row
+                    for row in rows
+                    if str(row.get("filterName") or "").strip()
+                    == identity.filter_name
+                ]
+                if len(expected_rows) != 1:
+                    raise RuntimeError(
+                        f"CreateSourceFilter non vérifié pour {source_alias}"
+                    )
+
+            kind, enabled, settings = self._fade_filter_state(
+                source_alias,
+                identity.filter_name,
+                source_uuid=identity.source_uuid,
+                session_generation=session_generation,
+                expected_collection=collection,
+                expected_collection_generation=collection_generation,
+            )
+            if kind != identity.filter_kind:
+                raise RuntimeError(
+                    f"Kind du helper incompatible pour {source_alias}: {kind}"
+                )
+            if not self._fade_helper_store.settings_compatible(
+                identity,
+                settings,
+            ):
+                raise RuntimeError(
+                    f"Helper de fade modifié extérieurement pour {source_alias}"
+                )
+
+            if identity.state != "observed":
+                self._verify_fade_collection(
+                    collection,
+                    session_generation=session_generation,
+                    expected_collection_generation=collection_generation,
+                )
+                identity = self._fade_helper_store.mark_observed(
+                    identity.helper_id,
+                    source_alias=source_alias,
+                    non_temporary_settings=settings,
+                )
+
+            raw_opacity = settings.get("opacity")
+            opacity_neutral = (
+                isinstance(raw_opacity, (int, float))
+                and not isinstance(raw_opacity, bool)
+                and abs(float(raw_opacity) - 1.0) <= 1e-6
+            )
+            if not opacity_neutral:
+                effect_started = True
+                try:
+                    self._fade_mutation_send(
+                        identity,
+                        "SetSourceFilterSettings",
+                        {
+                            "sourceName": source_alias,
+                            "sourceUuid": identity.source_uuid,
+                            "filterName": identity.filter_name,
+                            "filterSettings": {"opacity": 1.0},
+                            "overlay": True,
+                        },
+                        session_generation=session_generation,
+                        collection_generation=collection_generation,
+                    )
+                except Exception:
+                    pending = self._pending_fade_cleanup.get(
+                        (identity.collection, identity.helper_id)
+                    )
+                    if pending is not None and pending.context_uncertain:
+                        raise
+                kind, enabled, settings = self._fade_filter_state(
+                    source_alias,
+                    identity.filter_name,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                    expected_collection=collection,
+                    expected_collection_generation=collection_generation,
+                )
+                raw_opacity = settings.get("opacity")
+                if (
+                    kind != identity.filter_kind
+                    or not isinstance(raw_opacity, (int, float))
+                    or isinstance(raw_opacity, bool)
+                    or abs(float(raw_opacity) - 1.0) > 1e-6
+                ):
+                    raise RuntimeError(
+                        f"Neutralité du helper non vérifiée pour {source_alias}"
+                    )
+                if not self._fade_helper_store.settings_compatible(
+                    identity,
+                    settings,
+                ):
+                    raise RuntimeError(
+                        f"Helper de fade modifié pendant neutralisation pour "
+                        f"{source_alias}"
+                    )
+
+            if enabled is not True:
+                effect_started = True
+                self._fade_mutation_send(
+                    identity,
+                    "SetSourceFilterEnabled",
+                    {
+                        "sourceName": source_alias,
+                        "sourceUuid": identity.source_uuid,
+                        "filterName": identity.filter_name,
+                        "filterEnabled": True,
+                    },
+                    session_generation=session_generation,
+                    collection_generation=collection_generation,
+                )
+                kind, enabled, settings = self._fade_filter_state(
+                    source_alias,
+                    identity.filter_name,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                    expected_collection=collection,
+                    expected_collection_generation=collection_generation,
+                )
+                if kind != identity.filter_kind or enabled is not True:
+                    raise RuntimeError(
+                        f"Activation du helper non vérifiée pour {source_alias}"
+                    )
+                if not self._fade_helper_store.settings_compatible(
+                    identity,
+                    settings,
+                ):
+                    raise RuntimeError(
+                        f"Helper de fade modifié pendant activation pour "
+                        f"{source_alias}"
+                    )
+
+            self._active_fade_helpers[source_alias] = identity
+            self._active_fade_sessions[source_alias] = session_generation
+            self._active_fade_collection_generations[source_alias] = (
+                collection_generation
+            )
+            return identity
+        except BaseException as exc:
+            if not effect_started and not obligation_preexisting:
+                try:
+                    self._discard_unmutated_fade_obligation(identity)
+                except Exception as discard_exc:
+                    raise RuntimeError(
+                        f"{exc}; retrait du journal pré-mutation impossible: "
+                        f"{discard_exc}"
+                    ) from exc
+            raise
+
+    def _set_source_opacity(self, source: str, opacity: float) -> None:
+        identity = self._active_fade_helpers.get(str(source))
+        if identity is None:
+            raise RuntimeError(
+                f"Aucun helper de fade préparé pour {source}; création implicite interdite"
+            )
+        session_generation = self._active_fade_sessions.get(str(source), 0)
+        collection_generation = self._active_fade_collection_generations.get(
+            str(source),
+            0,
+        )
+        if not collection_generation and isinstance(
+            self.client,
+            OBSClientManager,
+        ):
+            raise RuntimeError(
+                f"Contexte Scene Collection absent pour le fade de {source}"
+            )
+
+        self._verify_fade_collection(
+            identity.collection,
+            session_generation=session_generation,
+            expected_collection_generation=collection_generation,
+        )
+        source_alias, source_uuid, source_kind = self._resolve_fade_input(
+            identity.source_alias,
+            source_uuid=identity.source_uuid,
+            session_generation=session_generation,
+            expected_collection=identity.collection,
+            expected_collection_generation=collection_generation,
+        )
+        if (
+            source_uuid != identity.source_uuid
+            or source_kind != identity.source_kind
+        ):
+            raise RuntimeError(
+                f"Source OBS remplacée ou kind modifié pendant le fade pour {source}"
+            )
+
+        self._fade_mutation_send(
+            identity,
+            "SetSourceFilterSettings",
+            {
+                "sourceName": source_alias,
+                "sourceUuid": identity.source_uuid,
+                "filterName": identity.filter_name,
+                "filterSettings": {
+                    "opacity": max(0.0, min(1.0, float(opacity)))
+                },
+                "overlay": True,
+            },
+            session_generation=session_generation,
+            collection_generation=collection_generation,
+        )
+
+    def _possible_renamed_fade_filters(
+        self,
+        source: str,
+        identity: FadeHelperIdentity,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        session_generation: int = 0,
+        expected_collection: str = "",
+        expected_collection_generation: int = 0,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        candidates: list[str] = []
+        unreadable: list[str] = []
+        for row in rows:
+            name = str(row.get("filterName") or "").strip()
+            if not name or name == identity.filter_name:
+                continue
+            try:
+                kind, _enabled, _settings = self._fade_filter_state(
+                    source,
+                    name,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                    expected_collection=expected_collection,
+                    expected_collection_generation=(
+                        expected_collection_generation
+                    ),
+                )
+            except Exception:
+                unreadable.append(name)
+                continue
+            if kind == identity.filter_kind:
+                candidates.append(name)
+        return (
+            tuple(sorted(set(candidates), key=str.casefold)),
+            tuple(sorted(set(unreadable), key=str.casefold)),
+        )
+
+    def _cleanup_filter_absence_status(
+        self,
+        source: str,
+        identity: FadeHelperIdentity,
+        *,
+        session_generation: int = 0,
+        collection_generation: int = 0,
+    ) -> tuple[bool, str]:
+        rows = self._fade_filter_rows(
+            source,
+            source_uuid=identity.source_uuid,
+            session_generation=session_generation,
+            expected_collection=identity.collection,
+            expected_collection_generation=collection_generation,
+        )
+        exact = [
+            row
+            for row in rows
+            if str(row.get("filterName") or "").strip() == identity.filter_name
+        ]
+        if exact:
+            return False, ""
+
+        suspicious = [
+            str(row.get("filterName") or "").strip()
+            for row in rows
+            if (
+                identity.helper_id
+                and identity.helper_id
+                in str(row.get("filterName") or "")
+            )
+            or is_layout_fade_name(row.get("filterName"))
+        ]
+        if suspicious:
+            return (
+                False,
+                f"{source}: helper attendu absent mais filtre(s) helper-like "
+                f"présent(s) ({', '.join(sorted(set(suspicious), key=str.casefold))}); "
+                "cleanup suspendu",
+            )
+
+        candidates, unreadable = self._possible_renamed_fade_filters(
+            source,
+            identity,
+            rows,
+            session_generation=session_generation,
+            expected_collection=identity.collection,
+            expected_collection_generation=collection_generation,
+        )
+        if candidates:
+            return (
+                False,
+                f"{source}: helper attendu absent mais renommage possible "
+                f"({', '.join(candidates)}); cleanup suspendu sans adoption",
+            )
+        if unreadable:
+            return (
+                False,
+                f"{source}: helper attendu absent mais filtre(s) non vérifiable(s) "
+                f"({', '.join(unreadable)}); absence non prouvée",
+            )
+
+        self._verify_fade_collection(
+            identity.collection,
+            session_generation=session_generation,
+            expected_collection_generation=collection_generation,
+        )
+        return True, ""
+
+    def _cleanup_pending_fade(
+        self,
+        pending: PendingFadeCleanup,
+    ) -> tuple[bool, str]:
+        if pending.legacy or not pending.helper_id:
+            return (
+                False,
+                f"{pending.source}: obligation fade legacy non prouvée; "
+                "aucune mutation automatique",
+            )
+        if pending.ambiguous:
+            return (
+                False,
+                f"{pending.source}: obligation fade dupliquée ou contradictoire; "
+                "aucune mutation automatique",
+            )
+        if pending.context_uncertain:
+            return (
+                False,
+                f"{pending.source}: mutation fade au contexte Scene Collection "
+                "incertain; cleanup automatique suspendu",
+            )
+        if pending.cleanup_action != "neutralize_disable":
+            return (
+                False,
+                f"{pending.source}: action de cleanup inconnue "
+                f"({pending.cleanup_action})",
+            )
+
+        try:
+            identity = self._fade_helper_store.get(pending.helper_id)
+        except FadeHelperManifestError as exc:
+            return (
+                False,
+                f"{pending.source}: manifeste helper non fiable ({exc})",
+            )
+        if identity is None:
+            return (
+                False,
+                f"{pending.source}: manifeste helper absent; cleanup suspendu",
+            )
+        if (
+            identity.connection_host != pending.connection_host
+            or identity.connection_port != pending.connection_port
+            or identity.collection != pending.collection
+            or identity.source_uuid != pending.source_uuid
+            or identity.source_kind != pending.source_kind
+            or identity.filter_name != pending.filter_name
+            or identity.filter_kind != pending.filter_kind
+        ):
+            return (
+                False,
+                f"{pending.source}: identité helper contradictoire; "
+                "cleanup suspendu",
+            )
+
+        if identity.state != "observed":
+            return (
+                True,
+                f"{pending.source}: helper jamais observé; "
+                "aucune mutation de recovery nécessaire",
+            )
+
+        try:
+            host, port = self._fade_connection_context()
+        except Exception as exc:
+            return False, f"{pending.source}: contexte OBS non vérifiable ({exc})"
+        if host != pending.connection_host or port != pending.connection_port:
+            return (
+                False,
+                f"{pending.source}: connexion OBS différente; cleanup suspendu",
+            )
+
+        try:
+            _current, collection_generation = (
+                self._capture_fade_collection_context(pending.collection)
+            )
+            session_generation = int(
+                getattr(self.client, "session_generation", 0) or 0
+            )
+            source_alias, source_uuid, source_kind = self._resolve_fade_input(
+                pending.source,
+                source_uuid=pending.source_uuid,
+                session_generation=session_generation,
+                expected_collection=pending.collection,
+                expected_collection_generation=collection_generation,
+            )
+            self._verify_fade_collection(
+                pending.collection,
+                session_generation=session_generation,
+                expected_collection_generation=collection_generation,
+            )
+        except Exception as exc:
+            return (
+                False,
+                f"{pending.source}: cible/contexte non vérifiable ({exc})",
+            )
+
+        if source_uuid != pending.source_uuid or source_kind != pending.source_kind:
+            return (
+                False,
+                f"{pending.source}: source remplacée ou kind modifié; "
+                "cleanup suspendu",
+            )
+
+        try:
+            rows = self._fade_filter_rows(
+                source_alias,
+                source_uuid=identity.source_uuid,
+                session_generation=session_generation,
+                expected_collection=pending.collection,
+                expected_collection_generation=collection_generation,
+            )
+        except Exception as exc:
+            return (
+                False,
+                f"{pending.source}: inventaire filtres non vérifiable ({exc})",
+            )
+
+        expected = [
+            row
+            for row in rows
+            if str(row.get("filterName") or "").strip() == identity.filter_name
+        ]
+        if not expected:
+            try:
+                absent, ambiguity = self._cleanup_filter_absence_status(
+                    source_alias,
+                    identity,
+                    session_generation=session_generation,
+                    collection_generation=collection_generation,
+                )
+            except Exception as exc:
+                return (
+                    False,
+                    f"{pending.source}: absence helper non vérifiable ({exc})",
+                )
+            if ambiguity:
+                return False, ambiguity
+            if absent:
+                return True, f"{pending.source}: helper déjà absent"
+
+        if len(expected) != 1:
+            return (
+                False,
+                f"{pending.source}: helper dupliqué; cleanup suspendu",
+            )
+
+        try:
+            kind, enabled, settings = self._fade_filter_state(
+                source_alias,
+                identity.filter_name,
+                source_uuid=identity.source_uuid,
+                session_generation=session_generation,
+                expected_collection=pending.collection,
+                expected_collection_generation=collection_generation,
+            )
+        except OBSResourceNotFoundError:
+            try:
+                absent, ambiguity = self._cleanup_filter_absence_status(
+                    source_alias,
+                    identity,
+                    session_generation=session_generation,
+                    collection_generation=collection_generation,
+                )
+            except Exception as exc:
+                return (
+                    False,
+                    f"{pending.source}: disparition helper non vérifiable ({exc})",
+                )
+            if ambiguity:
+                return False, ambiguity
+            if absent:
+                return True, f"{pending.source}: helper déjà absent"
+            return False, f"{pending.source}: helper devenu ambigu"
+        except Exception as exc:
+            return False, f"{pending.source}: helper non vérifiable ({exc})"
+
+        if kind != identity.filter_kind:
+            return (
+                False,
+                f"{pending.source}: kind helper modifié; cleanup suspendu",
+            )
+        if not self._fade_helper_store.settings_compatible(identity, settings):
+            return (
+                False,
+                f"{pending.source}: helper modifié extérieurement; "
+                "cleanup suspendu",
+            )
+
+        raw_opacity = settings.get("opacity")
+        opacity_neutral = (
+            isinstance(raw_opacity, (int, float))
+            and not isinstance(raw_opacity, bool)
+            and abs(float(raw_opacity) - 1.0) <= 1e-6
+        )
+
+        if not opacity_neutral:
+            write_error: Exception | None = None
+            try:
+                self._fade_mutation_send(
+                    identity,
+                    "SetSourceFilterSettings",
+                    {
+                        "sourceName": source_alias,
+                        "sourceUuid": identity.source_uuid,
+                        "filterName": identity.filter_name,
+                        "filterSettings": {"opacity": 1.0},
+                        "overlay": True,
+                    },
+                    session_generation=session_generation,
+                    collection_generation=collection_generation,
+                )
+            except OBSResourceNotFoundError:
+                try:
+                    absent, ambiguity = self._cleanup_filter_absence_status(
+                        source_alias,
+                        identity,
+                        session_generation=session_generation,
+                        collection_generation=collection_generation,
+                    )
+                except Exception as exc:
+                    return (
+                        False,
+                        f"{pending.source}: neutralisation incertaine ({exc})",
+                    )
+                if ambiguity:
+                    return False, ambiguity
+                if absent:
+                    return (
+                        True,
+                        f"{pending.source}: helper disparu pendant neutralisation",
+                    )
+            except Exception as exc:
+                if pending.context_uncertain:
+                    return (
+                        False,
+                        f"{pending.source}: neutralisation au contexte incertain "
+                        f"({exc}); obligation conservée",
+                    )
+                write_error = exc
+
+            try:
+                kind, enabled, settings = self._fade_filter_state(
+                    source_alias,
+                    identity.filter_name,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                    expected_collection=pending.collection,
+                    expected_collection_generation=collection_generation,
+                )
+            except Exception as exc:
+                detail = write_error or exc
+                return (
+                    False,
+                    f"{pending.source}: neutralisation/readback incertain "
+                    f"({detail})",
+                )
+
+            raw_opacity = settings.get("opacity")
+            if (
+                kind != identity.filter_kind
+                or not isinstance(raw_opacity, (int, float))
+                or isinstance(raw_opacity, bool)
+                or abs(float(raw_opacity) - 1.0) > 1e-6
+            ):
+                suffix = f" après erreur {write_error}" if write_error else ""
+                return (
+                    False,
+                    f"{pending.source}: opacité neutre non vérifiée{suffix}",
+                )
+            if not self._fade_helper_store.settings_compatible(
+                identity,
+                settings,
+            ):
+                return (
+                    False,
+                    f"{pending.source}: helper modifié pendant neutralisation",
+                )
+
+        if enabled is not False:
+            write_error = None
+            try:
+                self._fade_mutation_send(
+                    identity,
+                    "SetSourceFilterEnabled",
+                    {
+                        "sourceName": source_alias,
+                        "sourceUuid": identity.source_uuid,
+                        "filterName": identity.filter_name,
+                        "filterEnabled": False,
+                    },
+                    session_generation=session_generation,
+                    collection_generation=collection_generation,
+                )
+            except OBSResourceNotFoundError:
+                try:
+                    absent, ambiguity = self._cleanup_filter_absence_status(
+                        source_alias,
+                        identity,
+                        session_generation=session_generation,
+                        collection_generation=collection_generation,
+                    )
+                except Exception as exc:
+                    return (
+                        False,
+                        f"{pending.source}: désactivation incertaine ({exc})",
+                    )
+                if ambiguity:
+                    return False, ambiguity
+                if absent:
+                    return (
+                        True,
+                        f"{pending.source}: helper disparu pendant désactivation",
+                    )
+            except Exception as exc:
+                if pending.context_uncertain:
+                    return (
+                        False,
+                        f"{pending.source}: désactivation au contexte incertain "
+                        f"({exc}); obligation conservée",
+                    )
+                write_error = exc
+
+            try:
+                kind, enabled, settings = self._fade_filter_state(
+                    source_alias,
+                    identity.filter_name,
+                    source_uuid=identity.source_uuid,
+                    session_generation=session_generation,
+                    expected_collection=pending.collection,
+                    expected_collection_generation=collection_generation,
+                )
+            except Exception as exc:
+                detail = write_error or exc
+                return (
+                    False,
+                    f"{pending.source}: désactivation/readback incertain "
+                    f"({detail})",
+                )
+            if kind != identity.filter_kind or enabled is not False:
+                suffix = f" après erreur {write_error}" if write_error else ""
+                return (
+                    False,
+                    f"{pending.source}: désactivation helper non vérifiée"
+                    f"{suffix}",
+                )
+            if not self._fade_helper_store.settings_compatible(
+                identity,
+                settings,
+            ):
+                return (
+                    False,
+                    f"{pending.source}: helper modifié pendant cleanup",
+                )
+
+        try:
+            self._verify_fade_collection(
+                pending.collection,
+                session_generation=session_generation,
+                expected_collection_generation=collection_generation,
+            )
+        except Exception as exc:
+            return (
+                False,
+                f"{pending.source}: contexte changé avant acquittement ({exc})",
+            )
+        return True, ""
+
+    def retry_pending_fade_cleanup(self) -> tuple[str, ...]:
+        """Retry only obligations belonging to the active Scene Collection."""
+        if not self._pending_fade_cleanup:
+            return ()
+        try:
+            current = self._scene_collection_name()
+        except Exception as exc:
+            return (f"Scene Collection non lisible pour le cleanup fondu ({exc})",)
+
+        warnings: list[str] = []
+        for key, pending in tuple(self._pending_fade_cleanup.items()):
+            if pending.collection != current:
+                continue
+            try:
+                terminal, message = self._cleanup_pending_fade(pending)
+            except Exception as exc:
+                terminal = False
+                message = f"{pending.source}: cleanup fade incertain ({exc})"
+            if terminal:
+                try:
+                    self._remove_pending_fade(key)
+                except Exception as exc:
+                    pending.attempts += 1
+                    pending.last_error = str(exc)
+                    warnings.append(
+                        f"{pending.source}: retrait durable de l'obligation impossible ({exc})"
+                    )
+                continue
+            pending.attempts += 1
+            previous_error = pending.last_error
+            pending.last_error = message
+            if message and message != previous_error:
+                warnings.append(message)
+        return tuple(warnings)
 
     def _neutralize_fade_sources(
         self,
@@ -455,17 +1890,10 @@ class OBSLayoutManager:
         *,
         collection: str | None = None,
     ) -> tuple[str, ...]:
-        warnings: list[str] = []
         collection = str(collection or self._fade_collection_context()).strip()
         wanted_sources = {str(item) for item in sources if str(item)}
         if not wanted_sources:
             return ()
-
-        # Neutralization is a mutation and must obey the same Scene Collection
-        # boundary as deferred retries. If the origin is unknown, or OBS is now
-        # in another collection, keep the obligation but never guess/replay it.
-        for source in wanted_sources:
-            self._ensure_pending_fade(source, collection)
         if not collection or collection == "<unknown>":
             return tuple(
                 f"{source}: neutralisation suspendue (Scene Collection d'origine inconnue)"
@@ -474,10 +1902,6 @@ class OBSLayoutManager:
         try:
             current = self._scene_collection_name()
         except Exception as exc:
-            for source in wanted_sources:
-                pending = self._pending_fade_cleanup[(collection, source)]
-                pending.attempts += 1
-                pending.last_error = str(exc)
             return tuple(
                 f"{source}: neutralisation suspendue (collection OBS non lisible: {exc})"
                 for source in sorted(wanted_sources, key=str.casefold)
@@ -488,17 +1912,43 @@ class OBSLayoutManager:
                 for source in sorted(wanted_sources, key=str.casefold)
             )
 
-        for source in wanted_sources:
-            pending = self._pending_fade_cleanup[(collection, source)]
+        warnings: list[str] = []
+        for key, pending in tuple(self._pending_fade_cleanup.items()):
+            if pending.collection != collection or pending.source not in wanted_sources:
+                continue
             try:
-                self._set_source_opacity(source, 1.0)
+                terminal, message = self._cleanup_pending_fade(pending)
             except Exception as exc:
-                pending.attempts += 1
-                pending.last_error = str(exc)
-                warnings.append(f"{source}: opacité neutre non acquittée ({exc})")
-            else:
-                self._pending_fade_cleanup.pop((collection, source), None)
-                self._notify_pending_cleanup_changed()
+                terminal = False
+                message = f"{pending.source}: cleanup fade incertain ({exc})"
+            if terminal:
+                try:
+                    self._remove_pending_fade(key)
+                except Exception as exc:
+                    pending.attempts += 1
+                    pending.last_error = str(exc)
+                    warnings.append(
+                        f"{pending.source}: retrait durable de l'obligation impossible ({exc})"
+                    )
+                continue
+            pending.attempts += 1
+            pending.last_error = message
+            if message:
+                warnings.append(message)
+
+        # Every touched source must already have been armed before its first
+        # temporary filter mutation. Missing work here is a logic error, not a
+        # reason to manufacture a new recovery obligation during cleanup.
+        armed_sources = {
+            pending.source
+            for pending in self._pending_fade_cleanup.values()
+            if pending.collection == collection
+        }
+        for source in sorted(wanted_sources - armed_sources, key=str.casefold):
+            if source in self._active_fade_helpers:
+                warnings.append(
+                    f"{source}: obligation de cleanup absente; aucune création implicite"
+                )
         return tuple(warnings)
 
     def set_cooperative_yield(self, callback) -> None:
@@ -530,6 +1980,12 @@ class OBSLayoutManager:
         """Invalidate transient restore points after an OBS reconnect/session reset."""
         self._snapshot_generation += 1
         self.reset_cache()
+        # Active helper state belongs to one observed OBS session. Durable
+        # ownership remains in the manifest; the next fade must re-resolve and
+        # re-verify the helper before any mutation.
+        self._active_fade_helpers.clear()
+        self._active_fade_sessions.clear()
+        self._active_fade_collection_generations.clear()
 
     def _scene_collection_name(
         self,
@@ -2448,12 +3904,22 @@ class OBSLayoutManager:
 
             if current_visible:
                 touched.add(source)
-                self._ensure_pending_fade(source, fade_collection)
-                self._ensure_fade_filter(source, 1.0)
+                try:
+                    self._prepare_fade_filter(source, fade_collection)
+                except Exception as exc:
+                    warnings.append(f"Fondu indisponible pour {source}: {exc}")
+                    fallback.append(prepared)
+                    continue
                 fade_out[source] = (1.0, 0.0)
             if target_visible:
                 touched.add(source)
-                self._ensure_pending_fade(source, fade_collection)
+                if source not in self._active_fade_helpers:
+                    try:
+                        self._prepare_fade_filter(source, fade_collection)
+                    except Exception as exc:
+                        warnings.append(f"Fondu indisponible pour {source}: {exc}")
+                        fallback.append(prepared)
+                        continue
                 fade_in[source] = (0.0, 1.0)
 
         try:
@@ -2484,12 +3950,15 @@ class OBSLayoutManager:
                     except Exception as exc:
                         # The opacity mutation may have reached OBS even when its
                         # response was lost. Keep the pre-armed neutralization
-                        # obligation, skip this source's fade-in, and degrade to a
-                        # warning rather than aborting the whole layout transition.
+                        # obligation, skip this source's fade-in, and fall back to
+                        # the direct visibility target. Cleanup will neutralize and
+                        # disable the helper before the transition is considered
+                        # settled.
                         warnings.append(
                             f"Fondu d'apparition incertain pour {prepared['source']}: {exc}"
                         )
                         fade_in.pop(prepared["source"], None)
+                        fallback.append(prepared)
                 else:
                     self._set_enabled(prepared["container"], prepared["source"], False)
 
@@ -2601,12 +4070,14 @@ class OBSLayoutManager:
                     )
                 continue
 
+            # Mirror the fade path: once preparation begins, include
+            # the source in immediate cleanup. Pre-mutation preparation
+            # failures disarm their own obligation, so this remains a no-op
+            # unless an OBS-side effect may actually have occurred.
             touched_fades.add(source)
-            self._ensure_pending_fade(source, fade_collection)
             try:
-                if current_visible:
-                    self._ensure_fade_filter(source, 1.0)
-                else:
+                self._prepare_fade_filter(source, fade_collection)
+                if not current_visible:
                     self._set_source_opacity(source, 0.0)
                     self._set_enabled(
                         prepared["container"], prepared["source"], True
@@ -2614,7 +4085,11 @@ class OBSLayoutManager:
             except Exception as exc:
                 warnings.append(f"Fondu indisponible pour {source}: {exc}")
                 fallback_visibility.add(index)
-                touched_fades.discard(source)
+                # If preparation succeeded and a later opacity/visibility call
+                # became uncertain, the helper may already have affected OBS.
+                # Keep the source in touched_fades so immediate cleanup still
+                # neutralizes/disables it. A preparation failure before success
+                # never added the source to touched_fades in the first place.
                 if target_visible:
                     self._set_enabled(
                         prepared["container"], prepared["source"], True
@@ -2737,7 +4212,7 @@ class OBSLayoutManager:
         steps: int,
         warnings: list[str],
     ) -> None:
-        """Animate one layout on a single global timeline with bounded fade cleanup."""
+        """Animate one layout on a single global timeline."""
         if mode == "fade":
             self._animate_fade_reposition(
                 prepared_items,
@@ -2755,14 +4230,10 @@ class OBSLayoutManager:
             )
             return
 
+        # The generic path now handles move-only transitions. Fade creation,
+        # mutation and recovery live exclusively in the two specialized paths.
         move = mode == "move"
-        fade = False
-        # Bind all temporary fade obligations in this transition to the Scene
-        # Collection observed immediately before any fade mutation.
-        fade_collection = self._fade_collection_context(probe=True) if fade else ""
-        fade_state: dict[int, tuple[float, float]] = {}
         fallback_visibility: set[int] = set()
-        touched_fades: set[str] = set()
 
         for index, prepared in enumerate(prepared_items):
             self._yield_runtime()
@@ -2780,103 +4251,71 @@ class OBSLayoutManager:
                 if bool(target_enabled):
                     self._set_enabled(container, source, True)
                 continue
-
-            if fade:
-                # A filter mutation can succeed in OBS even when the response is
-                # lost. Arm neutralization before the first fade I/O so every
-                # uncertain temporary filter state has durable recovery work.
-                touched_fades.add(source)
-                self._ensure_pending_fade(source, fade_collection)
-                try:
-                    if bool(target_enabled):
-                        self._set_source_opacity(source, 0.0)
-                        self._set_enabled(container, source, True)
-                        fade_state[index] = (0.0, 1.0)
-                    else:
-                        self._ensure_fade_filter(source, 1.0)
-                        fade_state[index] = (1.0, 0.0)
-                except Exception as exc:
-                    warnings.append(f"Fondu indisponible pour {source}: {exc}")
-                    fallback_visibility.add(index)
-                    if bool(target_enabled):
-                        self._set_enabled(container, source, True)
-            elif move and bool(target_enabled):
+            if move and bool(target_enabled):
                 self._set_enabled(container, source, True)
 
-        try:
-            for t in self._transition_progress(duration_ms, steps):
-                for index, prepared in enumerate(prepared_items):
-                    self._yield_runtime()
-                    if move and prepared["transform_changed"]:
-                        target = prepared["target_transform"]
-                        current = prepared["current_transform"]
-                        if target:
-                            keys = [
-                                key
-                                for key in target
-                                if isinstance(target.get(key), (int, float))
-                            ]
-                            update = {
-                                key: _float(current.get(key), _float(target.get(key)))
-                                + (
-                                    _float(target.get(key))
-                                    - _float(current.get(key), _float(target.get(key)))
-                                )
-                                * t
-                                for key in keys
-                            }
-                            if update:
-                                self._set_transform(
-                                    prepared["container"],
-                                    prepared["source"],
-                                    update,
-                                )
-
-                    opacity = fade_state.get(index)
-                    if opacity is not None:
-                        start_opacity, end_opacity = opacity
-                        self._set_source_opacity(
-                            prepared["source"],
-                            start_opacity + (end_opacity - start_opacity) * t,
-                        )
-
-            for index, prepared in enumerate(prepared_items):
-                target_enabled = prepared["target_enabled"]
-                current_enabled = prepared["current_enabled"]
-                if (
-                    not move
-                    and prepared["target_transform"]
-                    and prepared["transform_changed"]
-                ):
+        for t in self._transition_progress(duration_ms, steps):
+            for prepared in prepared_items:
+                self._yield_runtime()
+                if not move or not prepared["transform_changed"]:
+                    continue
+                target = prepared["target_transform"]
+                current = prepared["current_transform"]
+                if not target:
+                    continue
+                keys = [
+                    key
+                    for key in target
+                    if isinstance(target.get(key), (int, float))
+                ]
+                update = {
+                    key: _float(current.get(key), _float(target.get(key)))
+                    + (
+                        _float(target.get(key))
+                        - _float(current.get(key), _float(target.get(key)))
+                    )
+                    * t
+                    for key in keys
+                }
+                if update:
                     self._set_transform(
                         prepared["container"],
                         prepared["source"],
-                        prepared["target_transform"],
+                        update,
                     )
-                if target_enabled is None:
-                    continue
-                if current_enabled is not None and bool(target_enabled) == current_enabled:
-                    continue
 
-                if index in fade_state:
-                    if not bool(target_enabled):
-                        self._set_enabled(prepared["container"], prepared["source"], False)
-                        self._set_source_opacity(prepared["source"], 1.0)
-                elif index in fallback_visibility or move:
-                    if not bool(target_enabled):
-                        self._set_enabled(prepared["container"], prepared["source"], False)
-                    elif index in fallback_visibility:
-                        self._set_enabled(prepared["container"], prepared["source"], True)
-        except Exception as exc:
-            cleanup_warnings = self._neutralize_fade_sources(touched_fades, collection=fade_collection)
-            warnings.extend(cleanup_warnings)
-            detail = ""
-            if cleanup_warnings:
-                detail = " · nettoyage fondu incomplet: " + "; ".join(cleanup_warnings)
-            raise RuntimeError(f"Transition layout interrompue: {exc}{detail}") from exc
-        else:
-            cleanup_warnings = self._neutralize_fade_sources(touched_fades, collection=fade_collection)
-            warnings.extend(cleanup_warnings)
+        for index, prepared in enumerate(prepared_items):
+            target_enabled = prepared["target_enabled"]
+            current_enabled = prepared["current_enabled"]
+            if (
+                not move
+                and prepared["target_transform"]
+                and prepared["transform_changed"]
+            ):
+                self._set_transform(
+                    prepared["container"],
+                    prepared["source"],
+                    prepared["target_transform"],
+                )
+            if target_enabled is None:
+                continue
+            if (
+                current_enabled is not None
+                and bool(target_enabled) == bool(current_enabled)
+            ):
+                continue
+            if not bool(target_enabled):
+                self._set_enabled(
+                    prepared["container"],
+                    prepared["source"],
+                    False,
+                )
+            elif index in fallback_visibility:
+                self._set_enabled(
+                    prepared["container"],
+                    prepared["source"],
+                    True,
+                )
 
     def _wait_group_resize_settle(self) -> None:
         """Allow OBS to finish automatic group-bound recomputation.
@@ -3259,64 +4698,6 @@ class OBSLayoutManager:
                 for key in keys
             }
             self._set_transform(container, source, update)
-            if index != steps:
-                self._cooperative_sleep(delay)
-
-    def _ensure_fade_filter(self, source: str, opacity: float) -> None:
-        """Ensure the helper filter exists without recursively setting it.
-
-        Filter creation is a bounded recovery path. Transport/protocol errors
-        are not interpreted as absence and therefore propagate unchanged.
-        """
-        response = self._send("GetSourceFilterList", {"sourceName": source})
-        filters = response.get("filters", []) or []
-        found = any(
-            isinstance(item, Mapping) and str(item.get("filterName") or "") == SSR_FADE_FILTER
-            for item in filters
-        )
-        if not found:
-            self._send(
-                "CreateSourceFilter",
-                {
-                    "sourceName": source,
-                    "filterName": SSR_FADE_FILTER,
-                    "filterKind": SSR_FADE_FILTER_KIND,
-                    "filterSettings": {
-                        "opacity": max(0.0, min(1.0, float(opacity)))
-                    },
-                },
-            )
-            return
-        self._send(
-            "SetSourceFilterEnabled",
-            {"sourceName": source, "filterName": SSR_FADE_FILTER, "filterEnabled": True},
-        )
-
-    def _set_source_opacity(self, source: str, opacity: float) -> None:
-        payload = {
-            "sourceName": source,
-            "filterName": SSR_FADE_FILTER,
-            "filterSettings": {"opacity": max(0.0, min(1.0, float(opacity)))},
-            "overlay": True,
-        }
-        try:
-            self._send("SetSourceFilterSettings", payload)
-            return
-        except OBSResourceNotFoundError:
-            # Confirmed absence is the only error that may create/re-enable the
-            # helper filter. Retry the settings write once, never recursively.
-            self._ensure_fade_filter(source, opacity)
-        self._send("SetSourceFilterSettings", payload)
-
-    def _animate_opacity(self, source: str, start: float, end: float, duration_ms: int, steps: int) -> None:
-        self._ensure_fade_filter(source, start)
-        if duration_ms <= 0:
-            self._set_source_opacity(source, end)
-            return
-        delay = duration_ms / 1000.0 / steps
-        for index in range(1, steps + 1):
-            value = start + (end - start) * (index / steps)
-            self._set_source_opacity(source, value)
             if index != steps:
                 self._cooperative_sleep(delay)
 

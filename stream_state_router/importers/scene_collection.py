@@ -8,6 +8,12 @@ from typing import Any, Callable, Mapping
 from ..obs.catalog import OBSResourceCatalogReader
 from ..obs.client import OBSClientManager, OBSRequestError
 from ..obs.layouts import OBSLayoutManager
+from ..obs.fade_helpers import (
+    FadeHelperManifestError,
+    FadeHelperManifestStore,
+    MemoryFadeHelperManifestStore,
+    is_layout_fade_name,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +71,7 @@ class ImportedFilter:
     kind: str
     enabled: bool | None
     settings: Mapping[str, Any]
+    helper_status: str = ""
 
     def as_mapping(self) -> dict[str, object]:
         return {
@@ -73,11 +80,23 @@ class ImportedFilter:
             "kind": self.kind,
             "enabled": self.enabled,
             "settings": copy.deepcopy(dict(self.settings)),
+            "helper_status": self.helper_status,
         }
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ImportedFilter":
         settings = raw.get("settings")
+        claimed_helper_status = str(
+            raw.get("helper_status") or ""
+        ).strip()
+        # Ownership is a live proof, not serializable authority. Any helper
+        # claim crossing this generic mapping boundary is untrusted and must
+        # remain visible as an ambiguity rather than silently excluding data.
+        helper_status = (
+            "ambiguous_helper"
+            if claimed_helper_status
+            else ""
+        )
         return cls(
             source=str(raw.get("source") or ""),
             name=str(raw.get("name") or ""),
@@ -92,6 +111,7 @@ class ImportedFilter:
                 if isinstance(settings, Mapping)
                 else {}
             ),
+            helper_status=helper_status,
         )
 
 
@@ -154,7 +174,14 @@ class SceneCollectionSnapshot:
             "collection": self.collection,
             "current_program_scene": self.current_program_scene,
             "inputs": [item.as_mapping() for item in self.inputs],
-            "filters": [item.as_mapping() for item in self.filters],
+            # Consume proven internal-helper ownership while still on the
+            # worker/live side. A serialized snapshot must never carry the
+            # authority to recreate "owned_helper" later in Qt or from disk.
+            "filters": [
+                item.as_mapping()
+                for item in self.filters
+                if item.helper_status != "owned_helper"
+            ],
             "scene_items": [item.as_mapping() for item in self.scene_items],
             "scenes": list(self.scenes),
             "warnings": list(self.warnings),
@@ -285,6 +312,7 @@ class SceneCollectionImporter:
         *,
         layout_manager: OBSLayoutManager | None = None,
         cooperative_yield: Callable[[], None] | None = None,
+        fade_helper_store: FadeHelperManifestStore | None = None,
     ) -> None:
         self.client = client
         self._cooperative_yield = cooperative_yield
@@ -292,7 +320,19 @@ class SceneCollectionImporter:
             client,
             cooperative_yield=cooperative_yield,
         )
-        self.layout_manager = layout_manager or OBSLayoutManager(client)
+        self.layout_manager = layout_manager or OBSLayoutManager(
+            client,
+            fade_helper_store=fade_helper_store,
+        )
+        self._fade_helper_store = (
+            fade_helper_store
+            or getattr(self.layout_manager, "_fade_helper_store", None)
+            or (
+                FadeHelperManifestStore()
+                if isinstance(client, OBSClientManager)
+                else MemoryFadeHelperManifestStore()
+            )
+        )
         if (
             cooperative_yield is not None
             and hasattr(self.layout_manager, "set_cooperative_yield")
@@ -314,11 +354,90 @@ class SceneCollectionImporter:
     ) -> SceneCollectionSnapshot:
         return SceneCollectionSnapshot.from_mapping(raw)
 
+    def _helper_connection_context(self) -> tuple[str, int] | None:
+        config = getattr(self.client, "config", None)
+        if config is None:
+            return None
+        host = str(getattr(config, "host", "") or "").strip().casefold()
+        try:
+            port = int(getattr(config, "port", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            port = 0
+        if not host or port <= 0:
+            return None
+        return host, port
+
+    def _classify_helper_filter(
+        self,
+        *,
+        collection: str,
+        input_ref,
+        filter_name: str,
+        filter_kind: str,
+        filter_settings: Mapping[str, Any] | None,
+        warnings: list[str],
+    ) -> str:
+        if not is_layout_fade_name(filter_name):
+            return ""
+        connection = self._helper_connection_context()
+        if (
+            connection is None
+            or input_ref is None
+            or not str(getattr(input_ref, "uuid", "") or "").strip()
+            or not str(getattr(input_ref, "kind", "") or "").strip()
+            or not str(collection or "").strip()
+        ):
+            warnings.append(
+                f"Filtre helper-like ambigu conservé comme preuve : "
+                f"{getattr(input_ref, 'name', '?')}/{filter_name}"
+            )
+            return "ambiguous_helper"
+        host, port = connection
+        try:
+            owned = self._fade_helper_store.prove_filter(
+                connection_host=host,
+                connection_port=port,
+                collection=collection,
+                source_uuid=str(input_ref.uuid),
+                source_alias=str(input_ref.name),
+                source_kind=str(input_ref.kind),
+                filter_name=filter_name,
+                filter_kind=filter_kind,
+            )
+        except FadeHelperManifestError as exc:
+            warnings.append(
+                f"Manifeste helper non fiable pour {input_ref.name}/{filter_name}: {exc}"
+            )
+            return "ambiguous_helper"
+        if owned is not None:
+            if filter_settings is None:
+                warnings.append(
+                    f"Helper SSR prouvé mais settings non vérifiables : "
+                    f"{input_ref.name}/{filter_name}"
+                )
+                return "ambiguous_helper"
+            if not self._fade_helper_store.settings_compatible(
+                owned,
+                filter_settings,
+            ):
+                warnings.append(
+                    f"Helper SSR modifié extérieurement : "
+                    f"{input_ref.name}/{filter_name}"
+                )
+                return "ambiguous_helper"
+            return "owned_helper"
+        warnings.append(
+            f"Filtre ressemblant à un helper SSR mais non prouvé : "
+            f"{input_ref.name}/{filter_name}"
+        )
+        return "ambiguous_helper"
+
     def snapshot(self) -> SceneCollectionSnapshot:
         catalog = self.reader.sync()
         warnings = list(catalog.warnings)
         inputs: list[ImportedInput] = []
         filters: dict[tuple[str, str], ImportedFilter] = {}
+        input_refs = {item.name: item for item in catalog.inputs}
 
         for input_ref in catalog.inputs:
             settings: Mapping[str, Any] = {}
@@ -395,22 +514,34 @@ class SceneCollectionImporter:
                 identity = (source, ref.name)
                 if identity in filters:
                     continue
+                filter_settings_for_ownership: Mapping[str, Any] | None
                 try:
                     details = self.reader.filter_details(source, ref.name)
                     settings = dict(details.settings)
                     filter_ref = details.filter
+                    filter_settings_for_ownership = settings
                 except OBSRequestError as exc:
                     warnings.append(
                         f"Filter '{source}/{ref.name}' settings unreadable: {exc}"
                     )
                     settings = {}
                     filter_ref = ref
+                    filter_settings_for_ownership = None
+                helper_status = self._classify_helper_filter(
+                    collection=catalog.collection,
+                    input_ref=input_refs.get(source),
+                    filter_name=ref.name,
+                    filter_kind=filter_ref.kind,
+                    filter_settings=filter_settings_for_ownership,
+                    warnings=warnings,
+                )
                 filters[identity] = ImportedFilter(
                     source=source,
                     name=ref.name,
                     kind=filter_ref.kind,
                     enabled=filter_ref.enabled,
                     settings=settings,
+                    helper_status=helper_status,
                 )
 
         scene_items = tuple(
@@ -514,6 +645,14 @@ class SceneCollectionImporter:
 
         if include_filters:
             for item in snapshot.filters:
+                if item.helper_status == "owned_helper":
+                    continue
+                if item.helper_status == "ambiguous_helper":
+                    skipped.append(
+                        "Filtre helper-like ambigu non importé automatiquement : "
+                        f"{item.source}/{item.name}"
+                    )
+                    continue
                 if item.enabled is not None:
                     actions.append(
                         {

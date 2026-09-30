@@ -272,6 +272,106 @@ class CurrentStateCaptureTests(unittest.TestCase):
         )
         self.assertEqual(validate_config(result.config), [])
 
+    def test_current_state_capture_excludes_proven_internal_fade_helper(self) -> None:
+        base = _snapshot()
+        helper_name = "[SSR] Layout Fade::owned-helper"
+        snapshot = SceneCollectionSnapshot(
+            collection=base.collection,
+            current_program_scene=base.current_program_scene,
+            inputs=base.inputs,
+            filters=(
+                *base.filters,
+                ImportedFilter(
+                    source="Game Capture",
+                    name=helper_name,
+                    kind="color_filter_v2",
+                    enabled=False,
+                    settings={"opacity": 1.0},
+                    helper_status="owned_helper",
+                ),
+            ),
+            scene_items=base.scene_items,
+            scenes=base.scenes,
+            warnings=base.warnings,
+        )
+
+        result = build_current_state_capture_draft(
+            _config(),
+            snapshot=snapshot,
+            raw_layouts={},
+            logical_state={"CaptureProfile": "HDR"},
+            options=CurrentStateCaptureOptions(
+                name="Game X",
+                process="GameX.exe",
+                include_input_settings=False,
+                include_audio_state=False,
+                include_filters=True,
+                include_visibility=False,
+                include_layout=False,
+                filters_domain="capture",
+            ),
+        )
+
+        rule = result.config["rules"][0]
+        profile_name = rule["state"]["CaptureProfile"]
+        actions = result.config["profiles"]["capture"][profile_name]["actions"]
+        self.assertNotIn(helper_name, str(actions))
+        self.assertIn("HDR Tone Map", str(actions))
+        self.assertFalse(
+            any(helper_name in warning for warning in result.report.warnings),
+            result.report.warnings,
+        )
+
+    def test_current_state_capture_quarantines_ambiguous_helper_lookalike(self) -> None:
+        base = _snapshot()
+        helper_name = "[SSR] Layout Fade::lookalike"
+        snapshot = SceneCollectionSnapshot(
+            collection=base.collection,
+            current_program_scene=base.current_program_scene,
+            inputs=base.inputs,
+            filters=(
+                *base.filters,
+                ImportedFilter(
+                    source="Game Capture",
+                    name=helper_name,
+                    kind="color_filter_v2",
+                    enabled=True,
+                    settings={"opacity": 0.4},
+                    helper_status="ambiguous_helper",
+                ),
+            ),
+            scene_items=base.scene_items,
+            scenes=base.scenes,
+            warnings=base.warnings,
+        )
+
+        result = build_current_state_capture_draft(
+            _config(),
+            snapshot=snapshot,
+            raw_layouts={},
+            logical_state={"CaptureProfile": "HDR"},
+            options=CurrentStateCaptureOptions(
+                name="Game X",
+                process="GameX.exe",
+                include_input_settings=False,
+                include_audio_state=False,
+                include_filters=True,
+                include_visibility=False,
+                include_layout=False,
+                filters_domain="capture",
+            ),
+        )
+
+        rule = result.config["rules"][0]
+        profile_name = rule["state"]["CaptureProfile"]
+        actions = result.config["profiles"]["capture"][profile_name]["actions"]
+        self.assertNotIn(helper_name, str(actions))
+        self.assertIn("HDR Tone Map", str(actions))
+        self.assertTrue(
+            any(helper_name in warning and "ambigu" in warning for warning in result.report.warnings),
+            result.report.warnings,
+        )
+
     def test_new_capture_routes_ownership_to_selected_domains(self) -> None:
         result = build_current_state_capture_draft(
             _config(),

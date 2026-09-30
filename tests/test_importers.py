@@ -12,7 +12,12 @@ from stream_state_router.importers import (
     SceneCollectionImporter,
     SceneCollectionSnapshot,
 )
+from stream_state_router.importers.scene_collection import ImportedFilter
 from stream_state_router.obs.client import OBSRequestError
+from stream_state_router.obs.fade_helpers import (
+    LEGACY_LAYOUT_FADE_FILTER,
+    MemoryFadeHelperManifestStore,
+)
 
 
 class _ImportClient:
@@ -178,6 +183,337 @@ class ImporterTests(unittest.TestCase):
                 "source_filter_settings",
                 "scene_item_enabled",
             ],
+        )
+
+    def test_scene_collection_excludes_proven_owned_fade_helper(self):
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Streaming",
+            source_uuid="input-1",
+            source_alias="Game Capture",
+            source_kind="game_capture",
+            session_generation=1,
+        )
+        identity = store.mark_observed(
+            identity.helper_id,
+            source_alias="Game Capture",
+            non_temporary_settings={},
+        )
+
+        class OwnedHelperClient(_ImportClient):
+            config = SimpleNamespace(
+                enabled=True,
+                host="127.0.0.1",
+                port=4455,
+            )
+
+            def send(self, request, data=None):
+                if (
+                    request == "GetSourceFilterList"
+                    and data
+                    and data.get("sourceName") == "Game Capture"
+                ):
+                    return {
+                        "filters": [
+                            {
+                                "filterName": identity.filter_name,
+                                "filterKind": identity.filter_kind,
+                                "filterEnabled": False,
+                            },
+                            {
+                                "filterName": "Tone Map",
+                                "filterKind": "shader_filter",
+                                "filterEnabled": True,
+                            },
+                        ]
+                    }
+                if request == "GetSourceFilter" and data:
+                    if data.get("filterName") == identity.filter_name:
+                        return {
+                            "filterName": identity.filter_name,
+                            "filterKind": identity.filter_kind,
+                            "filterEnabled": False,
+                            "filterSettings": {"opacity": 1.0},
+                        }
+                return super().send(request, data)
+
+        importer = SceneCollectionImporter(
+            OwnedHelperClient(),
+            fade_helper_store=store,
+        )
+        snapshot = importer.snapshot()
+        helper = next(
+            item for item in snapshot.filters
+            if item.name == identity.filter_name
+        )
+
+        self.assertEqual(helper.helper_status, "owned_helper")
+        actions, skipped = importer.actions_from_snapshot(snapshot)
+        rendered = str(actions)
+        self.assertNotIn(identity.filter_name, rendered)
+        self.assertFalse(
+            any(identity.filter_name in item for item in skipped),
+            skipped,
+        )
+        self.assertIn("Tone Map", rendered)
+
+    def test_scene_collection_quarantines_modified_owned_fade_helper(self):
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Streaming",
+            source_uuid="input-1",
+            source_alias="Game Capture",
+            source_kind="game_capture",
+            session_generation=1,
+        )
+        identity = store.mark_observed(
+            identity.helper_id,
+            source_alias="Game Capture",
+            non_temporary_settings={"contrast": 0.1},
+        )
+
+        class ModifiedHelperClient(_ImportClient):
+            config = SimpleNamespace(
+                enabled=True,
+                host="127.0.0.1",
+                port=4455,
+            )
+
+            def send(self, request, data=None):
+                if (
+                    request == "GetSourceFilterList"
+                    and data
+                    and data.get("sourceName") == "Game Capture"
+                ):
+                    return {
+                        "filters": [
+                            {
+                                "filterName": identity.filter_name,
+                                "filterKind": identity.filter_kind,
+                                "filterEnabled": False,
+                            }
+                        ]
+                    }
+                if request == "GetSourceFilter" and data:
+                    if data.get("filterName") == identity.filter_name:
+                        return {
+                            "filterName": identity.filter_name,
+                            "filterKind": identity.filter_kind,
+                            "filterEnabled": False,
+                            "filterSettings": {
+                                "opacity": 1.0,
+                                "contrast": 0.2,
+                            },
+                        }
+                return super().send(request, data)
+
+        snapshot = SceneCollectionImporter(
+            ModifiedHelperClient(),
+            fade_helper_store=store,
+        ).snapshot()
+
+        helper = next(
+            item for item in snapshot.filters
+            if item.name == identity.filter_name
+        )
+        self.assertEqual(helper.helper_status, "ambiguous_helper")
+        self.assertTrue(
+            any("modifié extérieurement" in warning for warning in snapshot.warnings),
+            snapshot.warnings,
+        )
+        actions, skipped = SceneCollectionImporter.actions_from_snapshot(snapshot)
+        self.assertNotIn(identity.filter_name, str(actions))
+        self.assertTrue(
+            any("helper-like ambigu" in item for item in skipped),
+            skipped,
+        )
+
+    def test_scene_collection_quarantines_owned_helper_when_settings_unreadable(self):
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Streaming",
+            source_uuid="input-1",
+            source_alias="Game Capture",
+            source_kind="game_capture",
+            session_generation=1,
+        )
+        identity = store.mark_observed(
+            identity.helper_id,
+            source_alias="Game Capture",
+            non_temporary_settings={},
+        )
+
+        class UnreadableHelperClient(_ImportClient):
+            config = SimpleNamespace(
+                enabled=True,
+                host="127.0.0.1",
+                port=4455,
+            )
+
+            def send(self, request, data=None):
+                if (
+                    request == "GetSourceFilterList"
+                    and data
+                    and data.get("sourceName") == "Game Capture"
+                ):
+                    return {
+                        "filters": [
+                            {
+                                "filterName": identity.filter_name,
+                                "filterKind": identity.filter_kind,
+                                "filterEnabled": False,
+                            }
+                        ]
+                    }
+                if request == "GetSourceFilter" and data:
+                    if data.get("filterName") == identity.filter_name:
+                        raise OBSRequestError(
+                            request,
+                            "helper settings unavailable",
+                        )
+                return super().send(request, data)
+
+        snapshot = SceneCollectionImporter(
+            UnreadableHelperClient(),
+            fade_helper_store=store,
+        ).snapshot()
+
+        helper = next(
+            item for item in snapshot.filters
+            if item.name == identity.filter_name
+        )
+        self.assertEqual(helper.helper_status, "ambiguous_helper")
+        self.assertTrue(
+            any("settings non vérifiables" in warning for warning in snapshot.warnings),
+            snapshot.warnings,
+        )
+        actions, skipped = SceneCollectionImporter.actions_from_snapshot(snapshot)
+        self.assertNotIn(identity.filter_name, str(actions))
+        self.assertTrue(
+            any("helper-like ambigu" in item for item in skipped),
+            skipped,
+        )
+
+    def test_scene_collection_treats_prepared_helper_as_ambiguous(self):
+        store = MemoryFadeHelperManifestStore()
+        identity = store.prepare_layout_fade(
+            connection_host="127.0.0.1",
+            connection_port=4455,
+            collection="Streaming",
+            source_uuid="input-1",
+            source_alias="Game Capture",
+            source_kind="game_capture",
+            session_generation=1,
+        )
+
+        class PreparedHelperClient(_ImportClient):
+            config = SimpleNamespace(
+                enabled=True,
+                host="127.0.0.1",
+                port=4455,
+            )
+
+            def send(self, request, data=None):
+                if (
+                    request == "GetSourceFilterList"
+                    and data
+                    and data.get("sourceName") == "Game Capture"
+                ):
+                    return {
+                        "filters": [
+                            {
+                                "filterName": identity.filter_name,
+                                "filterKind": identity.filter_kind,
+                                "filterEnabled": True,
+                            }
+                        ]
+                    }
+                if request == "GetSourceFilter" and data:
+                    if data.get("filterName") == identity.filter_name:
+                        return {
+                            "filterName": identity.filter_name,
+                            "filterKind": identity.filter_kind,
+                            "filterEnabled": True,
+                            "filterSettings": {"opacity": 1.0},
+                        }
+                return super().send(request, data)
+
+        snapshot = SceneCollectionImporter(
+            PreparedHelperClient(),
+            fade_helper_store=store,
+        ).snapshot()
+
+        helper = next(
+            item for item in snapshot.filters
+            if item.name == identity.filter_name
+        )
+        self.assertEqual(helper.helper_status, "ambiguous_helper")
+        actions, skipped = SceneCollectionImporter.actions_from_snapshot(snapshot)
+        self.assertNotIn(identity.filter_name, str(actions))
+        self.assertTrue(
+            any("helper-like ambigu" in item for item in skipped),
+            skipped,
+        )
+
+    def test_scene_collection_reports_unproven_helper_lookalike_without_action(self):
+        class LegacyHelperClient(_ImportClient):
+            config = SimpleNamespace(
+                enabled=True,
+                host="127.0.0.1",
+                port=4455,
+            )
+
+            def send(self, request, data=None):
+                if (
+                    request == "GetSourceFilterList"
+                    and data
+                    and data.get("sourceName") == "Game Capture"
+                ):
+                    return {
+                        "filters": [
+                            {
+                                "filterName": LEGACY_LAYOUT_FADE_FILTER,
+                                "filterKind": "color_filter_v2",
+                                "filterEnabled": True,
+                            }
+                        ]
+                    }
+                if request == "GetSourceFilter" and data:
+                    if data.get("filterName") == LEGACY_LAYOUT_FADE_FILTER:
+                        return {
+                            "filterName": LEGACY_LAYOUT_FADE_FILTER,
+                            "filterKind": "color_filter_v2",
+                            "filterEnabled": True,
+                            "filterSettings": {"opacity": 0.42},
+                        }
+                return super().send(request, data)
+
+        importer = SceneCollectionImporter(
+            LegacyHelperClient(),
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        snapshot = importer.snapshot()
+
+        self.assertEqual(len(snapshot.filters), 1)
+        self.assertEqual(
+            snapshot.filters[0].helper_status,
+            "ambiguous_helper",
+        )
+        self.assertTrue(
+            any("non prouvé" in warning for warning in snapshot.warnings),
+            snapshot.warnings,
+        )
+        actions, skipped = importer.actions_from_snapshot(snapshot)
+        self.assertNotIn(LEGACY_LAYOUT_FADE_FILTER, str(actions))
+        self.assertTrue(
+            any("helper-like ambigu" in item for item in skipped),
+            skipped,
         )
 
     def test_scene_collection_ignores_expected_non_audio_604(self):
@@ -1811,6 +2147,66 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(report.actions_converted, 0)
         self.assertTrue(any("wait" in item for item in report.skipped))
         self.assertEqual(config["rules"], [])
+
+
+    def test_serialized_snapshot_cannot_forge_owned_helper_status(self):
+        raw = {
+            "collection": "Streaming",
+            "current_program_scene": "In Game",
+            "inputs": [],
+            "filters": [
+                {
+                    "source": "Game Capture",
+                    "name": "User Color",
+                    "kind": "color_filter_v2",
+                    "enabled": True,
+                    "settings": {"opacity": 0.75},
+                    "helper_status": "owned_helper",
+                }
+            ],
+            "scene_items": [],
+            "scenes": ["In Game"],
+            "warnings": [],
+        }
+
+        snapshot = SceneCollectionSnapshot.from_mapping(raw)
+
+        self.assertEqual(
+            snapshot.filters[0].helper_status,
+            "ambiguous_helper",
+        )
+        actions, skipped = SceneCollectionImporter.actions_from_snapshot(
+            snapshot
+        )
+        self.assertEqual(actions, [])
+        self.assertTrue(
+            any("helper-like ambigu" in item for item in skipped),
+            skipped,
+        )
+
+    def test_live_owned_helper_is_consumed_before_snapshot_serialization(self):
+        snapshot = SceneCollectionSnapshot(
+            collection="Streaming",
+            current_program_scene="In Game",
+            inputs=(),
+            filters=(
+                ImportedFilter(
+                    source="Game Capture",
+                    name="[SSR] Layout Fade::owned",
+                    kind="color_filter_v2",
+                    enabled=False,
+                    settings={"opacity": 1.0},
+                    helper_status="owned_helper",
+                ),
+            ),
+            scene_items=(),
+            scenes=("In Game",),
+            warnings=(),
+        )
+
+        serialized = snapshot.as_mapping()
+
+        self.assertEqual(serialized["filters"], [])
 
 
 if __name__ == "__main__":

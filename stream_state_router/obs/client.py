@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from typing import Any
 
 from .models import OBSConnectionConfig
@@ -17,6 +18,19 @@ except Exception:  # pragma: no cover - optional dependency / runtime guard
 
 class OBSUnavailableError(RuntimeError):
     pass
+
+
+class OBSSceneCollectionContextChangedError(OBSUnavailableError):
+    """The Scene Collection context changed across a qualified request."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        request_submitted: bool,
+    ):
+        super().__init__(detail)
+        self.request_submitted = bool(request_submitted)
 
 
 class OBSRequestError(RuntimeError):
@@ -48,7 +62,16 @@ def _is_confirmed_missing_request_error(exc: BaseException) -> bool:
 
 
 class OBSClientManager:
-    """Small reconnecting obs-websocket v5 client wrapper."""
+    """Small reconnecting obs-websocket v5 client wrapper.
+
+    Scene Collection-sensitive callers can additionally bind a request sequence
+    to a monotonic collection generation.  The generation is fed by OBS
+    CurrentSceneCollectionChanging/Changed events.  A custom-event barrier is
+    used after qualified requests so an A -> B -> A round trip cannot be hidden
+    merely because the collection name is equal again at the end.
+    """
+
+    _BARRIER_KEY = "__ssr_scene_collection_barrier"
 
     def __init__(self, config: OBSConnectionConfig):
         self._config = config
@@ -59,6 +82,12 @@ class OBSClientManager:
         self._request_count = 0
         self._session_generation = 0
         self.last_error = ""
+
+        self._event_client = None
+        self._event_session_generation = 0
+        self._event_condition = threading.Condition(threading.RLock())
+        self._scene_collection_generation = 0
+        self._event_barriers_seen: set[str] = set()
 
     @property
     def config(self) -> OBSConnectionConfig:
@@ -81,30 +110,91 @@ class OBSClientManager:
         with self._lock:
             return int(self._session_generation)
 
+    @property
+    def scene_collection_generation(self) -> int:
+        """Monotonic identity invalidated by every observed collection change."""
+
+        with self._event_condition:
+            return int(self._scene_collection_generation)
+
+    def on_current_scene_collection_changing(self, _data) -> None:
+        with self._event_condition:
+            self._scene_collection_generation += 1
+            self._event_condition.notify_all()
+
+    def on_current_scene_collection_changed(self, _data) -> None:
+        with self._event_condition:
+            self._scene_collection_generation += 1
+            self._event_condition.notify_all()
+
+    def on_custom_event(self, data) -> None:
+        # obsws-python exposes CustomEvent.eventData fields directly on the
+        # callback dataclass. Keep the nested fake/legacy form as fallback.
+        token = getattr(data, self._BARRIER_KEY, None)
+        if not isinstance(token, str) or not token:
+            payload = getattr(data, "event_data", None)
+            token = (
+                payload.get(self._BARRIER_KEY)
+                if isinstance(payload, dict)
+                else None
+            )
+        if not isinstance(token, str) or not token:
+            return
+        with self._event_condition:
+            self._event_barriers_seen.add(token)
+            self._event_condition.notify_all()
+
     def configure(self, config: OBSConnectionConfig) -> None:
+        event_client = None
+        request_client = None
         with self._lock:
             if config == self._config:
                 return
             self._config = config
+            request_client = self._client
             self._client = None
+            event_client = self._detach_event_client_locked()
             self._connected = False
             self._session_generation += 1
             self.last_error = ""
             self._last_failure = 0.0
+        self._disconnect_client(request_client)
+        self._disconnect_client(event_client)
 
     def close(self) -> None:
-        """Close the owned ReqClient after runtime cleanup has finished."""
+        """Close owned request/event clients after runtime cleanup has finished."""
+        event_client = None
+        request_client = None
         with self._lock:
-            client = self._client
+            request_client = self._client
             self._client = None
+            event_client = self._detach_event_client_locked()
             self._connected = False
             self._session_generation += 1
             self.last_error = ""
+        self._disconnect_client(request_client)
+        self._disconnect_client(event_client)
+
+    @staticmethod
+    def _disconnect_client(client) -> None:
         if client is None:
             return
         disconnect = getattr(client, "disconnect", None)
         if callable(disconnect):
-            disconnect()
+            try:
+                disconnect()
+            except Exception:
+                pass
+
+    def _detach_event_client_locked(self):
+        client = self._event_client
+        self._event_client = None
+        self._event_session_generation = 0
+        with self._event_condition:
+            self._scene_collection_generation += 1
+            self._event_barriers_seen.clear()
+            self._event_condition.notify_all()
+        return client
 
     def probe(self) -> tuple[bool, str]:
         try:
@@ -124,62 +214,271 @@ class OBSClientManager:
         except Exception as exc:
             return False, str(exc)
 
+    def _guarded_client_locked(
+        self,
+        expected_session_generation: int | None,
+    ):
+        if expected_session_generation is None:
+            return self._ensure_client()
+
+        expected = int(expected_session_generation)
+        if expected <= 0:
+            raise OBSUnavailableError(
+                "Invalid expected OBS session generation for guarded request"
+            )
+        if (
+            self._client is None
+            or not self._connected
+            or self._session_generation != expected
+        ):
+            raise OBSUnavailableError(
+                "OBS session changed before guarded request; refusing reconnect"
+            )
+        return self._client
+
+    def _submit_locked(
+        self,
+        client,
+        request: str,
+        data: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        self._request_count += 1
+        request_error: BaseException | None = None
+        response: dict[str, Any] = {}
+        try:
+            if data is None:
+                raw = client.send(request, raw=True)
+            else:
+                raw = client.send(request, data, raw=True)
+            response = raw if isinstance(raw, dict) else {}
+            self._connected = True
+            self.last_error = ""
+        except _OBS_REQUEST_ERRORS as exc:
+            self._connected = True
+            self.last_error = str(exc)
+            request_error = exc
+        except Exception as exc:
+            event_client = self._detach_event_client_locked()
+            self._client = None
+            self._connected = False
+            self._session_generation += 1
+            self.last_error = str(exc)
+            self._last_failure = time.monotonic()
+            self._disconnect_client(event_client)
+            raise OBSUnavailableError(f"OBS WebSocket : {exc}") from exc
+
+        if request_error is not None:
+            error_type = (
+                OBSResourceNotFoundError
+                if _is_confirmed_missing_request_error(request_error)
+                else OBSRequestError
+            )
+            raise error_type(request, str(request_error)) from request_error
+        return response
+
+    def _ensure_event_client_locked(self):
+        if _obs is None or not hasattr(_obs, "EventClient"):
+            raise OBSUnavailableError(
+                "obsws-python EventClient indisponible; "
+                "qualification Scene Collection impossible"
+            )
+
+        current = self._event_client
+        worker = getattr(current, "worker", None)
+        if (
+            current is not None
+            and self._event_session_generation == self._session_generation
+            and worker is not None
+            and worker.is_alive()
+        ):
+            return current
+
+        stale = self._detach_event_client_locked()
+        self._disconnect_client(stale)
+
+        try:
+            event_client = _obs.EventClient(
+                host=self._config.host,
+                port=self._config.port,
+                password=self._config.password,
+                timeout=self._config.timeout_seconds,
+            )
+            event_client.callback.register(
+                [
+                    self.on_current_scene_collection_changing,
+                    self.on_current_scene_collection_changed,
+                    self.on_custom_event,
+                ]
+            )
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise OBSUnavailableError(
+                f"Flux d'événements OBS indisponible : {exc}"
+            ) from exc
+
+        self._event_client = event_client
+        self._event_session_generation = self._session_generation
+        with self._event_condition:
+            # Replacing the observer invalidates every token captured from the
+            # previous event stream even if OBS stayed on the same collection.
+            self._scene_collection_generation += 1
+            self._event_barriers_seen.clear()
+            self._event_condition.notify_all()
+        return event_client
+
+    def _collection_event_barrier_locked(
+        self,
+        request_client,
+        *,
+        expected_session_generation: int,
+    ) -> int:
+        self._ensure_event_client_locked()
+        if self._session_generation != int(expected_session_generation):
+            raise OBSUnavailableError(
+                "OBS session changed before Scene Collection barrier"
+            )
+
+        token = (
+            f"{self._session_generation}:"
+            f"{self._request_count}:"
+            f"{uuid.uuid4().hex}"
+        )
+        self._submit_locked(
+            request_client,
+            "BroadcastCustomEvent",
+            {"eventData": {self._BARRIER_KEY: token}},
+        )
+
+        timeout = max(0.25, float(self._config.timeout_seconds or 2.0))
+        deadline = time.monotonic() + timeout
+        with self._event_condition:
+            while token not in self._event_barriers_seen:
+                event_client = self._event_client
+                worker = getattr(event_client, "worker", None)
+                if (
+                    event_client is None
+                    or worker is None
+                    or not worker.is_alive()
+                    or self._event_session_generation != self._session_generation
+                ):
+                    raise OBSUnavailableError(
+                        "Flux d'événements OBS perdu pendant la qualification "
+                        "Scene Collection"
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise OBSUnavailableError(
+                        "Timeout de synchronisation des événements Scene Collection"
+                    )
+                self._event_condition.wait(min(0.05, remaining))
+            self._event_barriers_seen.discard(token)
+            return int(self._scene_collection_generation)
+
+    def scene_collection_context(
+        self,
+        *,
+        expected_session_generation: int | None = None,
+    ) -> tuple[str, int]:
+        """Return a stable collection name plus a monotonic event generation."""
+
+        with self._lock:
+            client = self._guarded_client_locked(expected_session_generation)
+            session_generation = int(self._session_generation)
+            self._ensure_event_client_locked()
+
+            # A stable sample requires no collection event between the barrier
+            # preceding GetSceneCollectionList and the barrier following it.
+            for _attempt in range(4):
+                before = self._collection_event_barrier_locked(
+                    client,
+                    expected_session_generation=session_generation,
+                )
+                response = self._submit_locked(
+                    client,
+                    "GetSceneCollectionList",
+                    None,
+                )
+                name = str(
+                    response.get("currentSceneCollectionName") or ""
+                ).strip()
+                after = self._collection_event_barrier_locked(
+                    client,
+                    expected_session_generation=session_generation,
+                )
+                if before == after and name:
+                    return name, after
+
+            raise OBSSceneCollectionContextChangedError(
+                "Scene Collection modifiée pendant sa qualification",
+                request_submitted=False,
+            )
+
     def send(
         self,
         request: str,
         data: dict[str, Any] | None = None,
         *,
         expected_session_generation: int | None = None,
+        expected_scene_collection_generation: int | None = None,
     ) -> dict[str, Any]:
         if not self._config.enabled:
             raise OBSUnavailableError("L'intégration OBS est désactivée")
+
         with self._lock:
-            if expected_session_generation is None:
-                client = self._ensure_client()
-            else:
-                expected = int(expected_session_generation)
-                if expected <= 0:
-                    raise OBSUnavailableError(
-                        "Invalid expected OBS session generation for guarded request"
+            client = self._guarded_client_locked(expected_session_generation)
+            session_generation = int(self._session_generation)
+
+            expected_collection_generation = (
+                None
+                if expected_scene_collection_generation is None
+                else int(expected_scene_collection_generation)
+            )
+
+            if expected_collection_generation is not None:
+                try:
+                    pre_generation = self._collection_event_barrier_locked(
+                        client,
+                        expected_session_generation=session_generation,
                     )
-                if (
-                    self._client is None
-                    or not self._connected
-                    or self._session_generation != expected
-                ):
-                    raise OBSUnavailableError(
-                        "OBS session changed before guarded request; refusing reconnect"
+                except Exception as exc:
+                    raise OBSSceneCollectionContextChangedError(
+                        "Qualification Scene Collection indisponible avant "
+                        "la requête OBS",
+                        request_submitted=False,
+                    ) from exc
+                if pre_generation != expected_collection_generation:
+                    raise OBSSceneCollectionContextChangedError(
+                        "Scene Collection modifiée avant la requête OBS qualifiée",
+                        request_submitted=False,
                     )
-                client = self._client
-            self._request_count += 1
+
+            request_error: BaseException | None = None
+            response: dict[str, Any] = {}
             try:
-                if data is None:
-                    response = client.send(request, raw=True)
-                else:
-                    response = client.send(request, data, raw=True)
-                self._connected = True
-                self.last_error = ""
-                return response if isinstance(response, dict) else {}
-            except _OBS_REQUEST_ERRORS as exc:
-                # OBS answered the request, so the WebSocket connection is still
-                # healthy. Distinguish confirmed absence from other request-level
-                # failures so activation cleanup can acknowledge only the former.
-                self._connected = True
-                self.last_error = str(exc)
-                error_type = (
-                    OBSResourceNotFoundError
-                    if _is_confirmed_missing_request_error(exc)
-                    else OBSRequestError
-                )
-                raise error_type(request, str(exc)) from exc
-            except Exception as exc:
-                # Transport/session failures really do invalidate the ReqClient.
-                self._client = None
-                self._connected = False
-                self._session_generation += 1
-                self.last_error = str(exc)
-                self._last_failure = time.monotonic()
-                raise OBSUnavailableError(f"OBS WebSocket : {exc}") from exc
+                response = self._submit_locked(client, request, data)
+            except (OBSRequestError, OBSResourceNotFoundError) as exc:
+                request_error = exc
+
+            if expected_collection_generation is not None:
+                try:
+                    post_generation = self._collection_event_barrier_locked(
+                        client,
+                        expected_session_generation=session_generation,
+                    )
+                except Exception as exc:
+                    raise OBSSceneCollectionContextChangedError(
+                        f"Qualification Scene Collection indisponible après {request}",
+                        request_submitted=True,
+                    ) from exc
+                if post_generation != expected_collection_generation:
+                    raise OBSSceneCollectionContextChangedError(
+                        f"Scene Collection modifiée pendant {request}",
+                        request_submitted=True,
+                    )
+
+            if request_error is not None:
+                raise request_error
+            return response
 
     def _ensure_client(self):
         if _obs is None:
