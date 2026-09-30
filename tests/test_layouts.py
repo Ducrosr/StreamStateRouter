@@ -3686,5 +3686,107 @@ class LayoutTests(unittest.TestCase):
         )
 
 
+    def test_move_fade_hidden_source_stops_before_zero_opacity_after_shutdown(self):
+        class RuntimeStop(BaseException):
+            pass
+
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        profile = manager.capture_profile("Gameplay")
+        profile["transition"] = {
+            "mode": "move_fade",
+            "duration_ms": 100,
+            "steps": 2,
+        }
+        client.enabled[2] = False
+
+        stopping = {"value": False}
+        original_prepare = manager._prepare_fade_filter
+
+        def prepare_then_stop(source, collection):
+            identity = original_prepare(source, collection)
+            stopping["value"] = True
+            return identity
+
+        def runtime_checkpoint():
+            if stopping["value"]:
+                raise RuntimeStop("shutdown requested")
+
+        manager._prepare_fade_filter = prepare_then_stop
+        manager.set_cooperative_yield(runtime_checkpoint)
+        client.calls.clear()
+
+        with self.assertRaises(RuntimeStop):
+            manager.apply_profile(profile, record_undo=False)
+
+        self.assertFalse(client.enabled[2])
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        identity = store.entries()[0]
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 1.0)
+        self.assertTrue(state["enabled"])
+        zero_writes = [
+            payload
+            for request, payload in client.calls
+            if request == "SetSourceFilterSettings"
+            and float((payload.get("filterSettings") or {}).get("opacity", -1.0))
+            == 0.0
+        ]
+        self.assertEqual(zero_writes, [])
+
+    def test_preexisting_obligation_survives_new_preparation_inventory_failure(self):
+        class FailingInventoryClient(FakeLayoutClient):
+            fail_inventory = False
+
+            def send(self, request, data=None):
+                if request == "GetSourceFilterList" and self.fail_inventory:
+                    raise RuntimeError("filter inventory unavailable")
+                return super().send(request, data)
+
+        client = FailingInventoryClient()
+        manager = OBSLayoutManager(
+            client,
+            fade_helper_store=MemoryFadeHelperManifestStore(),
+        )
+        manager.set_pending_cleanup_changed(lambda: None)
+        manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+        manager._set_source_opacity("[Webcam] Avatar", 0.3)
+        client.fail_inventory = True
+        client.calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "inventory unavailable"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+    def test_preexisting_obligation_survives_new_preparation_kind_mismatch(self):
+        client = FakeLayoutClient()
+        store = MemoryFadeHelperManifestStore()
+        manager = OBSLayoutManager(client, fade_helper_store=store)
+        manager.set_pending_cleanup_changed(lambda: None)
+        identity = manager._prepare_fade_filter(
+            "[Webcam] Avatar",
+            "Collection A",
+        )
+        manager._set_source_opacity("[Webcam] Avatar", 0.3)
+        state = client.source_filters["[Webcam] Avatar"][identity.filter_name]
+        state["kind"] = "unexpected_filter_kind"
+        client.calls.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "Kind du helper incompatible"):
+            manager._prepare_fade_filter("[Webcam] Avatar", "Collection A")
+
+        self.assertEqual(manager.pending_fade_cleanup(), ("[Webcam] Avatar",))
+        self.assertAlmostEqual(float(state["settings"]["opacity"]), 0.3)
+        self.assertFalse(
+            any(request == "CreateSourceFilter" for request, _ in client.calls)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
