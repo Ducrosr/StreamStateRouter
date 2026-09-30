@@ -495,15 +495,30 @@ class OBSLayoutManager:
                 ),
             )
         else:
-            current = self._scene_collection_name(
-                expected_session_generation=(
-                    int(session_generation or 0) or None
+            expected_session = int(session_generation or 0)
+            if expected_session:
+                current_session = int(
+                    getattr(self.client, "session_generation", 0) or 0
                 )
-            )
+                if current_session != expected_session:
+                    raise RuntimeError(
+                        "Session OBS modifiée pendant la qualification "
+                        "Scene Collection"
+                    )
+            current = self._scene_collection_name()
             generation = int(
                 getattr(self.client, "scene_collection_generation", 0)
                 or 0
             )
+            if expected_session:
+                current_session = int(
+                    getattr(self.client, "session_generation", 0) or 0
+                )
+                if current_session != expected_session:
+                    raise RuntimeError(
+                        "Session OBS modifiée pendant la qualification "
+                        "Scene Collection"
+                    )
         if expected_collection and current != expected_collection:
             raise RuntimeError(
                 f"Scene Collection modifiée pendant l'opération de fade "
