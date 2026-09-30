@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QDialog,
+    QDockWidget,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -102,10 +103,13 @@ from .dialogs import (
     RuleDialog,
 )
 from .ergonomics import (
+    build_attention_items,
     build_contextual_action,
     build_decision_trail,
     build_draft_banner,
+    build_rule_health,
     build_status_strip,
+    humanize_rule,
 )
 from .presentation import (
     UserActivityEntry,
@@ -195,6 +199,12 @@ class MainWindow(QMainWindow):
         self._user_activity_history: list[
             tuple[str, UserActivityEntry, int, float]
         ] = []
+        self._last_system_check_report = None
+        self._recent_inspector_targets: list[
+            tuple[str, str, str]
+        ] = []
+        self._inspector_context: tuple[str, str, str] | None = None
+        self._inspector_payload: Mapping[str, object] | None = None
 
         self.bridge = RuntimeBridge()
         self.bridge.foreground.connect(self._on_foreground)
@@ -378,6 +388,7 @@ class MainWindow(QMainWindow):
         self.logs_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_logs_tab()), "Journal"
         )
+        self._build_inspector_dock()
 
     def _scrollable_tab(self, page: QWidget) -> QScrollArea:
         scroll = QScrollArea()
@@ -559,6 +570,8 @@ class MainWindow(QMainWindow):
             and self.tabs.currentIndex() in expert_only
         ):
             self.tabs.setCurrentIndex(self.dashboard_tab_index)
+        if hasattr(self, "inspector_dock") and not self._expert_mode:
+            self.inspector_dock.hide()
         self._refresh_status_strip()
         if hasattr(self, "unsaved"):
             self._refresh_config_revision_status()
@@ -1850,6 +1863,338 @@ class MainWindow(QMainWindow):
                 prefix + (f" · {detail}" if detail else "")
             )
 
+
+    def _build_inspector_dock(self) -> None:
+        self.inspector_dock = QDockWidget("Inspecteur", self)
+        self.inspector_dock.setObjectName("InspectorDock")
+        self.inspector_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        body = QWidget()
+        root = QVBoxLayout(body)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        self.inspector_title = QLabel("Aucun élément sélectionné")
+        self.inspector_title.setStyleSheet(
+            "font-size: 14pt; font-weight: 700;"
+        )
+        self.inspector_health = QLabel("—")
+        self.inspector_health.setObjectName("Muted")
+        self.inspector_summary = QLabel(
+            "Sélectionnez une règle, un profil ou un layout."
+        )
+        self.inspector_summary.setObjectName("Muted")
+        self.inspector_summary.setWordWrap(True)
+        root.addWidget(self.inspector_title)
+        root.addWidget(self.inspector_health)
+        root.addWidget(self.inspector_summary)
+
+        self.inspector_tree = QTreeWidget()
+        self.inspector_tree.setColumnCount(2)
+        self.inspector_tree.setHeaderLabels(["Information", "Valeur"])
+        self.inspector_tree.setRootIsDecorated(False)
+        self.inspector_tree.setAlternatingRowColors(True)
+        self.inspector_tree.header().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.inspector_tree.header().setStretchLastSection(True)
+        root.addWidget(self.inspector_tree, 1)
+
+        actions = QHBoxLayout()
+        self.inspector_open_button = QPushButton("Ouvrir")
+        self.inspector_open_button.clicked.connect(
+            self._open_inspector_target
+        )
+        actions.addWidget(self.inspector_open_button)
+        self.inspector_impact_button = QPushButton("Impact / dépendances")
+        self.inspector_impact_button.clicked.connect(
+            self._show_inspector_impact
+        )
+        actions.addWidget(self.inspector_impact_button)
+        raw = QPushButton("JSON…")
+        raw.clicked.connect(self._show_inspector_raw)
+        actions.addWidget(raw)
+        actions.addStretch(1)
+        root.addLayout(actions)
+
+        self.inspector_dock.setWidget(body)
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            self.inspector_dock,
+        )
+        self.inspector_dock.hide()
+
+    def _remember_inspector_target(
+        self,
+        kind: str,
+        domain: str,
+        target: str,
+    ) -> None:
+        item = (
+            str(kind or ""),
+            str(domain or ""),
+            str(target or ""),
+        )
+        if not item[2]:
+            return
+        self._recent_inspector_targets = [
+            current
+            for current in self._recent_inspector_targets
+            if current != item
+        ]
+        self._recent_inspector_targets.insert(0, item)
+        self._recent_inspector_targets = self._recent_inspector_targets[:8]
+
+    def _set_inspector(
+        self,
+        *,
+        kind: str,
+        title: str,
+        domain: str = "",
+        target: str = "",
+        summary: str = "",
+        health_text: str = "—",
+        health_style: str = "Muted",
+        rows: list[tuple[str, str]] | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
+        if not hasattr(self, "inspector_dock"):
+            return
+        self._inspector_context = (
+            str(kind or ""),
+            str(domain or ""),
+            str(target or title),
+        )
+        self._inspector_payload = (
+            copy.deepcopy(dict(payload))
+            if isinstance(payload, Mapping)
+            else None
+        )
+        self._remember_inspector_target(
+            kind,
+            domain,
+            target or title,
+        )
+        self.inspector_title.setText(title)
+        self._set_status_label(
+            self.inspector_health,
+            health_text,
+            health_style,
+        )
+        self.inspector_summary.setText(summary or "—")
+        self.inspector_tree.clear()
+        for label, value in rows or []:
+            self.inspector_tree.addTopLevelItem(
+                QTreeWidgetItem([str(label), str(value)])
+            )
+        self.inspector_open_button.setEnabled(bool(target))
+        self.inspector_impact_button.setEnabled(
+            kind in {"profile", "layout"}
+        )
+        if self._expert_mode:
+            self.inspector_dock.show()
+
+    def _inspect_selected_rule(self) -> None:
+        if not hasattr(self, "rules_table"):
+            return
+        idx = self._selected_rule_index()
+        if idx is None:
+            return
+        raw_rules = self.config.get("rules")
+        if not isinstance(raw_rules, list) or not 0 <= idx < len(raw_rules):
+            return
+        rule = raw_rules[idx]
+        if not isinstance(rule, Mapping):
+            return
+        name = str(rule.get("name") or f"Règle {idx + 1}")
+        health = build_rule_health(rule, self.config)
+        conditions = (
+            rule.get("conditions")
+            if isinstance(rule.get("conditions"), Mapping)
+            else {}
+        )
+        state = (
+            rule.get("state")
+            if isinstance(rule.get("state"), Mapping)
+            else {}
+        )
+        rows = [
+            ("Priorité", str(rule.get("priority", 0))),
+            (
+                "État",
+                "Active" if bool(rule.get("enabled", True)) else "Désactivée",
+            ),
+            ("Comportement", str(rule.get("behavior") or "match")),
+            ("Processus", str(rule.get("exe") or "—")),
+            ("Chemin", str(rule.get("path") or "—")),
+            ("Titre", str(rule.get("title_regex") or "—")),
+        ]
+        for key, value in conditions.items():
+            rows.append((f"Condition · {key}", str(value)))
+        for key, value in state.items():
+            rows.append((f"Profil · {key}", str(value)))
+        self._set_inspector(
+            kind="rule",
+            title=name,
+            target=name,
+            summary=humanize_rule(rule),
+            health_text=health.text,
+            health_style=health.style,
+            rows=rows,
+            payload=rule,
+        )
+        if hasattr(self, "rule_human_summary"):
+            self.rule_human_summary.setText(humanize_rule(rule))
+            self._set_status_label(
+                self.rule_health_badge,
+                health.text,
+                health.style,
+            )
+            self.rule_health_badge.setToolTip(health.detail)
+
+    def _inspect_current_profile(self) -> None:
+        current = self._current_profile()
+        if current is None:
+            return
+        domain, name, profile = current
+        lineage = profile_lineage(self.config, domain, name)
+        usages = profile_usages(self.config, domain, name)
+        entries = profile_content_entries(self.config, domain, name)
+        rows = [
+            ("Domaine", DOMAIN_LABELS.get(domain, domain)),
+            ("Héritage", " ← ".join(lineage) if lineage else name),
+            ("Actions locales", str(len(profile.get("actions") or []))),
+            ("Contenu effectif", str(len(entries))),
+            ("Utilisé par", str(len(usages))),
+        ]
+        for usage in usages[:8]:
+            rows.append(
+                (
+                    f"Dépendance · {usage.kind}",
+                    f"{usage.owner} · {usage.detail}",
+                )
+            )
+        self._set_inspector(
+            kind="profile",
+            domain=domain,
+            title=f"{DOMAIN_LABELS.get(domain, domain)} · {name}",
+            target=name,
+            summary=(
+                f"{len(entries)} élément(s) effectif(s) · "
+                f"{len(usages)} dépendance(s)"
+            ),
+            health_text="✓ Configuré",
+            health_style="Good",
+            rows=rows,
+            payload=profile,
+        )
+
+    def _inspect_current_layout(self) -> None:
+        current = self._current_layout_profile()
+        if current is None:
+            return
+        name, profile = current
+        lineage = profile_lineage(self.config, "layout", name)
+        usages = profile_usages(self.config, "layout", name)
+        modules = (
+            profile.get("modules")
+            if isinstance(profile.get("modules"), Mapping)
+            else {}
+        )
+        rows = [
+            ("Héritage", " ← ".join(lineage) if lineage else name),
+            ("Modules locaux", str(len(modules))),
+            ("Utilisé par", str(len(usages))),
+            (
+                "Transition",
+                str(
+                    (
+                        profile.get("transition")
+                        if isinstance(profile.get("transition"), Mapping)
+                        else {}
+                    ).get("mode")
+                    or "instant"
+                ),
+            ),
+        ]
+        for usage in usages[:8]:
+            rows.append(
+                (
+                    f"Dépendance · {usage.kind}",
+                    f"{usage.owner} · {usage.detail}",
+                )
+            )
+        self._set_inspector(
+            kind="layout",
+            domain="layout",
+            title=f"Layout · {name}",
+            target=name,
+            summary=(
+                f"{len(modules)} module(s) local(aux) · "
+                f"{len(usages)} dépendance(s)"
+            ),
+            health_text="✓ Configuré",
+            health_style="Good",
+            rows=rows,
+            payload=profile,
+        )
+
+    def _open_inspector_target(self) -> None:
+        context = self._inspector_context
+        if context is None:
+            return
+        kind, domain, target = context
+        if kind == "rule":
+            self._open_rule_by_name(target)
+        elif kind in {"profile", "layout"}:
+            self._open_profile_target(domain, target)
+
+    def _show_inspector_impact(self) -> None:
+        context = self._inspector_context
+        if context is None:
+            return
+        kind, domain, target = context
+        if kind == "profile":
+            self._show_profile_impact(domain, target)
+        elif kind == "layout":
+            self._show_profile_impact("layout", target)
+
+    def _show_inspector_raw(self) -> None:
+        payload = self._inspector_payload
+        if not isinstance(payload, Mapping):
+            QMessageBox.information(
+                self,
+                "Inspecteur",
+                "Aucune donnée brute disponible pour cette sélection.",
+            )
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Inspecteur brut")
+        dialog.resize(760, 620)
+        root = QVBoxLayout(dialog)
+        note = QLabel(
+            "Vue technique en lecture seule de l’objet sélectionné."
+        )
+        note.setObjectName("Muted")
+        root.addWidget(note)
+        raw = QPlainTextEdit()
+        raw.setReadOnly(True)
+        raw.setPlainText(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        root.addWidget(raw, 1)
+        close = QPushButton("Fermer")
+        close.clicked.connect(dialog.accept)
+        root.addWidget(close, alignment=Qt.AlignRight)
+        dialog.exec()
+
     def _build_dashboard(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
@@ -2830,7 +3175,22 @@ class MainWindow(QMainWindow):
         )
         self.rules_table.horizontalHeader().setStretchLastSection(True)
         self.rules_table.doubleClicked.connect(self._edit_rule)
+        self.rules_table.itemSelectionChanged.connect(
+            self._inspect_selected_rule
+        )
         root.addWidget(self.rules_table, 1)
+
+        rule_summary_row = QHBoxLayout()
+        self.rule_health_badge = QLabel("—")
+        self.rule_health_badge.setObjectName("Muted")
+        rule_summary_row.addWidget(self.rule_health_badge)
+        self.rule_human_summary = QLabel(
+            "Sélectionnez une règle pour afficher sa lecture humaine."
+        )
+        self.rule_human_summary.setWordWrap(True)
+        self.rule_human_summary.setObjectName("Muted")
+        rule_summary_row.addWidget(self.rule_human_summary, 1)
+        root.addLayout(rule_summary_row)
 
         buttons = QHBoxLayout()
         add = QPushButton("Ajouter")
@@ -4537,7 +4897,7 @@ class MainWindow(QMainWindow):
                 return
 
         self._user_activity_history.append((timestamp, entry, 1, now))
-        self._user_activity_history = self._user_activity_history[-8:]
+        self._user_activity_history = self._user_activity_history[-40:]
         self._refresh_user_activity()
 
     def _refresh_user_activity(self) -> None:
@@ -5070,9 +5430,11 @@ class MainWindow(QMainWindow):
                 if rule.get("behavior", "match") == "match"
                 else "—"
             )
+            health = build_rule_health(rule, self.config)
+            name = str(rule.get("name") or "")
             values = [
                 "✓" if rule.get("enabled", True) else "",
-                rule.get("name", ""),
+                f"{health.text.split()[0]} {name}".strip(),
                 rule.get("behavior", "match"),
                 str(rule.get("priority", 0)),
                 process_display,
@@ -5088,6 +5450,12 @@ class MainWindow(QMainWindow):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 if str(value):
                     item.setToolTip(str(value))
+                if col == 1:
+                    item.setToolTip(
+                        humanize_rule(rule)
+                        + "\n\n"
+                        + health.detail
+                    )
                 self.rules_table.setItem(row, col, item)
         self._refresh_automations_view()
 
@@ -5270,6 +5638,7 @@ class MainWindow(QMainWindow):
             )
         actions = current[2].setdefault("actions", []) if current else []
         self.actions_table.setRowCount(len(actions))
+        self._inspect_current_profile()
         for row, action in enumerate(actions):
             values = [
                 "✓" if action.get("enabled", True) else "",
@@ -6708,6 +7077,7 @@ class MainWindow(QMainWindow):
         if not isinstance(modules, dict):
             modules = {}
         self.layout_modules_table.setRowCount(len(modules))
+        self._inspect_current_layout()
         for row, (module_name, module) in enumerate(sorted(modules.items(), key=lambda item: item[0].casefold())):
             geometry = module.get("geometry", {}) if isinstance(module, dict) else {}
             elements = module.get("elements", []) if isinstance(module, dict) else []
