@@ -2695,6 +2695,16 @@ class MainWindow(QMainWindow):
     def _build_rules_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
+
+        intro = QLabel(
+            "Les règles sont évaluées par priorité. La vue "
+            "Automatisations est préférable pour comprendre le résultat ; "
+            "cet écran sert à l’édition détaillée."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
         self.rules_table = QTableWidget(0, 11)
         self.rules_table.setHorizontalHeaderLabels(
             [
@@ -2712,29 +2722,50 @@ class MainWindow(QMainWindow):
             ]
         )
         self.rules_table.setAlternatingRowColors(True)
-        self.rules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.rules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.rules_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.rules_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.rules_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
         self.rules_table.horizontalHeader().setStretchLastSection(True)
         self.rules_table.doubleClicked.connect(self._edit_rule)
         root.addWidget(self.rules_table, 1)
 
         buttons = QHBoxLayout()
-        for text, slot, primary in [
-            ("Ajouter", self._add_rule, True),
-            ("Modifier", self._edit_rule, False),
-            ("Dupliquer", self._duplicate_rule, False),
-            ("Activer/Désactiver", self._toggle_rule, False),
-            ("Tester sur l’app courante", self._test_rule, False),
-            ("Supprimer", self._delete_rule, False),
-        ]:
-            b = QPushButton(text)
-            if primary:
-                b.setObjectName("Primary")
-            if text == "Supprimer":
-                b.setObjectName("Danger")
-            b.clicked.connect(slot)
-            buttons.addWidget(b)
+        add = QPushButton("Ajouter")
+        add.setObjectName("DraftAction")
+        add.clicked.connect(self._add_rule)
+        buttons.addWidget(add)
+
+        edit = QPushButton("Modifier")
+        edit.clicked.connect(self._edit_rule)
+        buttons.addWidget(edit)
+
+        test = QPushButton("Tester sur l’app courante")
+        self._set_action_risk(
+            test,
+            "read",
+            "Évalue la règle sans appliquer un profil à OBS.",
+        )
+        test.clicked.connect(self._test_rule)
+        buttons.addWidget(test)
+
+        more = QPushButton("⋯")
+        more.setToolTip("Actions supplémentaires sur la règle sélectionnée")
+        menu = QMenu(more)
+        duplicate = menu.addAction("Dupliquer")
+        duplicate.triggered.connect(self._duplicate_rule)
+        toggle = menu.addAction("Activer / désactiver")
+        toggle.triggered.connect(self._toggle_rule)
+        menu.addSeparator()
+        delete = menu.addAction("Supprimer")
+        delete.triggered.connect(self._delete_rule)
+        more.setMenu(menu)
+        buttons.addWidget(more)
         buttons.addStretch(1)
         root.addLayout(buttons)
         return page
@@ -2743,90 +2774,163 @@ class MainWindow(QMainWindow):
         page = QWidget()
         root = QVBoxLayout(page)
 
+        intro = QLabel(
+            "Un profil décrit ce que SSR doit appliquer pour un domaine. "
+            "Les actions rares sont regroupées dans ⋯ pour garder "
+            "l’opération courante lisible."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("Muted")
+        root.addWidget(intro)
+
         top = QHBoxLayout()
         top.addWidget(QLabel("Domaine"))
         self.profile_domain = QComboBox()
         for domain in PROFILE_DOMAINS:
-            self.profile_domain.addItem(DOMAIN_LABELS[domain], domain)
-        self.profile_domain.currentIndexChanged.connect(self._refresh_profile_names)
+            self.profile_domain.addItem(
+                DOMAIN_LABELS[domain],
+                domain,
+            )
+        self.profile_domain.currentIndexChanged.connect(
+            self._refresh_profile_names
+        )
         top.addWidget(self.profile_domain)
         top.addWidget(QLabel("Profil"))
         self.profile_name = QComboBox()
-        self.profile_name.currentIndexChanged.connect(self._refresh_actions_table)
+        self.profile_name.currentIndexChanged.connect(
+            self._refresh_actions_table
+        )
         top.addWidget(self.profile_name, 1)
-        for text, slot in [
-            ("Nouveau", self._new_profile),
-            ("Dupliquer", self._duplicate_profile),
-            ("Renommer", self._rename_profile),
-            ("Supprimer", self._delete_profile),
-            ("Tester", self._test_profile),
-            ("Impact", self._show_current_profile_impact),
-        ]:
-            b = QPushButton(text)
-            if text == "Nouveau":
-                b.setObjectName("Primary")
-            if text == "Supprimer":
-                b.setObjectName("Danger")
-            b.clicked.connect(slot)
-            if text == "Tester":
-                self._register_obs_connected_control(b)
-            top.addWidget(b)
+
+        new_profile = QPushButton("Nouveau")
+        self._set_action_risk(new_profile, "draft")
+        new_profile.clicked.connect(self._new_profile)
+        top.addWidget(new_profile)
+
+        self.profile_test_button = QPushButton("Tester dans OBS")
+        self._set_action_risk(
+            self.profile_test_button,
+            "live",
+            "Exécute directement le profil sélectionné.",
+        )
+        self.profile_test_button.clicked.connect(self._test_profile)
+        self._register_obs_connected_control(
+            self.profile_test_button
+        )
+        top.addWidget(self.profile_test_button)
+
+        more = QPushButton("⋯")
+        more.setToolTip("Gestion du profil sélectionné")
+        menu = QMenu(more)
+        impact = menu.addAction("Voir l’impact…")
+        impact.triggered.connect(self._show_current_profile_impact)
+        duplicate = menu.addAction("Dupliquer")
+        duplicate.triggered.connect(self._duplicate_profile)
+        rename = menu.addAction("Renommer")
+        rename.triggered.connect(self._rename_profile)
+        menu.addSeparator()
+        delete = menu.addAction("Supprimer")
+        delete.triggered.connect(self._delete_profile)
+        more.setMenu(menu)
+        top.addWidget(more)
         root.addLayout(top)
 
         inheritance = QHBoxLayout()
         inheritance.addWidget(QLabel("Hérite de"))
         self.profile_parent = QComboBox()
         self.profile_parent.addItem("— Aucun —", "")
-        self.profile_parent.currentIndexChanged.connect(self._profile_parent_changed)
+        self.profile_parent.currentIndexChanged.connect(
+            self._profile_parent_changed
+        )
         inheritance.addWidget(self.profile_parent, 1)
         detach_profile = QPushButton("Détacher de la base")
-        detach_profile.clicked.connect(self._detach_current_profile)
+        detach_profile.clicked.connect(
+            self._detach_current_profile
+        )
         inheritance.addWidget(detach_profile)
-        hint = QLabel("Les actions du parent sont exécutées avant celles de ce profil.")
+        hint = QLabel(
+            "Les actions du parent sont exécutées avant celles de ce profil."
+        )
         hint.setObjectName("Muted")
         inheritance.addWidget(hint)
         root.addLayout(inheritance)
-        self.profile_inheritance_hint = QLabel("Héritage effectif : —")
+        self.profile_inheritance_hint = QLabel(
+            "Héritage effectif : —"
+        )
         self.profile_inheritance_hint.setWordWrap(True)
         self.profile_inheritance_hint.setObjectName("Muted")
         root.addWidget(self.profile_inheritance_hint)
 
         self.actions_table = QTableWidget(0, 4)
-        self.actions_table.setHorizontalHeaderLabels(["Actif", "Type", "Nom", "Paramètres"])
-        self.actions_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.actions_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.actions_table.setHorizontalHeaderLabels(
+            ["Actif", "Type", "Nom", "Paramètres"]
+        )
+        self.actions_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.actions_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
         self.actions_table.setAlternatingRowColors(True)
-        self.actions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.actions_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
         self.actions_table.horizontalHeader().setStretchLastSection(True)
         self.actions_table.doubleClicked.connect(self._edit_action)
         root.addWidget(self.actions_table, 1)
 
         buttons = QHBoxLayout()
-        for text, slot in [
-            ("Ajouter une action", self._add_action),
-            ("Importer collection OBS…", self._import_collection_to_profile),
-            ("Migrer logique collection / ASC…", self._migrate_collection_logic),
-            ("Modifier", self._edit_action),
-            ("Dupliquer", self._duplicate_action),
-            ("Activer/Désactiver", self._toggle_action),
-            ("Supprimer", self._delete_action),
-            ("Monter", lambda: self._move_action(-1)),
-            ("Descendre", lambda: self._move_action(1)),
-        ]:
-            b = QPushButton(text)
-            if text == "Ajouter une action":
-                b.setObjectName("Primary")
-            if text == "Supprimer":
-                b.setObjectName("Danger")
-            b.clicked.connect(slot)
-            if text in {
-                "Importer collection OBS…",
-                "Migrer logique collection / ASC…",
-            }:
-                self._register_obs_connected_control(b)
-            buttons.addWidget(b)
+        add_action = QPushButton("Ajouter une action")
+        self._set_action_risk(add_action, "draft")
+        add_action.clicked.connect(self._add_action)
+        buttons.addWidget(add_action)
+
+        edit_action = QPushButton("Modifier")
+        edit_action.clicked.connect(self._edit_action)
+        buttons.addWidget(edit_action)
+
+        more_actions = QPushButton("⋯")
+        more_actions.setToolTip(
+            "Import, duplication, activation et ordre des actions"
+        )
+        action_menu = QMenu(more_actions)
+        import_collection = action_menu.addAction(
+            "Importer collection OBS…"
+        )
+        import_collection.triggered.connect(
+            self._import_collection_to_profile
+        )
+        self._register_obs_connected_control(import_collection)
+        migrate = action_menu.addAction(
+            "Migrer logique collection / ASC…"
+        )
+        migrate.triggered.connect(self._migrate_collection_logic)
+        self._register_obs_connected_control(migrate)
+        action_menu.addSeparator()
+        duplicate_action = action_menu.addAction("Dupliquer")
+        duplicate_action.triggered.connect(self._duplicate_action)
+        toggle_action = action_menu.addAction("Activer / désactiver")
+        toggle_action.triggered.connect(self._toggle_action)
+        move_up = action_menu.addAction("Monter")
+        move_up.triggered.connect(lambda: self._move_action(-1))
+        move_down = action_menu.addAction("Descendre")
+        move_down.triggered.connect(lambda: self._move_action(1))
+        action_menu.addSeparator()
+        delete_action = action_menu.addAction("Supprimer")
+        delete_action.triggered.connect(self._delete_action)
+        more_actions.setMenu(action_menu)
+        buttons.addWidget(more_actions)
         buttons.addStretch(1)
         root.addLayout(buttons)
+
+        risk = QLabel(
+            "Le brouillon n’agit pas sur OBS tant que vous n’utilisez pas "
+            "« Enregistrer et appliquer ». « Tester dans OBS » est l’exception "
+            "et exécute immédiatement le profil."
+        )
+        risk.setWordWrap(True)
+        risk.setObjectName("Muted")
+        root.addWidget(risk)
         return page
 
     def _build_layouts_tab(self) -> QWidget:
@@ -2835,137 +2939,259 @@ class MainWindow(QMainWindow):
         root.setSpacing(10)
 
         intro = QLabel(
-            "Les sources OBS nommées « [Type de module] Nom du module » sont détectées automatiquement. "
-            "Le préfixe entre crochets sert uniquement de catégorie ; chaque source OBS reste un module distinct. "
-            "Un LayoutProfile mémorise sa position, sa taille et sa visibilité."
+            "Un LayoutProfile mémorise position, taille et visibilité. "
+            "Le flux est volontairement séparé : lire OBS, modifier le "
+            "brouillon SSR, puis éventuellement appliquer à OBS."
         )
         intro.setWordWrap(True)
         intro.setObjectName("Muted")
         root.addWidget(intro)
 
+        source_title = QLabel("1. Source OBS — lecture seule")
+        source_title.setObjectName("Section")
+        root.addWidget(source_title)
         obs_row = QHBoxLayout()
         obs_row.addWidget(QLabel("Scène OBS"))
         self.layout_scene = QComboBox()
         self.layout_scene.setMinimumWidth(260)
-        self.layout_scene.currentIndexChanged.connect(self._layout_scene_changed)
+        self.layout_scene.currentIndexChanged.connect(
+            self._layout_scene_changed
+        )
         obs_row.addWidget(self.layout_scene, 1)
-        sync = QPushButton("Synchroniser avec OBS")
-        sync.setObjectName("Primary")
+        sync = QPushButton("Lire / synchroniser OBS")
+        self._set_action_risk(
+            sync,
+            "read",
+            "Met à jour le catalogue affiché sans modifier OBS.",
+        )
         sync.clicked.connect(self._sync_obs_modules)
         obs_row.addWidget(sync)
         self._register_obs_connected_control(sync)
         root.addLayout(obs_row)
+        self.layout_obs_hint = QLabel(
+            "Synchroniser lit uniquement la structure OBS."
+        )
+        self.layout_obs_hint.setObjectName("Muted")
+        root.addWidget(self.layout_obs_hint)
 
+        profile_title = QLabel("2. Layout SSR — brouillon")
+        profile_title.setObjectName("Section")
+        root.addWidget(profile_title)
         profile_row = QHBoxLayout()
         profile_row.addWidget(QLabel("LayoutProfile"))
         self.layout_profile_name = QComboBox()
-        self.layout_profile_name.currentIndexChanged.connect(self._refresh_layout_profile_view)
+        self.layout_profile_name.currentIndexChanged.connect(
+            self._refresh_layout_profile_view
+        )
         profile_row.addWidget(self.layout_profile_name, 1)
-        for text, slot in [
-            ("Nouveau", self._new_layout_profile),
-            ("Dupliquer", self._duplicate_layout_profile),
-            ("Renommer", self._rename_layout_profile),
-            ("Supprimer", self._delete_layout_profile),
-            ("Capturer depuis OBS", self._capture_layout_profile),
-            ("Appliquer maintenant", self._apply_layout_profile),
-            ("Éditer dans OBS", self._edit_layout_in_obs),
-            ("Impact", self._show_current_layout_impact),
-        ]:
-            button = QPushButton(text)
-            if text == "Capturer depuis OBS":
-                button.setObjectName("Primary")
-            elif text == "Supprimer":
-                button.setObjectName("Danger")
-            button.clicked.connect(slot)
-            if text in {
-                "Capturer depuis OBS",
-                "Appliquer maintenant",
-                "Éditer dans OBS",
-            }:
-                self._register_obs_connected_control(button)
-            profile_row.addWidget(button)
+
+        new_layout = QPushButton("Nouveau")
+        self._set_action_risk(new_layout, "draft")
+        new_layout.clicked.connect(self._new_layout_profile)
+        profile_row.addWidget(new_layout)
+
+        self.layout_capture_button = QPushButton(
+            "Capturer OBS dans le brouillon"
+        )
+        self._set_action_risk(
+            self.layout_capture_button,
+            "draft",
+            "Lit OBS puis remplace le contenu du LayoutProfile dans le brouillon.",
+        )
+        self.layout_capture_button.clicked.connect(
+            self._capture_layout_profile
+        )
+        self._register_obs_connected_control(
+            self.layout_capture_button
+        )
+        profile_row.addWidget(self.layout_capture_button)
+
+        self.layout_apply_button = QPushButton("Appliquer à OBS")
+        self._set_action_risk(
+            self.layout_apply_button,
+            "live",
+            "Modifie immédiatement la géométrie/visibilité OBS.",
+        )
+        self.layout_apply_button.clicked.connect(
+            self._apply_layout_profile
+        )
+        self._register_obs_connected_control(
+            self.layout_apply_button
+        )
+        profile_row.addWidget(self.layout_apply_button)
+
+        more = QPushButton("⋯")
+        more.setToolTip("Gestion et outils du LayoutProfile")
+        menu = QMenu(more)
+        impact = menu.addAction("Voir l’impact…")
+        impact.triggered.connect(self._show_current_layout_impact)
+        duplicate = menu.addAction("Dupliquer")
+        duplicate.triggered.connect(self._duplicate_layout_profile)
+        rename = menu.addAction("Renommer")
+        rename.triggered.connect(self._rename_layout_profile)
+        menu.addSeparator()
+        edit_obs = menu.addAction("Éditer dans OBS…")
+        edit_obs.triggered.connect(self._edit_layout_in_obs)
+        self._register_obs_connected_control(edit_obs)
+        menu.addSeparator()
+        delete = menu.addAction("Supprimer")
+        delete.triggered.connect(self._delete_layout_profile)
+        more.setMenu(menu)
+        profile_row.addWidget(more)
         root.addLayout(profile_row)
 
         options = QHBoxLayout()
         options.addWidget(QLabel("Base"))
         self.layout_parent = QComboBox()
         self.layout_parent.addItem("— Aucune —", "")
-        self.layout_parent.currentIndexChanged.connect(self._layout_option_changed)
+        self.layout_parent.currentIndexChanged.connect(
+            self._layout_option_changed
+        )
         options.addWidget(self.layout_parent)
         detach_layout = QPushButton("Détacher de la base")
-        detach_layout.clicked.connect(self._detach_current_layout_profile)
+        detach_layout.clicked.connect(
+            self._detach_current_layout_profile
+        )
         options.addWidget(detach_layout)
         options.addWidget(QLabel("Coordonnées"))
         self.layout_coordinate_mode = QComboBox()
-        self.layout_coordinate_mode.addItem("Normalisées", "normalized")
+        self.layout_coordinate_mode.addItem(
+            "Normalisées",
+            "normalized",
+        )
         self.layout_coordinate_mode.addItem("Absolues", "absolute")
-        self.layout_coordinate_mode.currentIndexChanged.connect(self._layout_option_changed)
+        self.layout_coordinate_mode.currentIndexChanged.connect(
+            self._layout_option_changed
+        )
         options.addWidget(self.layout_coordinate_mode)
         options.addWidget(QLabel("Transition"))
         self.layout_transition = QComboBox()
-        for label, value in [("Instantanée", "instant"), ("Déplacement", "move"), ("Fondu", "fade"), ("Déplacement + fondu", "move_fade")]:
+        for label, value in [
+            ("Instantanée", "instant"),
+            ("Déplacement", "move"),
+            ("Fondu", "fade"),
+            ("Déplacement + fondu", "move_fade"),
+        ]:
             self.layout_transition.addItem(label, value)
-        self.layout_transition.currentIndexChanged.connect(self._layout_option_changed)
+        self.layout_transition.currentIndexChanged.connect(
+            self._layout_option_changed
+        )
         options.addWidget(self.layout_transition)
         self.layout_transition_ms = QSpinBox()
         self.layout_transition_ms.setRange(0, 10000)
         self.layout_transition_ms.setSuffix(" ms")
-        self.layout_transition_ms.valueChanged.connect(self._layout_option_changed)
+        self.layout_transition_ms.valueChanged.connect(
+            self._layout_option_changed
+        )
         options.addWidget(self.layout_transition_ms)
         options.addStretch(1)
         root.addLayout(options)
-        self.layout_inheritance_hint = QLabel("Héritage effectif : —")
+        self.layout_inheritance_hint = QLabel(
+            "Héritage effectif : —"
+        )
         self.layout_inheritance_hint.setWordWrap(True)
         self.layout_inheritance_hint.setObjectName("Muted")
         root.addWidget(self.layout_inheritance_hint)
 
         tools = QHBoxLayout()
-        for text, slot in [
-            ("Prévisualiser", self._preview_layout_profile),
-            ("Annuler aperçu", self._cancel_layout_preview),
-            ("Undo OBS", self._undo_layout_obs),
-            ("Comparer à OBS", self._diff_layout_with_obs),
-            ("Comparer 2 layouts", self._diff_two_layouts),
-            ("Valider", self._validate_layout_profile),
-            ("Restaurer version précédente", self._restore_layout_revision),
-        ]:
-            button = QPushButton(text)
-            button.clicked.connect(slot)
-            if text in {
-                "Prévisualiser",
-                "Annuler aperçu",
-                "Undo OBS",
-                "Comparer à OBS",
-                "Valider",
-            }:
-                self._register_obs_connected_control(button)
-            tools.addWidget(button)
+        preview = QPushButton("Prévisualiser dans OBS")
+        self._set_action_risk(preview, "live")
+        preview.clicked.connect(self._preview_layout_profile)
+        self._register_obs_connected_control(preview)
+        tools.addWidget(preview)
+
+        compare_obs = QPushButton("Comparer à OBS")
+        self._set_action_risk(compare_obs, "read")
+        compare_obs.clicked.connect(self._diff_layout_with_obs)
+        self._register_obs_connected_control(compare_obs)
+        tools.addWidget(compare_obs)
+
+        more_tools = QPushButton("⋯")
+        more_tools.setToolTip("Outils avancés du layout")
+        tools_menu = QMenu(more_tools)
+        cancel_preview = tools_menu.addAction("Annuler aperçu OBS")
+        cancel_preview.triggered.connect(self._cancel_layout_preview)
+        self._register_obs_connected_control(cancel_preview)
+        undo_obs = tools_menu.addAction("Restaurer l’OBS précédent")
+        undo_obs.triggered.connect(self._undo_layout_obs)
+        self._register_obs_connected_control(undo_obs)
+        tools_menu.addSeparator()
+        compare_two = tools_menu.addAction("Comparer 2 layouts")
+        compare_two.triggered.connect(self._diff_two_layouts)
+        validate = tools_menu.addAction("Valider le layout")
+        validate.triggered.connect(self._validate_layout_profile)
+        self._register_obs_connected_control(validate)
+        tools_menu.addSeparator()
+        restore = tools_menu.addAction(
+            "Restaurer la version précédente du brouillon"
+        )
+        restore.triggered.connect(self._restore_layout_revision)
+        more_tools.setMenu(tools_menu)
+        tools.addWidget(more_tools)
         tools.addStretch(1)
         root.addLayout(tools)
 
+        content_title = QLabel(
+            "3. Contenu du layout — modules et géométrie"
+        )
+        content_title.setObjectName("Section")
+        root.addWidget(content_title)
         content = QHBoxLayout()
 
-        catalog_card, catalog_lay = self._card("Catalogue OBS — éléments à inclure lors de la capture")
+        catalog_card, catalog_lay = self._card(
+            "Catalogue OBS — sélection pour la prochaine capture"
+        )
         self.module_tree = QTreeWidget()
-        self.module_tree.setHeaderLabels(["Type / module", "Source OBS"])
-        self.module_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.module_tree.setHeaderLabels(
+            ["Type / module", "Source OBS"]
+        )
+        self.module_tree.header().setSectionResizeMode(
+            0,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
         self.module_tree.header().setStretchLastSection(True)
-        self.module_tree.itemChanged.connect(self._catalog_item_changed)
+        self.module_tree.itemChanged.connect(
+            self._catalog_item_changed
+        )
         catalog_lay.addWidget(self.module_tree)
         content.addWidget(catalog_card, 1)
 
-        layout_card, layout_lay = self._card("Modules mémorisés dans le LayoutProfile")
+        layout_card, layout_lay = self._card(
+            "Modules mémorisés dans le brouillon"
+        )
         self.layout_modules_table = QTableWidget(0, 8)
         self.layout_modules_table.setHorizontalHeaderLabels(
-            ["Module OBS", "Éléments", "X", "Y", "Largeur", "Hauteur", "Visible", "Ancre"]
+            [
+                "Module OBS",
+                "Éléments",
+                "X",
+                "Y",
+                "Largeur",
+                "Hauteur",
+                "Visible",
+                "Ancre",
+            ]
         )
-        self.layout_modules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.layout_modules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.layout_modules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.layout_modules_table.horizontalHeader().setStretchLastSection(True)
-        self.layout_modules_table.doubleClicked.connect(self._edit_layout_module)
+        self.layout_modules_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.layout_modules_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.layout_modules_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.layout_modules_table.horizontalHeader().setStretchLastSection(
+            True
+        )
+        self.layout_modules_table.doubleClicked.connect(
+            self._edit_layout_module
+        )
         layout_lay.addWidget(self.layout_modules_table)
-        edit = QPushButton("Modifier position, taille et éléments…")
+        edit = QPushButton(
+            "Modifier position, taille et éléments…"
+        )
+        self._set_action_risk(edit, "draft")
         edit.clicked.connect(self._edit_layout_module)
         layout_lay.addWidget(edit, alignment=Qt.AlignLeft)
         content.addWidget(layout_card, 2)
