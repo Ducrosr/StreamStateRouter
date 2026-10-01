@@ -349,6 +349,7 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
         migrated.setdefault("cues", {})
         migrated.setdefault("transition_profiles", {})
         migrated.setdefault("shader_sets", {})
+        migrated.setdefault("sound_sets", {})
         migrated.setdefault(
             "widget_runtime",
             {
@@ -1165,6 +1166,54 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             ):
                 errors.append(f"{fprefix}.overlay doit être booléen")
 
+    sound_sets = data.get("sound_sets", {})
+    if not isinstance(sound_sets, Mapping):
+        errors.append("sound_sets doit être un objet")
+        sound_sets = {}
+    for sound_name, sound_set in sound_sets.items():
+        prefix = f"sound_sets.{sound_name}"
+        if (
+            not str(sound_name).strip()
+            or not isinstance(sound_set, Mapping)
+        ):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        for phase in ("enter", "exit"):
+            triggers = sound_set.get(phase, [])
+            if not isinstance(triggers, list):
+                errors.append(f"{prefix}.{phase} doit être une liste")
+                continue
+            if len(triggers) > 32:
+                errors.append(
+                    f"{prefix}.{phase} dépasse 32 sons"
+                )
+            for index, trigger in enumerate(triggers):
+                tprefix = f"{prefix}.{phase}[{index}]"
+                if not isinstance(trigger, Mapping):
+                    errors.append(f"{tprefix} doit être un objet")
+                    continue
+                input_name = str(
+                    trigger.get("input")
+                    or trigger.get("input_name")
+                    or ""
+                ).strip()
+                if not input_name:
+                    errors.append(f"{tprefix}.input est requis")
+                action = str(
+                    trigger.get("action") or "restart"
+                ).strip().casefold()
+                if action not in {
+                    "play",
+                    "pause",
+                    "stop",
+                    "restart",
+                    "next",
+                    "previous",
+                }:
+                    errors.append(
+                        f"{tprefix}.action inconnu : {action}"
+                    )
+
     for cue_name, cue in cues.items():
         prefix = f"cues.{cue_name}"
         if not str(cue_name).strip() or not isinstance(cue, Mapping):
@@ -1465,6 +1514,29 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     f"{prefix}.{cue_key} référence un cue inexistant : "
                     f"{cue_name}"
                 )
+        transition_name = str(
+            profile.get("transition_profile") or ""
+        ).strip()
+        if (
+            transition_name
+            and transition_name not in transition_profiles
+        ):
+            errors.append(
+                f"{prefix}.transition_profile référence un profil "
+                f"inexistant : {transition_name}"
+            )
+        shader_name = str(profile.get("shader_set") or "").strip()
+        if shader_name and shader_name not in shader_sets:
+            errors.append(
+                f"{prefix}.shader_set référence un set inexistant : "
+                f"{shader_name}"
+            )
+        sound_name = str(profile.get("sound_set") or "").strip()
+        if sound_name and sound_name not in sound_sets:
+            errors.append(
+                f"{prefix}.sound_set référence un set inexistant : "
+                f"{sound_name}"
+            )
 
         transition_name = str(
             profile.get("transition_profile") or ""
@@ -1871,6 +1943,7 @@ def build_presentation_profiles(data: Mapping[str, Any]) -> PresentationRegistry
     cues_raw = data.get("cues", {})
     transitions_raw = data.get("transition_profiles", {})
     shader_sets_raw = data.get("shader_sets", {})
+    sound_sets_raw = data.get("sound_sets", {})
     return parse_presentation_registry(
         profiles_raw=(
             profiles_raw if isinstance(profiles_raw, Mapping) else {}
@@ -1884,6 +1957,11 @@ def build_presentation_profiles(data: Mapping[str, Any]) -> PresentationRegistry
         shader_sets_raw=(
             shader_sets_raw
             if isinstance(shader_sets_raw, Mapping)
+            else {}
+        ),
+        sound_sets_raw=(
+            sound_sets_raw
+            if isinstance(sound_sets_raw, Mapping)
             else {}
         ),
     )
