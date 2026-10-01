@@ -249,6 +249,63 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertIn("enqueue_uri", actions)
         self.assertIn("clear_queue", actions)
 
+    def test_shutdown_rejects_new_commands_and_cancels_queued_requests(self) -> None:
+        provider = FakeProvider()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+        )
+        runtime.start()
+
+        # Freeze the worker in a provider call so a second command remains
+        # queued long enough for stop() to own and cancel it deterministically.
+        entered = threading.Event()
+        release = threading.Event()
+        original_play = provider.play
+
+        def blocking_play() -> None:
+            entered.set()
+            release.wait(1.0)
+            original_play()
+
+        provider.play = blocking_play
+        active = runtime.request("play")
+        self.assertTrue(entered.wait(1.0))
+        queued = runtime.request("next")
+
+        result_holder: list[bool] = []
+
+        def stop_runtime() -> None:
+            result_holder.append(runtime.stop(timeout=1.5))
+
+        stopper = threading.Thread(target=stop_runtime)
+        stopper.start()
+        deadline = time.monotonic() + 1.0
+        while runtime.running and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        with self.assertRaises(RuntimeError):
+            runtime.request("pause")
+
+        queued_status = runtime.command_status(queued)
+        self.assertIsNotNone(queued_status)
+        assert queued_status is not None
+        self.assertFalse(queued_status["success"])
+        self.assertEqual(
+            queued_status["error"],
+            "Media Runtime en arrêt",
+        )
+
+        release.set()
+        stopper.join(2.0)
+        self.assertFalse(stopper.is_alive())
+        self.assertEqual(result_holder, [True])
+
+        active_status = runtime.command_status(active)
+        self.assertIsNotNone(active_status)
+        assert active_status is not None
+        self.assertTrue(active_status["success"])
+
     def test_invalid_action_and_disabled_runtime_are_rejected(self) -> None:
         runtime = MediaRuntime(
             MediaRuntimeConfig(enabled=False),
