@@ -6,6 +6,7 @@ from typing import Mapping
 
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -318,7 +319,7 @@ class PresentationEditor(QWidget):
             ["Temps (ms)", "Actions", "Résumé"]
         )
         self.frames_table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
+            QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.frames_table.horizontalHeader().setStretchLastSection(True)
         self.frames_table.itemSelectionChanged.connect(
@@ -345,7 +346,7 @@ class PresentationEditor(QWidget):
             ["Actif", "Type", "Nom", "Paramètres"]
         )
         self.cue_actions.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
+            QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.cue_actions.horizontalHeader().setStretchLastSection(True)
         self.cue_actions.doubleClicked.connect(self._edit_cue_action)
@@ -425,7 +426,7 @@ class PresentationEditor(QWidget):
             ["Source", "Filtre", "État", "Settings"]
         )
         self.shader_filters.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
+            QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.shader_filters.horizontalHeader().setStretchLastSection(True)
         self.shader_filters.doubleClicked.connect(self._edit_shader_filter)
@@ -465,7 +466,7 @@ class PresentationEditor(QWidget):
             ["Phase", "Source média OBS", "Action"]
         )
         self.sound_triggers.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
+            QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.sound_triggers.horizontalHeader().setStretchLastSection(True)
         self.sound_triggers.doubleClicked.connect(self._edit_sound_trigger)
