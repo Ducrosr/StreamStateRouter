@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import hashlib
 import json
@@ -10,8 +11,11 @@ from typing import Any, Mapping, Sequence
 
 from ..host import HostControlController
 from ..presentation import (
+    Cue,
     CueAction,
     CueExecutor,
+    CueFrame,
+    CueTask,
     PresentationRegistry,
     PresentationStateStore,
     ResolvedPresentationProfile,
@@ -113,6 +117,19 @@ class OBSDispatcher:
         self._cue_executor = CueExecutor(
             action_executor=self._execute_cue_action,
         )
+        self._presentation_tasks: deque[CueTask] = deque()
+        self._presentation_task_counter = 0
+        self._presentation_attempt_target = ""
+        self._presentation_exit_consumed_from = ""
+        self._presentation_enter_scheduled_for = ""
+        self._presentation_execution_status: dict[str, object] = {
+            "status": "idle",
+            "execution_id": "",
+            "cue": "",
+            "phase": "",
+            "target_profile": "",
+            "error": "",
+        }
         self._last_state: StreamState | None = None
         self._desired_state: StreamState | None = None
         self._applied_profiles: dict[str, str] = {}
