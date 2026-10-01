@@ -10,7 +10,9 @@ from typing import Any, Mapping, Sequence
 
 from ..host import HostControlController
 from ..presentation import (
+    Cue,
     CueAction,
+    CueEffectUncertainError,
     CueExecutor,
     PresentationRegistry,
     PresentationStateStore,
@@ -27,7 +29,7 @@ from ..planning import (
 )
 from ..router.engine import StateChange
 from ..router.models import DEFAULT_PROFILE_NAMES, ForegroundApp, StreamState
-from .client import OBSClientManager, OBSRequestError
+from .client import OBSClientManager, OBSRequestError, OBSUnavailableError
 from .layouts import OBSLayoutManager, resolve_layout_profile
 from .models import OBSAction, OBSProfile
 
@@ -153,6 +155,8 @@ class OBSDispatcher:
         self._control_variables: dict[str, str] = {}
         self._foreground_windows: dict[str, str] = {}
         self._launcher_override_keys: set[str] = set()
+        self._presentation_execution_epoch = 0
+        self._presentation_execution_target = ""
 
     def set_control_variables(
         self,
@@ -1721,6 +1725,7 @@ class OBSDispatcher:
         *,
         phase: str,
         state: StreamState,
+        execution_id: str,
     ) -> int:
         name = str(profile.sound_set or "").strip()
         if not name:
@@ -1733,25 +1738,33 @@ class OBSDispatcher:
             if str(phase).casefold() == "enter"
             else sound_set.exit
         )
-        executed = 0
-        variables = self._execution_variables(state)
-        for trigger in triggers:
-            self._yield_runtime()
-            self.execute_action(
-                OBSAction(
-                    type="media_input_action",
-                    params={
-                        "input": trigger.input_name,
-                        "action": trigger.action,
-                    },
-                    enabled=True,
-                    name=f"{name}:{phase}",
-                    preapply_on_launcher=False,
-                ),
-                variables=variables,
-            )
-            executed += 1
-        return executed
+        cue = Cue.from_mapping(
+            f"sound:{name}:{phase}",
+            {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "media_input_action",
+                                "params": {
+                                    "input": trigger.input_name,
+                                    "action": trigger.action,
+                                },
+                                "name": f"{name}:{phase}",
+                            }
+                            for trigger in triggers
+                        ],
+                    }
+                ]
+            },
+        )
+        result = self._cue_executor.execute(
+            cue,
+            variables=self._execution_variables(state),
+            execution_id=execution_id,
+        )
+        return result.actions_executed
 
     def _execute_cue_action(
         self,
@@ -1765,22 +1778,32 @@ class OBSDispatcher:
             )
             self._animate_filter_settings(rendered)
             return
-        self.execute_action(
-            OBSAction(
-                type=action.type,
-                params=dict(action.params),
-                enabled=action.enabled,
-                name=action.name,
-                preapply_on_launcher=False,
-            ),
-            variables=variables,
-        )
+        try:
+            self.execute_action(
+                OBSAction(
+                    type=action.type,
+                    params=dict(action.params),
+                    enabled=action.enabled,
+                    name=action.name,
+                    preapply_on_launcher=False,
+                ),
+                variables=variables,
+            )
+        except OBSUnavailableError as exc:
+            if action.type.strip().casefold() == "media_input_action":
+                raise CueEffectUncertainError(
+                    "Commande média au résultat incertain ; "
+                    "rejeu automatique interdit : "
+                    + str(exc)
+                ) from exc
+            raise
 
     def _execute_presentation_cue(
         self,
         cue_name: str,
         *,
         state: StreamState,
+        execution_id: str,
     ) -> tuple[int, int]:
         wanted = str(cue_name or "").strip()
         if not wanted:
@@ -1791,6 +1814,7 @@ class OBSDispatcher:
         result = self._cue_executor.execute(
             cue,
             variables=self._execution_variables(state),
+            execution_id=execution_id,
         )
         return (
             result.actions_executed,
@@ -1865,6 +1889,14 @@ class OBSDispatcher:
         presentation_failed = ""
         presentation_name = state.profile_name("presentation")
         if "presentation" in changed:
+            if (
+                force
+                or presentation_name != self._presentation_execution_target
+            ):
+                self._presentation_execution_epoch += 1
+                self._presentation_execution_target = presentation_name
+                self._cue_executor.cancel_all()
+            presentation_epoch = self._presentation_execution_epoch
             if self._is_unmanaged_default(
                 "presentation",
                 presentation_name,
@@ -1905,11 +1937,20 @@ class OBSDispatcher:
                                 previous_profile,
                                 phase="exit",
                                 state=state,
+                                execution_id=(
+                                    f"{presentation_epoch}:exit-sound:"
+                                    f"{previous_name}"
+                                ),
                             )
                             cue_executed, cue_skipped = (
                                 self._execute_presentation_cue(
                                     previous_profile.exit_cue,
                                     state=state,
+                                    execution_id=(
+                                        f"{presentation_epoch}:exit-cue:"
+                                        f"{previous_name}:"
+                                        f"{previous_profile.exit_cue}"
+                                    ),
                                 )
                             )
                             executed += cue_executed
@@ -2116,6 +2157,11 @@ class OBSDispatcher:
                     self._execute_presentation_cue(
                         presentation_profile.enter_cue,
                         state=state,
+                        execution_id=(
+                            f"{presentation_epoch}:enter-cue:"
+                            f"{presentation_name}:"
+                            f"{presentation_profile.enter_cue}"
+                        ),
                     )
                 )
                 executed += cue_executed
@@ -2124,6 +2170,10 @@ class OBSDispatcher:
                     presentation_profile,
                     phase="enter",
                     state=state,
+                    execution_id=(
+                        f"{presentation_epoch}:enter-sound:"
+                        f"{presentation_name}"
+                    ),
                 )
             except Exception as exc:
                 message = f"enter cue {presentation_name}: {exc}"
