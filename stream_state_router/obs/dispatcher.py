@@ -1851,6 +1851,9 @@ class OBSDispatcher:
                 "presentation",
                 presentation_name,
             ):
+                self.cancel_presentation_tasks(
+                    "domaine présentation non géré"
+                )
                 skipped += 1
                 self._presentation_state_store.clear()
                 status(
@@ -1873,29 +1876,55 @@ class OBSDispatcher:
                     "presentation",
                     "",
                 )
+                new_attempt = (
+                    self._presentation_attempt_target
+                    != presentation_name
+                )
+                if new_attempt:
+                    self.cancel_presentation_tasks(
+                        "PresentationProfile remplacé"
+                    )
+                    self._presentation_attempt_target = presentation_name
+                    self._presentation_enter_scheduled_for = ""
+
                 if (
-                    presentation_profile is not None
+                    new_attempt
+                    and presentation_profile is not None
                     and previous_name
                     and previous_name != presentation_name
+                    and self._presentation_exit_consumed_from
+                    != previous_name
                 ):
+                    # Mark the departure effects consumed before any external
+                    # write. A failed/ambiguous one-shot must not be replayed by
+                    # automatic reconciliation.
+                    self._presentation_exit_consumed_from = previous_name
                     try:
                         previous_profile = self._resolve_presentation(
                             previous_name
                         )
                         if previous_profile is not None:
-                            executed += self._execute_sound_set_phase(
+                            self._schedule_sound_set_phase(
                                 previous_profile,
                                 phase="exit",
                                 state=state,
+                                target_profile=presentation_name,
                             )
-                            cue_executed, cue_skipped = (
-                                self._execute_presentation_cue(
-                                    previous_profile.exit_cue,
-                                    state=state,
+                            self._schedule_presentation_cue(
+                                previous_profile.exit_cue,
+                                state=state,
+                                target_profile=presentation_name,
+                                phase="exit",
+                            )
+                            progress = self.tick_presentation_tasks()
+                            executed += progress.executed
+                            skipped += progress.skipped
+                            warnings.extend(progress.warnings)
+                            if progress.warnings:
+                                presentation_failed = (
+                                    "exit presentation incertaine : "
+                                    + "; ".join(progress.warnings)
                                 )
-                            )
-                            executed += cue_executed
-                            skipped += cue_skipped
                     except Exception as exc:
                         presentation_failed = (
                             f"exit cue {previous_name}: {exc}"
@@ -2093,43 +2122,54 @@ class OBSDispatcher:
             status(domain, profile_name, "applied")
 
         if presentation_profile is not None:
-            try:
-                cue_executed, cue_skipped = (
-                    self._execute_presentation_cue(
-                        presentation_profile.enter_cue,
-                        state=state,
-                    )
-                )
-                executed += cue_executed
-                skipped += cue_skipped
-                executed += self._execute_sound_set_phase(
-                    presentation_profile,
-                    phase="enter",
-                    state=state,
-                )
-            except Exception as exc:
-                message = f"enter cue {presentation_name}: {exc}"
-                warnings.append(
-                    f"presentation/{presentation_name}: {message}"
-                )
-                status(
-                    "presentation",
-                    presentation_name,
-                    "failed",
-                    message,
-                )
-            else:
-                self._applied_profiles["presentation"] = (
+            # Convergent presentation resources are committed independently
+            # from one-shot Cue/SoundSet effects. This prevents automatic
+            # reconciliation from replaying an effect after a partial or
+            # ambiguous execution.
+            self._applied_profiles["presentation"] = presentation_name
+            self._presentation_state_store.update(
+                presentation_profile
+            )
+            cue_warning = ""
+            if (
+                self._presentation_enter_scheduled_for
+                != presentation_name
+            ):
+                self._presentation_enter_scheduled_for = (
                     presentation_name
                 )
-                self._presentation_state_store.update(
-                    presentation_profile
-                )
-                status(
-                    "presentation",
-                    presentation_name,
-                    "applied",
-                )
+                try:
+                    self._schedule_presentation_cue(
+                        presentation_profile.enter_cue,
+                        state=state,
+                        target_profile=presentation_name,
+                        phase="enter",
+                    )
+                    self._schedule_sound_set_phase(
+                        presentation_profile,
+                        phase="enter",
+                        state=state,
+                        target_profile=presentation_name,
+                    )
+                    progress = self.tick_presentation_tasks()
+                    executed += progress.executed
+                    skipped += progress.skipped
+                    warnings.extend(progress.warnings)
+                    if progress.warnings:
+                        cue_warning = "; ".join(progress.warnings)
+                except Exception as exc:
+                    cue_warning = str(exc)
+                    warnings.append(
+                        f"presentation/{presentation_name}: "
+                        f"enter cue incertain : {exc}"
+                    )
+
+            status(
+                "presentation",
+                presentation_name,
+                "partial" if cue_warning else "applied",
+                cue_warning,
+            )
 
         return DispatchResult(
             executed,
