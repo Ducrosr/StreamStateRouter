@@ -377,6 +377,23 @@ class WidgetRuntimeTests(unittest.TestCase):
                 "subscription",
             )
 
+    def test_runtime_rejects_published_file_modified_after_import(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, package = self._runtime(Path(tmp))
+            package.entry.write_text(
+                "<html><body>tampered</body></html>",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(HTTPError) as error:
+                self._get(
+                    runtime.package_url(
+                        package.package_id,
+                        component="chat",
+                    )
+                )
+            self.assertEqual(error.exception.code, 404)
+
     def test_runtime_rejects_unpublished_files_added_after_import(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, package = self._runtime(Path(tmp))
