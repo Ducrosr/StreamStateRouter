@@ -54,6 +54,7 @@ from ..importers import (
     neutralize_referenced_test_layout_profiles,
     wire_windows_hdr_capture_profiles,
 )
+from ..media import MediaRuntime, MediaStateStore, VLCProvider
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -66,8 +67,10 @@ from ..services.config import (
     build_host_controller,
     build_profiles,
     build_layout_profiles,
+    build_media_runtime_config,
     build_presentation_profiles,
     build_ruleset,
+    build_vlc_config,
     build_widget_runtime_config,
     export_config,
     import_config,
@@ -208,6 +211,8 @@ class MainWindow(QMainWindow):
         self._dispatcher: OBSDispatcher | None = None
         self._client: OBSClientManager | None = None
         self._presentation_state_store = PresentationStateStore()
+        self._media_state_store = MediaStateStore("vlc")
+        self._media_runtime: MediaRuntime | None = None
         self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
@@ -260,6 +265,7 @@ class MainWindow(QMainWindow):
         )
         self._start_runtime()
         self._start_widget_runtime()
+        self._start_media_runtime()
         self._start_api()
         self._module_scan_timer = QTimer(self)
         self._module_scan_timer.timeout.connect(self._auto_scan_modules)
@@ -4454,6 +4460,32 @@ class MainWindow(QMainWindow):
         widget_lay.addWidget(widget_note)
         root.addWidget(widget_card)
 
+        media_card, media_lay = self._card("Média / VLC")
+        media_form = QFormLayout()
+        self.media_enabled = QCheckBox(
+            "Activer le contrôle média via VLC"
+        )
+        self.vlc_port = QSpinBox()
+        self.vlc_port.setRange(1, 65535)
+        self.vlc_password = QLineEdit()
+        self.vlc_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.vlc_password.setPlaceholderText(
+            "Mot de passe de l’interface Web VLC"
+        )
+        media_form.addRow("", self.media_enabled)
+        media_form.addRow("Port VLC localhost", self.vlc_port)
+        media_form.addRow("Mot de passe VLC", self.vlc_password)
+        media_lay.addLayout(media_form)
+        media_note = QLabel(
+            "SSR utilise uniquement l’interface HTTP locale de VLC. "
+            "Le widget Radio reçoit un état normalisé et ne dépend pas "
+            "directement de VLC."
+        )
+        media_note.setWordWrap(True)
+        media_note.setObjectName("Muted")
+        media_lay.addWidget(media_note)
+        root.addWidget(media_card)
+
         host_card, host_lay = self._card("Contrôle Windows")
         host_form = QFormLayout()
         self.soundvolumeview_path = QLineEdit()
@@ -5009,6 +5041,21 @@ class MainWindow(QMainWindow):
         self.widget_runtime_port.setValue(
             int(widget_runtime.get("port", 8766) or 8766)
         )
+        media = self.config.get("media", {})
+        if not isinstance(media, Mapping):
+            media = {}
+        vlc = media.get("vlc", {})
+        if not isinstance(vlc, Mapping):
+            vlc = {}
+        self.media_enabled.setChecked(
+            bool(media.get("enabled", False))
+        )
+        self.vlc_port.setValue(
+            int(vlc.get("port", 8080) or 8080)
+        )
+        self.vlc_password.setText(
+            str(vlc.get("password") or "")
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -5038,6 +5085,7 @@ class MainWindow(QMainWindow):
             self.obs_port,
             self.api_port,
             self.widget_runtime_port,
+            self.vlc_port,
             self.module_scan_seconds,
         ):
             widget.valueChanged.connect(self._mark_dirty)
@@ -5047,6 +5095,7 @@ class MainWindow(QMainWindow):
             self.start_with_windows,
             self.api_enabled,
             self.widget_runtime_enabled,
+            self.media_enabled,
             self.auto_detect_modules,
             self.safe_live,
         ):
@@ -5055,6 +5104,7 @@ class MainWindow(QMainWindow):
             self.obs_host,
             self.obs_password,
             self.api_token,
+            self.vlc_password,
             self.soundvolumeview_path,
         ):
             widget.textChanged.connect(self._mark_dirty)
@@ -5080,6 +5130,15 @@ class MainWindow(QMainWindow):
         )
         widget_runtime["host"] = "127.0.0.1"
         widget_runtime["port"] = self.widget_runtime_port.value()
+        media = self.config.setdefault("media", {})
+        media["enabled"] = self.media_enabled.isChecked()
+        media["provider"] = "vlc"
+        media.setdefault("poll_seconds", 0.5)
+        vlc = media.setdefault("vlc", {})
+        vlc["host"] = "127.0.0.1"
+        vlc["port"] = self.vlc_port.value()
+        vlc["password"] = self.vlc_password.text()
+        vlc.setdefault("timeout_seconds", 2.0)
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -5116,6 +5175,8 @@ class MainWindow(QMainWindow):
             context_provider=dispatcher.obs_context,
         )
         build_activation_policies(config_data)
+        build_media_runtime_config(config_data)
+        build_vlc_config(config_data)
 
     def _rollback_persisted_apply(
         self,
@@ -5490,6 +5551,7 @@ class MainWindow(QMainWindow):
         self._draft_dirty = False
         self._restart_api()
         self._restart_widget_runtime()
+        self._restart_media_runtime()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
         self._refresh_config_revision_status(draft_dirty=False)
@@ -9752,6 +9814,7 @@ class MainWindow(QMainWindow):
             cfg,
             self._presentation_state_store,
             event_bus=event_bus,
+            media_state_store=self._media_state_store,
         )
         self._widget_runtime = runtime
         try:
@@ -9781,6 +9844,40 @@ class MainWindow(QMainWindow):
         if runtime is not None:
             runtime.stop()
         self._update_widget_runtime_status()
+
+    def _start_media_runtime(self) -> None:
+        cfg = build_media_runtime_config(self.config)
+        provider = VLCProvider(build_vlc_config(self.config))
+        event_bus = (
+            self._widget_runtime.event_bus
+            if self._widget_runtime is not None
+            else None
+        )
+        runtime = MediaRuntime(
+            cfg,
+            provider,
+            state_store=self._media_state_store,
+            event_bus=event_bus,
+        )
+        self._media_runtime = runtime
+        runtime.start()
+        if cfg.enabled:
+            self._log(
+                "Media Runtime actif · provider VLC local."
+            )
+
+    def _restart_media_runtime(self) -> None:
+        runtime = self._media_runtime
+        self._media_runtime = None
+        if runtime is not None:
+            runtime.stop()
+        self._start_media_runtime()
+
+    def _stop_media_runtime(self) -> None:
+        runtime = self._media_runtime
+        self._media_runtime = None
+        if runtime is not None:
+            runtime.stop()
 
     def _start_api(self) -> None:
         raw = self.config.get("api", {})
@@ -9830,6 +9927,13 @@ class MainWindow(QMainWindow):
                     else ""
                 ),
             },
+            "media": {
+                "running": bool(
+                    self._media_runtime
+                    and self._media_runtime.running
+                ),
+                "state": self._media_state_store.snapshot(),
+            },
             "control_variables": (
                 service.control_variables() if service else {}
             ),
@@ -9851,11 +9955,33 @@ class MainWindow(QMainWindow):
         }
 
     def _api_request_status(self, request_id: str) -> dict | None:
-        if self._service is None:
-            return None
-        return self._service.command_status(request_id)
+        if self._service is not None:
+            result = self._service.command_status(request_id)
+            if result is not None:
+                return result
+        if self._media_runtime is not None:
+            return self._media_runtime.command_status(request_id)
+        return None
 
     def _api_action(self, action: str, payload: dict) -> dict:
+        if str(action or "").startswith("media."):
+            runtime = self._media_runtime
+            if runtime is None or not runtime.running:
+                raise RuntimeError("Media Runtime non disponible")
+            media_action = str(action).split(".", 1)[1].strip().casefold()
+            options: dict[str, object] = {}
+            if media_action == "seek":
+                options["seconds"] = payload.get("seconds", 0)
+            elif media_action == "set_volume":
+                options["percent"] = payload.get("percent", 0)
+            elif media_action == "play_uri":
+                options["uri"] = str(payload.get("uri") or "")
+            request_id = runtime.request(media_action, **options)
+            return {
+                "request_id": request_id,
+                "status": "accepted",
+            }
+
         if self._service is None or self._dispatcher is None:
             raise RuntimeError("Runtime non disponible")
         if action == "explain":
@@ -10365,6 +10491,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._stop_media_runtime()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         event.accept()
