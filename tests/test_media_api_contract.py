@@ -8,6 +8,7 @@ import unittest
 from urllib.request import Request, urlopen
 
 from stream_state_router.media import (
+    MediaProviderCommandError,
     MediaRuntime,
     MediaRuntimeConfig,
     MediaState,
@@ -200,6 +201,26 @@ class MediaAPIContractTests(unittest.TestCase):
 
 
     def test_uncertain_media_command_is_exposed_as_terminal_status(self):
+        class AmbiguousProvider(BlockingMediaProvider):
+            def next(self) -> None:
+                self.next_calls += 1
+                raise MediaProviderCommandError("response lost")
+
+        provider = AmbiguousProvider()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+        )
+        runtime.start()
+
+        def action(name, _payload):
+            self.assertEqual(name, "media.next")
+            request_id = runtime.request("next")
+            return {
+                "request_id": request_id,
+                "status": "accepted",
+            }
+
         api = LocalControlAPI(
             APIConfig(
                 enabled=True,
@@ -207,39 +228,45 @@ class MediaAPIContractTests(unittest.TestCase):
                 port=0,
             ),
             status=lambda: {},
-            action=lambda _name, _payload: {},
-            request_status=lambda request_id: (
-                {
-                    "request_id": request_id,
-                    "action": "next",
-                    "status": "uncertain",
-                    "success": False,
-                    "error": (
-                        "Résultat incertain : la commande peut avoir été "
-                        "appliquée par le lecteur"
-                    ),
-                    "state": {},
-                }
-                if request_id == "media-uncertain"
-                else None
-            ),
+            action=action,
+            request_status=runtime.command_status,
         )
         api.start()
         try:
-            with urlopen(
-                (
-                    f"http://127.0.0.1:{api.bound_port}"
-                    "/requests/media-uncertain"
-                ),
-                timeout=2.0,
-            ) as response:
-                payload = json.loads(response.read())
+            request = Request(
+                f"http://127.0.0.1:{api.bound_port}/media/next",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request, timeout=2.0) as response:
+                accepted = json.loads(response.read())
 
+            request_id = accepted["request_id"]
+            deadline = time.monotonic() + 1.0
+            payload = None
+            while time.monotonic() < deadline:
+                with urlopen(
+                    (
+                        f"http://127.0.0.1:{api.bound_port}"
+                        f"/requests/{request_id}"
+                    ),
+                    timeout=2.0,
+                ) as response:
+                    payload = json.loads(response.read())
+                if payload["status"] == "uncertain":
+                    break
+                time.sleep(0.01)
+
+            self.assertIsNotNone(payload)
+            assert payload is not None
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["status"], "uncertain")
             self.assertFalse(payload["success"])
             self.assertIn("incertain", payload["error"])
+            self.assertEqual(provider.next_calls, 1)
         finally:
+            runtime.stop()
             api.stop()
 
 
