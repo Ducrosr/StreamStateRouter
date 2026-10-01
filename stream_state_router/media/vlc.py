@@ -6,7 +6,7 @@ import json
 import math
 from typing import Callable, Mapping
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .models import MediaState
 
@@ -31,11 +31,25 @@ class VLCConfig:
             raise ValueError("Timeout VLC invalide")
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req,
+        fp,
+        code,
+        msg,
+        headers,
+        newurl,
+    ):
+        return None
+
+
 class VLCHttpTransport:
     """Minimal VLC Lua HTTP JSON transport using Python stdlib only."""
 
     def __init__(self, config: VLCConfig):
         self.config = config
+        self._opener = build_opener(_NoRedirectHandler())
 
     @property
     def base_url(self) -> str:
@@ -72,11 +86,14 @@ class VLCHttpTransport:
             },
             method="GET",
         )
-        with urlopen(
+        with self._opener.open(
             request,
             timeout=float(self.config.timeout_seconds),
         ) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            raw = response.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024:
+            raise ValueError("Réponse JSON VLC trop volumineuse")
+        payload = json.loads(raw.decode("utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("Réponse JSON VLC invalide")
         return payload
@@ -201,3 +218,12 @@ class VLCProvider:
         if not value:
             raise ValueError("URI média requise")
         self._command("in_play", input=value)
+
+    def enqueue_uri(self, uri: str) -> None:
+        value = str(uri or "").strip()
+        if not value:
+            raise ValueError("URI média requise")
+        self._command("in_enqueue", input=value)
+
+    def clear_queue(self) -> None:
+        self._command("pl_empty")
