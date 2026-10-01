@@ -365,6 +365,22 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["revision"], 0)
         self.assertEqual(provider.artwork_calls, 0)
 
+    def test_request_rejects_capability_not_advertised_by_provider(self) -> None:
+        provider = FakeProvider()
+        provider.capabilities = ("play",)
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True),
+            provider,
+        )
+        runtime.start()
+        self.addCleanup(runtime.stop)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "non supportée",
+        ):
+            runtime.request("pause")
+
     def test_failed_command_is_not_retried_automatically(self) -> None:
         provider = FakeProvider()
         provider.fail_pause = True
