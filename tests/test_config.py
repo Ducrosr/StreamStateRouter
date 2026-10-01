@@ -53,6 +53,39 @@ class ConfigTests(unittest.TestCase):
             },
         }
 
+    def test_partial_rule_inherits_unchecked_domains_from_fallback(self):
+        data = self.sample()
+        data["router"]["fallback_state"] = {
+            "Game": "Vanilla",
+            "OverlayProfile": "Vanilla",
+            "CaptureProfile": "Default",
+            "AudioProfile": "Default",
+            "LayoutProfile": "Vanilla",
+            "PresentationProfile": "Midgar",
+        }
+        data["presentation_profiles"] = {
+            "Midgar": {"theme": {"accent": "#00ffff"}},
+            "Combat": {"extends": "Midgar"},
+        }
+        data["cues"] = {}
+        data["rules"][1]["state"] = {
+            "Game": "Game",
+            "PresentationProfile": "Combat",
+        }
+
+        ruleset, _poll, _debounce, _fallback = build_ruleset(data)
+        state = ruleset.rules[1].state
+
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state.game, "Game")
+        self.assertEqual(state.overlay_profile, "Vanilla")
+        self.assertEqual(state.capture_profile, "Default")
+        self.assertEqual(state.audio_profile, "Default")
+        self.assertEqual(state.layout_profile, "Vanilla")
+        self.assertEqual(state.presentation_profile, "Combat")
+        self.assertEqual(validate_config(data), [])
+
     def test_valid_config_passes(self):
         self.assertEqual(validate_config(self.sample()), [])
 
