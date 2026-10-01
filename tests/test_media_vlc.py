@@ -114,6 +114,8 @@ class VLCProviderTests(unittest.TestCase):
         provider.seek(12.5)
         provider.set_volume(75)
         provider.play_uri(r"C:\Music\Mako Reactor.flac")
+        provider.enqueue_uri("file:///C:/Music/Next.flac")
+        provider.clear_queue()
 
         self.assertEqual(
             transport.calls,
@@ -153,6 +155,17 @@ class VLCProviderTests(unittest.TestCase):
                         "input": r"C:\Music\Mako Reactor.flac",
                     },
                 ),
+                (
+                    "/requests/status.json",
+                    {
+                        "command": "in_enqueue",
+                        "input": "file:///C:/Music/Next.flac",
+                    },
+                ),
+                (
+                    "/requests/status.json",
+                    {"command": "pl_empty"},
+                ),
             ],
         )
 
@@ -168,6 +181,8 @@ class VLCProviderTests(unittest.TestCase):
             provider.set_volume(201)
         with self.assertRaises(ValueError):
             provider.play_uri("")
+        with self.assertRaises(ValueError):
+            provider.enqueue_uri("")
 
 
 if __name__ == "__main__":
