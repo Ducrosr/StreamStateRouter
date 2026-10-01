@@ -4,6 +4,7 @@ import unittest
 
 from stream_state_router.presentation import (
     CueExecutor,
+    PresentationStateStore,
     build_presentation_registry,
 )
 
@@ -163,6 +164,43 @@ class PresentationEngineTests(unittest.TestCase):
             [(item.input_name, item.action) for item in sound_set.exit],
             [("SSR Combat Out", "restart")],
         )
+
+    def test_presentation_state_snapshots_do_not_share_nested_settings(self) -> None:
+        registry = build_presentation_registry(
+            profiles_raw={
+                "Midgar": {
+                    "theme": {
+                        "nested": {"value": 1},
+                    },
+                    "components": {
+                        "chat": {
+                            "mode": "custom",
+                            "resource": "chat",
+                            "settings": {
+                                "nested": {"opacity": 0.8},
+                            },
+                        }
+                    },
+                }
+            },
+            cues_raw={},
+        )
+        profile = registry.profile("Midgar")
+        assert profile is not None
+        store = PresentationStateStore()
+        store.update(profile)
+
+        first = store.snapshot()
+        first.theme["nested"]["value"] = 99
+        first.components["chat"]["settings"]["nested"]["opacity"] = 0.1
+
+        second = store.snapshot()
+        self.assertEqual(second.theme["nested"]["value"], 1)
+        self.assertEqual(
+            second.components["chat"]["settings"]["nested"]["opacity"],
+            0.8,
+        )
+        self.assertEqual(first.revision, second.revision)
 
     def test_profile_inheritance_rejects_cycle(self) -> None:
         registry = build_presentation_registry(
