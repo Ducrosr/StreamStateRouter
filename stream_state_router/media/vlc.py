@@ -11,6 +11,7 @@ from typing import Mapping
 from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from .base import MediaProviderCommandError
 from .models import MediaState
 
 
@@ -397,10 +398,15 @@ class VLCProvider:
     ) -> Mapping[str, object]:
         values: dict[str, object] = {"command": command}
         values.update(params)
-        return self._transport.get_json(
-            "/requests/status.json",
-            values,
-        )
+        try:
+            return self._transport.get_json(
+                "/requests/status.json",
+                values,
+            )
+        except Exception as exc:
+            raise MediaProviderCommandError(
+                f"Réponse VLC ambiguë après commande {command}"
+            ) from exc
 
     @staticmethod
     def _validated_media_uri(uri: str) -> str:
