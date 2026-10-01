@@ -1228,7 +1228,12 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     errors.append(f"{aprefix}.params doit être un objet")
                     continue
 
-                def cue_required_text(key: str) -> None:
+                def cue_required_text(
+                    key: str,
+                    *,
+                    params: Mapping[str, Any] = params,
+                    aprefix: str = aprefix,
+                ) -> None:
                     if not str(params.get(key) or "").strip():
                         errors.append(
                             f"{aprefix}.params.{key} est requis"
