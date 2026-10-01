@@ -54,7 +54,7 @@ from ..importers import (
     neutralize_referenced_test_layout_profiles,
     wire_windows_hdr_capture_profiles,
 )
-from ..media import MediaRuntime, MediaStateStore, VLCProvider
+from ..media import MediaRuntime, MediaStateStore
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -67,6 +67,7 @@ from ..services.config import (
     build_host_controller,
     build_profiles,
     build_layout_profiles,
+    build_media_provider,
     build_media_runtime_config,
     build_presentation_profiles,
     build_ruleset,
@@ -5201,6 +5202,7 @@ class MainWindow(QMainWindow):
         build_activation_policies(config_data)
         build_media_runtime_config(config_data)
         build_vlc_config(config_data)
+        build_media_provider(config_data)
 
     def _rollback_persisted_apply(
         self,
@@ -9925,7 +9927,7 @@ class MainWindow(QMainWindow):
 
     def _start_media_runtime(self) -> None:
         cfg = build_media_runtime_config(self.config)
-        provider = VLCProvider(build_vlc_config(self.config))
+        provider = build_media_provider(self.config)
         event_bus = (
             self._widget_runtime.event_bus
             if self._widget_runtime is not None
