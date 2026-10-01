@@ -330,6 +330,8 @@ class VLCProvider:
 
     def state(self) -> MediaState:
         raw = self._transport.get_json("/requests/status.json")
+        if "state" not in raw:
+            raise ValueError("Réponse d’état VLC incomplète")
         meta = self._meta(raw)
         playback = self._playback_state(raw)
 
