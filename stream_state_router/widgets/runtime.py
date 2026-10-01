@@ -718,6 +718,9 @@ iframe{display:block}
     const c = (state && state.component_state) || {};
     if (c.mode === "hidden") {
       host.style.visibility = "hidden";
+      host.replaceChildren();
+      frame = null;
+      current = "";
       return;
     }
     host.style.visibility = "visible";
