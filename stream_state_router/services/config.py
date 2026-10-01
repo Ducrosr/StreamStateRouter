@@ -37,6 +37,9 @@ SUPPORTED_ACTION_TYPES = {
     "windows_hdr",
     "wait_ms",
 }
+PRESENTATION_CUE_ACTION_TYPES = SUPPORTED_ACTION_TYPES | {
+    "media_input_action",
+}
 LAYOUT_ANCHORS = {
     "top_left",
     "top_center",
@@ -1153,7 +1156,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 if not action_type:
                     errors.append(f"{aprefix}.type est requis")
                     continue
-                if action_type not in SUPPORTED_ACTION_TYPES:
+                if action_type not in PRESENTATION_CUE_ACTION_TYPES:
                     errors.append(
                         f"{aprefix}.type inconnu : {action_type}"
                     )
@@ -1232,6 +1235,23 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         errors.append(
                             f"{aprefix}.params.duration_ms doit être compris "
                             "entre 0 et 10000"
+                        )
+                elif action_type == "media_input_action":
+                    cue_required_text("input")
+                    action_name = str(
+                        params.get("action") or ""
+                    ).strip().casefold()
+                    if action_name not in {
+                        "play",
+                        "pause",
+                        "stop",
+                        "restart",
+                        "next",
+                        "previous",
+                    }:
+                        errors.append(
+                            f"{aprefix}.params.action doit être play, pause, "
+                            "stop, restart, next ou previous"
                         )
         if total_actions > PRESENTATION_MAX_ACTIONS_PER_CUE:
             errors.append(
