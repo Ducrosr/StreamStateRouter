@@ -2017,6 +2017,54 @@ class OBSDispatcher:
             executed += 1
         return DispatchResult(executed, skipped, (domain,))
 
+    def execute_profile_snapshot(
+        self,
+        domain: str,
+        profile_name: str,
+        profiles_raw: Mapping[str, Mapping[str, object]],
+        *,
+        state: StreamState | None = None,
+    ) -> DispatchResult:
+        """Execute a validated draft profile without mutating live config.
+
+        The caller owns validation of the draft. Parsing and all OBS I/O still
+        happen on the runtime worker, and inheritance is resolved only inside
+        the supplied immutable snapshot.
+        """
+        if domain not in ACTION_PROFILE_DOMAINS:
+            raise ValueError(f"Domaine inconnu : {domain}")
+        parsed = profile_map_from_raw(
+            {
+                domain: profiles_raw,
+            }
+        ).get(domain, {})
+        if profile_name not in parsed:
+            raise ValueError(
+                f"Profil de brouillon introuvable : {domain}/{profile_name}"
+            )
+        profile = self._resolve_action_profile_inner(
+            parsed,
+            profile_name,
+            (),
+        )
+        if not self.conditions_match(profile.conditions):
+            return DispatchResult(
+                0,
+                len(profile.actions) or 1,
+                (domain,),
+            )
+        executed = 0
+        skipped = 0
+        variables = self._execution_variables(state)
+        for action in profile.actions:
+            self._yield_runtime()
+            if not action.enabled:
+                skipped += 1
+                continue
+            self.execute_action(action, variables=variables)
+            executed += 1
+        return DispatchResult(executed, skipped, (domain,))
+
     def execute_layout_profile(self, profile_name: str, *, preview: bool = False) -> DispatchResult:
         self._yield_runtime()
         if profile_name not in self._layout_profiles:
