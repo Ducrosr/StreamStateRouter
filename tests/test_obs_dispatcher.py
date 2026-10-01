@@ -960,7 +960,7 @@ class OBSDispatcherTests(unittest.TestCase):
                 "Combat": {
                     "transition_profile": "Mako",
                     "shader_set": "CombatShaders",
-                    "enter_cue": "Enter",
+                    "sound_set": "CombatSounds",
                 }
             },
             transitions_raw={
@@ -983,20 +983,13 @@ class OBSDispatcherTests(unittest.TestCase):
                     ]
                 }
             },
-            cues_raw={
-                "Enter": {
-                    "frames": [
+            cues_raw={},
+            sound_sets_raw={
+                "CombatSounds": {
+                    "enter": [
                         {
-                            "at_ms": 0,
-                            "actions": [
-                                {
-                                    "type": "media_input_action",
-                                    "params": {
-                                        "input": "SSR Jingle",
-                                        "action": "restart",
-                                    },
-                                }
-                            ],
+                            "input": "SSR Jingle",
+                            "action": "restart",
                         }
                     ]
                 }
@@ -1040,6 +1033,58 @@ class OBSDispatcherTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.executed, 7)
+
+    def test_presentation_switch_plays_exit_then_enter_sound_sets(self):
+        client = FakeClient()
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "Calm": {"sound_set": "CalmSounds"},
+                "Combat": {"sound_set": "CombatSounds"},
+            },
+            cues_raw={},
+            sound_sets_raw={
+                "CalmSounds": {
+                    "exit": [
+                        {
+                            "input": "SSR Calm Out",
+                            "action": "restart",
+                        }
+                    ]
+                },
+                "CombatSounds": {
+                    "enter": [
+                        {
+                            "input": "SSR Combat In",
+                            "action": "restart",
+                        }
+                    ]
+                },
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+
+        dispatcher.dispatch_state(
+            StreamState(presentation_profile="Calm")
+        )
+        client.calls.clear()
+        result = dispatcher.dispatch_state(
+            StreamState(presentation_profile="Combat")
+        )
+
+        media = [
+            payload["inputName"]
+            for request, payload in client.calls
+            if request == "TriggerMediaInputAction"
+        ]
+        self.assertEqual(
+            media,
+            ["SSR Calm Out", "SSR Combat In"],
+        )
+        self.assertEqual(result.executed, 2)
 
     def test_shader_animation_cue_reaches_exact_final_settings(self):
         client = FakeClient()
