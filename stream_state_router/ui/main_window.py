@@ -54,7 +54,7 @@ from ..importers import (
     neutralize_referenced_test_layout_profiles,
     wire_windows_hdr_capture_profiles,
 )
-from ..media import MediaRuntime, MediaStateStore
+from ..media import MediaArtworkStore, MediaRuntime, MediaStateStore
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -212,6 +212,7 @@ class MainWindow(QMainWindow):
         self._client: OBSClientManager | None = None
         self._presentation_state_store = PresentationStateStore()
         self._media_state_store = MediaStateStore("vlc")
+        self._media_artwork_store = MediaArtworkStore()
         self._media_runtime: MediaRuntime | None = None
         self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
@@ -9849,6 +9850,7 @@ class MainWindow(QMainWindow):
             self._presentation_state_store,
             event_bus=event_bus,
             media_state_store=self._media_state_store,
+            media_artwork_store=self._media_artwork_store,
         )
         self._widget_runtime = runtime
         try:
@@ -9935,6 +9937,7 @@ class MainWindow(QMainWindow):
             cfg,
             provider,
             state_store=self._media_state_store,
+            artwork_store=self._media_artwork_store,
             event_bus=event_bus,
         )
         self._media_runtime = runtime
