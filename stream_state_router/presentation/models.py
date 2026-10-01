@@ -114,6 +114,62 @@ class PresentationComponent:
 
 
 @dataclass(frozen=True, slots=True)
+class ShaderFilterState:
+    source: str
+    filter_name: str
+    enabled: bool | None = None
+    settings: Mapping[str, Any] = field(default_factory=dict)
+    overlay: bool = True
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any],
+    ) -> "ShaderFilterState":
+        settings = raw.get("settings")
+        enabled = raw.get("enabled")
+        return cls(
+            source=str(raw.get("source") or "").strip(),
+            filter_name=str(
+                raw.get("filter") or raw.get("filter_name") or ""
+            ).strip(),
+            enabled=(
+                bool(enabled)
+                if isinstance(enabled, bool)
+                else None
+            ),
+            settings=_freeze_mapping(
+                settings if isinstance(settings, Mapping) else {}
+            ),
+            overlay=bool(raw.get("overlay", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ShaderSet:
+    name: str
+    filters: tuple[ShaderFilterState, ...]
+
+    @classmethod
+    def from_mapping(
+        cls,
+        name: str,
+        raw: Mapping[str, Any],
+    ) -> "ShaderSet":
+        filters_raw = raw.get("filters")
+        filters = tuple(
+            ShaderFilterState.from_mapping(item)
+            for item in (
+                filters_raw
+                if isinstance(filters_raw, list)
+                else []
+            )
+            if isinstance(item, Mapping)
+        )
+        return cls(str(name), filters)
+
+
+@dataclass(frozen=True, slots=True)
 class TransitionProfile:
     name: str
     transition_name: str
@@ -225,6 +281,7 @@ class PresentationRegistry:
     profiles: Mapping[str, PresentationProfile]
     cues: Mapping[str, Cue]
     transitions: Mapping[str, TransitionProfile]
+    shader_sets: Mapping[str, ShaderSet]
 
     def profile(self, name: str) -> ResolvedPresentationProfile | None:
         if str(name) not in self.profiles:
@@ -239,6 +296,9 @@ class PresentationRegistry:
         name: str,
     ) -> TransitionProfile | None:
         return self.transitions.get(str(name))
+
+    def shader_set(self, name: str) -> ShaderSet | None:
+        return self.shader_sets.get(str(name))
 
 
 def resolve_presentation_profile(
@@ -341,6 +401,7 @@ def build_presentation_registry(
     profiles_raw: Mapping[str, Any] | None,
     cues_raw: Mapping[str, Any] | None,
     transitions_raw: Mapping[str, Any] | None = None,
+    shader_sets_raw: Mapping[str, Any] | None = None,
 ) -> PresentationRegistry:
     profiles = {
         str(name): PresentationProfile.from_mapping(str(name), raw)
@@ -357,8 +418,14 @@ def build_presentation_registry(
         for name, raw in (transitions_raw or {}).items()
         if isinstance(raw, Mapping)
     }
+    shader_sets = {
+        str(name): ShaderSet.from_mapping(str(name), raw)
+        for name, raw in (shader_sets_raw or {}).items()
+        if isinstance(raw, Mapping)
+    }
     return PresentationRegistry(
         profiles=MappingProxyType(profiles),
         cues=MappingProxyType(cues),
         transitions=MappingProxyType(transitions),
+        shader_sets=MappingProxyType(shader_sets),
     )
