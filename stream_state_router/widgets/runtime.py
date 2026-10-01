@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from http import HTTPStatus
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
@@ -603,6 +604,19 @@ class WidgetRuntime:
             return None
         if published_relative not in set(package.published_files):
             return None
+        expected_hash = dict(package.published_hashes).get(
+            published_relative,
+            "",
+        )
+        if expected_hash:
+            try:
+                current_hash = hashlib.sha256(
+                    candidate.read_bytes()
+                ).hexdigest()
+            except OSError:
+                return None
+            if current_hash.casefold() != expected_hash.casefold():
+                return None
         return candidate
 
     @staticmethod
