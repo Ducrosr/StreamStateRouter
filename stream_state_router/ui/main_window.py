@@ -267,6 +267,13 @@ class MainWindow(QMainWindow):
         self._start_widget_runtime()
         self._start_media_runtime()
         self._start_api()
+        self._media_status_timer = QTimer(self)
+        self._media_status_timer.setInterval(1000)
+        self._media_status_timer.timeout.connect(
+            self._update_media_runtime_status
+        )
+        self._media_status_timer.start()
+        self._update_media_runtime_status()
         self._module_scan_timer = QTimer(self)
         self._module_scan_timer.timeout.connect(self._auto_scan_modules)
         self._configure_module_scan_timer()
@@ -4495,6 +4502,12 @@ class MainWindow(QMainWindow):
         media_note.setWordWrap(True)
         media_note.setObjectName("Muted")
         media_lay.addWidget(media_note)
+        self.media_runtime_status = QLabel(
+            "Media Runtime : désactivé"
+        )
+        self.media_runtime_status.setObjectName("Muted")
+        self.media_runtime_status.setWordWrap(True)
+        media_lay.addWidget(self.media_runtime_status)
         root.addWidget(media_card)
 
         host_card, host_lay = self._card("Contrôle Windows")
@@ -9866,6 +9879,50 @@ class MainWindow(QMainWindow):
             runtime.stop()
         self._update_widget_runtime_status()
 
+    def _update_media_runtime_status(self) -> None:
+        label = getattr(self, "media_runtime_status", None)
+        if label is None:
+            return
+        runtime = self._media_runtime
+        state = self._media_state_store.snapshot()
+        if runtime is None or not runtime.config.enabled:
+            label.setText("Media Runtime : désactivé")
+            label.setObjectName("Muted")
+        elif not runtime.running:
+            label.setText("Media Runtime : indisponible")
+            label.setObjectName("Warn")
+        elif bool(state.get("connected", False)):
+            playback = str(
+                state.get("playback_state") or "unknown"
+            )
+            labels = {
+                "playing": "lecture",
+                "paused": "pause",
+                "stopped": "arrêt",
+                "unknown": "état inconnu",
+            }
+            title = str(state.get("title") or "").strip()
+            suffix = (
+                f" · {title}"
+                if title
+                else ""
+            )
+            label.setText(
+                "Media Runtime : VLC connecté · "
+                + labels.get(playback, playback)
+                + suffix
+            )
+            label.setObjectName("Good")
+        else:
+            error = str(state.get("error") or "").strip()
+            label.setText(
+                "Media Runtime : VLC non joignable"
+                + (f" · {error}" if error else "")
+            )
+            label.setObjectName("Warn")
+        label.style().unpolish(label)
+        label.style().polish(label)
+
     def _start_media_runtime(self) -> None:
         cfg = build_media_runtime_config(self.config)
         provider = VLCProvider(build_vlc_config(self.config))
@@ -9882,6 +9939,7 @@ class MainWindow(QMainWindow):
         )
         self._media_runtime = runtime
         runtime.start()
+        self._update_media_runtime_status()
         if cfg.enabled:
             self._log(
                 "Media Runtime actif · provider VLC local."
@@ -9899,6 +9957,7 @@ class MainWindow(QMainWindow):
         self._media_runtime = None
         if runtime is not None:
             runtime.stop()
+        self._update_media_runtime_status()
 
     def _start_api(self) -> None:
         raw = self.config.get("api", {})
