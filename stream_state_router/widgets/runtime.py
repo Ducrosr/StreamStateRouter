@@ -1,0 +1,405 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import mimetypes
+from pathlib import Path
+import threading
+from typing import Any
+from urllib.parse import parse_qs, unquote, urlsplit
+
+from ..presentation import PresentationStateStore
+from ..services.paths import imported_widgets_dir
+from .packages import WidgetPackage, list_widget_packages
+
+
+@dataclass(frozen=True, slots=True)
+class WidgetRuntimeConfig:
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8766
+
+
+_BRIDGE_JS = r"""
+(() => {
+  const script = document.currentScript;
+  const sourceUrl = new URL(script ? script.src : location.href, location.href);
+  const requested =
+    sourceUrl.searchParams.get("component") ||
+    document.documentElement.dataset.ssrComponent ||
+    "";
+  const stateUrl = new URL("/runtime/state", sourceUrl.origin);
+  if (requested) stateUrl.searchParams.set("component", requested);
+
+  let lastRevision = -1;
+  const normalizeKey = (key) =>
+    String(key).trim().replace(/[^A-Za-z0-9_-]+/g, "-").toLowerCase();
+
+  const apply = (state) => {
+    if (!state || state.revision === lastRevision) return;
+    lastRevision = state.revision;
+    const root = document.documentElement;
+    root.dataset.ssrPresentation = state.profile || "";
+    root.dataset.ssrAnimationIntensity = state.animation_intensity || "normal";
+
+    const tokens = Object.assign(
+      {},
+      state.theme || {},
+      (state.component_state && state.component_state.settings) || {}
+    );
+    for (const [key, value] of Object.entries(tokens)) {
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
+        root.style.setProperty("--ssr-" + normalizeKey(key), String(value));
+      }
+    }
+
+    const component = state.component_state || {};
+    root.dataset.ssrComponentMode = component.mode || "inherit";
+    root.dataset.ssrComponentResource = component.resource || "";
+    root.style.visibility =
+      component.mode === "hidden" ? "hidden" : "visible";
+
+    window.dispatchEvent(
+      new CustomEvent("ssrstatechange", { detail: state })
+    );
+  };
+
+  const refresh = async () => {
+    try {
+      const response = await fetch(stateUrl, { cache: "no-store" });
+      if (response.ok) apply(await response.json());
+    } catch (_) {
+      // Keep the last state during brief SSR restarts.
+    } finally {
+      window.setTimeout(refresh, 250);
+    }
+  };
+  refresh();
+})();
+""".strip()
+
+
+class _WidgetServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class WidgetRuntime:
+    """Loopback-only, read-only HTTP surface for SSR browser widgets."""
+
+    def __init__(
+        self,
+        config: WidgetRuntimeConfig,
+        state_store: PresentationStateStore,
+        *,
+        library_root: str | Path | None = None,
+    ):
+        self.config = config
+        self.state_store = state_store
+        self.library_root = (
+            Path(library_root).expanduser().resolve()
+            if library_root is not None
+            else imported_widgets_dir().resolve()
+        )
+        self._lock = threading.RLock()
+        self._packages: dict[str, WidgetPackage] = {}
+        self._server: _WidgetServer | None = None
+        self._thread: threading.Thread | None = None
+        self.refresh_packages()
+
+    @property
+    def running(self) -> bool:
+        return self._server is not None
+
+    @property
+    def port(self) -> int:
+        server = self._server
+        if server is not None:
+            return int(server.server_address[1])
+        return int(self.config.port)
+
+    @property
+    def base_url(self) -> str:
+        host = (
+            "127.0.0.1"
+            if self.config.host in {"localhost", "::1"}
+            else self.config.host
+        )
+        return f"http://{host}:{self.port}"
+
+    def refresh_packages(self) -> None:
+        packages = list_widget_packages(root=self.library_root)
+        with self._lock:
+            self._packages = {
+                package.package_id: package
+                for package in packages
+            }
+
+    def package_url(
+        self,
+        package_id: str,
+        *,
+        component: str = "",
+    ) -> str:
+        package = self._package(package_id)
+        if package is None:
+            raise KeyError(f"Widget inconnu : {package_id}")
+        suffix = (
+            f"?component={component}"
+            if str(component).strip()
+            else ""
+        )
+        return (
+            f"{self.base_url}/widgets/{package.package_id}/{suffix}"
+        )
+
+    def _package(self, package_id: str) -> WidgetPackage | None:
+        with self._lock:
+            return self._packages.get(str(package_id))
+
+    def _state_payload(self, component: str) -> dict[str, Any]:
+        return self.state_store.snapshot().as_mapping(
+            component=component,
+        )
+
+    @staticmethod
+    def _inside(root: Path, candidate: Path) -> bool:
+        try:
+            candidate.resolve().relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    def _static_file(
+        self,
+        package_id: str,
+        relative: str,
+    ) -> Path | None:
+        package = self._package(package_id)
+        if package is None:
+            return None
+        root = package.root.resolve()
+        if not relative:
+            candidate = package.entry.resolve()
+        else:
+            decoded = unquote(relative).replace("\\", "/")
+            if decoded.startswith("/") or ".." in Path(decoded).parts:
+                return None
+            candidate = (root / decoded).resolve()
+        if (
+            candidate.name.casefold() == "manifest.json"
+            or not self._inside(root, candidate)
+            or not candidate.is_file()
+        ):
+            return None
+        return candidate
+
+    def _handler(self):
+        runtime = self
+
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "SSRWidgetRuntime/1"
+
+            def log_message(self, _format: str, *_args) -> None:
+                return
+
+            def _common_headers(
+                self,
+                *,
+                content_type: str,
+                length: int,
+                cache: str = "no-store",
+            ) -> None:
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(length))
+                self.send_header("Cache-Control", cache)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+
+            def _send_bytes(
+                self,
+                body: bytes,
+                *,
+                content_type: str,
+                status: int = HTTPStatus.OK,
+                head_only: bool = False,
+                cache: str = "no-store",
+            ) -> None:
+                self.send_response(int(status))
+                self._common_headers(
+                    content_type=content_type,
+                    length=len(body),
+                    cache=cache,
+                )
+                self.end_headers()
+                if not head_only:
+                    self.wfile.write(body)
+
+            def _send_json(
+                self,
+                payload: object,
+                *,
+                status: int = HTTPStatus.OK,
+                head_only: bool = False,
+            ) -> None:
+                body = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                self._send_bytes(
+                    body,
+                    content_type="application/json; charset=utf-8",
+                    status=status,
+                    head_only=head_only,
+                )
+
+            def _serve(self, *, head_only: bool) -> None:
+                parsed = urlsplit(self.path)
+                path = parsed.path or "/"
+                if path == "/health":
+                    self._send_json(
+                        {
+                            "ok": True,
+                            "profile": (
+                                runtime.state_store.snapshot().profile
+                            ),
+                        },
+                        head_only=head_only,
+                    )
+                    return
+
+                if path == "/runtime/state":
+                    component = str(
+                        parse_qs(parsed.query).get(
+                            "component",
+                            [""],
+                        )[0]
+                    ).strip()
+                    self._send_json(
+                        runtime._state_payload(component),
+                        head_only=head_only,
+                    )
+                    return
+
+                if path == "/runtime/bridge.js":
+                    body = _BRIDGE_JS.encode("utf-8")
+                    self._send_bytes(
+                        body,
+                        content_type=(
+                            "application/javascript; charset=utf-8"
+                        ),
+                        head_only=head_only,
+                    )
+                    return
+
+                prefix = "/widgets/"
+                if path.startswith(prefix):
+                    rest = path[len(prefix):]
+                    package_id, separator, relative = rest.partition("/")
+                    if not package_id:
+                        self._send_json(
+                            {"error": "widget_not_found"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    file_path = runtime._static_file(
+                        unquote(package_id),
+                        relative if separator else "",
+                    )
+                    if file_path is None:
+                        self._send_json(
+                            {"error": "widget_file_not_found"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    try:
+                        body = file_path.read_bytes()
+                    except OSError:
+                        self._send_json(
+                            {"error": "widget_file_unreadable"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    guessed, _encoding = mimetypes.guess_type(
+                        file_path.name
+                    )
+                    content_type = guessed or "application/octet-stream"
+                    if content_type.startswith("text/"):
+                        content_type += "; charset=utf-8"
+                    self._send_bytes(
+                        body,
+                        content_type=content_type,
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                self._send_json(
+                    {"error": "not_found"},
+                    status=HTTPStatus.NOT_FOUND,
+                    head_only=head_only,
+                )
+
+            def do_GET(self) -> None:
+                self._serve(head_only=False)
+
+            def do_HEAD(self) -> None:
+                self._serve(head_only=True)
+
+            def do_POST(self) -> None:
+                self._send_json(
+                    {"error": "read_only"},
+                    status=HTTPStatus.METHOD_NOT_ALLOWED,
+                )
+
+        return Handler
+
+    def start(self) -> None:
+        if not self.config.enabled or self.running:
+            return
+        if self.config.host not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            raise ValueError(
+                "Widget Runtime doit rester lié à l’interface loopback"
+            )
+        server = _WidgetServer(
+            (self.config.host, int(self.config.port)),
+            self._handler(),
+        )
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="SSR-WidgetRuntime",
+            daemon=True,
+        )
+        self._server = server
+        self._thread = thread
+        thread.start()
+
+    def stop(self) -> None:
+        server = self._server
+        thread = self._thread
+        self._server = None
+        self._thread = None
+        if server is None:
+            return
+        server.shutdown()
+        server.server_close()
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=2.0)
