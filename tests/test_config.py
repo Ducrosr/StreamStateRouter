@@ -489,6 +489,38 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(validate_config(data), [])
 
+    def test_presentation_sound_sets_validate_and_profile_refs_resolve(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {},
+            "Combat": {"sound_set": "CombatSounds"},
+        }
+        data["sound_sets"] = {
+            "CombatSounds": {
+                "enter": [
+                    {
+                        "input": "SSR Combat In",
+                        "action": "restart",
+                    }
+                ],
+                "exit": [
+                    {
+                        "input": "SSR Combat Out",
+                        "action": "stop",
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(validate_config(data), [])
+
+        data["presentation_profiles"]["Combat"]["sound_set"] = "Missing"
+        errors = validate_config(data)
+        self.assertTrue(
+            any("sound_set référence un set inexistant" in item for item in errors),
+            errors,
+        )
+
     def test_presentation_validation_rejects_unknown_cue_and_unsafe_timeline(self):
         data = self.sample()
         data["presentation_profiles"] = {
