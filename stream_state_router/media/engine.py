@@ -16,6 +16,13 @@ class MediaProvider(Protocol):
 
     def artwork(self, key: str) -> tuple[bytes, str] | None: ...
 
+    def control(
+        self,
+        action: str,
+        *,
+        position_seconds: float | None = None,
+    ) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class MediaEngineConfig:
@@ -101,6 +108,25 @@ class MediaEngine:
         if provider is None:
             return None
         return provider.artwork(key)
+
+    def control(
+        self,
+        action: str,
+        *,
+        position_seconds: float | None = None,
+    ) -> None:
+        provider = self._active_provider
+        state = self.store.snapshot().state
+        if provider is None or not state.track_id:
+            raise RuntimeError("Aucun lecteur média actif")
+        if not state.supports_media_control:
+            raise RuntimeError(
+                "Le lecteur actif n’annonce pas le contrôle média distant"
+            )
+        provider.control(
+            action,
+            position_seconds=position_seconds,
+        )
 
     def _run(self) -> None:
         interval = max(
