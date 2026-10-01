@@ -77,6 +77,7 @@ from ..services.config import (
     build_widget_runtime_config,
     build_media_engine_config,
     build_jellyfin_config,
+    build_twitch_config,
     export_config,
     import_config,
     list_valid_backups,
@@ -99,6 +100,7 @@ from ..services.config_insights import (
     scan_obs_reference_repairs,
     simulate_rule_scenario,
 )
+from ..platforms import TwitchEventSubAdapter
 from ..presentation import PresentationStateStore
 from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
@@ -219,6 +221,7 @@ class MainWindow(QMainWindow):
         self._event_bus = EventBus()
         self._media_state_store = MediaStateStore()
         self._media_engine: MediaEngine | None = None
+        self._twitch_adapter: TwitchEventSubAdapter | None = None
         self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
@@ -271,6 +274,7 @@ class MainWindow(QMainWindow):
         )
         self._start_runtime()
         self._start_media_engine()
+        self._start_twitch_adapter()
         self._start_widget_runtime()
         self._start_api()
         self._module_scan_timer = QTimer(self)
@@ -4573,6 +4577,35 @@ class MainWindow(QMainWindow):
         media_lay.addWidget(media_note)
         root.addWidget(media_card)
 
+        twitch_card, twitch_lay = self._card(
+            "Twitch EventSub natif"
+        )
+        twitch_form = QFormLayout()
+        self.twitch_enabled = QCheckBox(
+            "Activer Twitch natif (chat / events / alerts)"
+        )
+        self.twitch_client_id = QLineEdit()
+        self.twitch_token = QLineEdit()
+        self.twitch_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.twitch_broadcaster_id = QLineEdit()
+        self.twitch_user_id = QLineEdit()
+        self.twitch_moderator_id = QLineEdit()
+        twitch_form.addRow("", self.twitch_enabled)
+        twitch_form.addRow("Client ID", self.twitch_client_id)
+        twitch_form.addRow("User access token", self.twitch_token)
+        twitch_form.addRow("Broadcaster user ID", self.twitch_broadcaster_id)
+        twitch_form.addRow("User ID chat", self.twitch_user_id)
+        twitch_form.addRow("Moderator user ID", self.twitch_moderator_id)
+        twitch_lay.addLayout(twitch_form)
+        twitch_note = QLabel(
+            "Les événements Twitch sont normalisés dans le même Event Bus "
+            "que les widgets SSR. Le token ne quitte jamais SSR."
+        )
+        twitch_note.setWordWrap(True)
+        twitch_note.setObjectName("Muted")
+        twitch_lay.addWidget(twitch_note)
+        root.addWidget(twitch_card)
+
         host_card, host_lay = self._card("Contrôle Windows")
         host_form = QFormLayout()
         self.soundvolumeview_path = QLineEdit()
@@ -5167,6 +5200,27 @@ class MainWindow(QMainWindow):
         self.jellyfin_client_name.setText(
             str(jellyfin.get("client_name") or "")
         )
+        twitch = self.config.get("twitch", {})
+        if not isinstance(twitch, Mapping):
+            twitch = {}
+        self.twitch_enabled.setChecked(
+            bool(twitch.get("enabled", False))
+        )
+        self.twitch_client_id.setText(
+            str(twitch.get("client_id") or "")
+        )
+        self.twitch_token.setText(
+            str(twitch.get("user_access_token") or "")
+        )
+        self.twitch_broadcaster_id.setText(
+            str(twitch.get("broadcaster_user_id") or "")
+        )
+        self.twitch_user_id.setText(
+            str(twitch.get("user_id") or "")
+        )
+        self.twitch_moderator_id.setText(
+            str(twitch.get("moderator_user_id") or "")
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -5259,6 +5313,21 @@ class MainWindow(QMainWindow):
             self.jellyfin_client_name.text().strip()
         )
         jellyfin.setdefault("timeout_seconds", 3.0)
+        twitch = self.config.setdefault("twitch", {})
+        twitch["enabled"] = self.twitch_enabled.isChecked()
+        twitch["client_id"] = self.twitch_client_id.text().strip()
+        twitch["user_access_token"] = self.twitch_token.text()
+        twitch["broadcaster_user_id"] = (
+            self.twitch_broadcaster_id.text().strip()
+        )
+        twitch["user_id"] = self.twitch_user_id.text().strip()
+        twitch["moderator_user_id"] = (
+            self.twitch_moderator_id.text().strip()
+        )
+        twitch.setdefault(
+            "subscriptions",
+            list(build_twitch_config({}).subscriptions),
+        )
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -5669,6 +5738,7 @@ class MainWindow(QMainWindow):
         self._draft_dirty = False
         self._restart_api()
         self._restart_media_engine()
+        self._restart_twitch_adapter()
         self._restart_widget_runtime()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
@@ -10022,6 +10092,32 @@ class MainWindow(QMainWindow):
         if engine is not None:
             engine.stop()
 
+    def _start_twitch_adapter(self) -> None:
+        cfg = build_twitch_config(self.config)
+        adapter = TwitchEventSubAdapter(
+            cfg,
+            self._event_bus,
+        )
+        self._twitch_adapter = adapter
+        try:
+            adapter.start()
+            if cfg.enabled:
+                self._log("Twitch EventSub natif démarré.")
+        except Exception as exc:
+            self._log(f"Twitch EventSub indisponible : {exc}")
+
+    def _restart_twitch_adapter(self) -> None:
+        adapter = self._twitch_adapter
+        if adapter is not None:
+            adapter.stop()
+        self._start_twitch_adapter()
+
+    def _stop_twitch_adapter(self) -> None:
+        adapter = self._twitch_adapter
+        self._twitch_adapter = None
+        if adapter is not None:
+            adapter.stop()
+
     def _start_widget_runtime(self) -> None:
         cfg = build_widget_runtime_config(self.config)
         runtime = WidgetRuntime(
@@ -10121,6 +10217,17 @@ class MainWindow(QMainWindow):
                     else ""
                 ),
                 "state": self._media_state_store.snapshot().as_mapping(),
+            },
+            "twitch": {
+                "running": bool(
+                    self._twitch_adapter
+                    and self._twitch_adapter.running
+                ),
+                "last_error": (
+                    self._twitch_adapter.last_error
+                    if self._twitch_adapter
+                    else ""
+                ),
             },
             "control_variables": (
                 service.control_variables() if service else {}
@@ -10675,6 +10782,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._stop_twitch_adapter()
         self._stop_media_engine()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()
@@ -10686,6 +10794,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        self._stop_twitch_adapter()
         self._stop_media_engine()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()

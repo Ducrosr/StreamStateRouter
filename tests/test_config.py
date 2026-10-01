@@ -289,6 +289,29 @@ class ConfigTests(unittest.TestCase):
             errors,
         )
 
+    def test_twitch_config_redacts_token_and_disables_export_copy(self):
+        data = self.sample()
+        data["twitch"] = {
+            "enabled": True,
+            "client_id": "client",
+            "user_access_token": "twitch-secret",
+            "broadcaster_user_id": "100",
+            "user_id": "100",
+            "moderator_user_id": "100",
+            "subscriptions": ["channel.chat.message"],
+        }
+
+        self.assertEqual(validate_config(data), [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exported["twitch"]["user_access_token"], "")
+        self.assertFalse(exported["twitch"]["enabled"])
+        self.assertEqual(validate_config(exported), [])
+
     def test_shareable_export_redacts_secrets_and_is_valid(self):
         data = self.sample()
         data["obs"]["password"] = "obs-secret"
