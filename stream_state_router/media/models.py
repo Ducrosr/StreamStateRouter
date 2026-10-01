@@ -70,15 +70,19 @@ class MediaState:
                 field_name,
                 str(getattr(self, field_name) or "").strip(),
             )
+        duration = finite_number(self.duration_seconds)
+        position = finite_number(self.position_seconds)
+        if duration > 0.0:
+            position = min(position, duration)
         object.__setattr__(
             self,
             "duration_seconds",
-            finite_number(self.duration_seconds),
+            duration,
         )
         object.__setattr__(
             self,
             "position_seconds",
-            finite_number(self.position_seconds),
+            position,
         )
         object.__setattr__(
             self,
