@@ -712,11 +712,12 @@ class OBSDispatcherTests(unittest.TestCase):
 
         self.assertEqual(client.calls, [])
         self.assertEqual(result.executed, 0)
-        self.assertEqual(result.skipped, 5)
+        self.assertEqual(result.skipped, 6)
         self.assertEqual(
             [item.status for item in result.domain_statuses],
-            ["unmanaged"] * 5,
+            ["unmanaged"] * 6,
         )
+        self.assertIn("presentation", result.changed_domains)
         self.assertEqual(result.warnings, ())
 
     def test_non_default_missing_profile_remains_pending_and_missing(self):
