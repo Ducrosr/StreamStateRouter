@@ -289,7 +289,7 @@ class MediaRuntime:
                     action=command.action,
                     success=False,
                     error="Media Runtime en arrêt",
-                    state=self.state_store.snapshot(),
+                    state=self.state_store.public_snapshot(),
                 )
         try:
             action = command.action
@@ -332,7 +332,7 @@ class MediaRuntime:
                 request_id=command.request_id,
                 action=command.action,
                 success=True,
-                state=self.state_store.snapshot(),
+                state=self.state_store.public_snapshot(),
             )
             if (
                 self.event_bus is not None
@@ -361,7 +361,7 @@ class MediaRuntime:
                 action=command.action,
                 success=False,
                 error=str(exc),
-                state=self.state_store.snapshot(),
+                state=self.state_store.public_snapshot(),
             )
 
     def _run(self) -> None:
