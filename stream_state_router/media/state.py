@@ -101,6 +101,22 @@ class MediaArtworkStore:
             raise ValueError("Type de pochette média non autorisé")
         if not body:
             raise ValueError("Pochette média vide")
+        if len(body) > 8 * 1024 * 1024:
+            raise ValueError("Pochette média trop volumineuse")
+        signatures = {
+            "image/jpeg": body.startswith(b"\xff\xd8\xff"),
+            "image/png": body.startswith(b"\x89PNG\r\n\x1a\n"),
+            "image/gif": body.startswith((b"GIF87a", b"GIF89a")),
+            "image/webp": (
+                len(body) >= 12
+                and body.startswith(b"RIFF")
+                and body[8:12] == b"WEBP"
+            ),
+        }
+        if not signatures.get(mime, False):
+            raise ValueError(
+                "Contenu de pochette incompatible avec son type MIME"
+            )
         with self._lock:
             self._revision += 1
             self._content = body
