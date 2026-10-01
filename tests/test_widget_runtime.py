@@ -194,6 +194,36 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["artwork_url"], "")
             self.assertNotIn("error", payload)
 
+    def test_media_stale_can_change_without_media_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            now = [10.0]
+            media = MediaStateStore("vlc", clock=lambda: now[0])
+            media.update(
+                MediaState(
+                    provider="vlc",
+                    connected=True,
+                    playback_state="playing",
+                    title="Mako",
+                )
+            )
+            runtime.media_state_store = media
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            fresh = json.loads(body)
+            self.assertEqual(fresh["revision"], 1)
+            self.assertFalse(fresh["stale"])
+
+            now[0] = 20.0
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            stale = json.loads(body)
+            self.assertEqual(stale["revision"], 1)
+            self.assertTrue(stale["stale"])
+
     def test_media_artwork_is_served_from_safe_runtime_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _package = self._runtime(Path(tmp))
@@ -236,8 +266,13 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(b"/runtime/media", body)
             self.assertIn(b'id="cover"', body)
             self.assertIn(b"state.artwork_url", body)
+            self.assertIn(b"state.artwork_revision", body)
             self.assertIn(b"state.stale", body)
+            self.assertIn(b"runtimeUnavailable", body)
+            self.assertIn(b"performance.now()", body)
+            self.assertNotIn(b"state.revision === lastRevision", body)
             self.assertIn("État obsolète".encode("utf-8"), body)
+            self.assertIn("SSR indisponible".encode("utf-8"), body)
             self.assertIn(b"textContent", body)
             self.assertNotIn(b"innerHTML", body)
             self.assertIn(
