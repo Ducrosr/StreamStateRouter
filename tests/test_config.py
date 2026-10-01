@@ -656,6 +656,46 @@ class ConfigTests(unittest.TestCase):
             errors,
         )
 
+    def test_presentation_validation_rejects_serial_wait_budget_overrun(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {"enter_cue": "TooLong"},
+        }
+        data["cues"] = {
+            "TooLong": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "wait_ms",
+                                "params": {"duration_ms": 10000},
+                            },
+                            {
+                                "type": "wait_ms",
+                                "params": {"duration_ms": 10000},
+                            },
+                            {
+                                "type": "wait_ms",
+                                "params": {"duration_ms": 10000},
+                            },
+                            {
+                                "type": "wait_ms",
+                                "params": {"duration_ms": 1},
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("budget temporel global" in item for item in errors),
+            errors,
+        )
+
     def test_schema_v5_adds_host_control_defaults(self):
         data = self.sample()
         data["schema_version"] = 5
