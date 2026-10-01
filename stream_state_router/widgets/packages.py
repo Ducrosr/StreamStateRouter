@@ -146,11 +146,28 @@ def _inside(root: Path, candidate: Path) -> bool:
 
 
 def _walk_package_root(root: Path) -> Iterable[Path]:
+    file_count = 0
+    total_bytes = 0
     for path in root.rglob("*"):
         if any(part in _SKIPPED_DIRS for part in path.parts):
             continue
         if path.is_symlink() or not path.is_file():
             continue
+        file_count += 1
+        if file_count > _MAX_FILES:
+            raise ValueError(
+                f"Le module contient plus de {_MAX_FILES} fichiers gérés"
+            )
+        try:
+            total_bytes += int(path.stat().st_size)
+        except OSError as exc:
+            raise ValueError(
+                f"Impossible d’inspecter le fichier : {path.name}"
+            ) from exc
+        if total_bytes > _MAX_BYTES:
+            raise ValueError(
+                "Le module dépasse la limite d’import de 100 Mio"
+            )
         yield path
 
 
@@ -164,6 +181,16 @@ def inspect_html_module(
         raise ValueError(f"Fichier HTML introuvable : {entry_path}")
     if entry_path.suffix.casefold() not in {".html", ".htm"}:
         raise ValueError("Le point d’entrée doit être un fichier .html ou .htm")
+    try:
+        entry_bytes = int(entry_path.stat().st_size)
+    except OSError as exc:
+        raise ValueError(
+            "Impossible d’inspecter la taille du point d’entrée"
+        ) from exc
+    if entry_bytes > _MAX_BYTES:
+        raise ValueError(
+            "Le module dépasse la limite d’import de 100 Mio"
+        )
 
     root = (
         Path(package_root).expanduser().resolve()
@@ -247,6 +274,14 @@ def inspect_html_module(
                         pending.append(candidate)
 
     files = sorted(local_files)
+    if any(
+        path.relative_to(root).as_posix().casefold() == "manifest.json"
+        for path in files
+    ):
+        raise ValueError(
+            "manifest.json est réservé au manifeste technique SSR ; "
+            "renommez ce fichier dans le module avant l’import"
+        )
     if len(files) > _MAX_FILES:
         raise ValueError(
             f"Le module contient plus de {_MAX_FILES} fichiers gérés"
