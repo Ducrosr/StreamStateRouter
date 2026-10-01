@@ -155,6 +155,22 @@ class VLCProvider:
     def name(self) -> str:
         return "vlc"
 
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        return (
+            "play",
+            "pause",
+            "stop",
+            "next",
+            "previous",
+            "seek",
+            "set_volume",
+            "play_uri",
+            "enqueue_uri",
+            "clear_queue",
+            "artwork",
+        )
+
     @staticmethod
     def _number(value: object, default: float = 0.0) -> float:
         try:
