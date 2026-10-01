@@ -1214,6 +1214,41 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         theme = profile.get("theme", {})
         if not isinstance(theme, Mapping):
             errors.append(f"{prefix}.theme doit être un objet")
+        components = profile.get("components", {})
+        if not isinstance(components, Mapping):
+            errors.append(f"{prefix}.components doit être un objet")
+        else:
+            for component_name, component in components.items():
+                cprefix = f"{prefix}.components.{component_name}"
+                if (
+                    not str(component_name).strip()
+                    or not isinstance(component, Mapping)
+                ):
+                    errors.append(
+                        f"{cprefix} doit être un objet nommé"
+                    )
+                    continue
+                mode = str(
+                    component.get("mode") or "inherit"
+                ).strip().casefold()
+                if mode not in {"inherit", "custom", "hidden"}:
+                    errors.append(
+                        f"{cprefix}.mode doit être inherit, custom ou hidden"
+                    )
+                if (
+                    "resource" in component
+                    and not isinstance(component.get("resource"), str)
+                ):
+                    errors.append(
+                        f"{cprefix}.resource doit être une chaîne"
+                    )
+                if (
+                    "settings" in component
+                    and not isinstance(component.get("settings"), Mapping)
+                ):
+                    errors.append(
+                        f"{cprefix}.settings doit être un objet"
+                    )
         for key in (
             "enter_cue",
             "exit_cue",
