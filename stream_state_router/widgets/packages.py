@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+import hashlib
 import json
 from pathlib import Path
 import re
 import shutil
-from typing import Iterable
+from typing import Iterable, Mapping
 from urllib.parse import unquote, urlsplit
 
 from ..services.paths import imported_widgets_dir
@@ -46,6 +47,7 @@ class WidgetPackage:
     warnings: tuple[str, ...]
     remote_references: tuple[str, ...]
     published_files: tuple[str, ...] = ()
+    published_hashes: tuple[tuple[str, str], ...] = ()
 
     @property
     def entry_uri(self) -> str:
@@ -380,12 +382,19 @@ def import_html_module(
                 for source in inspection.local_files
             )
         )
+        published_hashes = {
+            relative: hashlib.sha256(
+                (destination / relative).read_bytes()
+            ).hexdigest()
+            for relative in published_files
+        }
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "package_id": package_id,
             "name": display_name,
             "entry": entry_relative.as_posix(),
             "published_files": list(published_files),
+            "published_hashes": dict(published_hashes),
             "imported_at": datetime.now(timezone.utc).isoformat(),
             "source_mode": (
                 "folder" if package_root is not None else "html"
@@ -426,6 +435,7 @@ def import_html_module(
         warnings=inspection.warnings,
         remote_references=inspection.remote_references,
         published_files=published_files,
+        published_hashes=tuple(sorted(published_hashes.items())),
     )
 
 
@@ -472,6 +482,20 @@ def list_widget_packages(
                 )
             except ValueError:
                 continue
+        hashes_raw = payload.get("published_hashes")
+        if isinstance(hashes_raw, Mapping):
+            published_hashes = tuple(
+                sorted(
+                    (
+                        str(key).replace("\\", "/").strip("/"),
+                        str(value).strip().casefold(),
+                    )
+                    for key, value in hashes_raw.items()
+                    if str(key).strip() and str(value).strip()
+                )
+            )
+        else:
+            published_hashes = ()
         found.append(
             WidgetPackage(
                 package_id=str(payload.get("package_id") or package_root.name),
@@ -492,6 +516,7 @@ def list_widget_packages(
                     if str(item)
                 ),
                 published_files=published_files,
+                published_hashes=published_hashes,
             )
         )
     return tuple(found)
