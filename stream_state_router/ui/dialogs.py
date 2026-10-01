@@ -1581,11 +1581,26 @@ class ActionDialog(QDialog):
         ("Attendre (millisecondes)", "wait_ms"),
     ]
 
-    def __init__(self, parent=None, action: dict | None = None):
+    def __init__(
+        self,
+        parent=None,
+        action: dict | None = None,
+        *,
+        allow_presentation_actions: bool = False,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Action profil")
         self.resize(620, 470)
         source = OBSAction.from_mapping(action or {})
+        presentation_only = {
+            "animate_filter_settings",
+            "media_input_action",
+        }
+        self._action_types = [
+            item
+            for item in self.ACTION_TYPES
+            if allow_presentation_actions or item[1] not in presentation_only
+        ]
 
         root = QVBoxLayout(self)
         form = QFormLayout()
@@ -1605,7 +1620,7 @@ class ActionDialog(QDialog):
             "jusqu'au démarrage de l'application ou à la fermeture du launcher."
         )
         self.kind = QComboBox()
-        for label, value in self.ACTION_TYPES:
+        for label, value in self._action_types:
             self.kind.addItem(label, value)
         idx = self.kind.findData(source.type)
         if idx >= 0:
@@ -1618,7 +1633,7 @@ class ActionDialog(QDialog):
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
         self.pages: dict[str, tuple[QWidget, dict[str, QWidget]]] = {}
-        for _, kind in self.ACTION_TYPES:
+        for _, kind in self._action_types:
             page, fields = self._build_page(kind, dict(source.params) if source.type == kind else {})
             self.pages[kind] = (page, fields)
             self.stack.addWidget(page)
