@@ -26,7 +26,7 @@ from stream_state_router.services.config import (
 class ConfigTests(unittest.TestCase):
     def sample(self):
         return {
-            "schema_version": 6,
+            "schema_version": 7,
             "router": {
                 "poll_ms": 50,
                 "debounce_ms": 150,
@@ -129,7 +129,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         self.assertEqual(migrated["router"]["fallback_state"]["LayoutProfile"], "Vanilla")
         self.assertIn("Vanilla", migrated["layout_profiles"])
         self.assertEqual(validate_config(migrated), [])
@@ -184,7 +184,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         modules = migrated["layout_profiles"]["Vanilla"]["modules"]
         self.assertEqual(set(modules), {"[Global] Date", "[Global] Signature"})
         self.assertEqual(modules["[Global] Date"]["module_type"], "Global")
@@ -374,9 +374,122 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         self.assertEqual(migrated["activation_policies"], {})
         self.assertEqual(validate_config(migrated), [])
+
+    def test_schema_v6_adds_presentation_defaults(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data.pop("presentation_profiles", None)
+        data.pop("cues", None)
+        data["router"]["fallback_state"].pop(
+            "PresentationProfile",
+            None,
+        )
+        for rule in data["rules"]:
+            if isinstance(rule.get("state"), dict):
+                rule["state"].pop("PresentationProfile", None)
+
+        migrated = migrate_config(data)
+
+        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(
+            migrated["router"]["fallback_state"]["PresentationProfile"],
+            "Vanilla",
+        )
+        self.assertIn("Vanilla", migrated["presentation_profiles"])
+        self.assertEqual(migrated["cues"], {})
+        self.assertEqual(validate_config(migrated), [])
+
+    def test_presentation_profiles_and_cues_validate(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {
+                "theme": {"accent": "#00ffff"},
+            },
+            "Combat": {
+                "extends": "Vanilla",
+                "enter_cue": "GameEnter",
+                "exit_cue": "GameExit",
+                "animation_intensity": "high",
+            },
+        }
+        data["cues"] = {
+            "GameEnter": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Global",
+                                    "filter": "Mako",
+                                    "enabled": True,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+            "GameExit": {
+                "frames": [
+                    {
+                        "at_ms": 100,
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Global",
+                                    "filter": "Mako",
+                                    "enabled": False,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        data["router"]["fallback_state"]["PresentationProfile"] = "Vanilla"
+        data["rules"][1]["state"]["PresentationProfile"] = "Combat"
+
+        self.assertEqual(validate_config(data), [])
+
+    def test_presentation_validation_rejects_unknown_cue_and_unsafe_timeline(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {"enter_cue": "Missing"},
+        }
+        data["cues"] = {
+            "TooLate": {
+                "frames": [
+                    {
+                        "at_ms": 30001,
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Global",
+                                    "filter": "Mako",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("référence un cue inexistant" in item for item in errors),
+            errors,
+        )
+        self.assertTrue(
+            any(".at_ms doit être compris" in item for item in errors),
+            errors,
+        )
 
     def test_schema_v5_adds_host_control_defaults(self):
         data = self.sample()
@@ -385,7 +498,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         self.assertEqual(
             migrated["host_control"],
             {
@@ -397,7 +510,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_host_and_filter_actions_validate(self):
         data = self.sample()
-        data["schema_version"] = 6
+        data["schema_version"] = 7
         data["host_control"] = {
             "soundvolumeview_path": r"C:\\Tools\\SoundVolumeView.exe",
             "audio_timeout_seconds": 4.0,
@@ -432,7 +545,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_invalid_host_actions_are_rejected(self):
         data = self.sample()
-        data["schema_version"] = 6
+        data["schema_version"] = 7
         data["host_control"] = {
             "soundvolumeview_path": 42,
             "audio_timeout_seconds": 0,
