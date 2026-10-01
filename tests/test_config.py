@@ -10,6 +10,7 @@ import copy
 from stream_state_router.router.models import DEFAULT_PROFILE_NAMES, StreamState
 from stream_state_router.services.config import (
     build_activation_policies,
+    build_media_provider,
     build_media_runtime_config,
     build_ruleset,
     build_vlc_config,
@@ -232,12 +233,14 @@ class ConfigTests(unittest.TestCase):
 
         runtime = build_media_runtime_config(data)
         vlc = build_vlc_config(data)
+        provider = build_media_provider(data)
 
         self.assertFalse(runtime.enabled)
         self.assertEqual(runtime.poll_seconds, 0.5)
         self.assertEqual(vlc.host, "127.0.0.1")
         self.assertEqual(vlc.port, 8080)
         self.assertEqual(vlc.password, "")
+        self.assertEqual(provider.name, "vlc")
         self.assertEqual(validate_config(data), [])
 
     def test_enabled_media_requires_local_vlc_and_password(self):
