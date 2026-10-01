@@ -13,8 +13,8 @@ jamais le mot de passe à une Browser Source. Les réglages sont disponibles dan
 **Paramètres > Média / VLC**. Le média est désactivé par défaut.
 
 État normalisé : lecteur connecté, lecture/pause/arrêt, titre, artiste, album,
-durée, position, volume, identifiant de piste, horodatage d'observation et
-capacités du provider. Le snapshot public expose aussi un indicateur de
+durée, position, vitesse de lecture, volume, identifiant de piste, horodatage
+d'observation et capacités du provider. Le snapshot public expose aussi un indicateur de
 fraîcheur dérivé du rythme de polling réel.
 
 La pochette courante est lue depuis `/art` uniquement par
