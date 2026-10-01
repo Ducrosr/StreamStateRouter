@@ -252,13 +252,10 @@ class ConfigTests(unittest.TestCase):
             exported["media_engine"]["jellyfin"]["token"],
             "",
         )
-        # A redacted shareable export is intentionally not runnable with an
-        # enabled Jellyfin provider until the local secret is restored.
-        errors = validate_config(exported)
-        self.assertTrue(
-            any("media_engine.jellyfin.token est requis" in error for error in errors),
-            errors,
+        self.assertFalse(
+            exported["media_engine"]["jellyfin"]["enabled"]
         )
+        self.assertEqual(validate_config(exported), [])
 
     def test_media_engine_rejects_enabled_jellyfin_without_endpoint_or_token(self):
         data = self.sample()
