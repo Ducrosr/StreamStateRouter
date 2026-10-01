@@ -387,6 +387,103 @@ class CurrentStateCaptureTests(unittest.TestCase):
         self.assertNotIn("audio", owned)
         self.assertNotIn("overlay", owned)
 
+    def test_guided_plan_can_inherit_and_reuse_existing_profiles(self) -> None:
+        config = _config()
+        config["presentation_profiles"]["Midgar"] = {
+            "extends": "Vanilla",
+            "enter_cue": "",
+            "exit_cue": "",
+            "transition_profile": "",
+            "shader_set": "",
+            "sound_set": "",
+            "widget_theme": "Midgar",
+            "animation_intensity": "normal",
+            "theme": {},
+            "components": {},
+        }
+
+        result = build_current_state_capture_draft(
+            config,
+            snapshot=_snapshot(),
+            raw_layouts={},
+            logical_state={
+                "Game": "Vanilla",
+                "OverlayProfile": "FPS",
+                "CaptureProfile": "Default",
+                "AudioProfile": "Default",
+                "LayoutProfile": "FPS",
+                "PresentationProfile": "Vanilla",
+            },
+            options=CurrentStateCaptureOptions(
+                name="Overwatch",
+                process="Overwatch.exe",
+                include_input_settings=False,
+                include_audio_state=False,
+                include_filters=False,
+                include_visibility=False,
+                include_layout=False,
+                state_overrides={
+                    "CaptureProfile": "HDR",
+                    "AudioProfile": "Game",
+                    "PresentationProfile": "Midgar",
+                },
+                inherit_state_keys=(
+                    "Game",
+                    "OverlayProfile",
+                    "LayoutProfile",
+                ),
+            ),
+        )
+
+        rule = result.config["rules"][0]
+        self.assertEqual(
+            rule["state"],
+            {
+                "CaptureProfile": "HDR",
+                "AudioProfile": "Game",
+                "PresentationProfile": "Midgar",
+            },
+        )
+        self.assertNotIn(
+            "Overwatch",
+            result.config["profiles"]["game"],
+        )
+        self.assertTrue(
+            any(
+                "Preset global hérité" in note
+                for note in result.report.notes
+            )
+        )
+        self.assertTrue(
+            any(
+                "PresentationProfile=Midgar" in note
+                for note in result.report.notes
+            )
+        )
+        self.assertEqual(validate_config(result.config), [])
+
+    def test_guided_plan_rejects_unknown_logical_state_key(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Clé de profil logique inconnue",
+        ):
+            build_current_state_capture_draft(
+                _config(),
+                snapshot=_snapshot(),
+                raw_layouts={},
+                logical_state={},
+                options=CurrentStateCaptureOptions(
+                    name="Game X",
+                    process="GameX.exe",
+                    include_input_settings=False,
+                    include_audio_state=False,
+                    include_filters=False,
+                    include_visibility=False,
+                    include_layout=False,
+                    state_overrides={"UnknownProfile": "X"},
+                ),
+            )
+
     def test_update_shared_capture_profile_clones_before_filter_capture(self) -> None:
         config = _config()
         shared_state = {
