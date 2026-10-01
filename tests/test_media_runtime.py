@@ -38,6 +38,8 @@ class FakeProvider:
             connected=True,
             playback_state=self.playback_state,
             title="Midgar Radio",
+            artwork_url="file:///C:/Music/cover.jpg",
+            uri="file:///C:/Music/track.flac",
             duration_seconds=180,
             position_seconds=self.position,
             volume_percent=self.volume,
@@ -125,6 +127,9 @@ class MediaRuntimeTests(unittest.TestCase):
             events[-1].payload["playback_state"],
             "playing",
         )
+        self.assertNotIn("uri", events[-1].payload)
+        self.assertNotIn("artwork_url", events[-1].payload)
+        self.assertNotIn("error", events[-1].payload)
 
     def test_poll_marks_provider_disconnected_then_recovers(self) -> None:
         provider = FakeProvider()
