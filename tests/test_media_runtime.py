@@ -148,6 +148,23 @@ class MediaRuntimeTests(unittest.TestCase):
 
         self.assertFalse(store.snapshot()["available"])
 
+    def test_media_state_bounds_public_metadata_lengths(self) -> None:
+        state = MediaState(
+            provider="v" * 300,
+            connected=True,
+            playback_state="playing",
+            title="t" * 2000,
+            artist="a" * 2000,
+            album="b" * 2000,
+            error="e" * 3000,
+        )
+
+        self.assertEqual(len(state.provider), 128)
+        self.assertEqual(len(state.title), 1024)
+        self.assertEqual(len(state.artist), 1024)
+        self.assertEqual(len(state.album), 1024)
+        self.assertEqual(len(state.error), 2048)
+
     def test_media_state_clamps_position_to_known_duration(self) -> None:
         state = MediaState(
             provider="vlc",
