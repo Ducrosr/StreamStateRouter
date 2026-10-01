@@ -644,6 +644,26 @@ class OBSDispatcher:
                     domains.append(row)
                     continue
                 operations: list[dict[str, object]] = []
+                if profile.transition_profile:
+                    transition = self._presentation_registry.transition(
+                        profile.transition_profile
+                    )
+                    operations.append(
+                        {
+                            "type": "transition_profile",
+                            "profile": profile.transition_profile,
+                            "transition": (
+                                transition.transition_name
+                                if transition is not None
+                                else ""
+                            ),
+                            "duration_ms": (
+                                transition.duration_ms
+                                if transition is not None
+                                else None
+                            ),
+                        }
+                    )
                 for cue_kind, cue_name in (
                     ("exit", profile.exit_cue),
                     ("enter", profile.enter_cue),
@@ -1178,6 +1198,43 @@ class OBSDispatcher:
         )
         return bool(key and key in self._launcher_override_keys)
 
+    def _apply_transition_profile(
+        self,
+        profile: ResolvedPresentationProfile,
+    ) -> int:
+        name = str(profile.transition_profile or "").strip()
+        if not name:
+            return 0
+        transition = self._presentation_registry.transition(name)
+        if transition is None:
+            raise ValueError(
+                f"TransitionProfile introuvable : {name}"
+            )
+        self._yield_runtime()
+        self.client.send(
+            "SetCurrentSceneTransition",
+            {"transitionName": transition.transition_name},
+        )
+        executed = 1
+        if transition.duration_ms is not None:
+            self._yield_runtime()
+            self.client.send(
+                "SetCurrentSceneTransitionDuration",
+                {"transitionDuration": transition.duration_ms},
+            )
+            executed += 1
+        if transition.settings:
+            self._yield_runtime()
+            self.client.send(
+                "SetCurrentSceneTransitionSettings",
+                {
+                    "transitionSettings": dict(transition.settings),
+                    "overlay": bool(transition.overlay),
+                },
+            )
+            executed += 1
+        return executed
+
     def _execute_cue_action(
         self,
         action: CueAction,
@@ -1329,6 +1386,19 @@ class OBSDispatcher:
                     except Exception as exc:
                         presentation_failed = (
                             f"exit cue {previous_name}: {exc}"
+                        )
+
+                if (
+                    presentation_profile is not None
+                    and not presentation_failed
+                ):
+                    try:
+                        executed += self._apply_transition_profile(
+                            presentation_profile
+                        )
+                    except Exception as exc:
+                        presentation_failed = (
+                            f"transition {presentation_name}: {exc}"
                         )
 
                 if presentation_failed:
