@@ -9,7 +9,7 @@ from typing import Mapping
 import uuid
 
 from ..events import EventBus
-from .base import MediaProvider
+from .base import MediaProvider, MediaProviderCommandError
 from .models import MediaState, media_artwork_identity
 from .state import MediaArtworkStore, MediaCommandStore, MediaStateStore
 
@@ -34,12 +34,16 @@ class MediaCommandResult:
     success: bool
     error: str = ""
     state: Mapping[str, object] = field(default_factory=dict)
+    status: str = ""
 
     def as_mapping(self) -> dict[str, object]:
         return {
             "request_id": self.request_id,
             "action": self.action,
-            "status": "completed" if self.success else "failed",
+            "status": (
+                self.status
+                or ("completed" if self.success else "failed")
+            ),
             "success": self.success,
             "error": self.error,
             "state": dict(self.state),
@@ -55,6 +59,16 @@ class _MediaCommand:
 
 class MediaRuntime:
     """Owns all provider I/O on one worker and publishes normalized state."""
+
+    _ONE_SHOT_ACTIONS = frozenset(
+        {
+            "next",
+            "previous",
+            "play_uri",
+            "enqueue_uri",
+            "clear_queue",
+        }
+    )
 
     _SUPPORTED_ACTIONS = frozenset(
         {
@@ -436,12 +450,22 @@ class MediaRuntime:
                 stopping = self._stopping
             if not stopping:
                 self._poll_once()
+            uncertain = bool(
+                command.action in self._ONE_SHOT_ACTIONS
+                and isinstance(exc, MediaProviderCommandError)
+            )
             return MediaCommandResult(
                 request_id=command.request_id,
                 action=command.action,
                 success=False,
-                error=str(exc),
+                error=(
+                    "Résultat incertain : la commande peut avoir été "
+                    "appliquée par le lecteur"
+                    if uncertain
+                    else str(exc)
+                ),
                 state=self.state_store.public_snapshot(),
+                status="uncertain" if uncertain else "failed",
             )
 
     def _run(self) -> None:
@@ -462,6 +486,14 @@ class MediaRuntime:
                     success=result.success,
                     error=result.error,
                     state=dict(result.state),
+                    status=(
+                        result.status
+                        or (
+                            "completed"
+                            if result.success
+                            else "failed"
+                        )
+                    ),
                 )
                 next_poll = self._clock() + self.config.poll_seconds
                 continue
