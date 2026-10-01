@@ -67,6 +67,7 @@ from ..services.config import (
     build_profiles,
     build_layout_profiles,
     build_presentation_profiles,
+    build_widget_runtime_config,
     build_ruleset,
     export_config,
     import_config,
@@ -95,7 +96,11 @@ from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
 from ..services.system_check import run_system_check
-from ..widgets import import_html_module, list_widget_packages
+from ..widgets import (
+    WidgetRuntime,
+    import_html_module,
+    list_widget_packages,
+)
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
@@ -205,6 +210,8 @@ class MainWindow(QMainWindow):
         self._catalog_tree_guard = False
         self._quitting = False
         self._api: LocalControlAPI | None = None
+        self._widget_runtime: WidgetRuntime | None = None
+        self._widget_runtime_error = ""
         self._known_catalog_sources: set[str] = set()
         self._obs_connected_controls: list[tuple[object, bool]] = []
         self._preview_active = False
@@ -251,6 +258,8 @@ class MainWindow(QMainWindow):
         )
         self._start_runtime()
         self._start_api()
+        self._start_widget_runtime()
+        self._refresh_widget_library()
         self._module_scan_timer = QTimer(self)
         self._module_scan_timer.timeout.connect(self._auto_scan_modules)
         self._configure_module_scan_timer()
@@ -4383,6 +4392,29 @@ class MainWindow(QMainWindow):
         api_lay.addLayout(api_form)
         root.addWidget(api_card)
 
+        widget_card, widget_lay = self._card(
+            "Widget Runtime SSR"
+        )
+        widget_form = QFormLayout()
+        self.widget_runtime_enabled = QCheckBox(
+            "Servir les modules HTML via SSR"
+        )
+        self.widget_runtime_port = QSpinBox()
+        self.widget_runtime_port.setRange(1, 65535)
+        widget_form.addRow("", self.widget_runtime_enabled)
+        widget_form.addRow(
+            "Port localhost",
+            self.widget_runtime_port,
+        )
+        widget_lay.addLayout(widget_form)
+        self.widget_runtime_status = QLabel(
+            "Le runtime démarre après chargement de la configuration."
+        )
+        self.widget_runtime_status.setWordWrap(True)
+        self.widget_runtime_status.setObjectName("Muted")
+        widget_lay.addWidget(self.widget_runtime_status)
+        root.addWidget(widget_card)
+
         behavior_card, behavior_lay = self._card("Application")
         self.close_to_tray = QCheckBox("Fermer la fenêtre vers la zone de notification")
         self.start_with_windows = QCheckBox("Démarrer avec Windows")
@@ -4811,6 +4843,21 @@ class MainWindow(QMainWindow):
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
+        widget_runtime = self.config.get("widget_runtime", {})
+        self.widget_runtime_enabled.setChecked(
+            bool(
+                widget_runtime.get("enabled", True)
+                if isinstance(widget_runtime, Mapping)
+                else True
+            )
+        )
+        self.widget_runtime_port.setValue(
+            int(
+                widget_runtime.get("port", 17861)
+                if isinstance(widget_runtime, Mapping)
+                else 17861
+            )
+        )
         self.close_to_tray.setChecked(bool(ui.get("close_to_tray", True)))
         self.safe_live.setChecked(bool(ui.get("safe_live", True)))
         self.auto_detect_modules.setChecked(bool(ui.get("auto_detect_modules", True)))
@@ -4828,13 +4875,22 @@ class MainWindow(QMainWindow):
         self.unsaved.setText("")
 
     def _wire_dirty_signals(self) -> None:
-        for widget in (self.poll_ms, self.debounce_ms, self.fallback_debounce_ms, self.obs_port, self.api_port, self.module_scan_seconds):
+        for widget in (
+            self.poll_ms,
+            self.debounce_ms,
+            self.fallback_debounce_ms,
+            self.obs_port,
+            self.api_port,
+            self.widget_runtime_port,
+            self.module_scan_seconds,
+        ):
             widget.valueChanged.connect(self._mark_dirty)
         for widget in (
             self.obs_enabled,
             self.close_to_tray,
             self.start_with_windows,
             self.api_enabled,
+            self.widget_runtime_enabled,
             self.auto_detect_modules,
             self.safe_live,
         ):
@@ -4864,6 +4920,15 @@ class MainWindow(QMainWindow):
         api["host"] = "127.0.0.1"
         api["port"] = self.api_port.value()
         api["token"] = self.api_token.text()
+        widget_runtime = self.config.setdefault(
+            "widget_runtime",
+            {},
+        )
+        widget_runtime["enabled"] = (
+            self.widget_runtime_enabled.isChecked()
+        )
+        widget_runtime["host"] = "127.0.0.1"
+        widget_runtime["port"] = self.widget_runtime_port.value()
         ui = self.config.setdefault("ui", {})
         ui["close_to_tray"] = self.close_to_tray.isChecked()
         ui["start_with_windows"] = self.start_with_windows.isChecked()
@@ -5268,6 +5333,7 @@ class MainWindow(QMainWindow):
         self._last_saved_config = copy.deepcopy(draft)
         self._draft_dirty = False
         self._restart_api()
+        self._restart_widget_runtime()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
         self._refresh_config_revision_status(draft_dirty=False)
@@ -8999,6 +9065,136 @@ class MainWindow(QMainWindow):
             self._obs_module_catalog = catalog
             self._populate_module_tree()
 
+    def _start_widget_runtime(self) -> None:
+        cfg = build_widget_runtime_config(self.config)
+        runtime = WidgetRuntime(cfg)
+        self._widget_runtime = runtime
+        self._widget_runtime_error = ""
+        try:
+            runtime.start()
+        except Exception as exc:
+            self._widget_runtime_error = str(exc)
+            self._log(
+                f"Widget Runtime indisponible : {exc}"
+            )
+        self._refresh_widget_runtime_status()
+        self._publish_widget_presentation_state()
+
+    def _restart_widget_runtime(self) -> None:
+        current = self._widget_runtime
+        if current is not None:
+            current.stop()
+        self._start_widget_runtime()
+        self._refresh_widget_library()
+
+    def _refresh_widget_runtime_status(self) -> None:
+        if not hasattr(self, "widget_runtime_status"):
+            return
+        runtime = self._widget_runtime
+        if self._widget_runtime_error:
+            self._set_status_label(
+                self.widget_runtime_status,
+                "⚠ Runtime indisponible : "
+                + self._widget_runtime_error,
+                "Warn",
+            )
+            return
+        if runtime is None or not runtime.config.enabled:
+            self._set_status_label(
+                self.widget_runtime_status,
+                "Runtime désactivé.",
+                "Muted",
+            )
+            return
+        if runtime.running:
+            self._set_status_label(
+                self.widget_runtime_status,
+                f"✓ Actif sur {runtime.base_url}",
+                "Good",
+            )
+            return
+        self._set_status_label(
+            self.widget_runtime_status,
+            "Runtime arrêté.",
+            "Warn",
+        )
+
+    def _publish_widget_presentation_state(self) -> None:
+        runtime = self._widget_runtime
+        if runtime is None or not runtime.running:
+            return
+        service = self._service
+        state = (
+            service.engine.current_state
+            if service is not None
+            else None
+        )
+        profile_name = (
+            state.presentation_profile
+            if state is not None
+            else str(
+                (
+                    self.config.get("router", {})
+                    if isinstance(
+                        self.config.get("router"),
+                        Mapping,
+                    )
+                    else {}
+                ).get("fallback_state", {}).get(
+                    "PresentationProfile",
+                    "Vanilla",
+                )
+                if isinstance(
+                    (
+                        self.config.get("router", {})
+                        if isinstance(
+                            self.config.get("router"),
+                            Mapping,
+                        )
+                        else {}
+                    ).get("fallback_state", {}),
+                    Mapping,
+                )
+                else "Vanilla"
+            )
+        )
+        try:
+            registry = build_presentation_profiles(self.config)
+            profile = registry.profile(profile_name)
+        except Exception:
+            profile = None
+        payload = {
+            "profile": profile_name,
+            "theme": (
+                dict(profile.theme)
+                if profile is not None
+                else {}
+            ),
+            "widget_theme": (
+                profile.widget_theme
+                if profile is not None
+                else ""
+            ),
+            "animation_intensity": (
+                profile.animation_intensity
+                if profile is not None
+                else "normal"
+            ),
+            "components": (
+                {
+                    name: {
+                        "mode": item.mode,
+                        "resource": item.resource,
+                        "settings": dict(item.settings),
+                    }
+                    for name, item in profile.components.items()
+                }
+                if profile is not None
+                else {}
+            ),
+        }
+        runtime.set_state("presentation", payload)
+
     def _start_api(self) -> None:
         raw = self.config.get("api", {})
         cfg = APIConfig(
@@ -9570,6 +9766,8 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        if self._widget_runtime:
+            self._widget_runtime.stop()
         self._stop_runtime_for_exit()
         event.accept()
         QApplication.instance().quit()
@@ -9579,6 +9777,8 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        if self._widget_runtime:
+            self._widget_runtime.stop()
         self._stop_runtime_for_exit()
         self.tray.hide()
         QApplication.instance().quit()
