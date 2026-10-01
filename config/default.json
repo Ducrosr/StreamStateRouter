@@ -248,5 +248,22 @@
       "client_name": "",
       "timeout_seconds": 3
     }
+  },
+  "twitch": {
+    "enabled": false,
+    "client_id": "",
+    "user_access_token": "",
+    "broadcaster_user_id": "",
+    "user_id": "",
+    "moderator_user_id": "",
+    "subscriptions": [
+      "channel.chat.message",
+      "channel.follow",
+      "channel.subscribe",
+      "channel.subscription.gift",
+      "channel.subscription.message",
+      "channel.cheer",
+      "channel.raid"
+    ]
   }
 }
