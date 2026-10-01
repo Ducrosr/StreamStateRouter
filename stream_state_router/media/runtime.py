@@ -23,6 +23,8 @@ class MediaRuntimeConfig:
         poll = float(self.poll_seconds)
         if not math.isfinite(poll) or poll < 0.1:
             raise ValueError("media.poll_seconds doit être >= 0.1")
+        object.__setattr__(self, "enabled", bool(self.enabled))
+        object.__setattr__(self, "poll_seconds", poll)
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +197,10 @@ class MediaRuntime:
     def poll_once(self) -> MediaState:
         try:
             state = self.provider.state()
+            if not isinstance(state, MediaState):
+                raise TypeError(
+                    "Le provider média doit retourner MediaState"
+                )
         except Exception as exc:
             state = MediaState(
                 provider=self.provider.name,
@@ -204,8 +210,11 @@ class MediaRuntime:
             )
         self.state_store.update(state)
         semantic_key = state.semantic_key()
+        with self._lock:
+            stopping = self._stopping
         if (
             self.event_bus is not None
+            and not stopping
             and semantic_key != self._last_semantic_key
         ):
             self.event_bus.publish(
@@ -215,10 +224,18 @@ class MediaRuntime:
                 payload=state.as_public_mapping(),
             )
         self._last_semantic_key = semantic_key
-        self._last_state = state
         return state
 
     def _execute(self, command: _MediaCommand) -> MediaCommandResult:
+        with self._lock:
+            if self._stopping:
+                return MediaCommandResult(
+                    request_id=command.request_id,
+                    action=command.action,
+                    success=False,
+                    error="Media Runtime en arrêt",
+                    state=self.state_store.snapshot(),
+                )
         try:
             action = command.action
             if action == "play":
@@ -253,14 +270,28 @@ class MediaRuntime:
                 raise ValueError(
                     f"Action média inconnue : {command.action}"
                 )
-            state = self.poll_once()
+            with self._lock:
+                stopping = self._stopping
+            state = (
+                MediaState(
+                    provider=self.provider.name,
+                    connected=bool(
+                        self.state_store.snapshot().get(
+                            "connected",
+                            False,
+                        )
+                    ),
+                )
+                if stopping
+                else self.poll_once()
+            )
             result = MediaCommandResult(
                 request_id=command.request_id,
                 action=command.action,
                 success=True,
                 state=self.state_store.snapshot(),
             )
-            if self.event_bus is not None:
+            if self.event_bus is not None and not stopping:
                 self.event_bus.publish(
                     channel="media",
                     type="command",
@@ -288,8 +319,12 @@ class MediaRuntime:
         while not self._stop.is_set():
             now = self._clock()
             if now >= next_poll:
+                with self._lock:
+                    stopping = self._stopping
+                if stopping:
+                    break
                 self.poll_once()
-                next_poll = now + float(self.config.poll_seconds)
+                next_poll = now + self.config.poll_seconds
 
             try:
                 command = self._commands.get_nowait()
@@ -312,4 +347,4 @@ class MediaRuntime:
                 if len(self._results) > 250:
                     for key in tuple(self._results)[:50]:
                         self._results.pop(key, None)
-            next_poll = self._clock() + float(self.config.poll_seconds)
+            next_poll = self._clock() + self.config.poll_seconds
