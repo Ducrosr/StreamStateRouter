@@ -237,6 +237,123 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(exported["api"]["token"], "")
         self.assertEqual(validate_config(exported), [])
 
+    def test_schema_v6_migration_preserves_implicit_rule_defaults(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data["router"]["fallback_state"] = {
+            "Game": "Vanilla",
+            "OverlayProfile": "Special",
+            "CaptureProfile": "Default",
+            "AudioProfile": "Default",
+            "LayoutProfile": "Vanilla",
+        }
+        data["profiles"]["overlay"]["Special"] = {"actions": []}
+        data["rules"] = [
+            {
+                "name": "Legacy",
+                "behavior": "match",
+                "exe": "legacy.exe",
+                "state": {"Game": "Vanilla"},
+            }
+        ]
+        data.pop("presentation_profiles", None)
+        data.pop("cues", None)
+        data.pop("transition_profiles", None)
+        data.pop("shader_sets", None)
+        data.pop("sound_sets", None)
+        data.pop("widget_runtime", None)
+
+        migrated = migrate_config(data)
+        state = migrated["rules"][0]["state"]
+
+        self.assertEqual(state["Game"], "Vanilla")
+        self.assertEqual(state["OverlayProfile"], "Vanilla")
+        self.assertEqual(state["CaptureProfile"], "Default")
+        self.assertEqual(state["AudioProfile"], "Default")
+        self.assertEqual(state["LayoutProfile"], "Vanilla")
+        self.assertEqual(state["PresentationProfile"], "Vanilla")
+
+        ruleset, _poll, _debounce, _fallback = build_ruleset(migrated)
+        resolved = ruleset.rules[0].state
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.overlay_profile, "Vanilla")
+
+    def test_shareable_export_redacts_presentation_resource_settings(self):
+        data = self.sample()
+        data["cues"] = {
+            "SecretCue": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "enabled": True,
+                                "params": {
+                                    "input": "Browser",
+                                    "settings": {
+                                        "url": "https://example.test/?token=secret"
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        data["shader_sets"] = {
+            "SecretShaders": {
+                "filters": [
+                    {
+                        "source": "Camera",
+                        "filter": "Pulse",
+                        "enabled": True,
+                        "settings": {"token": "secret"},
+                    }
+                ]
+            }
+        }
+        data["transition_profiles"] = {
+            "SecretTransition": {
+                "transition_name": "Fade",
+                "settings": {"token": "secret"},
+            }
+        }
+        data["presentation_profiles"] = {
+            "Vanilla": {
+                "components": {
+                    "chat": {
+                        "mode": "custom",
+                        "resource": "chat",
+                        "settings": {"token": "secret"},
+                    }
+                }
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+
+        cue_action = exported["cues"]["SecretCue"]["frames"][0]["actions"][0]
+        self.assertEqual(cue_action["params"]["settings"], {})
+        self.assertFalse(cue_action["enabled"])
+        self.assertEqual(
+            exported["shader_sets"]["SecretShaders"]["filters"][0]["settings"],
+            {},
+        )
+        self.assertEqual(
+            exported["transition_profiles"]["SecretTransition"]["settings"],
+            {},
+        )
+        self.assertEqual(
+            exported["presentation_profiles"]["Vanilla"]["components"]["chat"]["settings"],
+            {},
+        )
+        self.assertEqual(validate_config(exported), [])
+
     def test_shareable_export_redacts_imported_obs_settings_and_host_path(self):
         data = self.sample()
         data["host_control"] = {
