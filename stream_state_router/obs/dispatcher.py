@@ -436,6 +436,32 @@ class OBSDispatcher:
             "type": action.type,
             "enabled": bool(action.enabled),
         }
+        if kind == "media_input_action":
+            input_name = self._need(p, "input")
+            action_name = str(
+                p.get("action") or ""
+            ).strip().casefold()
+            actions = {
+                "play": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY",
+                "pause": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE",
+                "stop": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP",
+                "restart": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+                "next": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_NEXT",
+                "previous": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PREVIOUS",
+            }
+            media_action = actions.get(action_name)
+            if media_action is None:
+                raise ValueError(
+                    "media_input_action params.action inconnu"
+                )
+            self.client.send(
+                "TriggerMediaInputAction",
+                {
+                    "inputName": input_name,
+                    "mediaAction": media_action,
+                },
+            )
+            return
         if kind == "set_program_scene":
             description["target"] = str(params.get("scene") or "")
         elif kind == "scene_item_enabled":
