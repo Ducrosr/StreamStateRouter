@@ -667,6 +667,25 @@ class MediaRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(command_events, [])
 
+    def test_direct_poll_is_rejected_while_worker_owns_provider_io(self) -> None:
+        provider = FakeProvider()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+        )
+        runtime.start()
+        self.addCleanup(runtime.stop)
+
+        deadline = time.monotonic() + 1.0
+        while (
+            not any(call[0] == "state" for call in provider.calls)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+
+        with self.assertRaisesRegex(RuntimeError, "appartient au worker"):
+            runtime.poll_once()
+
     def test_worker_serializes_commands_and_provider_polling(self) -> None:
         provider = FakeProvider()
         runtime = MediaRuntime(
