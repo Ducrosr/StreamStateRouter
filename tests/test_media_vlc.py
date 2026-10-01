@@ -249,6 +249,25 @@ class VLCProviderTests(unittest.TestCase):
 
         self.assertEqual(transport.artwork_timeout_seconds, 2.0)
 
+    def test_provider_artwork_can_target_observed_playlist_item(self) -> None:
+        transport = FakeTransport(
+            artwork=b"png-bytes",
+            artwork_type="image/png",
+        )
+        provider = VLCProvider(VLCConfig(), transport=transport)
+
+        provider.artwork("17")
+
+        self.assertEqual(
+            transport.calls,
+            [
+                (
+                    "/art?item=17",
+                    {"max_bytes": 8 * 1024 * 1024},
+                )
+            ],
+        )
+
     def test_provider_artwork_uses_vlc_art_endpoint(self) -> None:
         transport = FakeTransport(
             artwork=b"png-bytes",
@@ -372,6 +391,21 @@ class VLCProviderTests(unittest.TestCase):
             transport.calls,
             [("/requests/status.json", {})],
         )
+
+    def test_playlist_id_preserves_zero_and_drops_negative_sentinel(self) -> None:
+        for raw_id, expected in ((0, "0"), (-1, ""), (None, "")):
+            with self.subTest(raw_id=raw_id):
+                provider = VLCProvider(
+                    VLCConfig(),
+                    transport=FakeTransport(
+                        {
+                            "state": "stopped",
+                            "currentplid": raw_id,
+                        }
+                    ),
+                )
+
+                self.assertEqual(provider.state().track_id, expected)
 
     def test_status_falls_back_to_filename_for_title(self) -> None:
         provider = VLCProvider(
