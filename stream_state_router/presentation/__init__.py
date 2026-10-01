@@ -23,6 +23,8 @@ __all__ = [
     "PresentationComponent",
     "PresentationProfile",
     "PresentationRegistry",
+    "PresentationStateSnapshot",
+    "PresentationStateStore",
     "ResolvedPresentationProfile",
     "ShaderFilterState",
     "ShaderSet",
@@ -30,3 +32,5 @@ __all__ = [
     "build_presentation_registry",
     "resolve_presentation_profile",
 ]
+
+from .state import PresentationStateSnapshot, PresentationStateStore
