@@ -1,4 +1,4 @@
-from .base import MediaProvider
+from .base import MediaProvider, MediaProviderCommandError
 from .models import MEDIA_PLAYBACK_STATES, MediaState, media_artwork_identity
 from .runtime import MediaCommandResult, MediaRuntime, MediaRuntimeConfig
 from .state import MediaArtworkStore, MediaCommandStore, MediaStateStore
@@ -8,6 +8,7 @@ __all__ = [
     "MEDIA_PLAYBACK_STATES",
     "MediaCommandResult",
     "MediaProvider",
+    "MediaProviderCommandError",
     "MediaRuntime",
     "MediaRuntimeConfig",
     "MediaState",
