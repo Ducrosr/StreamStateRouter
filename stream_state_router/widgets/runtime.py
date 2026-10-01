@@ -5,6 +5,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
+import socket
 from pathlib import Path
 import threading
 from typing import Any
@@ -471,6 +472,10 @@ class _WidgetServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+class _WidgetServerV6(_WidgetServer):
+    address_family = socket.AF_INET6
+
+
 class WidgetRuntime:
     """Loopback-only, read-only HTTP surface for SSR browser widgets."""
 
@@ -498,7 +503,13 @@ class WidgetRuntime:
 
     @property
     def running(self) -> bool:
-        return self._server is not None
+        server = self._server
+        thread = self._thread
+        return (
+            server is not None
+            and thread is not None
+            and thread.is_alive()
+        )
 
     @property
     def port(self) -> int:
@@ -509,11 +520,13 @@ class WidgetRuntime:
 
     @property
     def base_url(self) -> str:
-        host = (
-            "127.0.0.1"
-            if self.config.host in {"localhost", "::1"}
-            else self.config.host
-        )
+        configured = str(self.config.host or "").strip()
+        if configured == "::1":
+            host = "[::1]"
+        elif configured == "localhost":
+            host = "127.0.0.1"
+        else:
+            host = configured
         return f"http://{host}:{self.port}"
 
     def refresh_packages(self) -> None:
@@ -1117,7 +1130,12 @@ iframe{display:block}
             raise ValueError(
                 "Widget Runtime doit rester lié à l’interface loopback"
             )
-        server = _WidgetServer(
+        server_type = (
+            _WidgetServerV6
+            if self.config.host == "::1"
+            else _WidgetServer
+        )
+        server = server_type(
             (self.config.host, int(self.config.port)),
             self._handler(),
         )
