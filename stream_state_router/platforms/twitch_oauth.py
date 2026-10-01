@@ -8,6 +8,19 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
+class TwitchOAuthError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int = 0,
+        oauth_message: str = "",
+    ):
+        super().__init__(message)
+        self.oauth_status = int(status)
+        self.oauth_message = str(oauth_message)
+
+
 DEFAULT_TWITCH_SCOPES = (
     "user:read:chat",
     "moderator:read:followers",
@@ -66,12 +79,11 @@ def _form_request(
             or payload.get("error")
             or exc.reason
         )
-        error = RuntimeError(
-            f"Twitch OAuth HTTP {exc.code}: {message}"
-        )
-        setattr(error, "oauth_status", int(exc.code))
-        setattr(error, "oauth_message", message)
-        raise error from exc
+        raise TwitchOAuthError(
+            f"Twitch OAuth HTTP {exc.code}: {message}",
+            status=int(exc.code),
+            oauth_message=message,
+        ) from exc
     if not isinstance(payload, dict):
         raise RuntimeError("Réponse Twitch OAuth invalide")
     return payload
