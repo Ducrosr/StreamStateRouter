@@ -366,6 +366,19 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["revision"], 0)
         self.assertEqual(provider.artwork_calls, 0)
 
+    def test_empty_capabilities_reject_all_media_commands(self) -> None:
+        provider = FakeProvider()
+        provider.capabilities = ()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True),
+            provider,
+        )
+        runtime.start()
+        self.addCleanup(runtime.stop)
+
+        with self.assertRaisesRegex(ValueError, "non supportée"):
+            runtime.request("clear_queue")
+
     def test_request_rejects_capability_not_advertised_by_provider(self) -> None:
         provider = FakeProvider()
         provider.capabilities = ("play",)
@@ -590,6 +603,47 @@ class MediaRuntimeTests(unittest.TestCase):
             row for row in provider.calls if row[0] == "pause"
         ]
         self.assertEqual(len(pause_calls), 1)
+
+    def test_stop_during_command_poll_does_not_publish_late_command_event(self) -> None:
+        provider = FakeProvider()
+        bus = EventBus()
+        entered = threading.Event()
+        release = threading.Event()
+        original_state = provider.state
+        state_calls = [0]
+
+        def blocking_second_state() -> MediaState:
+            state_calls[0] += 1
+            if state_calls[0] >= 2:
+                entered.set()
+                release.wait(1.0)
+            return original_state()
+
+        provider.state = blocking_second_state
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+            event_bus=bus,
+        )
+        runtime.start()
+
+        deadline = time.monotonic() + 1.0
+        while state_calls[0] < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        request_id = runtime.request("play")
+        self.assertTrue(entered.wait(1.0))
+        self.assertFalse(runtime.stop(timeout=0.01))
+        release.set()
+        self.assertTrue(runtime.stop(timeout=1.0))
+
+        command_events = [
+            event
+            for event in bus.events("media")
+            if event.type == "command"
+            and event.payload.get("request_id") == request_id
+        ]
+        self.assertEqual(command_events, [])
 
     def test_worker_serializes_commands_and_provider_polling(self) -> None:
         provider = FakeProvider()
