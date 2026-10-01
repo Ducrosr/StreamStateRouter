@@ -198,7 +198,7 @@ class MediaRuntime:
             )
             if str(item).strip()
         }
-        if capabilities and normalized not in capabilities:
+        if normalized not in capabilities:
             raise ValueError(
                 "Action média non supportée par "
                 f"{self.provider.name} : {normalized}"
@@ -260,8 +260,15 @@ class MediaRuntime:
         ):
             return
         self._last_artwork_identity = identity
+        capabilities = {
+            str(item).strip().casefold()
+            for item in (
+                getattr(self.provider, "capabilities", ()) or ()
+            )
+            if str(item).strip()
+        }
         loader = getattr(self.provider, "artwork", None)
-        if not callable(loader):
+        if "artwork" not in capabilities or not callable(loader):
             self._next_artwork_retry_at = float("inf")
             self.artwork_store.clear()
             return
@@ -377,6 +384,8 @@ class MediaRuntime:
             with self._lock:
                 stopping = self._stopping
             state = None if stopping else self.poll_once()
+            with self._lock:
+                stopping_after_poll = self._stopping
             result = MediaCommandResult(
                 request_id=command.request_id,
                 action=command.action,
@@ -385,7 +394,7 @@ class MediaRuntime:
             )
             if (
                 self.event_bus is not None
-                and not stopping
+                and not stopping_after_poll
                 and state is not None
             ):
                 self.event_bus.publish(
