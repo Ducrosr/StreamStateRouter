@@ -7,6 +7,9 @@ from typing import Callable, Mapping
 from .models import Cue, CueAction
 
 
+CUE_MAX_RUNTIME_MS = 60000
+
+
 @dataclass(frozen=True, slots=True)
 class CueExecutionResult:
     cue: str
@@ -108,7 +111,7 @@ class CueTask:
     target_profile: str
     phase: str
     started_at: float
-    max_runtime_ms: int = 60000
+    max_runtime_ms: int = CUE_MAX_RUNTIME_MS
     frame_index: int = 0
     action_index: int = 0
     blocked_until: float = 0.0
