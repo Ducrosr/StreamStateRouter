@@ -334,6 +334,37 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertEqual(provider.artwork_calls, 2)
         self.assertTrue(runtime.artwork_store.snapshot()["available"])
 
+    def test_stop_during_provider_read_cannot_commit_late_state(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingProvider(FakeProvider):
+            def state(self) -> MediaState:
+                entered.set()
+                release.wait(1.0)
+                return super().state()
+
+        provider = BlockingProvider()
+        store = MediaStateStore("fake")
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(
+                enabled=True,
+                poll_seconds=0.1,
+            ),
+            provider,
+            state_store=store,
+        )
+        runtime.start()
+        self.assertTrue(entered.wait(1.0))
+
+        self.assertFalse(runtime.stop(timeout=0.01))
+        release.set()
+        self.assertTrue(runtime.stop(timeout=1.0))
+
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["revision"], 0)
+        self.assertEqual(provider.artwork_calls, 0)
+
     def test_failed_command_is_not_retried_automatically(self) -> None:
         provider = FakeProvider()
         provider.fail_pause = True
