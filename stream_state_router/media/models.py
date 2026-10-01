@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import math
 
 
@@ -171,3 +173,31 @@ class MediaState:
             "observed_at_unix": self.observed_at_unix,
             "capabilities": list(self.capabilities),
         }
+
+
+
+def media_artwork_identity(
+    *,
+    provider: object = "",
+    track_id: object = "",
+    uri: object = "",
+    title: object = "",
+    artwork_url: object = "",
+) -> str:
+    """Stable private identity joining an observation to its cached artwork."""
+
+    parts = (
+        str(provider or "").strip(),
+        str(track_id or "").strip(),
+        str(uri or "").strip(),
+        str(title or "").strip(),
+        str(artwork_url or "").strip(),
+    )
+    if not any(parts[1:]):
+        return ""
+    raw = json.dumps(
+        parts,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
