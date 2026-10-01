@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from urllib.request import Request, urlopen
 
@@ -12,6 +13,7 @@ from stream_state_router.media import (
     MediaState,
 )
 from stream_state_router.services.api import APIConfig, LocalControlAPI
+from stream_state_router.ui.main_window import MainWindow
 
 
 class BlockingMediaProvider:
@@ -109,6 +111,22 @@ class MediaAPIContractTests(unittest.TestCase):
             provider.release.set()
             runtime.stop()
             api.stop()
+
+    def test_media_api_requires_seek_volume_and_uri_parameters(self):
+        runtime = SimpleNamespace(
+            running=True,
+            request=lambda *_args, **_kwargs: "media-1",
+        )
+        window = SimpleNamespace(_media_runtime=runtime)
+
+        with self.assertRaisesRegex(ValueError, "seconds requis"):
+            MainWindow._api_action(window, "media.seek", {})
+        with self.assertRaisesRegex(ValueError, "percent requis"):
+            MainWindow._api_action(window, "media.set_volume", {})
+        with self.assertRaisesRegex(ValueError, "uri requis"):
+            MainWindow._api_action(window, "media.play_uri", {})
+        with self.assertRaisesRegex(ValueError, "uri requis"):
+            MainWindow._api_action(window, "media.enqueue_uri", {"uri": " "})
 
     def test_media_route_and_async_request_status_match_streamdeck_contract(self):
         calls: list[tuple[str, dict[str, object]]] = []
