@@ -127,3 +127,117 @@ class MediaArtworkStore:
                 "content_type": self._content_type,
                 "identity": self._identity,
             }
+
+
+
+class MediaCommandStore:
+    """Thread-safe bounded lifecycle registry for accepted media commands."""
+
+    _TERMINAL = frozenset({"completed", "failed"})
+
+    def __init__(
+        self,
+        *,
+        max_records: int = 250,
+        max_expired: int = 250,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._max_records = max(1, int(max_records))
+        self._max_expired = max(1, int(max_expired))
+        self._records: dict[str, dict[str, object]] = {}
+        self._expired: dict[str, None] = {}
+
+    def reserve(
+        self,
+        request_id: str,
+        action: str,
+        *,
+        state: dict[str, object] | None = None,
+    ) -> None:
+        key = str(request_id or "")
+        if not key:
+            raise ValueError("request_id média requis")
+        with self._lock:
+            self._compact_locked()
+            if len(self._records) >= self._max_records:
+                raise RuntimeError("Historique des commandes média saturé")
+            self._expired.pop(key, None)
+            self._records[key] = {
+                "request_id": key,
+                "action": str(action or ""),
+                "status": "queued",
+                "success": None,
+                "error": "",
+                "state": dict(state or {}),
+            }
+
+    def mark_running(self, request_id: str) -> None:
+        key = str(request_id or "")
+        with self._lock:
+            row = self._records.get(key)
+            if row is None:
+                return
+            if str(row.get("status") or "") != "queued":
+                return
+            row["status"] = "running"
+
+    def finish(
+        self,
+        request_id: str,
+        *,
+        success: bool,
+        error: str = "",
+        state: dict[str, object] | None = None,
+    ) -> None:
+        key = str(request_id or "")
+        with self._lock:
+            row = self._records.get(key)
+            if row is None:
+                return
+            row["status"] = "completed" if success else "failed"
+            row["success"] = bool(success)
+            row["error"] = str(error or "")
+            row["state"] = dict(state or {})
+            self._compact_locked()
+
+    def get(self, request_id: str) -> dict[str, object] | None:
+        key = str(request_id or "")
+        with self._lock:
+            row = self._records.get(key)
+            if row is not None:
+                result = dict(row)
+                state = row.get("state")
+                result["state"] = (
+                    dict(state) if isinstance(state, dict) else {}
+                )
+                return result
+            if key in self._expired:
+                return {
+                    "request_id": key,
+                    "status": "expired",
+                    "success": False,
+                    "error": "Résultat de commande média expiré",
+                    "state": {},
+                }
+            return None
+
+    def _compact_locked(self) -> None:
+        if len(self._records) < self._max_records:
+            return
+        for key in tuple(self._records):
+            row = self._records.get(key)
+            if row is None:
+                continue
+            if str(row.get("status") or "") not in self._TERMINAL:
+                continue
+            self._records.pop(key, None)
+            self._expired[key] = None
+            while len(self._expired) > self._max_expired:
+                first = next(iter(self._expired))
+                self._expired.pop(first, None)
+            if len(self._records) < self._max_records:
+                return
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._records)
