@@ -352,6 +352,12 @@ class WidgetRuntimeTests(unittest.TestCase):
                 alerts_html,
             )
             self.assertIn(b"queue.push(event)", alerts_html)
+            self.assertIn(b"maxQueuedAlerts = 100", alerts_html)
+            self.assertIn(
+                b"if (queue.length >= maxQueuedAlerts) queue.shift()",
+                alerts_html,
+            )
+            self.assertIn(b"queue.length = 0", alerts_html)
             self.assertNotIn(b"innerHTML", alerts_html)
 
             _status, events_body, _content_type = self._get(
