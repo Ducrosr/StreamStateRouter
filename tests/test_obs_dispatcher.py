@@ -959,6 +959,7 @@ class OBSDispatcherTests(unittest.TestCase):
             profiles_raw={
                 "Combat": {
                     "transition_profile": "Mako",
+                    "shader_set": "CombatShaders",
                     "enter_cue": "Enter",
                 }
             },
@@ -968,6 +969,18 @@ class OBSDispatcherTests(unittest.TestCase):
                     "duration_ms": 450,
                     "settings": {"curve": 0.8},
                     "overlay": True,
+                }
+            },
+            shader_sets_raw={
+                "CombatShaders": {
+                    "filters": [
+                        {
+                            "source": "Global FX",
+                            "filter": "Mako Glow",
+                            "enabled": True,
+                            "settings": {"intensity": 0.6},
+                        }
+                    ]
                 }
             },
             cues_raw={
@@ -1009,6 +1022,8 @@ class OBSDispatcherTests(unittest.TestCase):
                 "SetCurrentSceneTransition",
                 "SetCurrentSceneTransitionDuration",
                 "SetCurrentSceneTransitionSettings",
+                "SetSourceFilterEnabled",
+                "SetSourceFilterSettings",
                 "SetCurrentProgramScene",
                 "TriggerMediaInputAction",
             ],
@@ -1024,7 +1039,7 @@ class OBSDispatcherTests(unittest.TestCase):
                 ),
             },
         )
-        self.assertEqual(result.executed, 5)
+        self.assertEqual(result.executed, 7)
 
     def test_force_reapply_replays_enter_without_exiting_same_presentation(self):
         client = FakeClient()
