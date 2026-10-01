@@ -1393,6 +1393,59 @@ class OBSDispatcherTests(unittest.TestCase):
         )
         self.assertEqual(client.calls, [])
 
+    def test_presentation_plan_describes_exit_from_applied_profile(self):
+        client = FakeClient()
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "A": {"exit_cue": "ExitA"},
+                "B": {
+                    "enter_cue": "EnterB",
+                    "exit_cue": "ExitB",
+                },
+            },
+            cues_raw={
+                "ExitA": {"frames": []},
+                "EnterB": {"frames": []},
+                "ExitB": {"frames": []},
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+        dispatcher._applied_profiles["presentation"] = "A"
+
+        plan = dispatcher.plan_state(
+            StreamState(presentation_profile="B"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+        row = next(
+            item
+            for item in plan["domains"]
+            if item["domain"] == "presentation"
+        )
+        cues = [
+            (item["phase"], item["cue"])
+            for item in row["operations"]
+            if item["type"] == "cue"
+        ]
+
+        self.assertEqual(
+            cues,
+            [("exit", "ExitA"), ("enter", "EnterB")],
+        )
+        self.assertNotIn(
+            ("exit", "ExitB"),
+            cues,
+        )
+        self.assertEqual(client.calls, [])
+
     def test_supported_action_shapes(self):
         client = FakeClient()
         dispatcher = OBSDispatcher(client, {})
