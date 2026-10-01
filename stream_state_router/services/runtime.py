@@ -1184,6 +1184,52 @@ class RoutingService:
             options["name"] = str(profile_name)
         return self.submit_obs_command(f"layout.{action}", options=options)
 
+
+    def request_widget_browser_source(
+        self,
+        *,
+        scene: str,
+        input_name: str,
+        url: str,
+        width: int = 1920,
+        height: int = 1080,
+        fps: int = 30,
+        enabled: bool = True,
+    ) -> str:
+        scene_name = str(scene or "").strip()
+        source_name = str(input_name or "").strip()
+        target_url = str(url or "").strip()
+        if not scene_name:
+            raise ValueError("scene requise")
+        if not source_name:
+            raise ValueError("input_name requis")
+        if not target_url.startswith("http://127.0.0.1:"):
+            raise ValueError(
+                "La Browser Source SSR doit cibler le Widget Runtime localhost"
+            )
+        for label, value, minimum, maximum in (
+            ("width", width, 1, 16384),
+            ("height", height, 1, 16384),
+            ("fps", fps, 1, 120),
+        ):
+            if isinstance(value, bool):
+                raise ValueError(f"{label} invalide")
+            numeric = int(value)
+            if not minimum <= numeric <= maximum:
+                raise ValueError(f"{label} hors plage")
+        return self.submit_obs_command(
+            "widget.browser.ensure",
+            options={
+                "scene": scene_name,
+                "input_name": source_name,
+                "url": target_url,
+                "width": int(width),
+                "height": int(height),
+                "fps": int(fps),
+                "enabled": bool(enabled),
+            },
+        )
+
     def explain_decision(
         self,
         app: ForegroundApp | None = None,
@@ -2867,6 +2913,139 @@ class RoutingService:
                         ),
                     )
                     return
+                elif command.action == "widget.browser.ensure":
+                    scene_name = str(
+                        command.options.get("scene") or ""
+                    ).strip()
+                    input_name = str(
+                        command.options.get("input_name") or ""
+                    ).strip()
+                    url = str(
+                        command.options.get("url") or ""
+                    ).strip()
+                    if not scene_name or not input_name or not url:
+                        raise ValueError(
+                            "scene, input_name et url sont requis"
+                        )
+                    if not url.startswith("http://127.0.0.1:"):
+                        raise ValueError(
+                            "URL Widget Runtime localhost requise"
+                        )
+                    settings = {
+                        "url": url,
+                        "width": int(
+                            command.options.get("width", 1920)
+                        ),
+                        "height": int(
+                            command.options.get("height", 1080)
+                        ),
+                        "fps": int(
+                            command.options.get("fps", 30)
+                        ),
+                        "shutdown": False,
+                        "restart_when_active": False,
+                    }
+                    inputs_response = self.dispatcher.client.send(
+                        "GetInputList",
+                        {"inputKind": "browser_source"},
+                    )
+                    raw_inputs = inputs_response.get("inputs", [])
+                    existing = any(
+                        isinstance(item, Mapping)
+                        and str(item.get("inputName") or "") == input_name
+                        for item in (
+                            raw_inputs
+                            if isinstance(raw_inputs, list)
+                            else []
+                        )
+                    )
+                    created_input = False
+                    created_scene_item = False
+                    if existing:
+                        self.dispatcher.client.send(
+                            "SetInputSettings",
+                            {
+                                "inputName": input_name,
+                                "inputSettings": settings,
+                                "overlay": True,
+                            },
+                        )
+                        scene_response = self.dispatcher.client.send(
+                            "GetSceneItemList",
+                            {"sceneName": scene_name},
+                        )
+                        raw_items = scene_response.get("sceneItems", [])
+                        found_item = None
+                        for item in (
+                            raw_items
+                            if isinstance(raw_items, list)
+                            else []
+                        ):
+                            if (
+                                isinstance(item, Mapping)
+                                and str(
+                                    item.get("sourceName") or ""
+                                ) == input_name
+                            ):
+                                found_item = item
+                                break
+                        if found_item is None:
+                            self.dispatcher.client.send(
+                                "CreateSceneItem",
+                                {
+                                    "sceneName": scene_name,
+                                    "sourceName": input_name,
+                                    "sceneItemEnabled": bool(
+                                        command.options.get(
+                                            "enabled",
+                                            True,
+                                        )
+                                    ),
+                                },
+                            )
+                            created_scene_item = True
+                        elif "sceneItemId" in found_item:
+                            self.dispatcher.client.send(
+                                "SetSceneItemEnabled",
+                                {
+                                    "sceneName": scene_name,
+                                    "sceneItemId": int(
+                                        found_item["sceneItemId"]
+                                    ),
+                                    "sceneItemEnabled": bool(
+                                        command.options.get(
+                                            "enabled",
+                                            True,
+                                        )
+                                    ),
+                                },
+                            )
+                    else:
+                        self.dispatcher.client.send(
+                            "CreateInput",
+                            {
+                                "sceneName": scene_name,
+                                "inputName": input_name,
+                                "inputKind": "browser_source",
+                                "inputSettings": settings,
+                                "sceneItemEnabled": bool(
+                                    command.options.get(
+                                        "enabled",
+                                        True,
+                                    )
+                                ),
+                            },
+                        )
+                        created_input = True
+                        created_scene_item = True
+                    result = {
+                        "scene": scene_name,
+                        "input_name": input_name,
+                        "url": url,
+                        "created_input": created_input,
+                        "created_scene_item": created_scene_item,
+                        "updated_existing": existing,
+                    }
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
