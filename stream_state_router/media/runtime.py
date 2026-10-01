@@ -63,6 +63,8 @@ class MediaRuntime:
             "seek",
             "set_volume",
             "play_uri",
+            "enqueue_uri",
+            "clear_queue",
         }
     )
 
@@ -204,6 +206,12 @@ class MediaRuntime:
                 self.provider.play_uri(
                     str(command.options.get("uri") or "")
                 )
+            elif action == "enqueue_uri":
+                self.provider.enqueue_uri(
+                    str(command.options.get("uri") or "")
+                )
+            elif action == "clear_queue":
+                self.provider.clear_queue()
             else:
                 raise ValueError(
                     f"Action média inconnue : {command.action}"
