@@ -13,6 +13,7 @@ from ..presentation import (
     CueAction,
     CueExecutor,
     PresentationRegistry,
+    PresentationStateStore,
     ResolvedPresentationProfile,
     build_presentation_registry,
 )
@@ -87,6 +88,7 @@ class OBSDispatcher:
         layout_profiles: Mapping[str, Mapping[str, object]] | None = None,
         host_controller: HostControlController | None = None,
         presentation_registry: PresentationRegistry | None = None,
+        presentation_state_store: PresentationStateStore | None = None,
     ):
         self.client = client
         self.host_controller = host_controller
@@ -102,6 +104,11 @@ class OBSDispatcher:
                 profiles_raw={},
                 cues_raw={},
             )
+        )
+        self._presentation_state_store = (
+            presentation_state_store
+            if presentation_state_store is not None
+            else PresentationStateStore()
         )
         self._cue_executor = CueExecutor(
             action_executor=self._execute_cue_action,
@@ -250,6 +257,10 @@ class OBSDispatcher:
         self._last_state = None
         self._desired_state = None
         self._applied_profiles.pop("presentation", None)
+        self._presentation_state_store.clear()
+
+    def presentation_state_store(self) -> PresentationStateStore:
+        return self._presentation_state_store
 
     def reset(self) -> None:
         self._last_state = None
@@ -1553,6 +1564,7 @@ class OBSDispatcher:
                 presentation_name,
             ):
                 skipped += 1
+                self._presentation_state_store.clear()
                 status(
                     "presentation",
                     presentation_name,
@@ -1811,6 +1823,9 @@ class OBSDispatcher:
             else:
                 self._applied_profiles["presentation"] = (
                     presentation_name
+                )
+                self._presentation_state_store.update(
+                    presentation_profile
                 )
                 status(
                     "presentation",
