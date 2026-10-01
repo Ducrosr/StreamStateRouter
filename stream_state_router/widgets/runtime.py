@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from ..events import EventBus
-from ..media import MediaStateStore
+from ..media import MediaArtworkStore, MediaStateStore
 from ..presentation import PresentationStateStore
 from ..services.paths import imported_widgets_dir
 from .packages import WidgetPackage, list_widget_packages
@@ -505,11 +505,22 @@ html, body {
   font-family:Inter,"Segoe UI",sans-serif;
 }
 #radio {
-  width:100%; height:100%; display:flex; flex-direction:column;
-  justify-content:center; gap:6px; padding:12px 16px;
+  width:100%; height:100%; display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  grid-template-rows:auto auto auto auto;
+  align-content:center; column-gap:12px; row-gap:6px; padding:12px 16px;
   background:rgba(8,17,24,var(--ssr-panel-opacity));
   border-left:2px solid var(--ssr-accent);
   box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.18);
+}
+#cover {
+  grid-row:1 / 5;
+  width:72px;
+  height:72px;
+  align-self:center;
+  object-fit:cover;
+  border-radius:6px;
+  display:none;
 }
 #title {
   color:var(--ssr-accent);
@@ -546,6 +557,7 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
 </head>
 <body>
 <div id="radio">
+  <img id="cover" alt="">
   <div id="title">SSR Radio</div>
   <div id="artist">Aucun média</div>
   <div id="progress"><div id="bar"></div></div>
@@ -554,6 +566,7 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
 <script src="/runtime/bridge.js?component=radio"></script>
 <script>
 (() => {
+  const cover = document.getElementById("cover");
   const title = document.getElementById("title");
   const artist = document.getElementById("artist");
   const status = document.getElementById("status");
@@ -564,6 +577,16 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
     if (!state || state.revision === lastRevision) return;
     lastRevision = Number(state.revision) || 0;
     title.textContent = state.title || "SSR Radio";
+    const artwork = String(state.artwork_url || "");
+    if (artwork) {
+      if (cover.getAttribute("src") !== artwork) {
+        cover.setAttribute("src", artwork);
+      }
+      cover.style.display = "block";
+    } else {
+      cover.removeAttribute("src");
+      cover.style.display = "none";
+    }
     artist.textContent =
       [state.artist, state.album].filter(Boolean).join(" · ") ||
       (state.connected ? "Aucun média" : "Lecteur indisponible");
@@ -615,6 +638,7 @@ class WidgetRuntime:
         *,
         event_bus: EventBus | None = None,
         media_state_store: MediaStateStore | None = None,
+        media_artwork_store: MediaArtworkStore | None = None,
         library_root: str | Path | None = None,
     ):
         self.config = config
@@ -623,6 +647,11 @@ class WidgetRuntime:
             media_state_store
             if media_state_store is not None
             else MediaStateStore()
+        )
+        self.media_artwork_store = (
+            media_artwork_store
+            if media_artwork_store is not None
+            else MediaArtworkStore()
         )
         self.event_bus = event_bus if event_bus is not None else EventBus()
         self.library_root = (
@@ -700,7 +729,21 @@ class WidgetRuntime:
         )
 
     def _media_payload(self) -> dict[str, Any]:
-        return self.media_state_store.public_snapshot()
+        payload = self.media_state_store.public_snapshot()
+        artwork = self.media_artwork_store.snapshot()
+        payload["artwork_available"] = bool(
+            artwork.get("available", False)
+        )
+        payload["artwork_revision"] = int(
+            artwork.get("revision", 0) or 0
+        )
+        payload["artwork_url"] = (
+            "/runtime/media/artwork?revision="
+            + str(payload["artwork_revision"])
+            if payload["artwork_available"]
+            else ""
+        )
+        return payload
 
     @staticmethod
     def _inside(root: Path, candidate: Path) -> bool:
@@ -1116,6 +1159,38 @@ iframe{display:block}
                     self._send_json(
                         runtime._media_payload(),
                         head_only=head_only,
+                    )
+                    return
+
+                if path == "/runtime/media/artwork":
+                    artwork = runtime.media_artwork_store.snapshot()
+                    body = artwork.get("content", b"")
+                    content_type = str(
+                        artwork.get("content_type") or ""
+                    )
+                    if (
+                        not bool(artwork.get("available", False))
+                        or not isinstance(body, bytes)
+                        or not body
+                        or content_type
+                        not in {
+                            "image/jpeg",
+                            "image/png",
+                            "image/webp",
+                            "image/gif",
+                        }
+                    ):
+                        self._send_json(
+                            {"error": "artwork_not_available"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    self._send_bytes(
+                        body,
+                        content_type=content_type,
+                        head_only=head_only,
+                        cache="no-cache",
                     )
                     return
 
