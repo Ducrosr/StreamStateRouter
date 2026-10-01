@@ -147,11 +147,21 @@ class HtmlWidgetPackageTests(unittest.TestCase):
             discovered = list_widget_packages(root=target)
 
             self.assertNotIn("source_path", manifest)
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(
+                manifest["published_files"],
+                ["widget.html"],
+            )
+            self.assertEqual(package.published_files, ("widget.html",))
             self.assertEqual(len(discovered), 1)
             self.assertEqual(discovered[0].name, "Chat Loveless")
             self.assertEqual(
                 discovered[0].entry.resolve(),
                 package.entry.resolve(),
+            )
+            self.assertEqual(
+                discovered[0].published_files,
+                ("widget.html",),
             )
 
     def test_entry_cannot_escape_selected_package_root(self) -> None:
