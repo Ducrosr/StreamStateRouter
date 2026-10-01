@@ -464,9 +464,12 @@ def _configured_filter_sources(
 ) -> tuple[str, ...]:
     sources: set[str] = set()
     profiles = config.get("profiles")
-    if not isinstance(profiles, Mapping):
-        return ()
-    for domain_profiles in profiles.values():
+    profile_groups = (
+        profiles.values()
+        if isinstance(profiles, Mapping)
+        else ()
+    )
+    for domain_profiles in profile_groups:
         if not isinstance(domain_profiles, Mapping):
             continue
         for profile in domain_profiles.values():
