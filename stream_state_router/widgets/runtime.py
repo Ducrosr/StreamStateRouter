@@ -160,6 +160,7 @@ _CHAT_HTML = r"""<!doctype html>
 (() => {
   const root = document.getElementById("chat");
   let after = 0;
+  let streamId = "";
   const maxMessages = 80;
 
   const addMessage = (event) => {
@@ -196,11 +197,25 @@ _CHAT_HTML = r"""<!doctype html>
   const refresh = async () => {
     try {
       const response = await fetch(
-        "/runtime/events?channel=chat&after=" + after + "&limit=50",
+        "/runtime/events?channel=chat&after=" + after + "&limit=50" +
+          (streamId ? "&stream_id=" + encodeURIComponent(streamId) : ""),
         { cache: "no-store" }
       );
       if (response.ok) {
         const snapshot = await response.json();
+        const streamChanged = Boolean(
+          streamId && snapshot.stream_id && snapshot.stream_id !== streamId
+        );
+        if (snapshot.stream_id) streamId = snapshot.stream_id;
+        if (streamChanged || snapshot.reset_required) {
+          after = 0;
+          root.replaceChildren();
+        }
+        if (snapshot.gap) {
+          window.dispatchEvent(
+            new CustomEvent("ssreventgap", { detail: snapshot })
+          );
+        }
         for (const event of snapshot.events || []) {
           after = Math.max(after, Number(event.sequence) || 0);
           if (event.type === "message") addMessage(event);
@@ -264,6 +279,7 @@ html[data-ssr-animation-intensity="off"] .event { animation:none; }
 (() => {
   const root = document.getElementById("events");
   let after = 0;
+  let streamId = "";
   const maxRows = 30;
   const render = (event) => {
     const payload = event.payload || {};
@@ -288,11 +304,25 @@ html[data-ssr-animation-intensity="off"] .event { animation:none; }
   const refresh = async () => {
     try {
       const response = await fetch(
-        "/runtime/events?channel=events&after=" + after + "&limit=50",
+        "/runtime/events?channel=events&after=" + after + "&limit=50" +
+          (streamId ? "&stream_id=" + encodeURIComponent(streamId) : ""),
         { cache: "no-store" }
       );
       if (response.ok) {
         const snapshot = await response.json();
+        const streamChanged = Boolean(
+          streamId && snapshot.stream_id && snapshot.stream_id !== streamId
+        );
+        if (snapshot.stream_id) streamId = snapshot.stream_id;
+        if (streamChanged || snapshot.reset_required) {
+          after = 0;
+          root.replaceChildren();
+        }
+        if (snapshot.gap) {
+          window.dispatchEvent(
+            new CustomEvent("ssreventgap", { detail: snapshot })
+          );
+        }
         for (const event of snapshot.events || []) {
           after = Math.max(after, Number(event.sequence) || 0);
           render(event);
@@ -354,6 +384,8 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
 (() => {
   const root = document.getElementById("root");
   let after = 0;
+  let streamId = "";
+  let renderGeneration = 0;
   const queue = [];
   let active = false;
   const showNext = () => {
@@ -374,7 +406,9 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
     box.appendChild(text);
     root.replaceChildren(box);
     const duration = Math.max(1000, Math.min(20000, Number(payload.duration_ms) || 5000));
+    const generation = renderGeneration;
     window.setTimeout(() => {
+      if (generation !== renderGeneration) return;
       root.replaceChildren();
       active = false;
       showNext();
@@ -383,11 +417,28 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
   const refresh = async () => {
     try {
       const response = await fetch(
-        "/runtime/events?channel=alerts&after=" + after + "&limit=20",
+        "/runtime/events?channel=alerts&after=" + after + "&limit=20" +
+          (streamId ? "&stream_id=" + encodeURIComponent(streamId) : ""),
         { cache: "no-store" }
       );
       if (response.ok) {
         const snapshot = await response.json();
+        const streamChanged = Boolean(
+          streamId && snapshot.stream_id && snapshot.stream_id !== streamId
+        );
+        if (snapshot.stream_id) streamId = snapshot.stream_id;
+        if (streamChanged || snapshot.reset_required) {
+          renderGeneration += 1;
+          after = 0;
+          queue.length = 0;
+          active = false;
+          root.replaceChildren();
+        }
+        if (snapshot.gap) {
+          window.dispatchEvent(
+            new CustomEvent("ssreventgap", { detail: snapshot })
+          );
+        }
         for (const event of snapshot.events || []) {
           after = Math.max(after, Number(event.sequence) || 0);
           queue.push(event);
