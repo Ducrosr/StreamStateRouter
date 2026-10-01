@@ -3,12 +3,15 @@ from __future__ import annotations
 import io
 import json
 import unittest
+from urllib.error import HTTPError
+from urllib.parse import parse_qs
 
 from stream_state_router.events import EventBus
 from stream_state_router.platforms import (
     TwitchEventSubMessageProcessor,
     TwitchEventSubSessionCoordinator,
     TwitchHelixClient,
+    TwitchOAuthDeviceClient,
     build_default_subscriptions,
 )
 
@@ -164,6 +167,118 @@ class TwitchSessionTests(unittest.TestCase):
 
         coordinator.connection_lost()
         self.assertFalse(coordinator.keepalive_expired())
+
+    def test_device_code_oauth_start_exchange_pending_and_refresh(self) -> None:
+        requests = []
+        exchange_count = 0
+
+        def opener(request, *, timeout):
+            nonlocal exchange_count
+            requests.append((request, timeout))
+            body = parse_qs(
+                (request.data or b"").decode("utf-8")
+            )
+            if request.full_url.endswith("/oauth2/device"):
+                return _Response(
+                    {
+                        "device_code": "device-secret",
+                        "expires_in": 1800,
+                        "interval": 5,
+                        "user_code": "ABCDEFGH",
+                        "verification_uri": (
+                            "https://www.twitch.tv/activate"
+                        ),
+                    }
+                )
+            if body.get("grant_type") == [
+                "urn:ietf:params:oauth:grant-type:device_code"
+            ]:
+                exchange_count += 1
+                if exchange_count == 1:
+                    payload = json.dumps(
+                        {
+                            "status": 400,
+                            "message": "authorization_pending",
+                        }
+                    ).encode("utf-8")
+                    raise HTTPError(
+                        request.full_url,
+                        400,
+                        "Bad Request",
+                        {},
+                        io.BytesIO(payload),
+                    )
+                return _Response(
+                    {
+                        "access_token": "access-1",
+                        "refresh_token": "refresh-1",
+                        "expires_in": 14400,
+                        "scope": [
+                            "user:read:chat",
+                            "bits:read",
+                        ],
+                        "token_type": "bearer",
+                    }
+                )
+            if body.get("grant_type") == ["refresh_token"]:
+                self.assertEqual(
+                    body.get("refresh_token"),
+                    ["refresh-1"],
+                )
+                self.assertNotIn("client_secret", body)
+                return _Response(
+                    {
+                        "access_token": "access-2",
+                        "refresh_token": "refresh-2",
+                        "expires_in": 14400,
+                        "scope": ["user:read:chat"],
+                        "token_type": "bearer",
+                    }
+                )
+            raise AssertionError(body)
+
+        client = TwitchOAuthDeviceClient(opener=opener)
+        authorization = client.start(
+            client_id="client",
+            scopes=["user:read:chat", "bits:read"],
+        )
+        self.assertEqual(authorization.user_code, "ABCDEFGH")
+        self.assertEqual(
+            authorization.scopes,
+            ("bits:read", "user:read:chat"),
+        )
+
+        pending = client.exchange(
+            client_id="client",
+            device_code=authorization.device_code,
+            scopes=authorization.scopes,
+        )
+        self.assertIsNone(pending)
+
+        tokens = client.exchange(
+            client_id="client",
+            device_code=authorization.device_code,
+            scopes=authorization.scopes,
+        )
+        self.assertIsNotNone(tokens)
+        assert tokens is not None
+        self.assertEqual(tokens.access_token, "access-1")
+        self.assertEqual(tokens.refresh_token, "refresh-1")
+
+        refreshed = client.refresh(
+            client_id="client",
+            refresh_token=tokens.refresh_token,
+        )
+        self.assertEqual(refreshed.access_token, "access-2")
+        self.assertEqual(refreshed.refresh_token, "refresh-2")
+
+        start_body = parse_qs(
+            (requests[0][0].data or b"").decode("utf-8")
+        )
+        self.assertEqual(
+            start_body["scopes"],
+            ["bits:read user:read:chat"],
+        )
 
     def test_helix_validate_and_create_subscription_do_not_persist_token(self) -> None:
         requests = []
