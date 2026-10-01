@@ -28,7 +28,7 @@ class PresentationStateSnapshot:
             if wanted
             else {}
         )
-        return {
+        result: dict[str, Any] = {
             "revision": self.revision,
             "profile": self.profile,
             "lineage": list(self.lineage),
@@ -45,11 +45,13 @@ class PresentationStateSnapshot:
                     "settings": {},
                 }
             ),
-            "components": {
+        }
+        if not wanted:
+            result["components"] = {
                 key: dict(value)
                 for key, value in self.components.items()
-            },
-        }
+            }
+        return result
 
 
 def _component_mapping(
