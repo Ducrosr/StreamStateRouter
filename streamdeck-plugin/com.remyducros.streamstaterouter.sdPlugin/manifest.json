@@ -128,6 +128,70 @@
       "SupportedInMultiActions": true
     },
     {
+      "Name": "Lecture / pause média",
+      "UUID": "com.remyducros.streamstaterouter.media-toggle",
+      "Icon": "imgs/actions/icon",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/key",
+          "TitleAlignment": "bottom",
+          "TitleColor": "#FFFFFF"
+        }
+      ],
+      "SupportedInMultiActions": true
+    },
+    {
+      "Name": "Média suivant",
+      "UUID": "com.remyducros.streamstaterouter.media-next",
+      "Icon": "imgs/actions/icon",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/key",
+          "TitleAlignment": "bottom",
+          "TitleColor": "#FFFFFF"
+        }
+      ],
+      "SupportedInMultiActions": true
+    },
+    {
+      "Name": "Média précédent",
+      "UUID": "com.remyducros.streamstaterouter.media-previous",
+      "Icon": "imgs/actions/icon",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/key",
+          "TitleAlignment": "bottom",
+          "TitleColor": "#FFFFFF"
+        }
+      ],
+      "SupportedInMultiActions": true
+    },
+    {
+      "Name": "Arrêter média",
+      "UUID": "com.remyducros.streamstaterouter.media-stop",
+      "Icon": "imgs/actions/icon",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/key",
+          "TitleAlignment": "bottom",
+          "TitleColor": "#FFFFFF"
+        }
+      ],
+      "SupportedInMultiActions": true
+    },
+    {
       "Name": "Connexion SSR",
       "UUID": "com.remyducros.streamstaterouter.connection",
       "Icon": "imgs/actions/icon",
