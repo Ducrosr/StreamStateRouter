@@ -9995,7 +9995,7 @@ class MainWindow(QMainWindow):
                 options["seconds"] = payload.get("seconds", 0)
             elif media_action == "set_volume":
                 options["percent"] = payload.get("percent", 0)
-            elif media_action == "play_uri":
+            elif media_action in {"play_uri", "enqueue_uri"}:
                 options["uri"] = str(payload.get("uri") or "")
             request_id = runtime.request(media_action, **options)
             return {
