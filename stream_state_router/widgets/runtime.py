@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from ..events import EventBus
+from ..media import MediaStateStore
 from ..presentation import PresentationStateStore
 from ..services.paths import imported_widgets_dir
 from .packages import WidgetPackage, list_widget_packages
@@ -404,6 +405,102 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
 </html>""".strip()
 
 
+_NOW_PLAYING_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="now-playing">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{
+  --ssr-accent:#63e6ff;
+  --ssr-panel-opacity:.84;
+  --ssr-glow:16px;
+  --ssr-font-size:20px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:white;font-family:Inter,"Segoe UI",sans-serif}
+#root{width:100%;height:100%;padding:10px;display:flex;align-items:center;gap:14px;background:rgba(8,17,24,var(--ssr-panel-opacity));border-left:2px solid var(--ssr-accent);box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.2);border-radius:8px}
+#cover{width:min(28vh,96px);height:min(28vh,96px);object-fit:cover;border-radius:6px;display:none}
+#meta{min-width:0;flex:1}
+#title{font-size:var(--ssr-font-size);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#artist,#album{opacity:.78;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#progress{height:4px;background:rgba(255,255,255,.16);margin-top:9px;overflow:hidden;border-radius:999px}
+#bar{height:100%;width:0;background:var(--ssr-accent);transition:width .25s linear}
+#state{font-size:.7em;opacity:.55;margin-top:4px}
+.empty{opacity:.55}
+</style>
+</head>
+<body>
+<div id="root">
+  <img id="cover" alt="">
+  <div id="meta">
+    <div id="title" class="empty">Aucune lecture</div>
+    <div id="artist"></div>
+    <div id="album"></div>
+    <div id="progress"><div id="bar"></div></div>
+    <div id="state"></div>
+  </div>
+</div>
+<script src="/runtime/bridge.js?component=now-playing"></script>
+<script>
+(() => {
+  const title = document.getElementById("title");
+  const artist = document.getElementById("artist");
+  const album = document.getElementById("album");
+  const cover = document.getElementById("cover");
+  const bar = document.getElementById("bar");
+  const state = document.getElementById("state");
+  let media = null;
+  let receivedAt = performance.now();
+
+  const render = () => {
+    const m = media || {};
+    const active = !!m.track_id;
+    title.textContent = active ? (m.title || "Sans titre") : "Aucune lecture";
+    title.className = active ? "" : "empty";
+    artist.textContent = Array.isArray(m.artists) ? m.artists.join(" · ") : "";
+    album.textContent = m.album || "";
+    const duration = Math.max(0, Number(m.duration_seconds) || 0);
+    let position = Math.max(0, Number(m.position_seconds) || 0);
+    if (m.playback === "playing") {
+      position += Math.max(0, performance.now() - receivedAt) / 1000;
+    }
+    position = duration ? Math.min(position, duration) : position;
+    bar.style.width = duration ? ((position / duration) * 100) + "%" : "0%";
+    state.textContent = active
+      ? ((m.playback || "stopped") + (m.player ? " · " + m.player : ""))
+      : "";
+  };
+
+  const refresh = async () => {
+    try {
+      const response = await fetch("/runtime/media", {cache:"no-store"});
+      if (response.ok) {
+        const next = await response.json();
+        const oldKey = media && media.artwork_key;
+        media = next;
+        receivedAt = performance.now();
+        if (next.artwork_key && next.artwork_key !== oldKey) {
+          cover.src = "/runtime/media/artwork?key=" +
+            encodeURIComponent(next.artwork_key) + "&r=" + Number(next.revision || 0);
+          cover.style.display = "block";
+        } else if (!next.artwork_key) {
+          cover.removeAttribute("src");
+          cover.style.display = "none";
+        }
+        render();
+      }
+    } catch (_) {}
+    finally { window.setTimeout(refresh, 1000); }
+  };
+  window.setInterval(render, 250);
+  refresh();
+})();
+</script>
+</body>
+</html>""".strip()
+
+
 class _WidgetServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -418,11 +515,15 @@ class WidgetRuntime:
         state_store: PresentationStateStore,
         *,
         event_bus: EventBus | None = None,
+        media_store: MediaStateStore | None = None,
+        media_artwork=None,
         library_root: str | Path | None = None,
     ):
         self.config = config
         self.state_store = state_store
         self.event_bus = event_bus if event_bus is not None else EventBus()
+        self.media_store = media_store if media_store is not None else MediaStateStore()
+        self.media_artwork = media_artwork
         self.library_root = (
             Path(library_root).expanduser().resolve()
             if library_root is not None
@@ -529,7 +630,7 @@ class WidgetRuntime:
         component_json = json.dumps(wanted, ensure_ascii=False)
         fallback = (
             f"builtin:{wanted}"
-            if wanted in {"chat", "events", "alerts"}
+            if wanted in {"chat", "events", "alerts", "now-playing"}
             else ""
         )
         fallback_json = json.dumps(fallback)
@@ -557,7 +658,7 @@ iframe{display:block}
     const value = String(resource || fallback || "").trim();
     if (value.startsWith("builtin:")) {
       const name = value.slice("builtin:".length);
-      if (["chat","events","alerts"].includes(name)) {
+      if (["chat","events","alerts","now-playing"].includes(name)) {
         return "/builtin/" + encodeURIComponent(name);
       }
       return "";
@@ -772,6 +873,44 @@ iframe{display:block}
                     )
                     return
 
+                if path == "/runtime/media":
+                    self._send_json(
+                        runtime.media_store.snapshot().as_mapping(),
+                        head_only=head_only,
+                    )
+                    return
+
+                if path == "/runtime/media/artwork":
+                    key = str(
+                        parse_qs(parsed.query).get("key", [""])[0]
+                    ).strip()
+                    if not key or not callable(runtime.media_artwork):
+                        self._send_json(
+                            {"error": "artwork_not_found"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    try:
+                        artwork = runtime.media_artwork(key)
+                    except Exception:
+                        artwork = None
+                    if artwork is None:
+                        self._send_json(
+                            {"error": "artwork_not_found"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    body, content_type = artwork
+                    self._send_bytes(
+                        body,
+                        content_type=str(content_type or "image/jpeg"),
+                        head_only=head_only,
+                        cache="private, max-age=60",
+                    )
+                    return
+
                 component_prefix = "/component/"
                 if path.startswith(component_prefix):
                     component = unquote(
@@ -837,6 +976,18 @@ iframe{display:block}
                 if path in {"/builtin/alerts", "/builtin/alerts/"}:
                     self._send_bytes(
                         _ALERTS_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {
+                    "/builtin/now-playing",
+                    "/builtin/now-playing/",
+                }:
+                    self._send_bytes(
+                        _NOW_PLAYING_HTML.encode("utf-8"),
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
