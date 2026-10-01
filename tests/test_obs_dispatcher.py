@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from stream_state_router.obs.dispatcher import OBSDispatcher, profile_map_from_raw
 from stream_state_router.router.engine import StateChange
 from stream_state_router.obs.models import OBSAction
+from stream_state_router.presentation import build_presentation_registry
 from stream_state_router.router.models import ForegroundApp, StreamState
 
 
@@ -816,6 +817,246 @@ class OBSDispatcherTests(unittest.TestCase):
                 for row in properties
             )
         )
+
+    def test_presentation_change_runs_exit_then_state_then_enter(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "A": {
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "GameA"},
+                            }
+                        ]
+                    },
+                    "B": {
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "GameB"},
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "PA": {
+                    "enter_cue": "EnterA",
+                    "exit_cue": "ExitA",
+                },
+                "PB": {
+                    "enter_cue": "EnterB",
+                },
+            },
+            cues_raw={
+                "EnterA": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "EnterA"},
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "ExitA": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "ExitA"},
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "EnterB": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "EnterB"},
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            profiles,
+            presentation_registry=presentation,
+        )
+
+        first = dispatcher.dispatch_state(
+            StreamState(
+                game="A",
+                presentation_profile="PA",
+            )
+        )
+        self.assertIn("presentation", first.changed_domains)
+        self.assertEqual(
+            [
+                payload["sceneName"]
+                for request, payload in client.calls
+                if request == "SetCurrentProgramScene"
+            ],
+            ["GameA", "EnterA"],
+        )
+
+        client.calls.clear()
+        second = dispatcher.dispatch_state(
+            StreamState(
+                game="B",
+                presentation_profile="PB",
+            )
+        )
+
+        self.assertIn("presentation", second.changed_domains)
+        self.assertEqual(
+            [
+                payload["sceneName"]
+                for request, payload in client.calls
+                if request == "SetCurrentProgramScene"
+            ],
+            ["ExitA", "GameB", "EnterB"],
+        )
+        self.assertEqual(
+            dispatcher.applied_profiles()["presentation"],
+            "PB",
+        )
+
+    def test_force_reapply_replays_enter_without_exiting_same_presentation(self):
+        client = FakeClient()
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "Combat": {
+                    "enter_cue": "Enter",
+                    "exit_cue": "Exit",
+                }
+            },
+            cues_raw={
+                "Enter": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "Enter"},
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "Exit": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "Exit"},
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+        state = StreamState(presentation_profile="Combat")
+
+        dispatcher.dispatch_state(state)
+        client.calls.clear()
+        dispatcher.dispatch_state(state, force=True)
+
+        self.assertEqual(
+            [
+                payload["sceneName"]
+                for request, payload in client.calls
+                if request == "SetCurrentProgramScene"
+            ],
+            ["Enter"],
+        )
+
+    def test_presentation_plan_is_classic_only_and_read_only(self):
+        client = FakeClient()
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "Combat": {
+                    "enter_cue": "Enter",
+                    "theme": {"accent": "#00ffff"},
+                }
+            },
+            cues_raw={
+                "Enter": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "source_filter_enabled",
+                                    "params": {
+                                        "source": "Global",
+                                        "filter": "Mako",
+                                        "enabled": True,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+
+        plan = dispatcher.plan_state(
+            StreamState(presentation_profile="Combat"),
+            context={
+                "obs_enabled": True,
+                "streaming": False,
+                "recording": False,
+                "program_scene": "In Game",
+            },
+        )
+
+        row = next(
+            item
+            for item in plan["domains"]
+            if item["domain"] == "presentation"
+        )
+        self.assertEqual(row["status"], "planned")
+        self.assertEqual(row["theme_keys"], ["accent"])
+        self.assertEqual(row["operations"][0]["cue"], "Enter")
+        self.assertTrue(
+            any(
+                item["provenance"] == "presentation:Combat"
+                and "classic-only" in item["reason"]
+                for item in plan["declarative_blocks"]
+            )
+        )
+        self.assertEqual(client.calls, [])
 
     def test_supported_action_shapes(self):
         client = FakeClient()
