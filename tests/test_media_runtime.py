@@ -175,6 +175,7 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(status)
         assert status is not None
         self.assertFalse(status["success"])
+        self.assertEqual(status["status"], "failed")
         self.assertEqual(status["error"], "ambiguous pause")
         pause_calls = [
             row for row in provider.calls if row[0] == "pause"
@@ -208,6 +209,7 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(status)
         assert status is not None
         self.assertTrue(status["success"])
+        self.assertEqual(status["status"], "completed")
         self.assertEqual(status["state"]["playback_state"], "paused")
 
         worker_threads = {
@@ -296,6 +298,7 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(queued_status)
         assert queued_status is not None
         self.assertFalse(queued_status["success"])
+        self.assertEqual(queued_status["status"], "failed")
         self.assertEqual(
             queued_status["error"],
             "Media Runtime en arrêt",
