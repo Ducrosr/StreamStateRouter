@@ -367,6 +367,26 @@ class CatalogRuntimeClient:
         return True, "connected"
 
 
+class BlockingBrowserSourceClient(CatalogRuntimeClient):
+    def __init__(self):
+        super().__init__()
+        self.current_scene_entered = threading.Event()
+        self.release_current_scene = threading.Event()
+
+    def send(self, request, data=None):
+        if request == "GetCurrentProgramScene":
+            self.request_count += 1
+            self.calls.append((request, data))
+            self.current_scene_entered.set()
+            if not self.release_current_scene.wait(2.0):
+                raise RuntimeError("current scene barrier timed out")
+            return {
+                "currentProgramSceneName": self.program_scene,
+                "currentProgramSceneUuid": "idle-uuid",
+            }
+        return super().send(request, data)
+
+
 class DeclarativeExecutorRuntimeClient:
     def __init__(self):
         self.config = SimpleNamespace(enabled=True)
@@ -1163,6 +1183,55 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(payload["sceneItemEnabled"])
         finally:
             self.assertTrue(service.stop())
+
+    def test_widget_browser_source_creation_is_rejected_after_stop_during_scene_discovery(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        client = BlockingBrowserSourceClient()
+        dispatcher = OBSDispatcher(client, {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        stopped = {}
+        try:
+            request_id = service.request_widget_browser_source(
+                input_name="[SSR] Alerts",
+                url="http://127.0.0.1:8766/component/alerts",
+            )
+            self.assertTrue(client.current_scene_entered.wait(1.0))
+
+            def stop_service():
+                stopped["value"] = service.stop(timeout=2.0)
+
+            stopper = threading.Thread(target=stop_service)
+            stopper.start()
+            deadline = time.monotonic() + 1.0
+            while not service._stopping and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(service._stopping)
+
+            client.release_current_scene.set()
+            stopper.join(2.0)
+            self.assertFalse(stopper.is_alive())
+            self.assertTrue(
+                stopped.get("value"),
+                stopped["value"].diagnostic_summary(),
+            )
+
+            result = collector.wait(request_id)
+            self.assertFalse(result.success)
+            self.assertIn("annulée", result.error)
+            self.assertFalse(
+                any(request == "CreateInput" for request, _data in client.calls)
+            )
+        finally:
+            client.release_current_scene.set()
+            service.stop()
 
     def test_widget_browser_source_creation_accepts_explicit_scene(self):
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
