@@ -9950,9 +9950,13 @@ class MainWindow(QMainWindow):
 
     def _restart_media_runtime(self) -> None:
         runtime = self._media_runtime
+        if runtime is not None and not runtime.stop():
+            self._log(
+                "Media Runtime : redémarrage refusé, "
+                "ancien worker encore actif."
+            )
+            return
         self._media_runtime = None
-        if runtime is not None:
-            runtime.stop()
         self._start_media_runtime()
 
     def _stop_media_runtime(self) -> None:
