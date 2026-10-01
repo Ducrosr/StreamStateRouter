@@ -22,6 +22,8 @@ __all__ = [
     "TwitchSessionInstruction",
     "TwitchTokenValidation",
     "TwitchQtEventSubService",
+    "TwitchCredentialBundle",
+    "TwitchCredentialStore",
 ]
 
 from .twitch_session import (
@@ -37,3 +39,8 @@ from .twitch_session import (
 )
 
 from .twitch_qt import TwitchQtEventSubService
+
+from .twitch_credentials import (
+    TwitchCredentialBundle,
+    TwitchCredentialStore,
+)
