@@ -211,7 +211,7 @@ class MediaRuntime:
                 channel="media",
                 type="state_changed",
                 platform=self.provider.name,
-                payload=state.as_mapping(),
+                payload=state.as_public_mapping(),
             )
         self._last_semantic_key = semantic_key
         self._last_state = state
@@ -268,7 +268,7 @@ class MediaRuntime:
                         "request_id": command.request_id,
                         "action": command.action,
                         "success": True,
-                        "state": state.as_mapping(),
+                        "state": state.as_public_mapping(),
                     },
                 )
             return result
