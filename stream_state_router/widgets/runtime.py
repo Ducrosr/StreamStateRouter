@@ -631,26 +631,39 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
     cover.style.display = "none";
   });
 
-  const refresh = async () => {
+  const acceptState = (state) => {
+    lastState = state || null;
+    lastSuccessAt = performance.now();
+    render(lastState, false);
+  };
+
+  window.addEventListener("ssrmediastatechange", (event) => {
+    acceptState((event && event.detail) || {});
+  });
+
+  const watchdog = () => {
+    if (
+      lastState &&
+      lastSuccessAt > 0 &&
+      performance.now() - lastSuccessAt >= 2000
+    ) {
+      render({ ...lastState, stale: true }, true);
+    }
+    window.setTimeout(watchdog, 500);
+  };
+
+  const refreshStandalone = async () => {
+    if (window.parent !== window) return;
     try {
       const response = await fetch("/runtime/media", { cache: "no-store" });
       if (!response.ok) throw new Error("media unavailable");
-      const state = await response.json();
-      lastState = state;
-      lastSuccessAt = performance.now();
-      render(state, false);
-    } catch (_) {
-      if (
-        lastState &&
-        lastSuccessAt > 0 &&
-        performance.now() - lastSuccessAt >= 2000
-      ) {
-        render({ ...lastState, stale: true }, true);
-      }
-    }
-    finally { window.setTimeout(refresh, 500); }
+      acceptState(await response.json());
+    } catch (_) {}
+    finally { window.setTimeout(refreshStandalone, 500); }
   };
-  refresh();
+
+  watchdog();
+  refreshStandalone();
 })();
 </script>
 </body>
