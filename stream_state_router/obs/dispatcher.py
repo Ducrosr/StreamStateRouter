@@ -71,6 +71,18 @@ class DispatchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FilterTargetBinding:
+    collection: str
+    session_generation: int
+    source_name: str
+    source_uuid: str
+    filter_name: str
+    filter_kind: str
+    initial_enabled: bool | None
+    initial_settings: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class LauncherPreparedAction:
     domain: str
     source_rule: str
@@ -1272,6 +1284,233 @@ class OBSDispatcher:
         )
         return bool(key and key in self._launcher_override_keys)
 
+    def _send_for_session(
+        self,
+        request: str,
+        data: dict[str, Any] | None,
+        session_generation: int,
+    ) -> dict[str, Any]:
+        if isinstance(self.client, OBSClientManager):
+            return self.client.send(
+                request,
+                data,
+                expected_session_generation=session_generation,
+            )
+        return self.client.send(request, data)
+
+    def _resolve_source_uuid(
+        self,
+        source_name: str,
+    ) -> tuple[str, int, str]:
+        source = str(source_name or "").strip()
+        if not source:
+            raise ValueError("source requise")
+
+        self._yield_runtime()
+        collection_response = self.client.send("GetSceneCollectionList")
+        collection = str(
+            collection_response.get("currentSceneCollectionName") or ""
+        ).strip()
+        try:
+            session_generation = int(self.client.session_generation)
+        except (AttributeError, TypeError, ValueError):
+            session_generation = 1
+        if session_generation <= 0:
+            session_generation = 1
+
+        candidates: set[str] = set()
+        self._yield_runtime()
+        try:
+            input_response = self._send_for_session(
+                "GetInputSettings",
+                {"inputName": source},
+                session_generation,
+            )
+        except Exception as exc:
+            # A scene/group is not an input. Only swallow a confirmed OBS
+            # request-level absence; transport/session failures remain fatal.
+            from .client import OBSRequestError
+
+            if not isinstance(exc, OBSRequestError):
+                raise
+        else:
+            input_uuid = str(input_response.get("inputUuid") or "").strip()
+            if input_uuid:
+                candidates.add(input_uuid)
+
+        self._yield_runtime()
+        scene_response = self._send_for_session(
+            "GetSceneList",
+            None,
+            session_generation,
+        )
+        scene_names: list[str] = []
+        for row in scene_response.get("scenes", []) or []:
+            if not isinstance(row, Mapping):
+                continue
+            scene_name = str(row.get("sceneName") or "").strip()
+            scene_uuid = str(row.get("sceneUuid") or "").strip()
+            if scene_name:
+                scene_names.append(scene_name)
+            if scene_name == source and scene_uuid:
+                candidates.add(scene_uuid)
+
+        if not candidates:
+            containers: list[tuple[str, str]] = [
+                ("GetSceneItemList", name) for name in scene_names
+            ]
+            self._yield_runtime()
+            try:
+                groups_response = self._send_for_session(
+                    "GetGroupList",
+                    None,
+                    session_generation,
+                )
+            except Exception:
+                groups_response = {}
+            containers.extend(
+                ("GetGroupSceneItemList", str(name).strip())
+                for name in groups_response.get("groups", []) or []
+                if str(name).strip()
+            )
+            for request, container in containers:
+                self._yield_runtime()
+                try:
+                    response = self._send_for_session(
+                        request,
+                        {"sceneName": container},
+                        session_generation,
+                    )
+                except Exception:
+                    continue
+                for row in response.get("sceneItems", []) or []:
+                    if not isinstance(row, Mapping):
+                        continue
+                    if str(row.get("sourceName") or "").strip() != source:
+                        continue
+                    source_uuid = str(row.get("sourceUuid") or "").strip()
+                    if source_uuid:
+                        candidates.add(source_uuid)
+
+        if len(candidates) != 1:
+            if not candidates:
+                raise RuntimeError(
+                    f"Impossible de qualifier l’identité OBS de la source : {source}"
+                )
+            raise RuntimeError(
+                f"Identité OBS ambiguë pour la source {source} : "
+                + ", ".join(sorted(candidates))
+            )
+
+        self._yield_runtime()
+        final_collection = self._send_for_session(
+            "GetSceneCollectionList",
+            None,
+            session_generation,
+        )
+        final_name = str(
+            final_collection.get("currentSceneCollectionName") or ""
+        ).strip()
+        if collection != final_name:
+            raise RuntimeError(
+                "OBS Scene Collection changed while resolving filter target: "
+                f"{collection} -> {final_name}"
+            )
+        return collection, session_generation, next(iter(candidates))
+
+    def _bind_filter_target(
+        self,
+        source_name: str,
+        filter_name: str,
+    ) -> FilterTargetBinding:
+        source = str(source_name or "").strip()
+        filter_value = str(filter_name or "").strip()
+        if not source or not filter_value:
+            raise ValueError("source/filter requis")
+        collection, session_generation, source_uuid = (
+            self._resolve_source_uuid(source)
+        )
+        self._yield_runtime()
+        details = self._send_for_session(
+            "GetSourceFilter",
+            {
+                "sourceUuid": source_uuid,
+                "filterName": filter_value,
+            },
+            session_generation,
+        )
+        settings = details.get("filterSettings") or {}
+        if not isinstance(settings, Mapping):
+            settings = {}
+        binding = FilterTargetBinding(
+            collection=collection,
+            session_generation=session_generation,
+            source_name=source,
+            source_uuid=source_uuid,
+            filter_name=filter_value,
+            filter_kind=str(details.get("filterKind") or "").strip(),
+            initial_enabled=(
+                bool(details.get("filterEnabled"))
+                if "filterEnabled" in details
+                else None
+            ),
+            initial_settings=dict(settings),
+        )
+        self._verify_filter_binding(binding)
+        return binding
+
+    def _verify_filter_binding(
+        self,
+        binding: FilterTargetBinding,
+    ) -> None:
+        self._yield_runtime()
+        current = self._send_for_session(
+            "GetSceneCollectionList",
+            None,
+            binding.session_generation,
+        )
+        current_collection = str(
+            current.get("currentSceneCollectionName") or ""
+        ).strip()
+        if current_collection != binding.collection:
+            raise RuntimeError(
+                "OBS Scene Collection changed during filter operation: "
+                f"{binding.collection} -> {current_collection}"
+            )
+        self._yield_runtime()
+        details = self._send_for_session(
+            "GetSourceFilter",
+            {
+                "sourceUuid": binding.source_uuid,
+                "filterName": binding.filter_name,
+            },
+            binding.session_generation,
+        )
+        current_kind = str(details.get("filterKind") or "").strip()
+        if binding.filter_kind and current_kind != binding.filter_kind:
+            raise RuntimeError(
+                "OBS filter identity changed during operation: "
+                f"{binding.filter_name} ({binding.filter_kind} -> {current_kind})"
+            )
+
+    def _send_filter_write(
+        self,
+        binding: FilterTargetBinding,
+        request: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        self._verify_filter_binding(binding)
+        data = {
+            "sourceUuid": binding.source_uuid,
+            "filterName": binding.filter_name,
+            **dict(payload),
+        }
+        return self._send_for_session(
+            request,
+            data,
+            binding.session_generation,
+        )
+
     def _apply_shader_set(
         self,
         profile: ResolvedPresentationProfile,
@@ -1284,24 +1523,22 @@ class OBSDispatcher:
             raise ValueError(f"ShaderSet introuvable : {name}")
         executed = 0
         for item in shader_set.filters:
-            self._yield_runtime()
+            binding = self._bind_filter_target(
+                item.source,
+                item.filter_name,
+            )
             if item.enabled is not None:
-                self.client.send(
+                self._send_filter_write(
+                    binding,
                     "SetSourceFilterEnabled",
-                    {
-                        "sourceName": item.source,
-                        "filterName": item.filter_name,
-                        "filterEnabled": bool(item.enabled),
-                    },
+                    {"filterEnabled": bool(item.enabled)},
                 )
                 executed += 1
             if item.settings:
-                self._yield_runtime()
-                self.client.send(
+                self._send_filter_write(
+                    binding,
                     "SetSourceFilterSettings",
                     {
-                        "sourceName": item.source,
-                        "filterName": item.filter_name,
                         "filterSettings": dict(item.settings),
                         "overlay": bool(item.overlay),
                     },
@@ -1444,6 +1681,7 @@ class OBSDispatcher:
                 f"animate_filter_settings easing inconnu : {easing}"
             )
         overlay = bool(params.get("overlay", True))
+        binding = self._bind_filter_target(source, filter_name)
         started = time.monotonic()
 
         for step in range(1, steps + 1):
@@ -1471,11 +1709,10 @@ class OBSDispatcher:
                     )
                     for key in start_values
                 }
-            self.client.send(
+            self._send_filter_write(
+                binding,
                 "SetSourceFilterSettings",
                 {
-                    "sourceName": source,
-                    "filterName": filter_name,
                     "filterSettings": settings,
                     "overlay": overlay,
                 },
