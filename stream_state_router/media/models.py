@@ -22,6 +22,8 @@ class MediaState:
     can_seek: bool = False
     can_next: bool = False
     can_previous: bool = False
+    supports_media_control: bool = False
+    supported_commands: tuple[str, ...] = ()
     artwork_key: str = ""
     metadata: Mapping[str, str] = field(default_factory=dict)
 
@@ -51,6 +53,8 @@ class MediaState:
             "can_seek": self.can_seek,
             "can_next": self.can_next,
             "can_previous": self.can_previous,
+            "supports_media_control": self.supports_media_control,
+            "supported_commands": list(self.supported_commands),
             "artwork_key": self.artwork_key,
             "metadata": dict(self.metadata),
         }
