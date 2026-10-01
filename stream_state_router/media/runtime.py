@@ -135,7 +135,9 @@ class MediaRuntime:
                 daemon=True,
             )
             self._thread = thread
-        thread.start()
+            # Start while admission is still locked so a concurrent start()
+            # cannot observe a non-alive placeholder and create a second worker.
+            thread.start()
 
     def stop(self, timeout: float | None = None) -> bool:
         with self._lock:
@@ -301,6 +303,19 @@ class MediaRuntime:
             self.artwork_store.clear()
 
     def poll_once(self) -> MediaState:
+        with self._lock:
+            thread = self._thread
+            if (
+                thread is not None
+                and thread.is_alive()
+                and threading.current_thread() is not thread
+            ):
+                raise RuntimeError(
+                    "L’observation média appartient au worker MediaRuntime"
+                )
+        return self._poll_once()
+
+    def _poll_once(self) -> MediaState:
         try:
             state = self.provider.state()
             if not isinstance(state, MediaState):
@@ -390,7 +405,7 @@ class MediaRuntime:
                 )
             with self._lock:
                 stopping = self._stopping
-            state = None if stopping else self.poll_once()
+            state = None if stopping else self._poll_once()
             with self._lock:
                 stopping_after_poll = self._stopping
             result = MediaCommandResult(
@@ -420,7 +435,7 @@ class MediaRuntime:
             with self._lock:
                 stopping = self._stopping
             if not stopping:
-                self.poll_once()
+                self._poll_once()
             return MediaCommandResult(
                 request_id=command.request_id,
                 action=command.action,
@@ -457,7 +472,7 @@ class MediaRuntime:
                     stopping = self._stopping
                 if stopping:
                     break
-                self.poll_once()
+                self._poll_once()
                 next_poll = self._clock() + self.config.poll_seconds
                 continue
 
