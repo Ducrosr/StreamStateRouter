@@ -105,7 +105,7 @@ def _reference_kind(raw: str) -> tuple[str, str]:
         return ("ignore", "")
     parts = urlsplit(value)
     scheme = parts.scheme.casefold()
-    if scheme in {"http", "https", "ws", "wss"}:
+    if scheme in {"http", "https", "ws", "wss"} or parts.netloc:
         return ("remote", value)
     if scheme in {"data", "blob", "about"}:
         return ("ignore", value)
@@ -181,6 +181,33 @@ def inspect_html_module(
 
     if package_root is not None:
         local_files.update(_walk_package_root(root))
+        inspected = tuple(local_files)
+        for current in inspected:
+            if current.suffix.casefold() not in {
+                ".html",
+                ".htm",
+                ".css",
+            }:
+                continue
+            for raw in _references_for_file(current):
+                kind, value = _reference_kind(raw)
+                if kind == "remote":
+                    remote.add(value)
+                    continue
+                if kind == "unsafe":
+                    unsafe.add(value)
+                    continue
+                if kind != "local":
+                    continue
+                candidate = (current.parent / value).resolve()
+                if (
+                    not _inside(root, candidate)
+                    or candidate.is_symlink()
+                ):
+                    unsafe.add(raw)
+                    continue
+                if not candidate.is_file():
+                    missing.add(raw)
     else:
         pending = [entry_path]
         visited: set[Path] = set()
@@ -200,7 +227,10 @@ def inspect_html_module(
                 if kind != "local":
                     continue
                 candidate = (current.parent / value).resolve()
-                if not _inside(root, candidate):
+                if (
+                    not _inside(root, candidate)
+                    or candidate.is_symlink()
+                ):
                     unsafe.add(raw)
                     continue
                 if not candidate.is_file():
