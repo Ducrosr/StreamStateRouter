@@ -86,3 +86,20 @@ class MediaState:
             "track_id": self.track_id,
             "error": self.error,
         }
+
+    def as_public_mapping(self) -> dict[str, object]:
+        """Browser/event-safe projection without local paths or backend errors."""
+
+        return {
+            "provider": self.provider,
+            "connected": self.connected,
+            "playback_state": self.playback_state,
+            "playing": self.playing,
+            "title": self.title,
+            "artist": self.artist,
+            "album": self.album,
+            "duration_seconds": self.duration_seconds,
+            "position_seconds": self.position_seconds,
+            "volume_percent": self.volume_percent,
+            "track_id": self.track_id,
+        }
