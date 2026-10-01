@@ -6,6 +6,7 @@ import unittest
 
 from stream_state_router.events import EventBus
 from stream_state_router.media import (
+    MediaArtworkStore,
     MediaRuntime,
     MediaRuntimeConfig,
     MediaState,
@@ -22,6 +23,9 @@ class FakeProvider:
         self.volume = 100.0
         self.fail_state = False
         self.fail_pause = False
+        self.fail_artwork = False
+        self.track_id = "track-1"
+        self.artwork_calls = 0
         self.calls: list[tuple[str, object, int]] = []
 
     def _record(self, action: str, value=None) -> None:
@@ -43,8 +47,15 @@ class FakeProvider:
             duration_seconds=180,
             position_seconds=self.position,
             volume_percent=self.volume,
-            track_id="track-1",
+            track_id=self.track_id,
         )
+
+    def artwork(self) -> tuple[bytes, str]:
+        self._record("artwork")
+        self.artwork_calls += 1
+        if self.fail_artwork:
+            raise RuntimeError("artwork unavailable")
+        return b"jpeg-cover", "image/jpeg"
 
     def play(self) -> None:
         self._record("play")
@@ -186,6 +197,48 @@ class MediaRuntimeTests(unittest.TestCase):
             [event.type for event in bus.events("media")],
             ["state_changed", "state_changed"],
         )
+
+    def test_artwork_is_loaded_once_per_track_identity(self) -> None:
+        provider = FakeProvider()
+        artwork_store = MediaArtworkStore()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=False),
+            provider,
+            artwork_store=artwork_store,
+        )
+
+        runtime.poll_once()
+        provider.position = 10
+        runtime.poll_once()
+
+        first = artwork_store.snapshot()
+        self.assertTrue(first["available"])
+        self.assertEqual(first["content"], b"jpeg-cover")
+        self.assertEqual(first["content_type"], "image/jpeg")
+        self.assertEqual(provider.artwork_calls, 1)
+
+        provider.track_id = "track-2"
+        runtime.poll_once()
+        second = artwork_store.snapshot()
+        self.assertGreater(second["revision"], first["revision"])
+        self.assertEqual(provider.artwork_calls, 2)
+
+    def test_artwork_failure_does_not_disconnect_media_state(self) -> None:
+        provider = FakeProvider()
+        provider.fail_artwork = True
+        artwork_store = MediaArtworkStore()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=False),
+            provider,
+            artwork_store=artwork_store,
+        )
+
+        state = runtime.poll_once()
+
+        self.assertTrue(state.connected)
+        self.assertEqual(state.error, "")
+        self.assertFalse(artwork_store.snapshot()["available"])
+        self.assertEqual(provider.artwork_calls, 1)
 
     def test_failed_command_is_not_retried_automatically(self) -> None:
         provider = FakeProvider()
