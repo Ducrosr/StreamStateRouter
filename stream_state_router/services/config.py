@@ -1765,10 +1765,11 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 isinstance(timeout, bool)
                 or not isinstance(timeout, (int, float))
                 or not math.isfinite(float(timeout))
-                or float(timeout) <= 0
+                or not 0.1 <= float(timeout) <= 10.0
             ):
                 errors.append(
-                    "media.vlc.timeout_seconds doit être un nombre fini > 0"
+                    "media.vlc.timeout_seconds doit être compris entre "
+                    "0.1 et 10"
                 )
             password = vlc.get("password", "")
             if not isinstance(password, str):
