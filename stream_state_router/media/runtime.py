@@ -102,7 +102,7 @@ class MediaRuntime:
         self._stopping = False
         self._last_semantic_key: tuple[object, ...] | None = None
         self._last_state: MediaState | None = None
-        self._last_artwork_identity: tuple[str, ...] | None = None
+        self._last_artwork_identity: str | None = None
         self._next_artwork_retry_at = 0.0
 
     @property
