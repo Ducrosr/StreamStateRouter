@@ -268,6 +268,27 @@ class ConfigTests(unittest.TestCase):
             errors,
         )
 
+    def test_media_vlc_timeout_is_bounded(self):
+        data = self.sample()
+        data["media"] = {
+            "enabled": False,
+            "provider": "vlc",
+            "poll_seconds": 0.5,
+            "vlc": {
+                "host": "127.0.0.1",
+                "port": 8080,
+                "password": "",
+                "timeout_seconds": 10.01,
+            },
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("media.vlc.timeout_seconds" in item for item in errors),
+            errors,
+        )
+
     def test_shareable_export_redacts_vlc_password(self):
         data = self.sample()
         data["media"] = {
