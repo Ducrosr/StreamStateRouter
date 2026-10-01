@@ -333,7 +333,7 @@ class PresentationRegistry:
     cues: Mapping[str, Cue]
     transitions: Mapping[str, TransitionProfile]
     shader_sets: Mapping[str, ShaderSet]
-    sound_sets: Mapping[str, SoundSet]
+    sound_sets: Mapping[str, SoundSet] = field(default_factory=dict)
 
     def profile(self, name: str) -> ResolvedPresentationProfile | None:
         if str(name) not in self.profiles:
