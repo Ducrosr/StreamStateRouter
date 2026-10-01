@@ -1015,8 +1015,6 @@ class OBSDispatcherTests(unittest.TestCase):
                 "SetCurrentSceneTransition",
                 "SetCurrentSceneTransitionDuration",
                 "SetCurrentSceneTransitionSettings",
-                "SetSourceFilterEnabled",
-                "SetSourceFilterSettings",
                 "SetCurrentProgramScene",
                 "TriggerMediaInputAction",
             ],
@@ -1032,7 +1030,11 @@ class OBSDispatcherTests(unittest.TestCase):
                 ),
             },
         )
-        self.assertEqual(result.executed, 7)
+        self.assertEqual(result.executed, 5)
+        self.assertTrue(
+            any("ShaderSet conservé" in warning for warning in result.warnings),
+            result.warnings,
+        )
 
     def test_presentation_switch_plays_exit_then_enter_sound_sets(self):
         client = FakeClient()
@@ -1086,7 +1088,7 @@ class OBSDispatcherTests(unittest.TestCase):
         )
         self.assertEqual(result.executed, 2)
 
-    def test_shader_animation_cue_reaches_exact_final_settings(self):
+    def test_shader_animation_cue_is_fenced_from_direct_filter_write(self):
         client = FakeClient()
         presentation = build_presentation_registry(
             profiles_raw={
@@ -1139,12 +1141,13 @@ class OBSDispatcherTests(unittest.TestCase):
             for request, payload in client.calls
             if request == "SetSourceFilterSettings"
         ]
-        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes, [])
+        self.assertEqual(result.executed, 0)
+        self.assertTrue(result.warnings)
         self.assertEqual(
-            writes[0]["filterSettings"],
-            {"intensity": 0.9, "speed": 1.0},
+            dispatcher.presentation_execution_status()["status"],
+            "uncertain",
         )
-        self.assertEqual(result.executed, 1)
 
     def test_partial_cue_failure_does_not_replay_one_shot_effect(self):
         client = FakeClient()
