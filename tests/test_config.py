@@ -673,6 +673,67 @@ class ConfigTests(unittest.TestCase):
             errors,
         )
 
+    def test_cue_validation_rejects_unbounded_wait_budget(self):
+        data = self.sample()
+        data["cues"] = {
+            "TooLong": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "wait_ms",
+                                "params": {"duration_ms": 10000},
+                            }
+                            for _ in range(7)
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("budget total de 60000 ms" in error for error in errors),
+            errors,
+        )
+
+    def test_cue_validation_rejects_multi_step_obs_filter_animation(self):
+        data = self.sample()
+        data["cues"] = {
+            "UnsafeAnimation": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "animate_filter_settings",
+                                "params": {
+                                    "source": "Camera",
+                                    "filter": "Pulse",
+                                    "from_settings": {"opacity": 0.0},
+                                    "to_settings": {"opacity": 1.0},
+                                    "duration_ms": 300,
+                                    "steps": 12,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(
+                "animations OBS multi-étapes sont désactivées" in error
+                for error in errors
+            ),
+            errors,
+        )
+
     def test_schema_v5_adds_host_control_defaults(self):
         data = self.sample()
         data["schema_version"] = 5
