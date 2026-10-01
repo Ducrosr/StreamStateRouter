@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from ..activation.models import TriggerPolicyConfig
 from ..host import HostControlConfig, HostControlController
+from ..media import MediaRuntimeConfig, VLCConfig
 from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
@@ -496,6 +497,12 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
     host = result.get("host_control")
     if isinstance(host, dict):
         host["soundvolumeview_path"] = ""
+
+    media = result.get("media")
+    if isinstance(media, dict):
+        vlc = media.get("vlc")
+        if isinstance(vlc, dict):
+            vlc["password"] = ""
 
     def redact_obs_action(action: object) -> None:
         if not isinstance(action, dict):
@@ -1707,6 +1714,66 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 "widget_runtime.port doit être différent de api.port"
             )
 
+    media = data.get("media", {})
+    if not isinstance(media, Mapping):
+        errors.append("media doit être un objet")
+    else:
+        if (
+            "enabled" in media
+            and not isinstance(media.get("enabled"), bool)
+        ):
+            errors.append("media.enabled doit être booléen")
+        provider = str(media.get("provider") or "vlc").strip().casefold()
+        if provider not in {"vlc"}:
+            errors.append(f"media.provider inconnu : {provider}")
+        poll_seconds = media.get("poll_seconds", 0.5)
+        if (
+            isinstance(poll_seconds, bool)
+            or not isinstance(poll_seconds, (int, float))
+            or not math.isfinite(float(poll_seconds))
+            or not 0.1 <= float(poll_seconds) <= 30.0
+        ):
+            errors.append(
+                "media.poll_seconds doit être compris entre 0.1 et 30"
+            )
+        vlc = media.get("vlc", {})
+        if not isinstance(vlc, Mapping):
+            errors.append("media.vlc doit être un objet")
+        else:
+            vlc_host = str(
+                vlc.get("host") or "127.0.0.1"
+            ).strip().casefold()
+            if vlc_host not in {"127.0.0.1", "localhost", "::1"}:
+                errors.append(
+                    "media.vlc.host doit rester local "
+                    "(127.0.0.1, localhost ou ::1)"
+                )
+            if not _valid_int(
+                vlc.get("port", 8080),
+                minimum=1,
+                maximum=65535,
+            ):
+                errors.append(
+                    "media.vlc.port doit être compris entre 1 et 65535"
+                )
+            timeout = vlc.get("timeout_seconds", 2.0)
+            if (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float))
+                or not math.isfinite(float(timeout))
+                or float(timeout) <= 0
+            ):
+                errors.append(
+                    "media.vlc.timeout_seconds doit être un nombre fini > 0"
+                )
+            password = vlc.get("password", "")
+            if not isinstance(password, str):
+                errors.append("media.vlc.password doit être une chaîne")
+            elif bool(media.get("enabled", False)) and not password:
+                errors.append(
+                    "media.vlc.password est requis quand media est activé"
+                )
+
     host_control = data.get("host_control", {})
     if not isinstance(host_control, Mapping):
         errors.append("host_control doit être un objet")
@@ -2000,6 +2067,34 @@ def build_host_controller(data: Mapping[str, Any]) -> HostControlController:
             soundvolumeview_path=str(host.get("soundvolumeview_path") or ""),
             audio_timeout_seconds=max(0.1, timeout),
         )
+    )
+
+
+def build_media_runtime_config(
+    data: Mapping[str, Any],
+) -> MediaRuntimeConfig:
+    raw = data.get("media", {})
+    values = raw if isinstance(raw, Mapping) else {}
+    return MediaRuntimeConfig(
+        enabled=bool(values.get("enabled", False)),
+        poll_seconds=float(values.get("poll_seconds", 0.5) or 0.5),
+    )
+
+
+def build_vlc_config(
+    data: Mapping[str, Any],
+) -> VLCConfig:
+    raw_media = data.get("media", {})
+    media = raw_media if isinstance(raw_media, Mapping) else {}
+    raw_vlc = media.get("vlc", {})
+    vlc = raw_vlc if isinstance(raw_vlc, Mapping) else {}
+    return VLCConfig(
+        host=str(vlc.get("host") or "127.0.0.1"),
+        port=int(vlc.get("port", 8080) or 8080),
+        password=str(vlc.get("password") or ""),
+        timeout_seconds=float(
+            vlc.get("timeout_seconds", 2.0) or 2.0
+        ),
     )
 
 
