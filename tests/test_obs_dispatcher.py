@@ -1041,6 +1041,66 @@ class OBSDispatcherTests(unittest.TestCase):
         )
         self.assertEqual(result.executed, 7)
 
+    def test_shader_animation_cue_reaches_exact_final_settings(self):
+        client = FakeClient()
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "Pulse": {
+                    "enter_cue": "PulseIn",
+                }
+            },
+            cues_raw={
+                "PulseIn": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "animate_filter_settings",
+                                    "params": {
+                                        "source": "Global FX",
+                                        "filter": "Mako Glow",
+                                        "from_settings": {
+                                            "intensity": 0.2,
+                                            "speed": 0.5,
+                                        },
+                                        "to_settings": {
+                                            "intensity": 0.9,
+                                            "speed": 1.0,
+                                        },
+                                        "duration_ms": 0,
+                                        "steps": 12,
+                                        "easing": "ease_in_out",
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+
+        result = dispatcher.dispatch_state(
+            StreamState(presentation_profile="Pulse")
+        )
+
+        writes = [
+            payload
+            for request, payload in client.calls
+            if request == "SetSourceFilterSettings"
+        ]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(
+            writes[0]["filterSettings"],
+            {"intensity": 0.9, "speed": 1.0},
+        )
+        self.assertEqual(result.executed, 1)
+
     def test_force_reapply_replays_enter_without_exiting_same_presentation(self):
         client = FakeClient()
         presentation = build_presentation_registry(
