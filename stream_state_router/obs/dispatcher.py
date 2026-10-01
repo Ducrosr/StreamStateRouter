@@ -721,6 +721,42 @@ class OBSDispatcher:
                             ),
                         }
                     )
+                if applied and applied != desired:
+                    try:
+                        previous_profile_for_sound = (
+                            self._presentation_registry.profile(applied)
+                        )
+                    except Exception:
+                        previous_profile_for_sound = None
+                    if (
+                        previous_profile_for_sound is not None
+                        and previous_profile_for_sound.sound_set
+                    ):
+                        previous_sound_set = (
+                            self._presentation_registry.sound_set(
+                                previous_profile_for_sound.sound_set
+                            )
+                        )
+                        operations.append(
+                            {
+                                "type": "sound_set",
+                                "phase": "exit",
+                                "profile": (
+                                    previous_profile_for_sound.sound_set
+                                ),
+                                "triggers": [
+                                    {
+                                        "input": trigger.input_name,
+                                        "action": trigger.action,
+                                    }
+                                    for trigger in (
+                                        previous_sound_set.exit
+                                        if previous_sound_set is not None
+                                        else ()
+                                    )
+                                ],
+                            }
+                        )
                 if profile.sound_set:
                     sound_set = self._presentation_registry.sound_set(
                         profile.sound_set
@@ -728,17 +764,19 @@ class OBSDispatcher:
                     operations.append(
                         {
                             "type": "sound_set",
+                            "phase": "enter",
                             "profile": profile.sound_set,
-                            "enter": (
-                                len(sound_set.enter)
-                                if sound_set is not None
-                                else 0
-                            ),
-                            "exit": (
-                                len(sound_set.exit)
-                                if sound_set is not None
-                                else 0
-                            ),
+                            "triggers": [
+                                {
+                                    "input": trigger.input_name,
+                                    "action": trigger.action,
+                                }
+                                for trigger in (
+                                    sound_set.enter
+                                    if sound_set is not None
+                                    else ()
+                                )
+                            ],
                         }
                     )
                 cue_operations: list[tuple[str, str]] = []
