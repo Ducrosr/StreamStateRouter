@@ -235,5 +235,13 @@
     "host": "127.0.0.1",
     "port": 8766
   },
-  "sound_sets": {}
+  "sound_sets": {},
+  "platforms": {
+    "twitch": {
+      "enabled": false,
+      "client_id": "",
+      "broadcaster_user_id": "",
+      "moderator_user_id": ""
+    }
+  }
 }
