@@ -261,6 +261,46 @@ class VLCProviderTests(unittest.TestCase):
             provider.play_uri("")
         with self.assertRaises(ValueError):
             provider.enqueue_uri("")
+        for value in (
+            "ftp://example.test/music.flac",
+            "rtsp://example.test/live",
+            r"\\server\share\music.flac",
+            "relative-track.flac",
+            "file://server/share/music.flac",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "non autorisée",
+                ):
+                    provider.play_uri(value)
+
+    def test_media_uri_accepts_local_file_and_http_sources(self) -> None:
+        transport = FakeTransport({})
+        provider = VLCProvider(VLCConfig(), transport=transport)
+
+        provider.play_uri("file:///C:/Music/Local.flac")
+        provider.enqueue_uri("https://radio.example.test/live")
+
+        self.assertEqual(
+            transport.calls,
+            [
+                (
+                    "/requests/status.json",
+                    {
+                        "command": "in_play",
+                        "input": "file:///C:/Music/Local.flac",
+                    },
+                ),
+                (
+                    "/requests/status.json",
+                    {
+                        "command": "in_enqueue",
+                        "input": "https://radio.example.test/live",
+                    },
+                ),
+            ],
+        )
 
 
 if __name__ == "__main__":
