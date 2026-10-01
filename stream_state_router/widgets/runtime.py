@@ -522,6 +522,9 @@ html, body {
   border-radius:6px;
   display:none;
 }
+#title, #artist, #progress, #status {
+  grid-column:2;
+}
 #title {
   color:var(--ssr-accent);
   font-size:var(--ssr-font-size);
@@ -571,14 +574,30 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
   const artist = document.getElementById("artist");
   const status = document.getElementById("status");
   const bar = document.getElementById("bar");
-  let lastRevision = -1;
+  let lastRenderKey = "";
+  let lastState = null;
+  let lastSuccessAt = 0;
 
-  const render = (state) => {
-    if (!state || state.revision === lastRevision) return;
-    lastRevision = Number(state.revision) || 0;
+  const render = (state, runtimeUnavailable = false) => {
+    if (!state) return;
+    const renderKey = JSON.stringify([
+      Number(state.revision) || 0,
+      Number(state.artwork_revision) || 0,
+      Boolean(state.stale),
+      Boolean(runtimeUnavailable),
+      Boolean(state.connected),
+      String(state.playback_state || "unknown"),
+      String(state.title || ""),
+      String(state.artist || ""),
+      String(state.album || ""),
+      Number(state.position_seconds) || 0,
+      Number(state.duration_seconds) || 0,
+    ]);
+    if (renderKey === lastRenderKey) return;
+    lastRenderKey = renderKey;
     title.textContent = state.title || "SSR Radio";
     const artwork = String(state.artwork_url || "");
-    if (artwork) {
+    if (artwork && !runtimeUnavailable) {
       if (cover.getAttribute("src") !== artwork) {
         cover.setAttribute("src", artwork);
       }
@@ -592,7 +611,7 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
       (state.connected ? "Aucun média" : "Lecteur indisponible");
     const duration = Math.max(0, Number(state.duration_seconds) || 0);
     const position = Math.max(0, Number(state.position_seconds) || 0);
-    const percent = duration > 0
+    const percent = duration > 0 && !state.stale && !runtimeUnavailable
       ? Math.max(0, Math.min(100, position * 100 / duration))
       : 0;
     bar.style.width = percent + "%";
@@ -600,17 +619,35 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
     const provider = String(state.provider || "media").toUpperCase();
     status.textContent =
       provider + " · " +
-      (state.stale ? "État obsolète" :
+      (runtimeUnavailable ? "SSR indisponible" :
+       state.stale ? "État obsolète" :
        playback === "playing" ? "Lecture" :
        playback === "paused" ? "Pause" :
        playback === "stopped" ? "Arrêt" : "Indisponible");
   };
 
+  cover.addEventListener("error", () => {
+    cover.removeAttribute("src");
+    cover.style.display = "none";
+  });
+
   const refresh = async () => {
     try {
       const response = await fetch("/runtime/media", { cache: "no-store" });
-      if (response.ok) render(await response.json());
-    } catch (_) {}
+      if (!response.ok) throw new Error("media unavailable");
+      const state = await response.json();
+      lastState = state;
+      lastSuccessAt = performance.now();
+      render(state, false);
+    } catch (_) {
+      if (
+        lastState &&
+        lastSuccessAt > 0 &&
+        performance.now() - lastSuccessAt >= 2000
+      ) {
+        render({ ...lastState, stale: true }, true);
+      }
+    }
     finally { window.setTimeout(refresh, 500); }
   };
   refresh();
