@@ -342,6 +342,7 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
             },
         )
         migrated.setdefault("cues", {})
+        migrated.setdefault("transition_profiles", {})
         version = 7
 
     migrated["schema_version"] = version
@@ -1053,6 +1054,48 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         errors.append("cues doit être un objet")
         cues = {}
 
+    transition_profiles = data.get(
+        "transition_profiles",
+        {},
+    )
+    if not isinstance(transition_profiles, Mapping):
+        errors.append("transition_profiles doit être un objet")
+        transition_profiles = {}
+    for transition_name, transition in transition_profiles.items():
+        prefix = f"transition_profiles.{transition_name}"
+        if (
+            not str(transition_name).strip()
+            or not isinstance(transition, Mapping)
+        ):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        target = str(
+            transition.get("transition_name")
+            or transition.get("transition")
+            or ""
+        ).strip()
+        if not target:
+            errors.append(f"{prefix}.transition_name est requis")
+        duration = transition.get("duration_ms")
+        if duration not in (None, "") and not _valid_int(
+            duration,
+            minimum=50,
+            maximum=20000,
+        ):
+            errors.append(
+                f"{prefix}.duration_ms doit être compris entre 50 et 20000"
+            )
+        if (
+            "settings" in transition
+            and not isinstance(transition.get("settings"), Mapping)
+        ):
+            errors.append(f"{prefix}.settings doit être un objet")
+        if (
+            "overlay" in transition
+            and not isinstance(transition.get("overlay"), bool)
+        ):
+            errors.append(f"{prefix}.overlay doit être booléen")
+
     for cue_name, cue in cues.items():
         prefix = f"cues.{cue_name}"
         if not str(cue_name).strip() or not isinstance(cue, Mapping):
@@ -1266,6 +1309,18 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     f"{prefix}.{cue_key} référence un cue inexistant : "
                     f"{cue_name}"
                 )
+
+        transition_name = str(
+            profile.get("transition_profile") or ""
+        ).strip()
+        if (
+            transition_name
+            and transition_name not in transition_profiles
+        ):
+            errors.append(
+                f"{prefix}.transition_profile référence un preset "
+                f"inexistant : {transition_name}"
+            )
 
     host_control = data.get("host_control", {})
     if not isinstance(host_control, Mapping):
@@ -1594,9 +1649,15 @@ def build_layout_profiles(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 def build_presentation_profiles(data: Mapping[str, Any]) -> PresentationRegistry:
     profiles_raw = data.get("presentation_profiles", {})
     cues_raw = data.get("cues", {})
+    transitions_raw = data.get("transition_profiles", {})
     return parse_presentation_registry(
         profiles_raw=(
             profiles_raw if isinstance(profiles_raw, Mapping) else {}
         ),
         cues_raw=cues_raw if isinstance(cues_raw, Mapping) else {},
+        transitions_raw=(
+            transitions_raw
+            if isinstance(transitions_raw, Mapping)
+            else {}
+        ),
     )
