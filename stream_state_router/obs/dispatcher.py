@@ -9,6 +9,13 @@ import time
 from typing import Any, Mapping, Sequence
 
 from ..host import HostControlController
+from ..presentation import (
+    CueAction,
+    CueExecutor,
+    PresentationRegistry,
+    ResolvedPresentationProfile,
+    build_presentation_registry,
+)
 from ..planning import (
     DesiredAssignment,
     DesiredOwnershipConflict,
@@ -26,7 +33,7 @@ from .models import OBSAction, OBSProfile
 
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
-STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
+STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout", "presentation")
 _TEMPLATE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -79,6 +86,7 @@ class OBSDispatcher:
         profiles: Mapping[str, Mapping[str, OBSProfile]] | None = None,
         layout_profiles: Mapping[str, Mapping[str, object]] | None = None,
         host_controller: HostControlController | None = None,
+        presentation_registry: PresentationRegistry | None = None,
     ):
         self.client = client
         self.host_controller = host_controller
@@ -87,6 +95,17 @@ class OBSDispatcher:
             str(name): dict(value) for name, value in (layout_profiles or {}).items()
         }
         self._layout_manager = OBSLayoutManager(client)
+        self._presentation_registry = (
+            presentation_registry
+            if presentation_registry is not None
+            else build_presentation_registry(
+                profiles_raw={},
+                cues_raw={},
+            )
+        )
+        self._cue_executor = CueExecutor(
+            action_executor=self._execute_cue_action,
+        )
         self._last_state: StreamState | None = None
         self._desired_state: StreamState | None = None
         self._applied_profiles: dict[str, str] = {}
@@ -191,6 +210,10 @@ class OBSDispatcher:
         """Install the runtime shutdown checkpoint for long OBS batches."""
         self._cooperative_yield = callback
         self._layout_manager.set_cooperative_yield(callback)
+        self._cue_executor = CueExecutor(
+            action_executor=self._execute_cue_action,
+            cooperative_yield=callback,
+        )
 
     def _yield_runtime(self) -> None:
         callback = self._cooperative_yield
@@ -218,6 +241,15 @@ class OBSDispatcher:
         self._manual_layout_hold_active = False
         self._manual_layout_routing_baseline = ""
         self._context_cache = None
+
+    def configure_presentation(
+        self,
+        registry: PresentationRegistry,
+    ) -> None:
+        self._presentation_registry = registry
+        self._last_state = None
+        self._desired_state = None
+        self._applied_profiles.pop("presentation", None)
 
     def reset(self) -> None:
         self._last_state = None
@@ -275,6 +307,8 @@ class OBSDispatcher:
             return False
         if domain == "layout":
             return not self._layout_profiles
+        if domain == "presentation":
+            return not self._presentation_registry.profiles
         if domain in ACTION_PROFILE_DOMAINS:
             return not self._profiles.get(domain, {})
         return False
@@ -570,6 +604,87 @@ class OBSDispatcher:
                 "status": "held" if held else ("noop" if applied == desired else "planned"),
                 "operations": [],
             }
+
+            if domain == "presentation":
+                try:
+                    profile = self._presentation_registry.profile(desired)
+                except Exception as exc:
+                    row.update(status="failed", message=str(exc))
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": (
+                                "Résolution PresentationProfile impossible : "
+                                f"{exc}"
+                            ),
+                        }
+                    )
+                    domains.append(row)
+                    continue
+                if profile is None:
+                    if self._is_unmanaged_default(domain, desired):
+                        row.update(
+                            status="unmanaged",
+                            message=(
+                                "Aucun PresentationProfile configuré "
+                                "pour ce domaine"
+                            ),
+                        )
+                    else:
+                        row.update(
+                            status="missing",
+                            message="PresentationProfile introuvable",
+                        )
+                        declarative_blocks.append(
+                            {
+                                "provenance": f"{domain}:{desired}",
+                                "reason": "PresentationProfile introuvable",
+                            }
+                        )
+                    domains.append(row)
+                    continue
+                operations: list[dict[str, object]] = []
+                for cue_kind, cue_name in (
+                    ("exit", profile.exit_cue),
+                    ("enter", profile.enter_cue),
+                ):
+                    if not cue_name:
+                        continue
+                    cue = self._presentation_registry.cue(cue_name)
+                    operations.append(
+                        {
+                            "type": "cue",
+                            "phase": cue_kind,
+                            "cue": cue_name,
+                            "duration_ms": (
+                                cue.duration_ms if cue is not None else 0
+                            ),
+                            "actions": (
+                                cue.action_count if cue is not None else 0
+                            ),
+                        }
+                    )
+                row["operations"] = operations
+                row["extends"] = (
+                    " ← ".join(profile.lineage[:-1])
+                    if len(profile.lineage) > 1
+                    else ""
+                )
+                row["theme_keys"] = sorted(
+                    str(key) for key in profile.theme
+                )
+                if operations:
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": (
+                                "PresentationProfile avec Cue/Timeline : "
+                                "exécution classic-only sérialisée"
+                            ),
+                        }
+                    )
+                domains.append(row)
+                continue
 
             if domain == "layout":
                 if held:
@@ -1062,6 +1177,49 @@ class OBSDispatcher:
             rendered_params,
         )
         return bool(key and key in self._launcher_override_keys)
+
+    def _execute_cue_action(
+        self,
+        action: CueAction,
+        variables: Mapping[str, str] | None,
+    ) -> None:
+        self.execute_action(
+            OBSAction(
+                type=action.type,
+                params=dict(action.params),
+                enabled=action.enabled,
+                name=action.name,
+                preapply_on_launcher=False,
+            ),
+            variables=variables,
+        )
+
+    def _execute_presentation_cue(
+        self,
+        cue_name: str,
+        *,
+        state: StreamState,
+    ) -> tuple[int, int]:
+        wanted = str(cue_name or "").strip()
+        if not wanted:
+            return (0, 0)
+        cue = self._presentation_registry.cue(wanted)
+        if cue is None:
+            raise ValueError(f"Cue introuvable : {wanted}")
+        result = self._cue_executor.execute(
+            cue,
+            variables=self._execution_variables(state),
+        )
+        return (
+            result.actions_executed,
+            result.actions_skipped,
+        )
+
+    def _resolve_presentation(
+        self,
+        name: str,
+    ) -> ResolvedPresentationProfile | None:
+        return self._presentation_registry.profile(name)
 
     def dispatch_state(
         self,
