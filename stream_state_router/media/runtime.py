@@ -88,7 +88,11 @@ class MediaRuntime:
         self.state_store = state_store or MediaStateStore(provider.name)
         self.state_store.set_expected_poll(config.poll_seconds)
         self.artwork_store = artwork_store or MediaArtworkStore()
-        self.command_store = command_store or MediaCommandStore()
+        self.command_store = (
+            command_store
+            if command_store is not None
+            else MediaCommandStore()
+        )
         self.event_bus = event_bus
         self._clock = clock
         self._wall_clock = wall_clock
