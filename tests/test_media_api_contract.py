@@ -1,13 +1,115 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import unittest
 from urllib.request import Request, urlopen
 
+from stream_state_router.media import (
+    MediaRuntime,
+    MediaRuntimeConfig,
+    MediaState,
+)
 from stream_state_router.services.api import APIConfig, LocalControlAPI
 
 
+class BlockingMediaProvider:
+    name = "fake"
+    capabilities = ("next",)
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.next_calls = 0
+
+    def state(self) -> MediaState:
+        return MediaState(
+            provider=self.name,
+            connected=True,
+            playback_state="playing",
+            title="Track",
+        )
+
+    def next(self) -> None:
+        self.next_calls += 1
+        self.entered.set()
+        self.release.wait(1.0)
+
+
 class MediaAPIContractTests(unittest.TestCase):
+    def test_accepted_slow_media_command_is_never_temporarily_missing(self):
+        provider = BlockingMediaProvider()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+        )
+        runtime.start()
+
+        def action(name, _payload):
+            self.assertEqual(name, "media.next")
+            request_id = runtime.request("next")
+            return {
+                "request_id": request_id,
+                "status": "accepted",
+            }
+
+        api = LocalControlAPI(
+            APIConfig(
+                enabled=True,
+                host="127.0.0.1",
+                port=0,
+            ),
+            status=lambda: {},
+            action=action,
+            request_status=runtime.command_status,
+        )
+        api.start()
+        try:
+            request = Request(
+                f"http://127.0.0.1:{api.bound_port}/media/next",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request, timeout=2.0) as response:
+                accepted = json.loads(response.read())
+
+            request_id = accepted["request_id"]
+            self.assertTrue(provider.entered.wait(1.0))
+
+            with urlopen(
+                f"http://127.0.0.1:{api.bound_port}/requests/{request_id}",
+                timeout=2.0,
+            ) as response:
+                in_flight = json.loads(response.read())
+
+            self.assertIn(in_flight["status"], {"queued", "running"})
+            self.assertIsNone(in_flight["success"])
+
+            provider.release.set()
+            deadline = time.monotonic() + 1.0
+            terminal = None
+            while time.monotonic() < deadline:
+                with urlopen(
+                    f"http://127.0.0.1:{api.bound_port}/requests/{request_id}",
+                    timeout=2.0,
+                ) as response:
+                    terminal = json.loads(response.read())
+                if terminal["status"] == "completed":
+                    break
+                time.sleep(0.01)
+
+            self.assertIsNotNone(terminal)
+            assert terminal is not None
+            self.assertEqual(terminal["status"], "completed")
+            self.assertTrue(terminal["success"])
+            self.assertEqual(provider.next_calls, 1)
+        finally:
+            provider.release.set()
+            runtime.stop()
+            api.stop()
+
     def test_media_route_and_async_request_status_match_streamdeck_contract(self):
         calls: list[tuple[str, dict[str, object]]] = []
         statuses = {
