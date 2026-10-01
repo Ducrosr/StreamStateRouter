@@ -2132,7 +2132,8 @@ class OBSDispatcher:
             )
             cue_warning = ""
             if (
-                self._presentation_enter_scheduled_for
+                force
+                or self._presentation_enter_scheduled_for
                 != presentation_name
             ):
                 self._presentation_enter_scheduled_for = (
