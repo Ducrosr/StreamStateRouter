@@ -480,6 +480,7 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
         jellyfin = media.get("jellyfin")
         if isinstance(jellyfin, dict):
             jellyfin["token"] = ""
+            jellyfin["enabled"] = False
 
     profiles = result.get("profiles")
     if isinstance(profiles, Mapping):
