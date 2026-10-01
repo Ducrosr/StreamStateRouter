@@ -1313,11 +1313,150 @@ class OBSDispatcher:
             executed += 1
         return executed
 
+    @staticmethod
+    def _ease_value(progress: float, easing: str) -> float:
+        t = max(0.0, min(1.0, float(progress)))
+        mode = str(easing or "linear").strip().casefold()
+        if mode == "ease_in":
+            return t * t
+        if mode == "ease_out":
+            return 1.0 - (1.0 - t) * (1.0 - t)
+        if mode == "ease_in_out":
+            if t < 0.5:
+                return 2.0 * t * t
+            return 1.0 - ((-2.0 * t + 2.0) ** 2) / 2.0
+        return t
+
+    def _animate_filter_settings(
+        self,
+        params: Mapping[str, object],
+    ) -> None:
+        source = self._need(params, "source")
+        filter_name = self._need(params, "filter")
+        start_raw = params.get("from_settings")
+        end_raw = params.get("to_settings")
+        if not isinstance(start_raw, Mapping) or not isinstance(
+            end_raw,
+            Mapping,
+        ):
+            raise ValueError(
+                "animate_filter_settings requiert from_settings/to_settings"
+            )
+        keys = tuple(sorted(set(start_raw) | set(end_raw), key=str))
+        if not keys or any(
+            key not in start_raw or key not in end_raw for key in keys
+        ):
+            raise ValueError(
+                "animate_filter_settings requiert les mêmes clés de départ/fin"
+            )
+        start_values: dict[str, float] = {}
+        end_values: dict[str, float] = {}
+        for key in keys:
+            start_value = start_raw[key]
+            end_value = end_raw[key]
+            for label, raw_value in (
+                ("from", start_value),
+                ("to", end_value),
+            ):
+                if (
+                    isinstance(raw_value, bool)
+                    or not isinstance(raw_value, (int, float))
+                    or not math.isfinite(float(raw_value))
+                ):
+                    raise ValueError(
+                        f"animate_filter_settings {label}.{key} invalide"
+                    )
+            start_values[str(key)] = float(start_value)
+            end_values[str(key)] = float(end_value)
+
+        raw_duration = params.get("duration_ms", 300)
+        raw_steps = params.get("steps", 12)
+        if (
+            isinstance(raw_duration, bool)
+            or not isinstance(raw_duration, (int, float))
+            or not math.isfinite(float(raw_duration))
+        ):
+            raise ValueError(
+                "animate_filter_settings duration_ms invalide"
+            )
+        duration_ms = float(raw_duration)
+        if not 0.0 <= duration_ms <= 10000.0:
+            raise ValueError(
+                "animate_filter_settings duration_ms hors plage"
+            )
+        if isinstance(raw_steps, bool):
+            raise ValueError("animate_filter_settings steps invalide")
+        try:
+            steps = int(raw_steps)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "animate_filter_settings steps invalide"
+            ) from exc
+        if not 1 <= steps <= 120:
+            raise ValueError(
+                "animate_filter_settings steps hors plage"
+            )
+        if duration_ms == 0.0:
+            steps = 1
+        easing = str(
+            params.get("easing") or "linear"
+        ).strip().casefold()
+        if easing not in {
+            "linear",
+            "ease_in",
+            "ease_out",
+            "ease_in_out",
+        }:
+            raise ValueError(
+                f"animate_filter_settings easing inconnu : {easing}"
+            )
+        overlay = bool(params.get("overlay", True))
+        started = time.monotonic()
+
+        for step in range(1, steps + 1):
+            deadline = (
+                started
+                + (duration_ms / 1000.0) * (step / steps)
+            )
+            while True:
+                self._yield_runtime()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+            factor = self._ease_value(step / steps, easing)
+            settings = {
+                key: (
+                    start_values[key]
+                    + (
+                        end_values[key] - start_values[key]
+                    )
+                    * factor
+                )
+                for key in start_values
+            }
+            self.client.send(
+                "SetSourceFilterSettings",
+                {
+                    "sourceName": source,
+                    "filterName": filter_name,
+                    "filterSettings": settings,
+                    "overlay": overlay,
+                },
+            )
+
     def _execute_cue_action(
         self,
         action: CueAction,
         variables: Mapping[str, str] | None,
     ) -> None:
+        if action.type.strip().casefold() == "animate_filter_settings":
+            rendered = self._render_value(
+                dict(action.params),
+                variables or self._execution_variables(),
+            )
+            self._animate_filter_settings(rendered)
+            return
         self.execute_action(
             OBSAction(
                 type=action.type,
