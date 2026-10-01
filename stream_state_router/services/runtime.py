@@ -1565,6 +1565,37 @@ class RoutingService:
                                     self._reset_manual_override_release_locked()
                                     override_released_reason = "durée écoulée"
                             resolved_rule = self.engine.current_rule
+                            current_state = self.engine.current_state
+
+                        if hasattr(
+                            self.dispatcher,
+                            "cancel_presentation_tasks_for_state",
+                        ):
+                            cancelled = (
+                                self.dispatcher.cancel_presentation_tasks_for_state(
+                                    current_state
+                                )
+                            )
+                            if cancelled:
+                                self._emit(
+                                    RuntimeEvent(
+                                        "presentation_cue_cancelled",
+                                        (
+                                            f"{cancelled} effet(s) de présentation "
+                                            "annulé(s) après changement de routage"
+                                        ),
+                                        payload={
+                                            "cancelled": cancelled,
+                                            "presentation": (
+                                                current_state.profile_name(
+                                                    "presentation"
+                                                )
+                                                if current_state is not None
+                                                else ""
+                                            ),
+                                        },
+                                    )
+                                )
 
                         if override_released_reason:
                             self._emit(
@@ -1667,6 +1698,11 @@ class RoutingService:
                     with self._lock:
                         if self._stopping:
                             continue
+                    self._worker_phase = "presentation_tasks"
+                    self._process_presentation_tasks(paused=paused)
+                    with self._lock:
+                        if self._stopping:
+                            continue
                     self._worker_phase = "reconcile"
                     self._reconcile_desired_state_if_due()
                     with self._lock:
@@ -1704,6 +1740,22 @@ class RoutingService:
                         wait_for,
                         max(0.0, pending.deadline - time.monotonic()),
                     )
+                deadline_getter = getattr(
+                    self.dispatcher,
+                    "next_presentation_deadline",
+                    None,
+                )
+                if callable(deadline_getter):
+                    presentation_deadline = deadline_getter()
+                    if presentation_deadline is not None:
+                        wait_for = min(
+                            wait_for,
+                            max(
+                                0.0,
+                                presentation_deadline
+                                - time.monotonic(),
+                            ),
+                        )
                 self._wake.wait(wait_for)
                 self._wake.clear()
         finally:
@@ -1716,6 +1768,54 @@ class RoutingService:
                 self._worker_phase = "stopped"
             self._shutdown_complete.set()
             self.logger.info("Routing service stopped")
+
+    def _process_presentation_tasks(
+        self,
+        *,
+        paused: bool,
+    ) -> None:
+        ticker = getattr(
+            self.dispatcher,
+            "tick_presentation_tasks",
+            None,
+        )
+        if not callable(ticker) or paused:
+            return
+        with self._dispatch_lock:
+            result = ticker(max_actions=16)
+        if not (
+            result.executed
+            or result.skipped
+            or result.warnings
+        ):
+            return
+        if self.on_dispatch:
+            self.on_dispatch(result)
+        status_getter = getattr(
+            self.dispatcher,
+            "presentation_execution_status",
+            None,
+        )
+        status = (
+            status_getter()
+            if callable(status_getter)
+            else {}
+        )
+        success = not bool(result.warnings)
+        message = (
+            f"Effets présentation : {result.executed} exécuté(s), "
+            f"{result.skipped} ignoré(s)"
+        )
+        if result.warnings:
+            message += " — " + "; ".join(result.warnings)
+        self._emit(
+            RuntimeEvent(
+                "presentation_cue_progress",
+                message,
+                payload=status,
+                success=success,
+            )
+        )
 
     def _probe_obs_if_due(self) -> None:
         client = getattr(self.dispatcher, "client", None)
