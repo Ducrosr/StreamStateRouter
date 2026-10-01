@@ -45,6 +45,7 @@ class JellyfinProvider:
         path: str,
         *,
         query: Mapping[str, object] | None = None,
+        method: str = "GET",
     ) -> bytes:
         base = self.config.base_url.rstrip("/") + "/"
         relative = path.lstrip("/")
@@ -67,7 +68,7 @@ class JellyfinProvider:
                 "X-Emby-Token": self.config.token,
                 "User-Agent": "StreamStateRouter/1",
             },
-            method="GET",
+            method=str(method or "GET").upper(),
         )
         with urlopen(
             request,
@@ -182,6 +183,20 @@ class JellyfinProvider:
         ):
             artwork_key = item_id
 
+        supported_raw = session.get("SupportedCommands")
+        supported_commands = tuple(
+            str(value)
+            for value in (
+                supported_raw
+                if isinstance(supported_raw, list)
+                else []
+            )
+            if str(value).strip()
+        )
+        supports_media_control = bool(
+            session.get("SupportsMediaControl", False)
+        )
+
         self._active_session_id = session_id
         self._active_artwork_key = artwork_key
         return MediaState(
@@ -198,13 +213,50 @@ class JellyfinProvider:
             volume=volume,
             can_seek=bool(play_state.get("CanSeek")),
             can_next=True,
-            can_previous=True,
+            can_previous=supports_media_control,
+            supports_media_control=supports_media_control,
+            supported_commands=supported_commands,
             artwork_key=artwork_key,
             metadata={
                 "client": str(session.get("Client") or ""),
                 "device_id": str(session.get("DeviceId") or ""),
                 "media_type": str(item.get("MediaType") or item.get("Type") or ""),
             },
+        )
+
+    def control(
+        self,
+        action: str,
+        *,
+        position_seconds: float | None = None,
+    ) -> None:
+        session_id = self._active_session_id
+        if not session_id:
+            raise RuntimeError("Aucune session Jellyfin active")
+        commands = {
+            "play_pause": "PlayPause",
+            "play": "Unpause",
+            "pause": "Pause",
+            "stop": "Stop",
+            "next": "NextTrack",
+            "previous": "PreviousTrack",
+            "seek": "Seek",
+        }
+        command = commands.get(str(action or "").strip().casefold())
+        if command is None:
+            raise ValueError(f"Commande média inconnue : {action}")
+        query: dict[str, object] = {}
+        if command == "Seek":
+            if position_seconds is None:
+                raise ValueError("position_seconds requis pour seek")
+            query["seekPositionTicks"] = max(
+                0,
+                int(float(position_seconds) * _TICKS_PER_SECOND),
+            )
+        self._request(
+            f"/Sessions/{quote(session_id, safe='')}/Playing/{command}",
+            query=query,
+            method="POST",
         )
 
     def artwork(self, key: str) -> tuple[bytes, str] | None:
