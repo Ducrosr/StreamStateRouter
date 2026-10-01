@@ -2683,6 +2683,31 @@ class RoutingService:
             write()
             return True, ""
 
+    def _commit_obs_command_mutation(
+        self,
+        command: _OBSCommand,
+        write: Callable[[], object],
+    ) -> object:
+        """Atomically admit one explicit OBS mutation against runtime lifecycle.
+
+        Discovery may block before a mutation is ready.  Re-check the command
+        generation and runtime admission immediately before the write, then keep
+        that local lifecycle decision stable until the request returns.  This
+        prevents stop()/reconfiguration from closing admission between the final
+        check and the OBS mutation.
+        """
+
+        with self._lock:
+            if (
+                self._stopping
+                or not self._runtime_operational
+                or command.generation != self._command_generation
+            ):
+                raise RuntimeError(
+                    "Commande annulée par arrêt/reconfiguration du runtime"
+                )
+            return write()
+
     def _validate_prepared_execution_target(
         self,
         prepared: PreparedExecution,
@@ -2944,31 +2969,32 @@ class RoutingService:
                         raise RuntimeError(
                             "Impossible de déterminer la scène OBS cible"
                         )
-                    response = client.send(
-                        "CreateInput",
-                        {
-                            "sceneName": scene,
-                            "inputName": input_name,
-                            "inputKind": "browser_source",
-                            "inputSettings": {
-                                "url": url,
-                                "width": width,
-                                "height": height,
-                                "shutdown": bool(
-                                    command.options.get(
-                                        "shutdown_when_not_visible",
-                                        False,
-                                    )
-                                ),
-                                "restart_when_active": bool(
-                                    command.options.get(
-                                        "restart_when_active",
-                                        False,
-                                    )
-                                ),
-                            },
-                            "sceneItemEnabled": True,
+                    create_payload = {
+                        "sceneName": scene,
+                        "inputName": input_name,
+                        "inputKind": "browser_source",
+                        "inputSettings": {
+                            "url": url,
+                            "width": width,
+                            "height": height,
+                            "shutdown": bool(
+                                command.options.get(
+                                    "shutdown_when_not_visible",
+                                    False,
+                                )
+                            ),
+                            "restart_when_active": bool(
+                                command.options.get(
+                                    "restart_when_active",
+                                    False,
+                                )
+                            ),
                         },
+                        "sceneItemEnabled": True,
+                    }
+                    response = self._commit_obs_command_mutation(
+                        command,
+                        lambda: client.send("CreateInput", create_payload),
                     )
                     result = {
                         "scene": scene,
