@@ -11,7 +11,7 @@ import uuid
 from ..events import EventBus
 from .base import MediaProvider
 from .models import MediaState
-from .state import MediaArtworkStore, MediaStateStore
+from .state import MediaArtworkStore, MediaCommandStore, MediaStateStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +78,7 @@ class MediaRuntime:
         *,
         state_store: MediaStateStore | None = None,
         artwork_store: MediaArtworkStore | None = None,
+        command_store: MediaCommandStore | None = None,
         event_bus: EventBus | None = None,
         clock=time.monotonic,
         wall_clock=time.time,
@@ -87,16 +88,18 @@ class MediaRuntime:
         self.state_store = state_store or MediaStateStore(provider.name)
         self.state_store.set_expected_poll(config.poll_seconds)
         self.artwork_store = artwork_store or MediaArtworkStore()
+        self.command_store = command_store or MediaCommandStore()
         self.event_bus = event_bus
         self._clock = clock
         self._wall_clock = wall_clock
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
-        self._commands: queue.Queue[_MediaCommand] = queue.Queue()
+        self._commands: queue.Queue[_MediaCommand] = queue.Queue(
+            maxsize=64
+        )
         self._lock = threading.RLock()
         self._stopping = False
-        self._results: dict[str, MediaCommandResult] = {}
         self._last_semantic_key: tuple[object, ...] | None = None
         self._last_state: MediaState | None = None
         self._last_artwork_identity: tuple[str, ...] | None = None
@@ -141,11 +144,10 @@ class MediaRuntime:
                     cancelled.append(self._commands.get_nowait())
                 except queue.Empty:
                     break
-            state = self.state_store.snapshot()
+            state = self.state_store.public_snapshot()
             for command in cancelled:
-                self._results[command.request_id] = MediaCommandResult(
-                    request_id=command.request_id,
-                    action=command.action,
+                self.command_store.finish(
+                    command.request_id,
                     success=False,
                     error="Media Runtime en arrêt",
                     state=state,
@@ -215,7 +217,18 @@ class MediaRuntime:
                 or not thread.is_alive()
             ):
                 raise RuntimeError("Media Runtime indisponible")
-            self._commands.put(command)
+            self.command_store.reserve(
+                request_id,
+                normalized,
+                state=self.state_store.public_snapshot(),
+            )
+            try:
+                self._commands.put_nowait(command)
+            except queue.Full as exc:
+                self.command_store.discard(request_id)
+                raise RuntimeError(
+                    "File des commandes média saturée"
+                ) from exc
         self._wake.set()
         return request_id
 
@@ -223,9 +236,7 @@ class MediaRuntime:
         self,
         request_id: str,
     ) -> dict[str, object] | None:
-        with self._lock:
-            result = self._results.get(str(request_id or ""))
-        return result.as_mapping() if result is not None else None
+        return self.command_store.get(str(request_id or ""))
 
     def state(self) -> dict[str, object]:
         return self.state_store.snapshot()
@@ -413,13 +424,14 @@ class MediaRuntime:
                 command = None
 
             if command is not None:
+                self.command_store.mark_running(command.request_id)
                 result = self._execute(command)
-                with self._lock:
-                    self._results[result.request_id] = result
-                    # Bound command diagnostics; callers only need recent requests.
-                    if len(self._results) > 250:
-                        for key in tuple(self._results)[:50]:
-                            self._results.pop(key, None)
+                self.command_store.finish(
+                    result.request_id,
+                    success=result.success,
+                    error=result.error,
+                    state=dict(result.state),
+                )
                 next_poll = self._clock() + self.config.poll_seconds
                 continue
 
