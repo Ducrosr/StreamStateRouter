@@ -57,9 +57,11 @@ class CueExecutor:
         self._clock = clock
         self._sleeper = sleeper
         self._progress: dict[str, _CueProgress] = {}
+        self._completed: dict[str, CueExecutionResult] = {}
 
     def cancel_all(self) -> None:
         self._progress.clear()
+        self._completed.clear()
 
     def _yield(self) -> None:
         if self._cooperative_yield is not None:
@@ -81,6 +83,8 @@ class CueExecutor:
         execution_id: str = "",
     ) -> CueExecutionResult:
         key = str(execution_id or "").strip()
+        if key and key in self._completed:
+            return self._completed[key]
         progress = self._progress.get(key) if key else None
         if progress is not None and progress.cue_name != cue.name:
             raise RuntimeError(
@@ -133,7 +137,7 @@ class CueExecutor:
 
         if key:
             self._progress.pop(key, None)
-        return CueExecutionResult(
+        result = CueExecutionResult(
             cue=cue.name,
             frames_executed=progress.frames_executed,
             actions_executed=progress.actions_executed,
@@ -143,3 +147,6 @@ class CueExecutor:
                 (self._clock() - progress.started_at) * 1000.0,
             ),
         )
+        if key:
+            self._completed[key] = result
+        return result
