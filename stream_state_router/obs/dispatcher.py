@@ -1420,6 +1420,11 @@ class OBSDispatcher:
             raise ValueError(
                 "animate_filter_settings duration_ms hors plage"
             )
+        if duration_ms != 0.0:
+            raise ValueError(
+                "animate_filter_settings multi-étapes désactivé : "
+                "utiliser une interpolation locale shader/widget"
+            )
         if isinstance(raw_steps, bool):
             raise ValueError("animate_filter_settings steps invalide")
         try:
