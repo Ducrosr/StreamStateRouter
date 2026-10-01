@@ -17,6 +17,7 @@ from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
 from ..presentation import (
+    CUE_MAX_RUNTIME_MS,
     PresentationRegistry,
     build_presentation_registry as parse_presentation_registry,
 )
@@ -1306,6 +1307,8 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 f"{prefix}.frames dépasse {PRESENTATION_MAX_FRAMES} entrées"
             )
         total_actions = 0
+        max_frame_at_ms = 0.0
+        sequential_wait_ms = 0.0
         for frame_index, frame in enumerate(frames):
             fprefix = f"{prefix}.frames[{frame_index}]"
             if not isinstance(frame, Mapping):
@@ -1322,6 +1325,11 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 errors.append(
                     f"{fprefix}.at_ms doit être compris entre 0 et "
                     f"{PRESENTATION_MAX_CUE_MS}"
+                )
+            else:
+                max_frame_at_ms = max(
+                    max_frame_at_ms,
+                    float(at_ms),
                 )
             actions = frame.get("actions", [])
             if not isinstance(actions, list):
@@ -1427,6 +1435,8 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                             f"{aprefix}.params.duration_ms doit être compris "
                             "entre 0 et 10000"
                         )
+                    elif bool(action.get("enabled", True)):
+                        sequential_wait_ms += float(raw_duration)
                 elif action_type == "media_input_action":
                     cue_required_text("input")
                     action_name = str(
@@ -1480,14 +1490,23 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                                     f"{aprefix}.params.{side}.{key} doit être "
                                     "un nombre fini"
                                 )
+                    animation_duration = params.get(
+                        "duration_ms",
+                        300,
+                    )
                     if not _valid_int(
-                        params.get("duration_ms", 300),
+                        animation_duration,
                         minimum=0,
                         maximum=10000,
                     ):
                         errors.append(
                             f"{aprefix}.params.duration_ms doit être compris "
                             "entre 0 et 10000"
+                        )
+                    elif int(animation_duration) != 0:
+                        errors.append(
+                            f"{aprefix}.params.duration_ms doit être 0 : "
+                            "les animations OBS multi-étapes sont désactivées"
                         )
                     if not _valid_int(
                         params.get("steps", 12),
@@ -1513,6 +1532,16 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             errors.append(
                 f"{prefix} dépasse "
                 f"{PRESENTATION_MAX_ACTIONS_PER_CUE} actions"
+            )
+
+        theoretical_runtime_ms = (
+            max_frame_at_ms + sequential_wait_ms
+        )
+        if theoretical_runtime_ms > CUE_MAX_RUNTIME_MS:
+            errors.append(
+                f"{prefix} dépasse le budget total de "
+                f"{CUE_MAX_RUNTIME_MS} ms "
+                "(offsets de frames + attentes séquentielles)"
             )
 
     for profile_name, profile in presentation_profiles.items():
