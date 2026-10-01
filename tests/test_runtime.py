@@ -167,6 +167,24 @@ class CommandDispatcher(FakeDispatcher):
         self.profile_threads.append((domain, profile_name, threading.current_thread().name))
         return DispatchResult(1, 0, (domain,))
 
+    def execute_profile_snapshot(
+        self,
+        domain,
+        profile_name,
+        profiles_raw,
+        *,
+        state=None,
+    ):
+        self.profile_threads.append(
+            (
+                domain,
+                profile_name,
+                threading.current_thread().name,
+                dict(profiles_raw),
+            )
+        )
+        return DispatchResult(1, 0, (domain,))
+
     def execute_layout_profile(self, profile_name, preview=False):
         self.layout_threads.append(
             (profile_name, bool(preview), threading.current_thread().name)
@@ -1106,6 +1124,51 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.profile_threads,
                 [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_draft_profile_test_runs_snapshot_on_runtime_worker(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            draft = {
+                "Vanilla": {
+                    "actions": [
+                        {
+                            "type": "input_mute",
+                            "params": {
+                                "input": "Music",
+                                "muted": True,
+                            },
+                        }
+                    ]
+                }
+            }
+            request_id = service.request_profile_test(
+                "audio",
+                "Vanilla",
+                draft,
+            )
+            draft["Vanilla"]["actions"][0]["params"]["input"] = "Changed"
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            recorded = dispatcher.profile_threads[-1]
+            self.assertEqual(recorded[0:3], ("audio", "Vanilla", "SSR-Router"))
+            self.assertEqual(
+                recorded[3]["Vanilla"]["actions"][0]["params"]["input"],
+                "Music",
             )
         finally:
             self.assertTrue(service.stop())
