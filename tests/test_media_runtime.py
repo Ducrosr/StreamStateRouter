@@ -605,11 +605,16 @@ class MediaRuntimeTests(unittest.TestCase):
 
         request_id = runtime.request("pause")
         deadline = time.monotonic() + 1.0
-        status = None
-        while status is None and time.monotonic() < deadline:
+        status = runtime.command_status(request_id)
+        while (
+            (
+                status is None
+                or status.get("status") not in {"completed", "failed", "expired"}
+            )
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
             status = runtime.command_status(request_id)
-            if status is None:
-                time.sleep(0.01)
 
         self.assertIsNotNone(status)
         assert status is not None
@@ -679,12 +684,17 @@ class MediaRuntimeTests(unittest.TestCase):
             time.sleep(0.01)
 
         request_id = runtime.request("pause")
-        status = None
+        status = runtime.command_status(request_id)
         deadline = time.monotonic() + 1.0
-        while status is None and time.monotonic() < deadline:
+        while (
+            (
+                status is None
+                or status.get("status") not in {"completed", "failed", "expired"}
+            )
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
             status = runtime.command_status(request_id)
-            if status is None:
-                time.sleep(0.01)
 
         self.assertIsNotNone(status)
         assert status is not None
@@ -718,17 +728,22 @@ class MediaRuntimeTests(unittest.TestCase):
         second = runtime.request("clear_queue")
 
         deadline = time.monotonic() + 1.0
+        terminal = {"completed", "failed", "expired"}
+        first_status = runtime.command_status(first)
+        second_status = runtime.command_status(second)
         while (
             (
-                runtime.command_status(first) is None
-                or runtime.command_status(second) is None
+                first_status is None
+                or second_status is None
+                or first_status.get("status") not in terminal
+                or second_status.get("status") not in terminal
             )
             and time.monotonic() < deadline
         ):
             time.sleep(0.01)
+            first_status = runtime.command_status(first)
+            second_status = runtime.command_status(second)
 
-        first_status = runtime.command_status(first)
-        second_status = runtime.command_status(second)
         self.assertIsNotNone(first_status)
         self.assertIsNotNone(second_status)
         assert first_status is not None
