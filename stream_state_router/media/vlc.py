@@ -6,7 +6,7 @@ import json
 import math
 import re
 from typing import Mapping
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .models import MediaState
@@ -198,11 +198,7 @@ class VLCProvider:
     def state(self) -> MediaState:
         raw = self._transport.get_json("/requests/status.json")
         meta = self._meta(raw)
-        playback = str(raw.get("state") or "unknown").strip().casefold()
-        if playback == "opening":
-            playback = "playing"
-        if playback not in {"playing", "paused", "stopped"}:
-            playback = "unknown"
+        playback = self._playback_state(raw)
 
         raw_volume = self._number(raw.get("volume"), 0.0)
         # VLC's HTTP API uses 256 as the 100% reference and permits boost
@@ -239,10 +235,25 @@ class VLCProvider:
             track_id=str(raw.get("currentplid") or "").strip(),
         )
 
-    def _command(self, command: str, **params: object) -> None:
+    @staticmethod
+    def _playback_state(payload: Mapping[str, object]) -> str:
+        playback = str(
+            payload.get("state") or "unknown"
+        ).strip().casefold()
+        if playback == "opening":
+            return "playing"
+        if playback in {"playing", "paused", "stopped"}:
+            return playback
+        return "unknown"
+
+    def _command(
+        self,
+        command: str,
+        **params: object,
+    ) -> Mapping[str, object]:
         values: dict[str, object] = {"command": command}
         values.update(params)
-        self._transport.get_json(
+        return self._transport.get_json(
             "/requests/status.json",
             values,
         )
@@ -252,26 +263,78 @@ class VLCProvider:
         value = str(uri or "").strip()
         if not value:
             raise ValueError("URI média requise")
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("URI média non autorisée : caractère de contrôle")
         if re.match(r"^[A-Za-z]:[\\/]", value):
             return value
-        parts = urlsplit(value)
-        scheme = parts.scheme.casefold()
-        if scheme in {"http", "https"} and parts.netloc:
+        if value.startswith(("\\\\", "//")):
+            raise ValueError("URI média non autorisée : chemin UNC")
+        try:
+            parts = urlsplit(value)
+            scheme = parts.scheme.casefold()
+            hostname = str(parts.hostname or "").casefold()
+            # Accessing .port validates malformed/non-numeric ports.
+            _port = parts.port
+        except ValueError as exc:
+            raise ValueError("URI média non autorisée : URL invalide") from exc
+
+        if scheme in {"http", "https"}:
+            if (
+                not hostname
+                or parts.username is not None
+                or parts.password is not None
+            ):
+                raise ValueError(
+                    "URI média non autorisée : URL HTTP(S) invalide"
+                )
             return value
-        if (
-            scheme == "file"
-            and parts.path
-            and str(parts.hostname or "").casefold()
-            in {"", "localhost"}
-        ):
+
+        if scheme == "file":
+            if (
+                parts.username is not None
+                or parts.password is not None
+                or _port is not None
+                or hostname not in {"", "localhost"}
+            ):
+                raise ValueError(
+                    "URI média non autorisée : autorité file:// invalide"
+                )
+            decoded_path = unquote(parts.path)
+            # Decode once, matching the backend interpretation closely enough
+            # to catch encoded UNC forms without recursive decoding.
+            if (
+                decoded_path.startswith("//")
+                or decoded_path.startswith("\\\\")
+                or decoded_path.startswith("/\\\\")
+                or decoded_path.startswith("/\\")
+            ):
+                raise ValueError(
+                    "URI média non autorisée : chemin UNC"
+                )
+            if not re.match(r"^/[A-Za-z]:[\\/]", decoded_path):
+                raise ValueError(
+                    "URI média non autorisée : chemin file:// absolu requis"
+                )
             return value
+
         raise ValueError(
             "URI média non autorisée : utiliser un chemin local, "
             "file:// local, http:// ou https://"
         )
 
     def play(self) -> None:
-        self._command("pl_forceresume")
+        before = self._transport.get_json("/requests/status.json")
+        playback = self._playback_state(before)
+        if playback == "playing":
+            return
+        command = (
+            "pl_forceresume"
+            if playback == "paused"
+            else "pl_play"
+        )
+        after = self._command(command)
+        if self._playback_state(after) != "playing":
+            raise RuntimeError("VLC n'a pas démarré la lecture")
 
     def pause(self) -> None:
         self._command("pl_forcepause")
