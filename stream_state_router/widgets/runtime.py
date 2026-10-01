@@ -8,7 +8,7 @@ import mimetypes
 from pathlib import Path
 import threading
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..events import EventBus
 from ..presentation import PresentationStateStore
@@ -880,13 +880,15 @@ iframe{display:block}
                 if origin:
                     try:
                         parsed_origin = urlsplit(origin)
+                        origin_scheme = parsed_origin.scheme.casefold()
                         origin_host = (parsed_origin.hostname or "").casefold()
                         origin_port = parsed_origin.port
                     except ValueError:
+                        origin_scheme = ""
                         origin_host = ""
                         origin_port = None
                     if (
-                        parsed_origin.scheme.casefold() != "http"
+                        origin_scheme != "http"
                         or origin_host not in {"127.0.0.1", "localhost", "::1"}
                         or origin_port != runtime.port
                     ):
