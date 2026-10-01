@@ -569,6 +569,9 @@ class VLCProviderTests(unittest.TestCase):
             "https://user:secret@example.test/audio",
             "https://example.test:bad/audio",
             "https://example.test/audio\nnext",
+            "file:///C:/Music/a%0Ab.mp3",
+            "https://example.test/audio%0Dnext",
+            "https://example.test/audio%7Fnext",
         )
         for value in rejected:
             with self.subTest(value=value):

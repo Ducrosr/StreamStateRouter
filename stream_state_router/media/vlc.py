@@ -428,6 +428,19 @@ class VLCProvider:
         except ValueError as exc:
             raise ValueError("URI média non autorisée : URL invalide") from exc
 
+        # URL percent-encoding must not bypass the control-character guard.
+        # Decode exactly once: this catches %00/%0A/%0D while preserving
+        # legitimate literal percent sequences such as %25 without applying
+        # arbitrary recursive decoding.
+        decoded_value = unquote(value)
+        if any(
+            ord(char) < 32 or ord(char) == 127
+            for char in decoded_value
+        ):
+            raise ValueError(
+                "URI média non autorisée : caractère de contrôle"
+            )
+
         if scheme in {"http", "https"}:
             if (
                 not hostname
