@@ -22,6 +22,7 @@ class EventBus:
         self._clock = clock
         self._lock = threading.RLock()
         self._sequence = 0
+        self._stream_id = uuid.uuid4().hex
         self._history: dict[str, deque[EventEnvelope]] = defaultdict(
             lambda: deque(maxlen=self._history_limit)
         )
@@ -34,6 +35,10 @@ class EventBus:
     def sequence(self) -> int:
         with self._lock:
             return self._sequence
+
+    @property
+    def stream_id(self) -> str:
+        return self._stream_id
 
     def publish(
         self,
@@ -110,7 +115,10 @@ class EventBus:
             for event in values
             if event.sequence > wanted_after
         ]
-        return tuple(selected[-wanted_limit:])
+        # Continuation cursors must consume history from oldest to newest.
+        # Returning the newest page makes a client advance past retained
+        # events it has never observed.
+        return tuple(selected[:wanted_limit])
 
     def snapshot(
         self,
@@ -119,18 +127,41 @@ class EventBus:
         after: int = 0,
         limit: int = 100,
     ) -> dict[str, object]:
-        events = self.events(
-            channel,
-            after=after,
-            limit=limit,
-        )
+        normalized = str(channel or "").strip().casefold()
+        wanted_after = max(0, int(after))
+        wanted_limit = max(1, min(500, int(limit)))
         with self._lock:
+            values = tuple(self._history.get(normalized, ()))
             latest = self._sequence
+            stream_id = self._stream_id
+
+        selected = [
+            event
+            for event in values
+            if event.sequence > wanted_after
+        ]
+        page = tuple(selected[:wanted_limit])
+        next_after = (
+            page[-1].sequence
+            if page
+            else wanted_after
+        )
+        earliest = values[0].sequence if values else 0
         return {
-            "channel": str(channel or "").strip().casefold(),
-            "after": max(0, int(after)),
+            "stream_id": stream_id,
+            "channel": normalized,
+            "after": wanted_after,
+            "next_after": next_after,
             "latest_sequence": latest,
-            "events": [event.as_mapping() for event in events],
+            "earliest_available_sequence": earliest,
+            "has_more": len(selected) > len(page),
+            "cursor_before_history": bool(
+                wanted_after > 0
+                and earliest > 0
+                and wanted_after < earliest
+            ),
+            "initial": wanted_after == 0,
+            "events": [event.as_mapping() for event in page],
         }
 
     def clear(self, channel: str = "") -> None:
