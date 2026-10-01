@@ -5161,7 +5161,7 @@ class MainWindow(QMainWindow):
         media["provider"] = "vlc"
         media.setdefault("poll_seconds", 0.5)
         vlc = media.setdefault("vlc", {})
-        vlc["host"] = "127.0.0.1"
+        vlc.setdefault("host", "127.0.0.1")
         vlc["port"] = self.vlc_port.value()
         vlc["password"] = self.vlc_password.text()
         vlc.setdefault("timeout_seconds", 2.0)
@@ -5577,21 +5577,36 @@ class MainWindow(QMainWindow):
         self._draft_dirty = False
         self._restart_api()
         self._restart_widget_runtime()
-        self._restart_media_runtime()
+        media_restarted = self._restart_media_runtime()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
         self._refresh_config_revision_status(draft_dirty=False)
-        self.statusBar().showMessage(
-            "Configuration enregistrée et appliquée",
-            4000,
-        )
-        self._log("Configuration enregistrée et appliquée.")
-        self._record_user_activity(
-            UserActivityEntry(
-                "Good",
+        if media_restarted:
+            self.statusBar().showMessage(
                 "Configuration enregistrée et appliquée",
+                4000,
             )
-        )
+            self._log("Configuration enregistrée et appliquée.")
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Good",
+                    "Configuration enregistrée et appliquée",
+                )
+            )
+        else:
+            message = (
+                "Configuration enregistrée, mais le Media Runtime "
+                "n’a pas pu redémarrer."
+            )
+            self.statusBar().showMessage(message, 8000)
+            self._log(message)
+            self._record_user_activity(
+                UserActivityEntry(
+                    "Warn",
+                    "Configuration partiellement appliquée",
+                    "Media Runtime encore actif ou bloqué",
+                )
+            )
 
     def _start_runtime(
         self,
@@ -9950,16 +9965,18 @@ class MainWindow(QMainWindow):
                 "Media Runtime actif · provider VLC local."
             )
 
-    def _restart_media_runtime(self) -> None:
+    def _restart_media_runtime(self) -> bool:
         runtime = self._media_runtime
         if runtime is not None and not runtime.stop():
             self._log(
                 "Media Runtime : redémarrage refusé, "
                 "ancien worker encore actif."
             )
-            return
+            self._update_media_runtime_status()
+            return False
         self._media_runtime = None
         self._start_media_runtime()
+        return True
 
     def _stop_media_runtime(self) -> None:
         runtime = self._media_runtime
@@ -10061,11 +10078,17 @@ class MainWindow(QMainWindow):
             media_action = str(action).split(".", 1)[1].strip().casefold()
             options: dict[str, object] = {}
             if media_action == "seek":
-                options["seconds"] = payload.get("seconds", 0)
+                if "seconds" not in payload:
+                    raise ValueError("seconds requis")
+                options["seconds"] = payload["seconds"]
             elif media_action == "set_volume":
-                options["percent"] = payload.get("percent", 0)
+                if "percent" not in payload:
+                    raise ValueError("percent requis")
+                options["percent"] = payload["percent"]
             elif media_action in {"play_uri", "enqueue_uri"}:
-                options["uri"] = str(payload.get("uri") or "")
+                if "uri" not in payload or not str(payload.get("uri") or "").strip():
+                    raise ValueError("uri requis")
+                options["uri"] = str(payload["uri"])
             request_id = runtime.request(media_action, **options)
             return {
                 "request_id": request_id,
