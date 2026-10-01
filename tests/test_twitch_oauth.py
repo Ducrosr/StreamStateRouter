@@ -6,6 +6,7 @@ from unittest.mock import patch
 from stream_state_router.platforms import (
     DEFAULT_TWITCH_SCOPES,
     TwitchDeviceAuthorization,
+    TwitchOAuthError,
     begin_device_authorization,
     poll_device_tokens,
     refresh_user_tokens,
@@ -41,8 +42,11 @@ class TwitchOAuthTests(unittest.TestCase):
             expires_in=1800,
             interval=5,
         )
-        error = RuntimeError("pending")
-        setattr(error, "oauth_message", "authorization_pending")
+        error = TwitchOAuthError(
+            "pending",
+            status=400,
+            oauth_message="authorization_pending",
+        )
 
         with patch(
             "stream_state_router.platforms.twitch_oauth._form_request",
