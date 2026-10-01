@@ -987,7 +987,7 @@ class PresentationEditor(QWidget):
                 "Sélectionnez ou créez d’abord une frame.",
             )
             return
-        dialog = ActionDialog(self)
+        dialog = ActionDialog(self, allow_presentation_actions=True)
         if dialog.exec() != QDialog.Accepted:
             return
         action = dialog.result_action()
@@ -1004,7 +1004,11 @@ class PresentationEditor(QWidget):
         actions = frame.get("actions", [])
         if not isinstance(actions, list) or row >= len(actions):
             return
-        dialog = ActionDialog(self, action=actions[row])
+        dialog = ActionDialog(
+            self,
+            action=actions[row],
+            allow_presentation_actions=True,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         action = dialog.result_action()
