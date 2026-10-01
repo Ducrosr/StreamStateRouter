@@ -522,6 +522,94 @@ class WidgetRuntime:
         return candidate
 
     @staticmethod
+    def _component_host_html(component: str) -> bytes:
+        wanted = str(component or "").strip().casefold()
+        if not wanted:
+            raise ValueError("component requis")
+        component_json = json.dumps(wanted, ensure_ascii=False)
+        fallback = (
+            f"builtin:{wanted}"
+            if wanted in {"chat", "events", "alerts"}
+            else ""
+        )
+        fallback_json = json.dumps(fallback)
+        html = """<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body,#host,iframe{margin:0;width:100%;height:100%;border:0;background:transparent;overflow:hidden}
+iframe{display:block}
+</style>
+</head>
+<body>
+<div id="host"></div>
+<script>
+(() => {
+  const component = __COMPONENT__;
+  const fallback = __FALLBACK__;
+  const host = document.getElementById("host");
+  let current = "";
+  let frame = null;
+
+  const routeFor = (resource) => {
+    const value = String(resource || fallback || "").trim();
+    if (value.startsWith("builtin:")) {
+      const name = value.slice("builtin:".length);
+      if (["chat","events","alerts"].includes(name)) {
+        return "/builtin/" + encodeURIComponent(name);
+      }
+      return "";
+    }
+    if (value.startsWith("widget:") || value.startsWith("package:")) {
+      const id = value.slice(value.indexOf(":") + 1).trim();
+      if (!id) return "";
+      return "/widgets/" + encodeURIComponent(id) + "/?component=" + encodeURIComponent(component);
+    }
+    return "";
+  };
+
+  const apply = (state) => {
+    const c = (state && state.component_state) || {};
+    if (c.mode === "hidden") {
+      host.style.visibility = "hidden";
+      return;
+    }
+    host.style.visibility = "visible";
+    const route = routeFor(c.resource);
+    if (route === current) return;
+    current = route;
+    host.replaceChildren();
+    frame = null;
+    if (!route) return;
+    frame = document.createElement("iframe");
+    frame.src = route;
+    frame.setAttribute("allowtransparency", "true");
+    frame.setAttribute("scrolling", "no");
+    host.appendChild(frame);
+  };
+
+  const refresh = async () => {
+    try {
+      const response = await fetch(
+        "/runtime/state?component=" + encodeURIComponent(component),
+        { cache: "no-store" }
+      );
+      if (response.ok) apply(await response.json());
+    } catch (_) {}
+    finally { window.setTimeout(refresh, 250); }
+  };
+  refresh();
+})();
+</script>
+</body>
+</html>"""
+        html = html.replace("__COMPONENT__", component_json)
+        html = html.replace("__FALLBACK__", fallback_json)
+        return html.encode("utf-8")
+
+    @staticmethod
     def _inject_bridge(
         body: bytes,
         *,
@@ -681,6 +769,39 @@ class WidgetRuntime:
                             limit=limit,
                         ),
                         head_only=head_only,
+                    )
+                    return
+
+                component_prefix = "/component/"
+                if path.startswith(component_prefix):
+                    component = unquote(
+                        path[len(component_prefix):]
+                    ).strip().strip("/")
+                    if (
+                        not component
+                        or "/" in component
+                        or "\\" in component
+                    ):
+                        self._send_json(
+                            {"error": "component_not_found"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    try:
+                        body = runtime._component_host_html(component)
+                    except ValueError:
+                        self._send_json(
+                            {"error": "component_not_found"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    self._send_bytes(
+                        body,
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
                     )
                     return
 
