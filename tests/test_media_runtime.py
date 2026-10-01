@@ -127,6 +127,7 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertEqual(state.title, "Track")
         self.assertEqual(state.duration_seconds, 0.0)
         self.assertEqual(state.position_seconds, 0.0)
+        self.assertEqual(state.playback_rate, 0.0)
         self.assertEqual(state.volume_percent, 0.0)
 
     def test_artwork_store_rejects_active_svg_content(self) -> None:
