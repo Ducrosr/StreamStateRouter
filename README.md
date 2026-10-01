@@ -16,6 +16,10 @@ jamais le mot de passe à une Browser Source. Les réglages sont disponibles dan
 durée, position, volume et identifiant de piste. La Browser Source native
 **Radio** utilise la route stable `/component/radio` et ne reçoit qu'une
 projection minimale de cet état.
+Un renderer HTML personnalisé affecté au composant `radio` reste sandboxé.
+Il reçoit l'état média public par `postMessage` via le pont SSR, qui déclenche
+l'événement navigateur `ssrmediastatechange`. Il n'a donc besoin ni d'accès
+same-origin ni d'autorisation réseau vers l'API locale.
 
 L'API locale accepte `POST /media/play`, `/media/pause`, `/media/stop`,
 `/media/next`, `/media/previous`, `/media/seek`, `/media/set_volume`,
