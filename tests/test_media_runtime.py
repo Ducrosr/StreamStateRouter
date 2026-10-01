@@ -8,6 +8,7 @@ from stream_state_router.events import EventBus
 from stream_state_router.media import (
     MediaArtworkStore,
     MediaCommandStore,
+    MediaProviderCommandError,
     MediaRuntime,
     MediaRuntimeConfig,
     MediaState,
@@ -621,6 +622,41 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(expired)
         assert expired is not None
         self.assertEqual(expired["status"], "expired")
+
+    def test_one_shot_delivery_error_is_terminal_uncertain(self) -> None:
+        provider = FakeProvider()
+        original_next = provider.next
+
+        def ambiguous_next() -> None:
+            original_next()
+            raise MediaProviderCommandError("response lost")
+
+        provider.next = ambiguous_next
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=0.1),
+            provider,
+        )
+        runtime.start()
+        self.addCleanup(runtime.stop)
+
+        request_id = runtime.request("next")
+        deadline = time.monotonic() + 1.0
+        status = None
+        while time.monotonic() < deadline:
+            status = runtime.command_status(request_id)
+            if status and status["status"] == "uncertain":
+                break
+            time.sleep(0.01)
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status["status"], "uncertain")
+        self.assertFalse(status["success"])
+        self.assertIn("peut avoir été", status["error"])
+        self.assertEqual(
+            len([row for row in provider.calls if row[0] == "next"]),
+            1,
+        )
 
     def test_failed_command_is_not_retried_automatically(self) -> None:
         provider = FakeProvider()
