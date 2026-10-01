@@ -1282,6 +1282,10 @@ class OBSDispatcher:
         name = str(profile.shader_set or "").strip()
         if not name:
             return 0
+        raise RuntimeError(
+            "Exécution ShaderSet différée : les propriétés de filtres "
+            "doivent passer par le contrat typé d'identité/ownership"
+        )
         shader_set = self._presentation_registry.shader_set(name)
         if shader_set is None:
             raise ValueError(f"ShaderSet introuvable : {name}")
@@ -1532,13 +1536,16 @@ class OBSDispatcher:
         action: CueAction,
         variables: Mapping[str, str] | None,
     ) -> None:
-        if action.type.strip().casefold() == "animate_filter_settings":
-            rendered = self._render_value(
-                dict(action.params),
-                variables or self._execution_variables(),
+        action_type = action.type.strip().casefold()
+        if action_type in {
+            "source_filter_enabled",
+            "source_filter_settings",
+            "animate_filter_settings",
+        }:
+            raise ValueError(
+                "Les mutations de propriétés de filtre sont interdites "
+                "dans un Cue ; utiliser le contrat de propriétés typées"
             )
-            self._animate_filter_settings(rendered)
-            return
         self.execute_action(
             OBSAction(
                 type=action.type,
