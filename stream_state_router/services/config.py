@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from ..activation.models import TriggerPolicyConfig
 from ..host import HostControlConfig, HostControlController
+from ..media import JellyfinConfig, MediaEngineConfig
 from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
@@ -473,6 +474,12 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
     host = result.get("host_control")
     if isinstance(host, dict):
         host["soundvolumeview_path"] = ""
+
+    media = result.get("media_engine")
+    if isinstance(media, dict):
+        jellyfin = media.get("jellyfin")
+        if isinstance(jellyfin, dict):
+            jellyfin["token"] = ""
 
     profiles = result.get("profiles")
     if isinstance(profiles, Mapping):
@@ -1602,6 +1609,77 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 "widget_runtime.port doit être différent de api.port"
             )
 
+    media_engine = data.get("media_engine", {})
+    if not isinstance(media_engine, Mapping):
+        errors.append("media_engine doit être un objet")
+    else:
+        if (
+            "enabled" in media_engine
+            and not isinstance(media_engine.get("enabled"), bool)
+        ):
+            errors.append("media_engine.enabled doit être booléen")
+        poll_interval = media_engine.get(
+            "poll_interval_seconds",
+            1.0,
+        )
+        if (
+            isinstance(poll_interval, bool)
+            or not isinstance(poll_interval, (int, float))
+            or not math.isfinite(float(poll_interval))
+            or not 0.25 <= float(poll_interval) <= 60.0
+        ):
+            errors.append(
+                "media_engine.poll_interval_seconds doit être compris "
+                "entre 0.25 et 60"
+            )
+        jellyfin = media_engine.get("jellyfin", {})
+        if not isinstance(jellyfin, Mapping):
+            errors.append("media_engine.jellyfin doit être un objet")
+        else:
+            if (
+                "enabled" in jellyfin
+                and not isinstance(jellyfin.get("enabled"), bool)
+            ):
+                errors.append(
+                    "media_engine.jellyfin.enabled doit être booléen"
+                )
+            for key in (
+                "base_url",
+                "token",
+                "device_id",
+                "device_name",
+                "client_name",
+            ):
+                if key in jellyfin and not isinstance(
+                    jellyfin.get(key),
+                    str,
+                ):
+                    errors.append(
+                        f"media_engine.jellyfin.{key} doit être une chaîne"
+                    )
+            timeout = jellyfin.get("timeout_seconds", 3.0)
+            if (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float))
+                or not math.isfinite(float(timeout))
+                or not 0.5 <= float(timeout) <= 30.0
+            ):
+                errors.append(
+                    "media_engine.jellyfin.timeout_seconds doit être "
+                    "compris entre 0.5 et 30"
+                )
+            if bool(jellyfin.get("enabled", False)):
+                if not str(jellyfin.get("base_url") or "").strip():
+                    errors.append(
+                        "media_engine.jellyfin.base_url est requis "
+                        "lorsque Jellyfin est activé"
+                    )
+                if not str(jellyfin.get("token") or "").strip():
+                    errors.append(
+                        "media_engine.jellyfin.token est requis "
+                        "lorsque Jellyfin est activé"
+                    )
+
     host_control = data.get("host_control", {})
     if not isinstance(host_control, Mapping):
         errors.append("host_control doit être un objet")
@@ -1907,6 +1985,41 @@ def build_widget_runtime_config(
         enabled=bool(values.get("enabled", True)),
         host=str(values.get("host") or "127.0.0.1"),
         port=int(values.get("port", 8766) or 8766),
+    )
+
+
+def build_media_engine_config(
+    data: Mapping[str, Any],
+) -> MediaEngineConfig:
+    raw = data.get("media_engine", {})
+    values = raw if isinstance(raw, Mapping) else {}
+    return MediaEngineConfig(
+        enabled=bool(values.get("enabled", True)),
+        poll_interval_seconds=float(
+            values.get("poll_interval_seconds", 1.0) or 1.0
+        ),
+    )
+
+
+def build_jellyfin_config(
+    data: Mapping[str, Any],
+) -> JellyfinConfig:
+    raw_engine = data.get("media_engine", {})
+    engine = (
+        raw_engine if isinstance(raw_engine, Mapping) else {}
+    )
+    raw = engine.get("jellyfin", {})
+    values = raw if isinstance(raw, Mapping) else {}
+    return JellyfinConfig(
+        enabled=bool(values.get("enabled", False)),
+        base_url=str(values.get("base_url") or ""),
+        token=str(values.get("token") or ""),
+        device_id=str(values.get("device_id") or ""),
+        device_name=str(values.get("device_name") or ""),
+        client_name=str(values.get("client_name") or ""),
+        timeout_seconds=float(
+            values.get("timeout_seconds", 3.0) or 3.0
+        ),
     )
 
 
