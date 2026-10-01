@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping, Sequence
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -29,6 +31,9 @@ class SetupGuideResult:
     html_entry: str = ""
     html_package_root: str = ""
     html_name: str = ""
+    # (logical state key, mode, selected profile)
+    # mode is inherit, capture or profile.
+    app_customizations: tuple[tuple[str, str, str], ...] = ()
 
 
 class SetupGuideDialog(QDialog):
@@ -41,6 +46,8 @@ class SetupGuideDialog(QDialog):
         foreground: ForegroundApp | None = None,
         obs_enabled: bool = False,
         obs_connected: bool = False,
+        profile_choices: Mapping[str, Sequence[str]] | None = None,
+        fallback_state: Mapping[str, object] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Guide pas à pas — Configurer SSR")
@@ -48,6 +55,19 @@ class SetupGuideDialog(QDialog):
         self._foreground = foreground
         self._obs_enabled = bool(obs_enabled)
         self._obs_connected = bool(obs_connected)
+        self._profile_choices = {
+            str(domain): [
+                str(name)
+                for name in values
+                if str(name).strip()
+            ]
+            for domain, values in (profile_choices or {}).items()
+        }
+        self._fallback_state = {
+            str(key): str(value)
+            for key, value in (fallback_state or {}).items()
+            if str(value).strip()
+        }
         self._inspection: HtmlModuleInspection | None = None
 
         root = QVBoxLayout(self)
@@ -142,6 +162,103 @@ class SetupGuideDialog(QDialog):
         self.context.setWordWrap(True)
         root.addWidget(self.context)
 
+        self.app_panel = QWidget()
+        app_form = QFormLayout(self.app_panel)
+        self.app_customization_controls: dict[
+            str,
+            tuple[QCheckBox, QComboBox, str],
+        ] = {}
+
+        def add_app_option(
+            state_key: str,
+            label: str,
+            domain: str,
+            *,
+            capture_allowed: bool = True,
+        ) -> None:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+
+            check = QCheckBox("Personnaliser")
+            fallback = str(
+                self._fallback_state.get(state_key) or ""
+            ).strip()
+            check.setToolTip(
+                (
+                    f"Décoché : hérite du preset global « {fallback} »."
+                    if fallback
+                    else "Décoché : hérite du preset global."
+                )
+            )
+            row_layout.addWidget(check)
+
+            choice = QComboBox()
+            if capture_allowed:
+                choice.addItem("Capturer l’état actuel", "capture")
+            for profile_name in self._profile_choices.get(domain, []):
+                choice.addItem(
+                    f"Utiliser « {profile_name} »",
+                    f"profile:{profile_name}",
+                )
+            if choice.count() == 0:
+                choice.addItem("Aucun profil disponible", "")
+            choice.setEnabled(False)
+            check.toggled.connect(choice.setEnabled)
+            row_layout.addWidget(choice, 1)
+
+            fallback_hint = QLabel(
+                f"Défaut : {fallback or '—'}"
+            )
+            fallback_hint.setObjectName("Muted")
+            row_layout.addWidget(fallback_hint)
+            app_form.addRow(label, row)
+            self.app_customization_controls[state_key] = (
+                check,
+                choice,
+                fallback,
+            )
+
+        add_app_option("Game", "Jeu / sources", "game")
+        add_app_option(
+            "OverlayProfile",
+            "Overlay / visibilité",
+            "overlay",
+        )
+        add_app_option(
+            "CaptureProfile",
+            "Capture / HDR-SDR",
+            "capture",
+        )
+        add_app_option(
+            "AudioProfile",
+            "Audio / routage",
+            "audio",
+        )
+        add_app_option(
+            "LayoutProfile",
+            "Disposition",
+            "layout",
+        )
+        add_app_option(
+            "PresentationProfile",
+            "Présentation / widgets",
+            "presentation",
+            capture_allowed=False,
+        )
+
+        app_note = QLabel(
+            "Une ligne décochée reste héritée du preset global. "
+            "« Capturer » crée/actualise uniquement ce que vous choisissez. "
+            "Un profil existant réutilise directement sa logique : par exemple "
+            "CaptureProfile HDR/SDR ou AudioProfile de routage."
+        )
+        app_note.setWordWrap(True)
+        app_note.setObjectName("Muted")
+        app_form.addRow("", app_note)
+        root.addWidget(self.app_panel)
+
         self.html_panel = QWidget()
         form = QFormLayout(self.html_panel)
 
@@ -234,6 +351,7 @@ class SetupGuideDialog(QDialog):
             ),
         }
         self.task_explanation.setText(explanations.get(task, ""))
+        self.app_panel.setVisible(task == "app")
         self.html_panel.setVisible(task == "html")
         self._update_context()
 
@@ -316,6 +434,34 @@ class SetupGuideDialog(QDialog):
                 if not self.html_name.text().strip():
                     self.html_name.setText(root.name)
 
+    def _app_customization_plan(
+        self,
+    ) -> tuple[tuple[str, str, str], ...]:
+        result: list[tuple[str, str, str]] = []
+        for state_key, (
+            check,
+            choice,
+            _fallback,
+        ) in self.app_customization_controls.items():
+            if not check.isChecked():
+                result.append((state_key, "inherit", ""))
+                continue
+            raw = str(choice.currentData() or "").strip()
+            if raw == "capture":
+                result.append((state_key, "capture", ""))
+                continue
+            if raw.startswith("profile:"):
+                result.append(
+                    (
+                        state_key,
+                        "profile",
+                        raw.split(":", 1)[1],
+                    )
+                )
+                continue
+            result.append((state_key, "invalid", ""))
+        return tuple(result)
+
     def _validate_details(self) -> bool:
         task = self._task_key()
         if task in {"app", "collection", "repair"}:
@@ -340,6 +486,24 @@ class SetupGuideDialog(QDialog):
                     "Placez l’application à configurer au premier plan puis recommencez.",
                 )
                 return False
+            if task == "app":
+                invalid = [
+                    key
+                    for key, mode, _value
+                    in self._app_customization_plan()
+                    if mode == "invalid"
+                ]
+                if invalid:
+                    QMessageBox.warning(
+                        self,
+                        "Guide SSR",
+                        (
+                            "Aucun profil n’est disponible pour : "
+                            + ", ".join(invalid)
+                            + ". Décochez la ligne ou créez d’abord un profil."
+                        ),
+                    )
+                    return False
             return True
 
         if task != "html":
@@ -425,13 +589,7 @@ class SetupGuideDialog(QDialog):
             return
 
         previews = {
-            "app": (
-                "SSR va ouvrir l’assistant « Configurer l’application courante ».\n\n"
-                "1. Lecture de l’état OBS\n"
-                "2. Choix des domaines à gérer\n"
-                "3. Création du brouillon\n"
-                "4. Revue avant Enregistrer et appliquer"
-            ),
+            "app": "",
             "collection": (
                 "SSR va analyser la collection OBS en lecture seule.\n\n"
                 "Aucune scène, source ou configuration ne sera modifiée "
@@ -443,6 +601,41 @@ class SetupGuideDialog(QDialog):
                 "le brouillon, après votre validation."
             ),
         }
+        if task == "app":
+            labels = {
+                "Game": "Jeu / sources",
+                "OverlayProfile": "Overlay / visibilité",
+                "CaptureProfile": "Capture / HDR-SDR",
+                "AudioProfile": "Audio / routage",
+                "LayoutProfile": "Disposition",
+                "PresentationProfile": "Présentation / widgets",
+            }
+            lines = [
+                "PLAN DE PERSONNALISATION DE L’APPLICATION",
+                "",
+            ]
+            for key, mode, value in self._app_customization_plan():
+                fallback = str(
+                    self._fallback_state.get(key) or "preset global"
+                )
+                if mode == "inherit":
+                    description = f"Hériter de « {fallback} »"
+                elif mode == "capture":
+                    description = "Capturer l’état actuel"
+                else:
+                    description = f"Utiliser « {value} »"
+                lines.append(
+                    f"• {labels.get(key, key)} : {description}"
+                )
+            lines.extend(
+                [
+                    "",
+                    "Le brouillon restera modifiable avant application.",
+                    "Les lignes héritées ne dupliquent aucun réglage.",
+                ]
+            )
+            self.preview.setPlainText("\n".join(lines))
+            return
         self.preview.setPlainText(previews.get(task, ""))
 
     def _back(self) -> None:
@@ -470,6 +663,11 @@ class SetupGuideDialog(QDialog):
 
     def result_value(self) -> SetupGuideResult:
         task = self._task_key()
+        if task == "app":
+            return SetupGuideResult(
+                task=task,
+                app_customizations=self._app_customization_plan(),
+            )
         if task != "html":
             return SetupGuideResult(task=task)
         return SetupGuideResult(
