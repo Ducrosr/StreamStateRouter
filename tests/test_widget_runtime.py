@@ -361,6 +361,25 @@ class WidgetRuntimeTests(unittest.TestCase):
                 urlopen(request, timeout=2.0)
             self.assertEqual(error.exception.code, 403)
 
+    def test_runtime_rejects_opaque_and_foreign_origins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            for origin in ("null", "http://127.0.0.1:9"):
+                request = Request(
+                    runtime.base_url + "/runtime/state?component=chat",
+                    headers={"Origin": origin},
+                )
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(request, timeout=2.0)
+                self.assertEqual(error.exception.code, 403)
+
+            request = Request(
+                runtime.base_url + "/runtime/state?component=chat",
+                headers={"Origin": runtime.base_url},
+            )
+            with urlopen(request, timeout=2.0) as response:
+                self.assertEqual(response.status, 200)
+
     def test_imported_package_response_has_restrictive_csp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, package = self._runtime(Path(tmp))
