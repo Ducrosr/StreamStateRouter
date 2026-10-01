@@ -240,6 +240,30 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertFalse(artwork_store.snapshot()["available"])
         self.assertEqual(provider.artwork_calls, 1)
 
+    def test_artwork_failure_retries_after_backoff(self) -> None:
+        provider = FakeProvider()
+        provider.fail_artwork = True
+        now = [100.0]
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=False),
+            provider,
+            artwork_store=MediaArtworkStore(),
+            clock=lambda: now[0],
+        )
+
+        runtime.poll_once()
+        self.assertEqual(provider.artwork_calls, 1)
+
+        now[0] = 104.0
+        runtime.poll_once()
+        self.assertEqual(provider.artwork_calls, 1)
+
+        provider.fail_artwork = False
+        now[0] = 105.1
+        runtime.poll_once()
+        self.assertEqual(provider.artwork_calls, 2)
+        self.assertTrue(runtime.artwork_store.snapshot()["available"])
+
     def test_failed_command_is_not_retried_automatically(self) -> None:
         provider = FakeProvider()
         provider.fail_pause = True
