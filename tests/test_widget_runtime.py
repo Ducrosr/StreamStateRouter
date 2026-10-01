@@ -396,7 +396,7 @@ class WidgetRuntimeTests(unittest.TestCase):
                 html,
             )
             self.assertIn(
-                '["chat","events","alerts","now-playing","clock","countdown"]',
+                '["chat","events","alerts","now-playing","clock","countdown","audience"]',
                 html,
             )
 
