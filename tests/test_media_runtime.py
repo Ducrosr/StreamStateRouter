@@ -15,6 +15,8 @@ from stream_state_router.media import (
 )
 
 
+VALID_JPEG = b"\xff\xd8\xff\xe0SSR-JPEG"
+
 class FakeProvider:
     name = "fake"
     capabilities = (
@@ -64,12 +66,12 @@ class FakeProvider:
             track_id=self.track_id,
         )
 
-    def artwork(self) -> tuple[bytes, str]:
-        self._record("artwork")
+    def artwork(self, track_id: str = "") -> tuple[bytes, str]:
+        self._record("artwork", track_id)
         self.artwork_calls += 1
         if self.fail_artwork:
             raise RuntimeError("artwork unavailable")
-        return b"jpeg-cover", "image/jpeg"
+        return VALID_JPEG, "image/jpeg"
 
     def play(self) -> None:
         self._record("play")
@@ -130,6 +132,21 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertEqual(state.position_seconds, 0.0)
         self.assertEqual(state.playback_rate, 0.0)
         self.assertEqual(state.volume_percent, 0.0)
+
+    def test_artwork_store_rejects_mime_spoofed_content(self) -> None:
+        store = MediaArtworkStore()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "incompatible",
+        ):
+            store.update(
+                b"<svg><script>alert(1)</script></svg>",
+                content_type="image/jpeg",
+                identity="track-spoof",
+            )
+
+        self.assertFalse(store.snapshot()["available"])
 
     def test_artwork_store_rejects_active_svg_content(self) -> None:
         store = MediaArtworkStore()
@@ -284,7 +301,7 @@ class MediaRuntimeTests(unittest.TestCase):
 
         first = artwork_store.snapshot()
         self.assertTrue(first["available"])
-        self.assertEqual(first["content"], b"jpeg-cover")
+        self.assertEqual(first["content"], VALID_JPEG)
         self.assertEqual(first["content_type"], "image/jpeg")
         self.assertEqual(provider.artwork_calls, 1)
 
