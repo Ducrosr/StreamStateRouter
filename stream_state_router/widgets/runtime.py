@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from ..events import EventBus
-from ..media import MediaArtworkStore, MediaStateStore
+from ..media import MediaArtworkStore, MediaStateStore, media_artwork_identity
 from ..presentation import PresentationStateStore
 from ..services.paths import imported_widgets_dir
 from .packages import WidgetPackage, list_widget_packages
@@ -768,9 +768,22 @@ class WidgetRuntime:
 
     def _media_payload(self) -> dict[str, Any]:
         payload = self.media_state_store.public_snapshot()
+        internal = self.media_state_store.snapshot()
         artwork = self.media_artwork_store.snapshot()
+        expected_identity = media_artwork_identity(
+            provider=internal.get("provider", ""),
+            track_id=internal.get("track_id", ""),
+            uri=internal.get("uri", ""),
+            title=internal.get("title", ""),
+            artwork_url=internal.get("artwork_url", ""),
+        )
+        artwork_matches = bool(
+            expected_identity
+            and artwork.get("identity") == expected_identity
+        )
         payload["artwork_available"] = bool(
             artwork.get("available", False)
+            and artwork_matches
         )
         payload["artwork_revision"] = int(
             artwork.get("revision", 0) or 0
@@ -1202,6 +1215,30 @@ iframe{display:block}
 
                 if path == "/runtime/media/artwork":
                     artwork = runtime.media_artwork_store.snapshot()
+                    query = parse_qs(parsed.query)
+                    requested_revision = str(
+                        query.get("revision", [""])[0]
+                    ).strip()
+                    current_revision = int(
+                        artwork.get("revision", 0) or 0
+                    )
+                    if requested_revision:
+                        try:
+                            requested_value = int(requested_revision)
+                        except ValueError:
+                            self._send_json(
+                                {"error": "invalid_artwork_revision"},
+                                status=HTTPStatus.BAD_REQUEST,
+                                head_only=head_only,
+                            )
+                            return
+                        if requested_value != current_revision:
+                            self._send_json(
+                                {"error": "artwork_revision_expired"},
+                                status=HTTPStatus.NOT_FOUND,
+                                head_only=head_only,
+                            )
+                            return
                     body = artwork.get("content", b"")
                     content_type = str(
                         artwork.get("content_type") or ""
