@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import copy
 from typing import Any, Mapping
 
@@ -14,6 +14,12 @@ _STATE_KEYS = {
     "audio": "AudioProfile",
     "layout": "LayoutProfile",
 }
+_LOGICAL_STATE_KEYS = frozenset(
+    {
+        *_STATE_KEYS.values(),
+        "PresentationProfile",
+    }
+)
 
 _ACTION_DOMAINS = ("game", "overlay", "capture", "audio")
 _DOMAIN_LABELS = {
@@ -42,6 +48,11 @@ class CurrentStateCaptureOptions:
     audio_state_domain: str = "game"
     filters_domain: str = "game"
     visibility_domain: str = "game"
+    # Guided app setup may explicitly select existing logical profiles or
+    # leave domains inherited from router.fallback_state. Capture-specific
+    # ownership remains controlled by the flags above.
+    state_overrides: Mapping[str, str] = field(default_factory=dict)
+    inherit_state_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -707,6 +718,75 @@ def build_current_state_capture_draft(
             state["LayoutProfile"] = layout_profile
             captured_layout = True
             ownership.append(("layout", layout_profile))
+
+    inherited_keys: list[str] = []
+    for key in options.inherit_state_keys:
+        normalized = str(key or "").strip()
+        if normalized not in _LOGICAL_STATE_KEYS:
+            raise ValueError(
+                f"Clé d’héritage logique inconnue : {normalized or '<vide>'}"
+            )
+        state.pop(normalized, None)
+        inherited_keys.append(normalized)
+
+    overridden_keys: list[str] = []
+    for key, raw_value in options.state_overrides.items():
+        normalized = str(key or "").strip()
+        value = str(raw_value or "").strip()
+        if normalized not in _LOGICAL_STATE_KEYS:
+            raise ValueError(
+                f"Clé de profil logique inconnue : {normalized or '<vide>'}"
+            )
+        if not value:
+            raise ValueError(
+                f"Le profil logique {normalized} ne peut pas être vide"
+            )
+        state[normalized] = value
+        overridden_keys.append(normalized)
+
+    if inherited_keys:
+        notes.append(
+            "Preset global hérité : "
+            + ", ".join(sorted(inherited_keys))
+            + "."
+        )
+    if overridden_keys:
+        notes.append(
+            "Profils logiques choisis : "
+            + ", ".join(
+                f"{key}={state[key]}"
+                for key in sorted(overridden_keys)
+            )
+            + "."
+        )
+
+    # A newly created GameProfile is only a capture workspace. If the guided
+    # plan finally inherits/uses another GameProfile and nothing was captured
+    # into it, remove the empty orphan instead of polluting the profile list.
+    if existing_rule is None and state.get("Game") != requested_name:
+        profiles_root = draft.get("profiles")
+        game_profiles = (
+            profiles_root.get("game")
+            if isinstance(profiles_root, dict)
+            else None
+        )
+        candidate = (
+            game_profiles.get(requested_name)
+            if isinstance(game_profiles, dict)
+            else None
+        )
+        candidate_actions = (
+            candidate.get("actions")
+            if isinstance(candidate, Mapping)
+            else None
+        )
+        if (
+            isinstance(game_profiles, dict)
+            and isinstance(candidate, Mapping)
+            and isinstance(candidate_actions, list)
+            and not candidate_actions
+        ):
+            game_profiles.pop(requested_name, None)
 
     if existing_rule is not None:
         existing_rule["state"] = state
