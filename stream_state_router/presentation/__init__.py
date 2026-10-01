@@ -14,11 +14,12 @@ from .models import (
     build_presentation_registry,
     resolve_presentation_profile,
 )
-from .timeline import CueExecutionResult, CueExecutor
+from .timeline import CueEffectUncertainError, CueExecutionResult, CueExecutor
 
 __all__ = [
     "Cue",
     "CueAction",
+    "CueEffectUncertainError",
     "CueExecutionResult",
     "CueExecutor",
     "CueFrame",
