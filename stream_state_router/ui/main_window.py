@@ -3267,6 +3267,17 @@ class MainWindow(QMainWindow):
         )
         self._register_obs_connected_control(install_alerts)
         widget_actions.addWidget(install_alerts)
+        install_radio = QPushButton("Installer Radio…")
+        self._set_action_risk(
+            install_radio,
+            "live",
+            "Crée une Browser Source locale pour l’état média SSR.",
+        )
+        install_radio.clicked.connect(
+            self._install_builtin_radio_in_obs
+        )
+        self._register_obs_connected_control(install_radio)
+        widget_actions.addWidget(install_radio)
         demo = QPushButton("Événements de démo")
         self._set_action_risk(
             demo,
@@ -6697,6 +6708,16 @@ class MainWindow(QMainWindow):
             component="alerts",
             width=1920,
             height=1080,
+        )
+
+    def _install_builtin_radio_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/radio",
+            module_name="Radio SSR natif",
+            input_name="[SSR] Radio",
+            component="radio",
+            width=900,
+            height=180,
         )
 
     def _publish_widget_demo_events(self) -> None:
@@ -10502,6 +10523,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        self._stop_media_runtime()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         self.tray.hide()
