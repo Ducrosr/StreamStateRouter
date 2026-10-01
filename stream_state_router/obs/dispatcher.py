@@ -33,6 +33,20 @@ from .models import OBSAction, OBSProfile
 
 
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
+ACTION_PROFILE_ACTION_TYPES = frozenset(
+    {
+        "set_program_scene",
+        "scene_item_enabled",
+        "source_filter_enabled",
+        "source_filter_settings",
+        "input_mute",
+        "input_volume_db",
+        "set_input_settings",
+        "app_audio_output",
+        "windows_hdr",
+        "wait_ms",
+    }
+)
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
 STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout", "presentation")
 _TEMPLATE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -2003,6 +2017,47 @@ class OBSDispatcher:
         profile = self._resolve_action_profile(domain, profile_name)
         if profile is None:
             raise ValueError(f"Profil introuvable : {domain}/{profile_name}")
+        if not self.conditions_match(profile.conditions):
+            return DispatchResult(0, len(profile.actions) or 1, (domain,))
+        executed = 0
+        skipped = 0
+        variables = self._execution_variables(state)
+        for action in profile.actions:
+            self._yield_runtime()
+            if not action.enabled:
+                skipped += 1
+                continue
+            self.execute_action(action, variables=variables)
+            executed += 1
+        return DispatchResult(executed, skipped, (domain,))
+
+    def execute_profile_snapshot(
+        self,
+        domain: str,
+        profile_name: str,
+        profiles_raw: Mapping[str, Mapping[str, object]],
+        *,
+        state: StreamState | None = None,
+    ) -> DispatchResult:
+        """Execute a validated draft profile without mutating dispatcher config.
+
+        This is used by the editor's live test path.  It deliberately reuses
+        the runtime-owned dispatcher/client while keeping the saved/applied
+        profile registry untouched.
+        """
+        if domain not in ACTION_PROFILE_DOMAINS:
+            raise ValueError(f"Domaine inconnu : {domain}")
+        parsed = profile_map_from_raw({domain: profiles_raw}).get(domain, {})
+        if profile_name not in parsed:
+            raise ValueError(f"Profil brouillon introuvable : {domain}/{profile_name}")
+        for candidate in parsed.values():
+            for action in candidate.actions:
+                kind = action.type.strip().casefold()
+                if kind not in ACTION_PROFILE_ACTION_TYPES:
+                    raise ValueError(
+                        f"Action non autorisée dans un profil classique : {action.type}"
+                    )
+        profile = self._resolve_action_profile_inner(parsed, profile_name, ())
         if not self.conditions_match(profile.conditions):
             return DispatchResult(0, len(profile.actions) or 1, (domain,))
         executed = 0
