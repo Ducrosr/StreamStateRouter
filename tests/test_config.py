@@ -26,7 +26,7 @@ from stream_state_router.services.config import (
 class ConfigTests(unittest.TestCase):
     def sample(self):
         return {
-            "schema_version": 7,
+            "schema_version": 8,
             "router": {
                 "poll_ms": 50,
                 "debounce_ms": 150,
@@ -162,7 +162,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(migrated["schema_version"], 8)
         self.assertEqual(migrated["router"]["fallback_state"]["LayoutProfile"], "Vanilla")
         self.assertIn("Vanilla", migrated["layout_profiles"])
         self.assertEqual(validate_config(migrated), [])
@@ -217,7 +217,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(migrated["schema_version"], 8)
         modules = migrated["layout_profiles"]["Vanilla"]["modules"]
         self.assertEqual(set(modules), {"[Global] Date", "[Global] Signature"})
         self.assertEqual(modules["[Global] Date"]["module_type"], "Global")
@@ -407,7 +407,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(migrated["schema_version"], 8)
         self.assertEqual(migrated["activation_policies"], {})
         self.assertEqual(validate_config(migrated), [])
 
@@ -426,7 +426,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(migrated["schema_version"], 8)
         self.assertEqual(
             migrated["router"]["fallback_state"]["PresentationProfile"],
             "Vanilla",
@@ -524,6 +524,74 @@ class ConfigTests(unittest.TestCase):
             errors,
         )
 
+    def test_schema_v7_adds_widget_runtime_and_sound_sets(self):
+        data = self.sample()
+        data["schema_version"] = 7
+        data.pop("widget_runtime", None)
+        data.pop("sound_sets", None)
+
+        migrated = migrate_config(data)
+
+        self.assertEqual(migrated["schema_version"], 8)
+        self.assertEqual(
+            migrated["widget_runtime"],
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 17861,
+            },
+        )
+        self.assertEqual(migrated["sound_sets"], {})
+        self.assertEqual(validate_config(migrated), [])
+
+    def test_widget_runtime_must_remain_local(self):
+        data = self.sample()
+        data["widget_runtime"] = {
+            "enabled": True,
+            "host": "0.0.0.0",
+            "port": 17861,
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("widget_runtime.host doit rester local" in item for item in errors),
+            errors,
+        )
+
+    def test_sound_sets_validate_and_are_referenced_by_presentation(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {
+                "sound_set": "Midgar",
+            }
+        }
+        data["sound_sets"] = {
+            "Midgar": {
+                "enter": [
+                    {
+                        "input": "SFX - Enter",
+                        "action": "restart",
+                    }
+                ],
+                "exit": [
+                    {
+                        "input": "SFX - Exit",
+                        "action": "restart",
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(validate_config(data), [])
+
+        data["sound_sets"]["Midgar"]["enter"][0]["action"] = "explode"
+        errors = validate_config(data)
+        self.assertTrue(
+            any("sound_sets.Midgar.enter[0].action inconnu" in item for item in errors),
+            errors,
+        )
+
     def test_schema_v5_adds_host_control_defaults(self):
         data = self.sample()
         data["schema_version"] = 5
@@ -531,7 +599,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(migrated["schema_version"], 8)
         self.assertEqual(
             migrated["host_control"],
             {
@@ -543,7 +611,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_host_and_filter_actions_validate(self):
         data = self.sample()
-        data["schema_version"] = 7
+        data["schema_version"] = 8
         data["host_control"] = {
             "soundvolumeview_path": r"C:\\Tools\\SoundVolumeView.exe",
             "audio_timeout_seconds": 4.0,
@@ -578,7 +646,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_invalid_host_actions_are_rejected(self):
         data = self.sample()
-        data["schema_version"] = 7
+        data["schema_version"] = 8
         data["host_control"] = {
             "soundvolumeview_path": 42,
             "audio_timeout_seconds": 0,
