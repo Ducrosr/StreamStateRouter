@@ -3265,8 +3265,8 @@ class MainWindow(QMainWindow):
         demo = QPushButton("Événements de démo")
         self._set_action_risk(
             demo,
-            "read",
-            "Publie seulement des événements locaux vers les widgets SSR.",
+            "live",
+            "Injecte des événements de démonstration dans les widgets SSR actifs.",
         )
         demo.clicked.connect(self._publish_widget_demo_events)
         widget_actions.addWidget(demo)
@@ -6667,6 +6667,10 @@ class MainWindow(QMainWindow):
                 "Widgets SSR",
                 "Le Widget Runtime doit être actif.",
             )
+            return
+        if not self._safe_live_confirm(
+            "Injecter des événements de démonstration dans les widgets actifs"
+        ):
             return
         runtime.event_bus.publish(
             channel="chat",
