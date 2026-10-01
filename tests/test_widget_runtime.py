@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -82,6 +83,39 @@ class WidgetRuntimeTests(unittest.TestCase):
         runtime.start()
         self.addCleanup(runtime.stop)
         return runtime, package
+
+    def test_ipv6_loopback_base_url_uses_bracketed_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = WidgetRuntime(
+                WidgetRuntimeConfig(
+                    enabled=True,
+                    host="::1",
+                    port=8766,
+                ),
+                PresentationStateStore(),
+                library_root=Path(tmp),
+            )
+
+            self.assertEqual(
+                runtime.base_url,
+                "http://[::1]:8766",
+            )
+
+    def test_running_requires_live_server_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = WidgetRuntime(
+                WidgetRuntimeConfig(
+                    enabled=True,
+                    host="127.0.0.1",
+                    port=8766,
+                ),
+                PresentationStateStore(),
+                library_root=Path(tmp),
+            )
+            runtime._server = object()
+            runtime._thread = threading.Thread(target=lambda: None)
+
+            self.assertFalse(runtime.running)
 
     @staticmethod
     def _get(url: str) -> tuple[int, bytes, str]:
