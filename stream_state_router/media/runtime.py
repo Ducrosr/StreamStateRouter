@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import queue
 import threading
@@ -80,6 +80,7 @@ class MediaRuntime:
         artwork_store: MediaArtworkStore | None = None,
         event_bus: EventBus | None = None,
         clock=time.monotonic,
+        wall_clock=time.time,
     ):
         self.config = config
         self.provider = provider
@@ -87,6 +88,7 @@ class MediaRuntime:
         self.artwork_store = artwork_store or MediaArtworkStore()
         self.event_bus = event_bus
         self._clock = clock
+        self._wall_clock = wall_clock
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -245,6 +247,13 @@ class MediaRuntime:
                 raise TypeError(
                     "Le provider média doit retourner MediaState"
                 )
+            state = replace(
+                state,
+                observed_at_unix=float(self._wall_clock()),
+                capabilities=tuple(
+                    getattr(self.provider, "capabilities", ()) or ()
+                ),
+            )
         except Exception as exc:
             state = MediaState(
                 provider=self.provider.name,
