@@ -10015,7 +10015,7 @@ class MainWindow(QMainWindow):
                     self._media_runtime
                     and self._media_runtime.running
                 ),
-                "state": self._media_state_store.snapshot(),
+                "state": self._media_state_store.public_snapshot(),
             },
             "control_variables": (
                 service.control_variables() if service else {}
