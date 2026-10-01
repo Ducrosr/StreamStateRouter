@@ -74,13 +74,19 @@ async function waitForCommand(payload: Record<string, unknown>): Promise<Record<
     if (state === "completed") {
       return status;
     }
-    if (state === "failed" || state === "expired") {
+    if (
+      state === "failed" ||
+      state === "expired" ||
+      state === "uncertain"
+    ) {
       throw new Error(
         String(
           status.error ??
           (state === "expired"
             ? "Résultat de commande SSR expiré"
-            : "Commande SSR échouée")
+            : state === "uncertain"
+              ? "Résultat incertain : ne répétez pas immédiatement la commande"
+              : "Commande SSR échouée")
         )
       );
     }
