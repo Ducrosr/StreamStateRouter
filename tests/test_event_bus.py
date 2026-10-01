@@ -50,6 +50,23 @@ class EventBusTests(unittest.TestCase):
             [3],
         )
 
+    def test_reentrant_publish_preserves_subscriber_sequence_order(self) -> None:
+        bus = EventBus()
+        observed: list[int] = []
+
+        def callback(event) -> None:
+            observed.append(event.sequence)
+            if event.sequence == 1:
+                bus.publish(
+                    channel="events",
+                    type="nested",
+                )
+
+        bus.subscribe(callback, channel="events")
+        bus.publish(channel="events", type="root")
+
+        self.assertEqual(observed, [1, 2])
+
     def test_snapshot_pages_oldest_first_without_skipping_retained_events(self) -> None:
         bus = EventBus(history_limit=50)
         for index in range(30):
