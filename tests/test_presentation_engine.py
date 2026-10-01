@@ -68,6 +68,54 @@ class PresentationEngineTests(unittest.TestCase):
             },
         )
 
+    def test_component_policy_supports_inherit_custom_and_hidden(self) -> None:
+        registry = build_presentation_registry(
+            profiles_raw={
+                "Midgar": {
+                    "components": {
+                        "chat": {
+                            "mode": "custom",
+                            "resource": "chat/midgar",
+                            "settings": {"opacity": 0.85},
+                        },
+                        "radio": {
+                            "mode": "custom",
+                            "resource": "radio/midgar",
+                            "settings": {"glow": 0.4},
+                        },
+                    }
+                },
+                "Game": {
+                    "extends": "Midgar",
+                    "components": {
+                        "chat": {"mode": "hidden"},
+                        "radio": {
+                            "mode": "custom",
+                            "settings": {"glow": 0.8},
+                        },
+                        "events": {"mode": "inherit"},
+                    },
+                },
+            },
+            cues_raw={},
+        )
+
+        resolved = registry.profile("Game")
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.components["chat"].mode, "hidden")
+        self.assertEqual(resolved.components["radio"].mode, "custom")
+        self.assertEqual(
+            resolved.components["radio"].resource,
+            "radio/midgar",
+        )
+        self.assertEqual(
+            dict(resolved.components["radio"].settings),
+            {"glow": 0.8},
+        )
+        self.assertNotIn("events", resolved.components)
+
     def test_profile_inheritance_rejects_cycle(self) -> None:
         registry = build_presentation_registry(
             profiles_raw={
