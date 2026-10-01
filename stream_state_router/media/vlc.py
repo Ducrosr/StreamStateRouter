@@ -321,8 +321,12 @@ class VLCProvider:
         meta = category.get("meta")
         return meta if isinstance(meta, Mapping) else {}
 
-    def artwork(self) -> tuple[bytes, str]:
-        return self._transport.get_bytes("/art")
+    def artwork(self, track_id: str = "") -> tuple[bytes, str]:
+        item = str(track_id or "").strip()
+        path = "/art"
+        if item:
+            path += "?" + urlencode({"item": item})
+        return self._transport.get_bytes(path)
 
     def state(self) -> MediaState:
         raw = self._transport.get_json("/requests/status.json")
@@ -338,6 +342,15 @@ class VLCProvider:
         filename = str(meta.get("filename") or "").strip()
         if not title:
             title = filename
+
+        raw_track_id = raw.get("currentplid")
+        track_id = ""
+        try:
+            playlist_id = int(raw_track_id)
+            if playlist_id >= 0:
+                track_id = str(playlist_id)
+        except (TypeError, ValueError, OverflowError):
+            track_id = ""
 
         return MediaState(
             provider=self.name,
@@ -361,7 +374,7 @@ class VLCProvider:
             position_seconds=self._number(raw.get("time"), 0.0),
             playback_rate=self._number(raw.get("rate"), 1.0),
             volume_percent=volume_percent,
-            track_id=str(raw.get("currentplid") or "").strip(),
+            track_id=track_id,
         )
 
     @staticmethod
