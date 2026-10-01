@@ -686,25 +686,7 @@ class WidgetRuntime:
         )
 
     def _media_payload(self) -> dict[str, Any]:
-        snapshot = self.media_state_store.snapshot()
-        allowed = (
-            "revision",
-            "provider",
-            "connected",
-            "playback_state",
-            "playing",
-            "title",
-            "artist",
-            "album",
-            "duration_seconds",
-            "position_seconds",
-            "volume_percent",
-            "track_id",
-        )
-        return {
-            key: snapshot.get(key)
-            for key in allowed
-        }
+        return self.media_state_store.public_snapshot()
 
     @staticmethod
     def _inside(root: Path, candidate: Path) -> bool:
