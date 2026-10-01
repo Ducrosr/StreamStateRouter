@@ -264,6 +264,7 @@
       "channel.subscription.message",
       "channel.cheer",
       "channel.raid"
-    ]
+    ],
+    "refresh_token": ""
   }
 }

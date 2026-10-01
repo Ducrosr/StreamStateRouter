@@ -5,8 +5,8 @@ import json
 import os
 import time
 from typing import Mapping
-from PySide6.QtCore import QObject, Qt, Signal, QTimer, QSettings
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QObject, Qt, QUrl, Signal, QTimer, QSettings
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -104,6 +104,7 @@ from ..platforms import (
     TwitchAudiencePoller,
     TwitchEventSubAdapter,
     TwitchHelixClient,
+    begin_device_authorization,
 )
 from ..presentation import PresentationStateStore
 from ..services.control_variables import ControlVariableStore
@@ -134,6 +135,7 @@ from .ergonomics import (
     humanize_rule,
 )
 from .setup_guide import SetupGuideDialog, WidgetObsInstallDialog
+from .twitch_oauth_dialog import TwitchDeviceOAuthDialog
 from .presentation_editor import PresentationEditor
 from .presentation import (
     UserActivityEntry,
@@ -4621,6 +4623,12 @@ class MainWindow(QMainWindow):
         twitch_note.setObjectName("Muted")
         twitch_lay.addWidget(twitch_note)
         twitch_actions = QHBoxLayout()
+        connect_twitch = QPushButton("Connecter Twitch…")
+        connect_twitch.setObjectName("Primary")
+        connect_twitch.clicked.connect(
+            self._connect_twitch_device
+        )
+        twitch_actions.addWidget(connect_twitch)
         test_twitch = QPushButton("Tester les credentials Twitch")
         test_twitch.clicked.connect(self._test_twitch_credentials)
         twitch_actions.addWidget(test_twitch)
@@ -4683,6 +4691,99 @@ class MainWindow(QMainWindow):
         root.addWidget(behavior_card)
         root.addStretch(1)
         return page
+
+    def _connect_twitch_device(self) -> None:
+        self._collect_settings()
+        client_id = self.twitch_client_id.text().strip()
+        if not client_id:
+            QMessageBox.warning(
+                self,
+                "Connexion Twitch",
+                (
+                    "Renseignez d’abord le Client ID de l’application "
+                    "Twitch enregistrée pour SSR."
+                ),
+            )
+            return
+        try:
+            authorization = begin_device_authorization(client_id)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Connexion Twitch",
+                f"Impossible de démarrer l’autorisation : {exc}",
+            )
+            return
+
+        QDesktopServices.openUrl(
+            QUrl(authorization.verification_uri)
+        )
+        dialog = TwitchDeviceOAuthDialog(
+            client_id,
+            authorization,
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        tokens = dialog.tokens
+        if tokens is None or not tokens.access_token:
+            QMessageBox.warning(
+                self,
+                "Connexion Twitch",
+                "Twitch n’a retourné aucun access token.",
+            )
+            return
+
+        self.twitch_token.setText(tokens.access_token)
+        self.twitch_enabled.setChecked(True)
+        twitch = self.config.setdefault("twitch", {})
+        if isinstance(twitch, dict):
+            twitch["refresh_token"] = tokens.refresh_token
+
+        temp = copy.deepcopy(self.config)
+        raw = temp.setdefault("twitch", {})
+        if isinstance(raw, dict):
+            raw["enabled"] = True
+            raw["client_id"] = client_id
+            raw["user_access_token"] = tokens.access_token
+            raw["refresh_token"] = tokens.refresh_token
+
+        try:
+            info = TwitchHelixClient(
+                build_twitch_config(temp)
+            ).validate_token()
+        except Exception as exc:
+            self._mark_dirty()
+            QMessageBox.warning(
+                self,
+                "Connexion Twitch",
+                (
+                    "L’autorisation a réussi, mais la validation "
+                    f"du token a échoué : {exc}\n\n"
+                    "Le token reste dans le brouillon pour diagnostic."
+                ),
+            )
+            return
+
+        if info.user_id:
+            if not self.twitch_broadcaster_id.text().strip():
+                self.twitch_broadcaster_id.setText(info.user_id)
+            if not self.twitch_user_id.text().strip():
+                self.twitch_user_id.setText(info.user_id)
+            if not self.twitch_moderator_id.text().strip():
+                self.twitch_moderator_id.setText(info.user_id)
+
+        self._mark_dirty()
+        QMessageBox.information(
+            self,
+            "Connexion Twitch",
+            (
+                f"✓ Twitch autorisé pour {info.login or info.user_id}.\n\n"
+                "Les credentials sont dans le brouillon. "
+                "Utilisez « Enregistrer et appliquer » pour démarrer "
+                "EventSub et l’audience."
+            ),
+        )
 
     def _test_twitch_credentials(self) -> None:
         self._collect_settings()
