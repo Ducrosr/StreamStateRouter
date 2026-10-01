@@ -413,6 +413,90 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["revision"], 0)
         self.assertEqual(provider.artwork_calls, 0)
 
+    def test_stop_cannot_linearize_between_state_guard_and_commit(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        stopping_seen: list[bool] = []
+        holder: dict[str, MediaRuntime] = {}
+
+        class BlockingStateStore(MediaStateStore):
+            def update(self, state: MediaState) -> dict[str, object]:
+                entered.set()
+                release.wait(1.0)
+                stopping_seen.append(holder["runtime"]._stopping)
+                return super().update(state)
+
+        provider = FakeProvider()
+        store = BlockingStateStore("fake")
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+            state_store=store,
+        )
+        holder["runtime"] = runtime
+        runtime.start()
+        self.assertTrue(entered.wait(1.0))
+
+        stopped: list[bool] = []
+        stopper = threading.Thread(
+            target=lambda: stopped.append(runtime.stop(timeout=1.0))
+        )
+        stopper.start()
+        time.sleep(0.05)
+        release.set()
+        stopper.join(2.0)
+
+        self.assertFalse(stopper.is_alive())
+        self.assertEqual(stopping_seen, [False])
+        self.assertEqual(stopped, [True])
+
+    def test_stop_cannot_linearize_between_artwork_guard_and_commit(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        stopping_seen: list[bool] = []
+        holder: dict[str, MediaRuntime] = {}
+
+        class BlockingArtworkStore(MediaArtworkStore):
+            def update(
+                self,
+                content: bytes,
+                *,
+                content_type: str,
+                identity: str,
+            ) -> int:
+                entered.set()
+                release.wait(1.0)
+                stopping_seen.append(holder["runtime"]._stopping)
+                return super().update(
+                    content,
+                    content_type=content_type,
+                    identity=identity,
+                )
+
+        provider = FakeProvider()
+        artwork = BlockingArtworkStore()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+            artwork_store=artwork,
+        )
+        holder["runtime"] = runtime
+        runtime.start()
+        self.assertTrue(entered.wait(1.0))
+
+        stopped: list[bool] = []
+        stopper = threading.Thread(
+            target=lambda: stopped.append(runtime.stop(timeout=1.0))
+        )
+        stopper.start()
+        time.sleep(0.05)
+        release.set()
+        stopper.join(2.0)
+
+        self.assertFalse(stopper.is_alive())
+        self.assertEqual(stopping_seen, [False])
+        self.assertEqual(stopped, [True])
+
     def test_empty_capabilities_reject_all_media_commands(self) -> None:
         provider = FakeProvider()
         provider.capabilities = ()

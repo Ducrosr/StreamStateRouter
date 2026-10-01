@@ -270,22 +270,25 @@ class MediaRuntime:
             artwork_url=state.artwork_url,
         )
         now = self._clock()
-        if not state.connected or not identity:
-            self._last_artwork_identity = identity
-            self._next_artwork_retry_at = 0.0
-            self.artwork_store.clear()
-            return
-        if (
-            identity == self._last_artwork_identity
-            and now < self._next_artwork_retry_at
-        ):
-            return
+        with self._lock:
+            if self._stopping:
+                return
+            if not state.connected or not identity:
+                self._last_artwork_identity = identity
+                self._next_artwork_retry_at = 0.0
+                self.artwork_store.clear()
+                return
+            if (
+                identity == self._last_artwork_identity
+                and now < self._next_artwork_retry_at
+            ):
+                return
 
-        # Never expose artwork from the previous track while the new artwork
-        # is still being resolved.
-        if identity != self._last_artwork_identity:
-            self.artwork_store.clear()
-        self._last_artwork_identity = identity
+            # Never expose artwork from the previous track while the new
+            # artwork is still being resolved.
+            if identity != self._last_artwork_identity:
+                self.artwork_store.clear()
+            self._last_artwork_identity = identity
 
         capabilities = {
             str(item).strip().casefold()
@@ -296,25 +299,31 @@ class MediaRuntime:
         }
         loader = getattr(self.provider, "artwork", None)
         if "artwork" not in capabilities or not callable(loader):
-            self._next_artwork_retry_at = float("inf")
-            self.artwork_store.clear()
+            with self._lock:
+                if self._stopping:
+                    return
+                self._next_artwork_retry_at = float("inf")
+                self.artwork_store.clear()
             return
         try:
             content, content_type = loader(state.track_id)
             with self._lock:
                 if self._stopping:
                     return
-            self.artwork_store.update(
-                content,
-                content_type=content_type,
-                identity=identity,
-            )
-            self._next_artwork_retry_at = float("inf")
+                self.artwork_store.update(
+                    content,
+                    content_type=content_type,
+                    identity=identity,
+                )
+                self._next_artwork_retry_at = float("inf")
         except Exception:
             # Artwork is optional metadata: never make the player appear
             # disconnected because a cover cannot be loaded.
-            self._next_artwork_retry_at = now + 5.0
-            self.artwork_store.clear()
+            with self._lock:
+                if self._stopping:
+                    return
+                self._next_artwork_retry_at = now + 5.0
+                self.artwork_store.clear()
 
     def poll_once(self) -> MediaState:
         with self._lock:
@@ -351,10 +360,9 @@ class MediaRuntime:
             ),
         )
         with self._lock:
-            stopping = self._stopping
-        if stopping:
-            return state
-        self.state_store.update(state)
+            if self._stopping:
+                return state
+            self.state_store.update(state)
         self._refresh_artwork(state)
         semantic_key = state.semantic_key()
         with self._lock:
