@@ -16,6 +16,12 @@ from ..services.paths import imported_widgets_dir
 _MAX_FILES = 1000
 _MAX_BYTES = 100 * 1024 * 1024
 _SKIPPED_DIRS = {".git", "node_modules", "__pycache__"}
+_PUBLISHABLE_SUFFIXES = {
+    ".html", ".htm", ".css", ".js", ".mjs", ".cjs", ".wasm",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
+    ".woff", ".woff2", ".ttf", ".otf",
+    ".mp3", ".wav", ".ogg", ".m4a", ".mp4", ".webm",
+}
 _CSS_URL_RE = re.compile(
     r"url\(\s*(['\"]?)(?P<value>[^)'\"]+)\1\s*\)",
     re.IGNORECASE,
@@ -45,6 +51,7 @@ class WidgetPackage:
     total_bytes: int
     warnings: tuple[str, ...]
     remote_references: tuple[str, ...]
+    published_files: tuple[str, ...] = ()
 
     @property
     def entry_uri(self) -> str:
@@ -180,7 +187,11 @@ def inspect_html_module(
     unsafe: set[str] = set()
 
     if package_root is not None:
-        local_files.update(_walk_package_root(root))
+        local_files.update(
+            path
+            for path in _walk_package_root(root)
+            if path.suffix.casefold() in _PUBLISHABLE_SUFFIXES
+        )
         inspected = tuple(local_files)
         for current in inspected:
             if current.suffix.casefold() not in {
@@ -357,6 +368,12 @@ def import_html_module(
             "unsafe_references": list(
                 inspection.unsafe_references
             ),
+            "published_files": [
+                source.relative_to(
+                    inspection.package_root
+                ).as_posix()
+                for source in inspection.local_files
+            ],
         }
         manifest.write_text(
             json.dumps(
@@ -380,6 +397,12 @@ def import_html_module(
         total_bytes=inspection.total_bytes,
         warnings=inspection.warnings,
         remote_references=inspection.remote_references,
+        published_files=tuple(
+            source.relative_to(
+                inspection.package_root
+            ).as_posix()
+            for source in inspection.local_files
+        ),
     )
 
 
@@ -427,6 +450,22 @@ def list_widget_packages(
                     str(item)
                     for item in payload.get("remote_references", [])
                     if str(item)
+                ),
+                published_files=tuple(
+                    str(item).replace("\\\\", "/")
+                    for item in (
+                        payload.get("published_files", [])
+                        if isinstance(payload.get("published_files"), list)
+                        else []
+                    )
+                    if str(item).strip()
+                ) or tuple(
+                    path.relative_to(package_root).as_posix()
+                    for path in _walk_package_root(package_root)
+                    if (
+                        path != manifest
+                        and path.suffix.casefold() in _PUBLISHABLE_SUFFIXES
+                    )
                 ),
             )
         )
