@@ -130,7 +130,7 @@ class MediaRuntime:
             self._thread = thread
         thread.start()
 
-    def stop(self, timeout: float = 2.0) -> bool:
+    def stop(self, timeout: float | None = None) -> bool:
         with self._lock:
             thread = self._thread
             self._stopping = True
@@ -151,12 +151,29 @@ class MediaRuntime:
                     state=state,
                 )
         self._wake.set()
+        if timeout is None:
+            provider_config = getattr(self.provider, "config", None)
+            provider_timeout = getattr(
+                provider_config,
+                "timeout_seconds",
+                0.0,
+            )
+            try:
+                provider_timeout_value = max(
+                    0.0,
+                    float(provider_timeout),
+                )
+            except (TypeError, ValueError, OverflowError):
+                provider_timeout_value = 0.0
+            timeout_value = max(2.0, provider_timeout_value + 0.5)
+        else:
+            timeout_value = max(0.0, float(timeout))
         if (
             thread is not None
             and thread.is_alive()
             and thread is not threading.current_thread()
         ):
-            thread.join(timeout=max(0.0, float(timeout)))
+            thread.join(timeout=timeout_value)
         stopped = not bool(thread and thread.is_alive())
         if stopped:
             with self._lock:
@@ -227,6 +244,9 @@ class MediaRuntime:
             return
         try:
             content, content_type = loader()
+            with self._lock:
+                if self._stopping:
+                    return
             if len(content) > 8 * 1024 * 1024:
                 raise ValueError("Pochette média trop volumineuse")
             self.artwork_store.update(
@@ -264,6 +284,10 @@ class MediaRuntime:
                 getattr(self.provider, "capabilities", ()) or ()
             ),
         )
+        with self._lock:
+            stopping = self._stopping
+        if stopping:
+            return state
         self.state_store.update(state)
         self._refresh_artwork(state)
         semantic_key = state.semantic_key()
