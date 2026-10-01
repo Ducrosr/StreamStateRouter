@@ -20,6 +20,8 @@ class FakeProvider:
         self.playback_state = "stopped"
         self.position = 0.0
         self.volume = 100.0
+        self.fail_state = False
+        self.fail_pause = False
         self.calls: list[tuple[str, object, int]] = []
 
     def _record(self, action: str, value=None) -> None:
@@ -29,6 +31,8 @@ class FakeProvider:
 
     def state(self) -> MediaState:
         self._record("state")
+        if self.fail_state:
+            raise RuntimeError("provider offline")
         return MediaState(
             provider=self.name,
             connected=True,
@@ -47,6 +51,8 @@ class FakeProvider:
     def pause(self) -> None:
         self._record("pause")
         self.playback_state = "paused"
+        if self.fail_pause:
+            raise RuntimeError("ambiguous pause")
 
     def stop(self) -> None:
         self._record("stop")
@@ -119,6 +125,56 @@ class MediaRuntimeTests(unittest.TestCase):
             events[-1].payload["playback_state"],
             "playing",
         )
+
+    def test_poll_marks_provider_disconnected_then_recovers(self) -> None:
+        provider = FakeProvider()
+        bus = EventBus()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=False),
+            provider,
+            event_bus=bus,
+        )
+        provider.fail_state = True
+
+        offline = runtime.poll_once()
+        provider.fail_state = False
+        recovered = runtime.poll_once()
+
+        self.assertFalse(offline.connected)
+        self.assertEqual(offline.error, "provider offline")
+        self.assertTrue(recovered.connected)
+        self.assertEqual(recovered.error, "")
+        self.assertEqual(
+            [event.type for event in bus.events("media")],
+            ["state_changed", "state_changed"],
+        )
+
+    def test_failed_command_is_not_retried_automatically(self) -> None:
+        provider = FakeProvider()
+        provider.fail_pause = True
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=0.1),
+            provider,
+        )
+        runtime.start()
+        self.addCleanup(runtime.stop)
+
+        request_id = runtime.request("pause")
+        deadline = time.monotonic() + 1.0
+        status = None
+        while status is None and time.monotonic() < deadline:
+            status = runtime.command_status(request_id)
+            if status is None:
+                time.sleep(0.01)
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertFalse(status["success"])
+        self.assertEqual(status["error"], "ambiguous pause")
+        pause_calls = [
+            row for row in provider.calls if row[0] == "pause"
+        ]
+        self.assertEqual(len(pause_calls), 1)
 
     def test_worker_serializes_commands_and_provider_polling(self) -> None:
         provider = FakeProvider()
