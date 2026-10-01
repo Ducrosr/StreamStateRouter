@@ -205,6 +205,50 @@ class WidgetRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(body)["events"], [])
 
+    def test_events_endpoint_exposes_stream_identity_and_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            for index in range(30):
+                runtime.event_bus.publish(
+                    channel="chat",
+                    type="message",
+                    payload={"index": index + 1},
+                )
+
+            _status, body, _content_type = self._get(
+                runtime.base_url
+                + "/runtime/events?channel=chat&after=0&limit=20"
+            )
+            first = json.loads(body)
+            self.assertTrue(first["stream_id"])
+            self.assertEqual(
+                [event["sequence"] for event in first["events"]],
+                list(range(1, 21)),
+            )
+            self.assertTrue(first["has_more"])
+
+            _status, body, _content_type = self._get(
+                runtime.base_url
+                + "/runtime/events?channel=chat&after=20&limit=20"
+                + f"&stream_id={first['stream_id']}"
+            )
+            second = json.loads(body)
+            self.assertEqual(
+                [event["sequence"] for event in second["events"]],
+                list(range(21, 31)),
+            )
+
+    def test_builtin_consumers_send_and_handle_stream_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            for route in ("chat", "events", "alerts"):
+                _status, body, _content_type = self._get(
+                    runtime.base_url + f"/builtin/{route}"
+                )
+                self.assertIn(b"stream_id=", body)
+                self.assertIn(b"snapshot.reset_required", body)
+                self.assertIn(b"ssreventgap", body)
+
     def test_component_host_defaults_to_builtin_and_can_switch_resource(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, package = self._runtime(Path(tmp))
