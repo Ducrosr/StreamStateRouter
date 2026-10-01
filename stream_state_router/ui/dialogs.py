@@ -41,12 +41,20 @@ class RuleDialog(QDialog):
         rule: dict | None = None,
         *,
         profile_choices: Mapping[str, Sequence[str]] | None = None,
+        fallback_state: Mapping[str, object] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Règle d'application")
         self.resize(580, 680)
         self._source = deepcopy(rule or {})
-        self._choices = {key: list(values) for key, values in (profile_choices or {}).items()}
+        self._choices = {
+            key: list(values)
+            for key, values in (profile_choices or {}).items()
+        }
+        self._fallback_mapping = dict(fallback_state or {})
+        self._fallback_state = StreamState.from_mapping(
+            self._fallback_mapping
+        )
 
         root = QVBoxLayout(self)
         form = QFormLayout()
@@ -140,23 +148,81 @@ class RuleDialog(QDialog):
         root.addWidget(title)
         state_form = QFormLayout()
         root.addLayout(state_form)
-        raw_state = self._source.get("state") if isinstance(self._source.get("state"), dict) else {}
-        state = StreamState.from_mapping(raw_state)
+        raw_state = (
+            self._source.get("state")
+            if isinstance(self._source.get("state"), dict)
+            else {}
+        )
+        effective = dict(self._fallback_mapping)
+        effective.update(raw_state)
+        state = StreamState.from_mapping(effective)
 
         self.game = self._profile_combo("game", state.game)
-        self.overlay = self._profile_combo("overlay", state.overlay_profile)
-        self.capture = self._profile_combo("capture", state.capture_profile)
-        self.audio = self._profile_combo("audio", state.audio_profile)
-        self.layout = self._profile_combo("layout", state.layout_profile)
-        state_form.addRow("Game", self.game)
-        state_form.addRow("OverlayProfile", self.overlay)
-        state_form.addRow("CaptureProfile", self.capture)
-        state_form.addRow("AudioProfile", self.audio)
-        state_form.addRow("LayoutProfile", self.layout)
+        self.overlay = self._profile_combo(
+            "overlay",
+            state.overlay_profile,
+        )
+        self.capture = self._profile_combo(
+            "capture",
+            state.capture_profile,
+        )
+        self.audio = self._profile_combo(
+            "audio",
+            state.audio_profile,
+        )
+        self.layout = self._profile_combo(
+            "layout",
+            state.layout_profile,
+        )
+        self.presentation = self._profile_combo(
+            "presentation",
+            state.presentation_profile,
+        )
+
+        self.customize_game = self._customize_box(
+            "Game" in raw_state,
+            self.game,
+            self._fallback_state.game,
+        )
+        self.customize_overlay = self._customize_box(
+            "OverlayProfile" in raw_state,
+            self.overlay,
+            self._fallback_state.overlay_profile,
+        )
+        self.customize_capture = self._customize_box(
+            "CaptureProfile" in raw_state,
+            self.capture,
+            self._fallback_state.capture_profile,
+        )
+        self.customize_audio = self._customize_box(
+            "AudioProfile" in raw_state,
+            self.audio,
+            self._fallback_state.audio_profile,
+        )
+        self.customize_layout = self._customize_box(
+            "LayoutProfile" in raw_state,
+            self.layout,
+            self._fallback_state.layout_profile,
+        )
+        self.customize_presentation = self._customize_box(
+            "PresentationProfile" in raw_state,
+            self.presentation,
+            self._fallback_state.presentation_profile,
+        )
+
+        state_form.addRow("Game", self.customize_game)
+        state_form.addRow("Overlay", self.customize_overlay)
+        state_form.addRow("Capture", self.customize_capture)
+        state_form.addRow("Audio", self.customize_audio)
+        state_form.addRow("Disposition", self.customize_layout)
+        state_form.addRow("Présentation", self.customize_presentation)
 
         hint = QLabel(
-            "LayoutProfile choisit la disposition des modules OBS nommés [Type de module] Nom du module "
-            "pour cette application."
+            "Décochez une ligne pour hériter du preset global. "
+            "Aujourd’hui ce fallback peut être Midgar/Vanilla ; il reste "
+            "configurable et n’est pas codé en dur. Les modules visuels "
+            "peuvent ensuite être hérités, personnalisés ou masqués dans "
+            "PresentationProfile."
         )
         hint.setWordWrap(True)
         hint.setObjectName("Muted")
@@ -193,10 +259,46 @@ class RuleDialog(QDialog):
         box.setCurrentText(current)
         return box
 
+    def _customize_box(
+        self,
+        checked: bool,
+        combo: QComboBox,
+        fallback_value: str,
+    ) -> QWidget:
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        check = QCheckBox("Personnaliser")
+        check.setChecked(bool(checked))
+        check.setToolTip(
+            f"Décoché : utilise le preset global « {fallback_value} »."
+        )
+        combo.setEnabled(bool(checked))
+        combo.setToolTip(
+            f"Preset global actuel : {fallback_value}"
+        )
+        check.toggled.connect(combo.setEnabled)
+        container._customize_check = check
+        container._profile_combo = combo
+        row.addWidget(check)
+        row.addWidget(combo, 1)
+        return container
+
     def _sync_behavior(self) -> None:
         enabled = self.behavior.currentData() == "match"
-        for widget in (self.game, self.overlay, self.capture, self.audio, self.layout):
-            widget.setEnabled(enabled)
+        pairs = (
+            (self.customize_game, self.game),
+            (self.customize_overlay, self.overlay),
+            (self.customize_capture, self.capture),
+            (self.customize_audio, self.audio),
+            (self.customize_layout, self.layout),
+            (self.customize_presentation, self.presentation),
+        )
+        for container, combo in pairs:
+            check = container._customize_check
+            check.setEnabled(enabled)
+            combo.setEnabled(enabled and check.isChecked())
 
     def _sync_process_mode(self) -> None:
         foreground = self.require_foreground.isChecked()
@@ -285,13 +387,50 @@ class RuleDialog(QDialog):
         elif not foreground and process:
             raw["conditions"]["process_running"] = process
         if raw["behavior"] == "match":
-            raw["state"] = {
-                "Game": self.game.currentText().strip() or "Vanilla",
-                "OverlayProfile": self.overlay.currentText().strip() or "Vanilla",
-                "CaptureProfile": self.capture.currentText().strip() or "Default",
-                "AudioProfile": self.audio.currentText().strip() or "Default",
-                "LayoutProfile": self.layout.currentText().strip() or "Vanilla",
-            }
+            state: dict[str, str] = {}
+            selections = (
+                (
+                    self.customize_game,
+                    "Game",
+                    self.game,
+                    self._fallback_state.game,
+                ),
+                (
+                    self.customize_overlay,
+                    "OverlayProfile",
+                    self.overlay,
+                    self._fallback_state.overlay_profile,
+                ),
+                (
+                    self.customize_capture,
+                    "CaptureProfile",
+                    self.capture,
+                    self._fallback_state.capture_profile,
+                ),
+                (
+                    self.customize_audio,
+                    "AudioProfile",
+                    self.audio,
+                    self._fallback_state.audio_profile,
+                ),
+                (
+                    self.customize_layout,
+                    "LayoutProfile",
+                    self.layout,
+                    self._fallback_state.layout_profile,
+                ),
+                (
+                    self.customize_presentation,
+                    "PresentationProfile",
+                    self.presentation,
+                    self._fallback_state.presentation_profile,
+                ),
+            )
+            for container, key, combo, fallback in selections:
+                if not container._customize_check.isChecked():
+                    continue
+                state[key] = combo.currentText().strip() or fallback
+            raw["state"] = state
         return raw
 
 
