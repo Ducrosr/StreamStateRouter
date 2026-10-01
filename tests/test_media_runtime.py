@@ -390,6 +390,9 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertTrue(status["success"])
         self.assertEqual(status["status"], "completed")
         self.assertEqual(status["state"]["playback_state"], "paused")
+        self.assertNotIn("uri", status["state"])
+        self.assertNotIn("artwork_url", status["state"])
+        self.assertNotIn("error", status["state"])
 
         worker_threads = {
             thread_id
