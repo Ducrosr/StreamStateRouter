@@ -355,6 +355,8 @@ class CatalogRuntimeClient:
                 "currentProgramSceneName": self.program_scene,
                 "currentProgramSceneUuid": "idle-uuid",
             }
+        if request == "CreateInput":
+            return {"sceneItemId": 77}
         if request == "GetStreamStatus":
             return {"outputActive": False}
         if request == "GetRecordStatus":
@@ -1104,6 +1106,105 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.profile_threads,
                 [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_widget_browser_source_creation_runs_on_runtime_worker(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        client = CatalogRuntimeClient()
+        dispatcher = OBSDispatcher(client, {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_widget_browser_source(
+                input_name="[SSR] Loveless Chat",
+                url="http://127.0.0.1:8766/widgets/loveless-chat/",
+                width=720,
+                height=900,
+            )
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(
+                result.result["scene"],
+                "Idle",
+            )
+            self.assertEqual(
+                result.result["scene_item_id"],
+                77,
+            )
+            create_calls = [
+                (request, payload)
+                for request, payload in client.calls
+                if request == "CreateInput"
+            ]
+            self.assertEqual(len(create_calls), 1)
+            payload = create_calls[0][1]
+            self.assertEqual(payload["sceneName"], "Idle")
+            self.assertEqual(
+                payload["inputName"],
+                "[SSR] Loveless Chat",
+            )
+            self.assertEqual(payload["inputKind"], "browser_source")
+            self.assertEqual(
+                payload["inputSettings"]["url"],
+                "http://127.0.0.1:8766/widgets/loveless-chat/",
+            )
+            self.assertEqual(payload["inputSettings"]["width"], 720)
+            self.assertEqual(payload["inputSettings"]["height"], 900)
+            self.assertTrue(payload["sceneItemEnabled"])
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_widget_browser_source_creation_accepts_explicit_scene(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        client = CatalogRuntimeClient()
+        dispatcher = OBSDispatcher(client, {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_widget_browser_source(
+                input_name="[SSR] Events",
+                url="http://127.0.0.1:8766/widgets/events/",
+                scene="Gameplay",
+                width=1920,
+                height=1080,
+                shutdown_when_not_visible=True,
+                restart_when_active=True,
+            )
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertFalse(
+                any(
+                    request == "GetCurrentProgramScene"
+                    for request, _payload in client.calls
+                )
+            )
+            payload = next(
+                payload
+                for request, payload in client.calls
+                if request == "CreateInput"
+            )
+            self.assertEqual(payload["sceneName"], "Gameplay")
+            self.assertTrue(payload["inputSettings"]["shutdown"])
+            self.assertTrue(
+                payload["inputSettings"]["restart_when_active"]
             )
         finally:
             self.assertTrue(service.stop())
