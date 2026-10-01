@@ -87,30 +87,59 @@ class MediaRuntime:
         self._thread: threading.Thread | None = None
         self._commands: queue.Queue[_MediaCommand] = queue.Queue()
         self._lock = threading.RLock()
+        self._stopping = False
         self._results: dict[str, MediaCommandResult] = {}
         self._last_semantic_key: tuple[object, ...] | None = None
         self._last_state: MediaState | None = None
 
     @property
     def running(self) -> bool:
-        thread = self._thread
-        return bool(thread is not None and thread.is_alive())
+        with self._lock:
+            thread = self._thread
+            stopping = self._stopping
+        return bool(
+            thread is not None
+            and thread.is_alive()
+            and not stopping
+        )
 
     def start(self) -> None:
-        if not self.config.enabled or self.running:
+        if not self.config.enabled:
             return
-        self._stop.clear()
-        thread = threading.Thread(
-            target=self._run,
-            name="SSR-MediaRuntime",
-            daemon=True,
-        )
-        self._thread = thread
+        with self._lock:
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                return
+            self._stopping = False
+            self._stop.clear()
+            thread = threading.Thread(
+                target=self._run,
+                name="SSR-MediaRuntime",
+                daemon=True,
+            )
+            self._thread = thread
         thread.start()
 
     def stop(self, timeout: float = 2.0) -> bool:
-        thread = self._thread
-        self._stop.set()
+        with self._lock:
+            thread = self._thread
+            self._stopping = True
+            self._stop.set()
+            cancelled: list[_MediaCommand] = []
+            while True:
+                try:
+                    cancelled.append(self._commands.get_nowait())
+                except queue.Empty:
+                    break
+            state = self.state_store.snapshot()
+            for command in cancelled:
+                self._results[command.request_id] = MediaCommandResult(
+                    request_id=command.request_id,
+                    action=command.action,
+                    success=False,
+                    error="Media Runtime en arrêt",
+                    state=state,
+                )
         self._wake.set()
         if (
             thread is not None
@@ -120,7 +149,9 @@ class MediaRuntime:
             thread.join(timeout=max(0.0, float(timeout)))
         stopped = not bool(thread and thread.is_alive())
         if stopped:
-            self._thread = None
+            with self._lock:
+                if self._thread is thread:
+                    self._thread = None
         return stopped
 
     def request(
@@ -131,16 +162,21 @@ class MediaRuntime:
         normalized = str(action or "").strip().casefold()
         if normalized not in self._SUPPORTED_ACTIONS:
             raise ValueError(f"Action média inconnue : {action}")
-        if not self.running:
-            raise RuntimeError("Media Runtime indisponible")
         request_id = uuid.uuid4().hex
-        self._commands.put(
-            _MediaCommand(
-                request_id=request_id,
-                action=normalized,
-                options=dict(options),
-            )
+        command = _MediaCommand(
+            request_id=request_id,
+            action=normalized,
+            options=dict(options),
         )
+        with self._lock:
+            thread = self._thread
+            if (
+                self._stopping
+                or thread is None
+                or not thread.is_alive()
+            ):
+                raise RuntimeError("Media Runtime indisponible")
+            self._commands.put(command)
         self._wake.set()
         return request_id
 
