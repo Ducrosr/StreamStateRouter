@@ -54,7 +54,7 @@ from ..importers import (
     neutralize_referenced_test_layout_profiles,
     wire_windows_hdr_capture_profiles,
 )
-from ..media import MediaArtworkStore, MediaRuntime, MediaStateStore
+from ..media import MediaArtworkStore, MediaCommandStore, MediaRuntime, MediaStateStore
 from ..obs.client import OBSClientManager
 from ..obs.dispatcher import PROFILE_DOMAINS, STATE_DOMAINS, OBSDispatcher
 from ..obs.layouts import OBSLayoutManager, anchor_factors, compact_layout_overrides, diff_layout_profiles, resolve_layout_profile
@@ -213,6 +213,7 @@ class MainWindow(QMainWindow):
         self._presentation_state_store = PresentationStateStore()
         self._media_state_store = MediaStateStore("vlc")
         self._media_artwork_store = MediaArtworkStore()
+        self._media_command_store = MediaCommandStore()
         self._media_runtime: MediaRuntime | None = None
         self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
@@ -9938,6 +9939,7 @@ class MainWindow(QMainWindow):
             provider,
             state_store=self._media_state_store,
             artwork_store=self._media_artwork_store,
+            command_store=self._media_command_store,
             event_bus=event_bus,
         )
         self._media_runtime = runtime
@@ -10046,8 +10048,9 @@ class MainWindow(QMainWindow):
             result = self._service.command_status(request_id)
             if result is not None:
                 return result
-        if self._media_runtime is not None:
-            return self._media_runtime.command_status(request_id)
+        media_result = self._media_command_store.get(request_id)
+        if media_result is not None:
+            return media_result
         return None
 
     def _api_action(self, action: str, payload: dict) -> dict:
