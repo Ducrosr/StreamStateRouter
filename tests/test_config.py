@@ -167,6 +167,36 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("Vanilla", migrated["layout_profiles"])
         self.assertEqual(validate_config(migrated), [])
 
+    def test_schema_v6_migration_materializes_legacy_rule_defaults(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data["profiles"]["overlay"]["Special"] = {"actions": []}
+        data["router"]["fallback_state"].update(
+            {
+                "OverlayProfile": "Special",
+                "CaptureProfile": "Default",
+                "AudioProfile": "Default",
+                "LayoutProfile": "Vanilla",
+            }
+        )
+        data["rules"][1]["state"] = {"Game": "Game"}
+
+        migrated = migrate_config(data)
+
+        state = migrated["rules"][1]["state"]
+        self.assertEqual(state["Game"], "Game")
+        self.assertEqual(state["OverlayProfile"], "Vanilla")
+        self.assertEqual(state["CaptureProfile"], "Default")
+        self.assertEqual(state["AudioProfile"], "Default")
+        self.assertEqual(state["LayoutProfile"], "Vanilla")
+        self.assertEqual(state["PresentationProfile"], "Vanilla")
+        ruleset, _poll, _debounce, _fallback = build_ruleset(migrated)
+        resolved = ruleset.rules[1].state
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.overlay_profile, "Vanilla")
+        self.assertEqual(validate_config(migrated), [])
+
     def test_schema_v3_splits_prefix_grouped_sources_into_distinct_modules(self):
         data = self.sample()
         data["schema_version"] = 3
@@ -279,6 +309,76 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(actions[1]["params"]["settings"], {})
         self.assertFalse(actions[0]["enabled"])
         self.assertFalse(actions[1]["enabled"])
+
+    def test_shareable_export_redacts_presentation_resource_settings(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {
+                "enter_cue": "Enter",
+                "transition_profile": "SecretTransition",
+                "shader_set": "SecretShaders",
+                "theme": {},
+            }
+        }
+        data["cues"] = {
+            "Enter": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "enabled": True,
+                                "params": {
+                                    "input": "Browser",
+                                    "settings": {
+                                        "url": "https://example.test/?token=cue-secret",
+                                        "cookie": "cue-secret",
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        data["shader_sets"] = {
+            "SecretShaders": {
+                "filters": [
+                    {
+                        "source": "Camera",
+                        "filter": "Pulse",
+                        "enabled": True,
+                        "settings": {"api_token": "shader-secret"},
+                    }
+                ]
+            }
+        }
+        data["transition_profiles"] = {
+            "SecretTransition": {
+                "transition_name": "Fade",
+                "settings": {"url": "https://example.test/t?key=secret"},
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+
+        cue_action = exported["cues"]["Enter"]["frames"][0]["actions"][0]
+        self.assertEqual(cue_action["params"]["settings"], {})
+        self.assertFalse(cue_action["enabled"])
+        shader_filter = exported["shader_sets"]["SecretShaders"]["filters"][0]
+        self.assertEqual(shader_filter["settings"], {})
+        self.assertEqual(
+            exported["transition_profiles"]["SecretTransition"]["settings"],
+            {},
+        )
+        profile = exported["presentation_profiles"]["Vanilla"]
+        self.assertEqual(profile["shader_set"], "")
+        self.assertEqual(profile["transition_profile"], "")
+        self.assertEqual(validate_config(exported), [])
 
     def test_backup_names_do_not_collide_and_retention_is_bounded(self):
         data = self.sample()
