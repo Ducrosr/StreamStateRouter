@@ -35,6 +35,7 @@ _BRIDGE_JS = r"""
   if (requested) stateUrl.searchParams.set("component", requested);
 
   let lastRevision = -1;
+  let managedTokenNames = new Set();
   const normalizeKey = (key) =>
     String(key).trim().replace(/[^A-Za-z0-9_-]+/g, "-").toLowerCase();
 
@@ -50,15 +51,24 @@ _BRIDGE_JS = r"""
       state.theme || {},
       (state.component_state && state.component_state.settings) || {}
     );
+    const nextTokenNames = new Set();
     for (const [key, value] of Object.entries(tokens)) {
       if (
         typeof value === "string" ||
         typeof value === "number" ||
         typeof value === "boolean"
       ) {
-        root.style.setProperty("--ssr-" + normalizeKey(key), String(value));
+        const cssName = "--ssr-" + normalizeKey(key);
+        nextTokenNames.add(cssName);
+        root.style.setProperty(cssName, String(value));
       }
     }
+    for (const cssName of managedTokenNames) {
+      if (!nextTokenNames.has(cssName)) {
+        root.style.removeProperty(cssName);
+      }
+    }
+    managedTokenNames = nextTokenNames;
 
     const component = state.component_state || {};
     root.dataset.ssrComponentMode = component.mode || "inherit";
@@ -160,6 +170,7 @@ _CHAT_HTML = r"""<!doctype html>
 (() => {
   const root = document.getElementById("chat");
   let after = 0;
+  let streamId = "";
   const maxMessages = 80;
 
   const addMessage = (event) => {
@@ -201,10 +212,22 @@ _CHAT_HTML = r"""<!doctype html>
       );
       if (response.ok) {
         const snapshot = await response.json();
+        const incomingStreamId = String(snapshot.stream_id || "");
+        if (
+          streamId &&
+          incomingStreamId &&
+          incomingStreamId !== streamId
+        ) {
+          streamId = incomingStreamId;
+          after = 0;
+          return;
+        }
+        if (incomingStreamId) streamId = incomingStreamId;
         for (const event of snapshot.events || []) {
           after = Math.max(after, Number(event.sequence) || 0);
           if (event.type === "message") addMessage(event);
         }
+        after = Math.max(after, Number(snapshot.next_after) || after);
       }
     } catch (_) {
       // Keep current chat visible during short SSR restarts.
@@ -264,6 +287,7 @@ html[data-ssr-animation-intensity="off"] .event { animation:none; }
 (() => {
   const root = document.getElementById("events");
   let after = 0;
+  let streamId = "";
   const maxRows = 30;
   const render = (event) => {
     const payload = event.payload || {};
@@ -293,10 +317,22 @@ html[data-ssr-animation-intensity="off"] .event { animation:none; }
       );
       if (response.ok) {
         const snapshot = await response.json();
+        const incomingStreamId = String(snapshot.stream_id || "");
+        if (
+          streamId &&
+          incomingStreamId &&
+          incomingStreamId !== streamId
+        ) {
+          streamId = incomingStreamId;
+          after = 0;
+          return;
+        }
+        if (incomingStreamId) streamId = incomingStreamId;
         for (const event of snapshot.events || []) {
           after = Math.max(after, Number(event.sequence) || 0);
           render(event);
         }
+        after = Math.max(after, Number(snapshot.next_after) || after);
       }
     } catch (_) {}
     finally { window.setTimeout(refresh, 350); }
@@ -354,6 +390,7 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
 (() => {
   const root = document.getElementById("root");
   let after = 0;
+  let streamId = "";
   const queue = [];
   let active = false;
   const showNext = () => {
@@ -388,10 +425,22 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
       );
       if (response.ok) {
         const snapshot = await response.json();
+        const incomingStreamId = String(snapshot.stream_id || "");
+        if (
+          streamId &&
+          incomingStreamId &&
+          incomingStreamId !== streamId
+        ) {
+          streamId = incomingStreamId;
+          after = 0;
+          return;
+        }
+        if (incomingStreamId) streamId = incomingStreamId;
         for (const event of snapshot.events || []) {
           after = Math.max(after, Number(event.sequence) || 0);
           queue.push(event);
         }
+        after = Math.max(after, Number(snapshot.next_after) || after);
         showNext();
       }
     } catch (_) {}
