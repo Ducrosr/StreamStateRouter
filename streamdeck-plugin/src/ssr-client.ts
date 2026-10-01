@@ -6,6 +6,13 @@ export type SSRStatus = {
   rule?: string;
   state?: Record<string, string>;
   obs_connected?: boolean;
+  media?: {
+    running?: boolean;
+    state?: {
+      playback_state?: string;
+      title?: string;
+    };
+  };
 };
 
 export type SSRConnectionSettings = {
@@ -88,4 +95,9 @@ export const ssrClient = {
   previewLayout: async (name: string) => command("/layout/preview", { name }),
   cancelPreview: async () => command("/layout/cancel-preview"),
   undoLayout: async () => command("/layout/undo"),
+  mediaPlay: async () => command("/media/play"),
+  mediaPause: async () => command("/media/pause"),
+  mediaStop: async () => command("/media/stop"),
+  mediaNext: async () => command("/media/next"),
+  mediaPrevious: async () => command("/media/previous"),
 };
