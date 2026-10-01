@@ -235,5 +235,18 @@
     "host": "127.0.0.1",
     "port": 8766
   },
-  "sound_sets": {}
+  "sound_sets": {},
+  "media_engine": {
+    "enabled": true,
+    "poll_interval_seconds": 1,
+    "jellyfin": {
+      "enabled": false,
+      "base_url": "",
+      "token": "",
+      "device_id": "",
+      "device_name": "",
+      "client_name": "",
+      "timeout_seconds": 3
+    }
+  }
 }

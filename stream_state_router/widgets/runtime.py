@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from ..events import EventBus
+from ..media import MediaStateStore
 from ..presentation import PresentationStateStore
 from ..services.paths import imported_widgets_dir
 from .packages import WidgetPackage, list_widget_packages
@@ -404,6 +405,151 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
 </html>""".strip()
 
 
+_NOW_PLAYING_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="now-playing">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{
+  --ssr-accent:#63e6ff;
+  --ssr-panel-opacity:.84;
+  --ssr-glow:16px;
+  --ssr-font-size:20px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:white;font-family:Inter,"Segoe UI",sans-serif}
+#root{width:100%;height:100%;padding:10px;display:flex;align-items:center;gap:14px;background:rgba(8,17,24,var(--ssr-panel-opacity));border-left:2px solid var(--ssr-accent);box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.2);border-radius:8px}
+#cover{width:min(28vh,96px);height:min(28vh,96px);object-fit:cover;border-radius:6px;display:none}
+#meta{min-width:0;flex:1}
+#title{font-size:var(--ssr-font-size);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#artist,#album{opacity:.78;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#progress{height:4px;background:rgba(255,255,255,.16);margin-top:9px;overflow:hidden;border-radius:999px}
+#bar{height:100%;width:0;background:var(--ssr-accent);transition:width .25s linear}
+#state{font-size:.7em;opacity:.55;margin-top:4px}
+.empty{opacity:.55}
+</style>
+</head>
+<body>
+<div id="root">
+  <img id="cover" alt="">
+  <div id="meta">
+    <div id="title" class="empty">Aucune lecture</div>
+    <div id="artist"></div>
+    <div id="album"></div>
+    <div id="progress"><div id="bar"></div></div>
+    <div id="state"></div>
+  </div>
+</div>
+<script src="/runtime/bridge.js?component=now-playing"></script>
+<script>
+(() => {
+  const title = document.getElementById("title");
+  const artist = document.getElementById("artist");
+  const album = document.getElementById("album");
+  const cover = document.getElementById("cover");
+  const bar = document.getElementById("bar");
+  const state = document.getElementById("state");
+  let media = null;
+  let receivedAt = performance.now();
+
+  const render = () => {
+    const m = media || {};
+    const active = !!m.track_id;
+    title.textContent = active ? (m.title || "Sans titre") : "Aucune lecture";
+    title.className = active ? "" : "empty";
+    artist.textContent = Array.isArray(m.artists) ? m.artists.join(" · ") : "";
+    album.textContent = m.album || "";
+    const duration = Math.max(0, Number(m.duration_seconds) || 0);
+    let position = Math.max(0, Number(m.position_seconds) || 0);
+    if (m.playback === "playing") {
+      position += Math.max(0, performance.now() - receivedAt) / 1000;
+    }
+    position = duration ? Math.min(position, duration) : position;
+    bar.style.width = duration ? ((position / duration) * 100) + "%" : "0%";
+    state.textContent = active
+      ? ((m.playback || "stopped") + (m.player ? " · " + m.player : ""))
+      : "";
+  };
+
+  const refresh = async () => {
+    try {
+      const response = await fetch("/runtime/media", {cache:"no-store"});
+      if (response.ok) {
+        const next = await response.json();
+        const oldKey = media && media.artwork_key;
+        media = next;
+        receivedAt = performance.now();
+        if (next.artwork_key && next.artwork_key !== oldKey) {
+          cover.src = "/runtime/media/artwork?key=" +
+            encodeURIComponent(next.artwork_key) + "&r=" + Number(next.revision || 0);
+          cover.style.display = "block";
+        } else if (!next.artwork_key) {
+          cover.removeAttribute("src");
+          cover.style.display = "none";
+        }
+        render();
+      }
+    } catch (_) {}
+    finally { window.setTimeout(refresh, 1000); }
+  };
+  window.setInterval(render, 250);
+  refresh();
+})();
+</script>
+</body>
+</html>""".strip()
+
+
+_CLOCK_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="clock">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--ssr-accent:#63e6ff;--ssr-panel-opacity:.72;--ssr-glow:12px;--ssr-font-size:30px}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:white;font-family:Inter,"Segoe UI",sans-serif}
+#root{width:100%;height:100%;display:flex;align-items:center;justify-content:center;gap:12px;padding:8px 14px;background:rgba(8,17,24,var(--ssr-panel-opacity));border-bottom:2px solid var(--ssr-accent);box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.18);border-radius:6px}
+#time{font-size:var(--ssr-font-size);font-weight:800;color:var(--ssr-accent)}
+#date{opacity:.78;font-size:.65em}
+</style></head>
+<body><div id="root"><span id="time"></span><span id="date"></span></div>
+<script src="/runtime/bridge.js?component=clock"></script>
+<script>
+(() => {
+ const t=document.getElementById("time"), d=document.getElementById("date");
+ const render=()=>{const now=new Date();t.textContent=new Intl.DateTimeFormat("fr-FR",{hour:"2-digit",minute:"2-digit",second:"2-digit"}).format(now);d.textContent=new Intl.DateTimeFormat("fr-FR",{weekday:"short",day:"2-digit",month:"short"}).format(now);};
+ render();window.setInterval(render,250);
+})();
+</script></body></html>""".strip()
+
+
+_COUNTDOWN_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="countdown">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--ssr-accent:#63e6ff;--ssr-panel-opacity:.82;--ssr-glow:18px;--ssr-font-size:54px}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:white;font-family:Inter,"Segoe UI",sans-serif}
+#root{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(8,17,24,var(--ssr-panel-opacity));border:1px solid var(--ssr-accent);box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.25);border-radius:10px}
+#label{font-size:.35em;letter-spacing:.12em;text-transform:uppercase;opacity:.78}
+#time{font-size:var(--ssr-font-size);font-weight:900;color:var(--ssr-accent);font-variant-numeric:tabular-nums}
+.done #time{animation:pulse .8s ease-in-out infinite alternate}
+@keyframes pulse{to{filter:brightness(1.6);transform:scale(1.03)}}
+html[data-ssr-animation-intensity="off"] .done #time{animation:none}
+</style></head>
+<body><div id="root"><div id="label">J’ARRIVE</div><div id="time">00:00</div></div>
+<script src="/runtime/bridge.js?component=countdown"></script>
+<script>
+(() => {
+ const root=document.getElementById("root"), label=document.getElementById("label"), out=document.getElementById("time");
+ let after=0,target=0,hiddenAtZero=false;
+ const render=()=>{const remaining=Math.max(0,target-Date.now()/1000);const total=Math.ceil(remaining);const m=Math.floor(total/60),s=total%60;out.textContent=String(m).padStart(2,"0")+":"+String(s).padStart(2,"0");root.classList.toggle("done",!!target&&remaining<=0);root.style.visibility=(hiddenAtZero&&target&&remaining<=0)?"hidden":"visible";};
+ const refresh=async()=>{try{const response=await fetch("/runtime/events?channel=countdown&after="+after+"&limit=20",{cache:"no-store"});if(response.ok){const data=await response.json();for(const event of data.events||[]){after=Math.max(after,Number(event.sequence)||0);const p=event.payload||{};if(event.type==="clear"){target=0;root.style.visibility="hidden";continue;}if(event.type==="set"){target=Number(p.target_epoch)||0;hiddenAtZero=!!p.hide_at_zero;label.textContent=p.label||"J’ARRIVE";root.style.visibility="visible";}}}}catch(_){}finally{window.setTimeout(refresh,300);}};
+ render();window.setInterval(render,200);refresh();
+})();
+</script></body></html>""".strip()
+
+
 class _WidgetServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -418,11 +564,15 @@ class WidgetRuntime:
         state_store: PresentationStateStore,
         *,
         event_bus: EventBus | None = None,
+        media_store: MediaStateStore | None = None,
+        media_artwork=None,
         library_root: str | Path | None = None,
     ):
         self.config = config
         self.state_store = state_store
         self.event_bus = event_bus if event_bus is not None else EventBus()
+        self.media_store = media_store if media_store is not None else MediaStateStore()
+        self.media_artwork = media_artwork
         self.library_root = (
             Path(library_root).expanduser().resolve()
             if library_root is not None
@@ -529,7 +679,7 @@ class WidgetRuntime:
         component_json = json.dumps(wanted, ensure_ascii=False)
         fallback = (
             f"builtin:{wanted}"
-            if wanted in {"chat", "events", "alerts"}
+            if wanted in {"chat", "events", "alerts", "now-playing", "clock", "countdown"}
             else ""
         )
         fallback_json = json.dumps(fallback)
@@ -557,7 +707,7 @@ iframe{display:block}
     const value = String(resource || fallback || "").trim();
     if (value.startsWith("builtin:")) {
       const name = value.slice("builtin:".length);
-      if (["chat","events","alerts"].includes(name)) {
+      if (["chat","events","alerts","now-playing","clock","countdown"].includes(name)) {
         return "/builtin/" + encodeURIComponent(name);
       }
       return "";
@@ -772,6 +922,44 @@ iframe{display:block}
                     )
                     return
 
+                if path == "/runtime/media":
+                    self._send_json(
+                        runtime.media_store.snapshot().as_mapping(),
+                        head_only=head_only,
+                    )
+                    return
+
+                if path == "/runtime/media/artwork":
+                    key = str(
+                        parse_qs(parsed.query).get("key", [""])[0]
+                    ).strip()
+                    if not key or not callable(runtime.media_artwork):
+                        self._send_json(
+                            {"error": "artwork_not_found"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    try:
+                        artwork = runtime.media_artwork(key)
+                    except Exception:
+                        artwork = None
+                    if artwork is None:
+                        self._send_json(
+                            {"error": "artwork_not_found"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    body, content_type = artwork
+                    self._send_bytes(
+                        body,
+                        content_type=str(content_type or "image/jpeg"),
+                        head_only=head_only,
+                        cache="private, max-age=60",
+                    )
+                    return
+
                 component_prefix = "/component/"
                 if path.startswith(component_prefix):
                     component = unquote(
@@ -837,6 +1025,39 @@ iframe{display:block}
                 if path in {"/builtin/alerts", "/builtin/alerts/"}:
                     self._send_bytes(
                         _ALERTS_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {
+                    "/builtin/now-playing",
+                    "/builtin/now-playing/",
+                }:
+                    self._send_bytes(
+                        _NOW_PLAYING_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {"/builtin/clock", "/builtin/clock/"}:
+                    self._send_bytes(
+                        _CLOCK_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {
+                    "/builtin/countdown",
+                    "/builtin/countdown/",
+                }:
+                    self._send_bytes(
+                        _COUNTDOWN_HTML.encode("utf-8"),
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",

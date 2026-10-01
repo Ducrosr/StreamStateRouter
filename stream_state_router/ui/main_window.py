@@ -44,6 +44,12 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..activation import TriggerTargetIdentity
+from ..events import EventBus
+from ..media import (
+    JellyfinProvider,
+    MediaEngine,
+    MediaStateStore,
+)
 from ..importers import (
     AdvancedSceneSwitcherImporter,
     CurrentStateCaptureOptions,
@@ -69,6 +75,8 @@ from ..services.config import (
     build_presentation_profiles,
     build_ruleset,
     build_widget_runtime_config,
+    build_media_engine_config,
+    build_jellyfin_config,
     export_config,
     import_config,
     list_valid_backups,
@@ -208,6 +216,9 @@ class MainWindow(QMainWindow):
         self._dispatcher: OBSDispatcher | None = None
         self._client: OBSClientManager | None = None
         self._presentation_state_store = PresentationStateStore()
+        self._event_bus = EventBus()
+        self._media_state_store = MediaStateStore()
+        self._media_engine: MediaEngine | None = None
         self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
@@ -259,6 +270,7 @@ class MainWindow(QMainWindow):
             self._refresh_dashboard_summary
         )
         self._start_runtime()
+        self._start_media_engine()
         self._start_widget_runtime()
         self._start_api()
         self._module_scan_timer = QTimer(self)
@@ -3261,6 +3273,41 @@ class MainWindow(QMainWindow):
         )
         self._register_obs_connected_control(install_alerts)
         widget_actions.addWidget(install_alerts)
+        install_now_playing = QPushButton("Installer Now Playing…")
+        self._set_action_risk(
+            install_now_playing,
+            "live",
+            "Crée une Browser Source locale pour le Media Engine SSR.",
+        )
+        install_now_playing.clicked.connect(
+            self._install_builtin_now_playing_in_obs
+        )
+        self._register_obs_connected_control(
+            install_now_playing
+        )
+        widget_actions.addWidget(install_now_playing)
+        install_clock = QPushButton("Installer Horloge…")
+        self._set_action_risk(
+            install_clock,
+            "live",
+            "Crée une Browser Source locale pour l’horloge SSR.",
+        )
+        install_clock.clicked.connect(
+            self._install_builtin_clock_in_obs
+        )
+        self._register_obs_connected_control(install_clock)
+        widget_actions.addWidget(install_clock)
+        install_countdown = QPushButton("Installer Countdown…")
+        self._set_action_risk(
+            install_countdown,
+            "live",
+            "Crée une Browser Source locale pour le compte à rebours SSR.",
+        )
+        install_countdown.clicked.connect(
+            self._install_builtin_countdown_in_obs
+        )
+        self._register_obs_connected_control(install_countdown)
+        widget_actions.addWidget(install_countdown)
         demo = QPushButton("Événements de démo")
         self._set_action_risk(
             demo,
@@ -3269,6 +3316,26 @@ class MainWindow(QMainWindow):
         )
         demo.clicked.connect(self._publish_widget_demo_events)
         widget_actions.addWidget(demo)
+        start_countdown = QPushButton("Démarrer Countdown…")
+        self._set_action_risk(
+            start_countdown,
+            "read",
+            "Publie uniquement un état local vers le widget Countdown.",
+        )
+        start_countdown.clicked.connect(
+            self._start_builtin_countdown
+        )
+        widget_actions.addWidget(start_countdown)
+        clear_countdown = QPushButton("Effacer Countdown")
+        self._set_action_risk(
+            clear_countdown,
+            "read",
+            "Masque le widget Countdown local.",
+        )
+        clear_countdown.clicked.connect(
+            self._clear_builtin_countdown
+        )
+        widget_actions.addWidget(clear_countdown)
         bind_profile = QPushButton("Associer à Présentation…")
         self._set_action_risk(
             bind_profile,
@@ -4454,6 +4521,58 @@ class MainWindow(QMainWindow):
         widget_lay.addWidget(widget_note)
         root.addWidget(widget_card)
 
+        media_card, media_lay = self._card(
+            "Media Engine / Now Playing"
+        )
+        media_form = QFormLayout()
+        self.media_engine_enabled = QCheckBox(
+            "Activer le moteur média SSR"
+        )
+        self.media_poll_ms = QSpinBox()
+        self.media_poll_ms.setRange(250, 60000)
+        self.media_poll_ms.setSuffix(" ms")
+        self.jellyfin_enabled = QCheckBox(
+            "Utiliser Jellyfin nativement"
+        )
+        self.jellyfin_url = QLineEdit()
+        self.jellyfin_url.setPlaceholderText(
+            "http://127.0.0.1:8096"
+        )
+        self.jellyfin_token = QLineEdit()
+        self.jellyfin_token.setEchoMode(
+            QLineEdit.EchoMode.Password
+        )
+        self.jellyfin_device_id = QLineEdit()
+        self.jellyfin_device_id.setPlaceholderText(
+            "Facultatif — filtre exact DeviceId"
+        )
+        self.jellyfin_device_name = QLineEdit()
+        self.jellyfin_device_name.setPlaceholderText(
+            "Facultatif — ex. PC-Streaming"
+        )
+        self.jellyfin_client_name = QLineEdit()
+        self.jellyfin_client_name.setPlaceholderText(
+            "Facultatif — ex. Jellyfin Media Player"
+        )
+        media_form.addRow("", self.media_engine_enabled)
+        media_form.addRow("Actualisation", self.media_poll_ms)
+        media_form.addRow("", self.jellyfin_enabled)
+        media_form.addRow("Serveur Jellyfin", self.jellyfin_url)
+        media_form.addRow("Token Jellyfin", self.jellyfin_token)
+        media_form.addRow("Device ID", self.jellyfin_device_id)
+        media_form.addRow("Nom du périphérique", self.jellyfin_device_name)
+        media_form.addRow("Client", self.jellyfin_client_name)
+        media_lay.addLayout(media_form)
+        media_note = QLabel(
+            "Le token reste exclusivement côté SSR. Les Browser Sources "
+            "reçoivent uniquement l’état média normalisé et l’artwork "
+            "proxyfié par le Widget Runtime local."
+        )
+        media_note.setWordWrap(True)
+        media_note.setObjectName("Muted")
+        media_lay.addWidget(media_note)
+        root.addWidget(media_card)
+
         host_card, host_lay = self._card("Contrôle Windows")
         host_form = QFormLayout()
         self.soundvolumeview_path = QLineEdit()
@@ -5009,6 +5128,45 @@ class MainWindow(QMainWindow):
         self.widget_runtime_port.setValue(
             int(widget_runtime.get("port", 8766) or 8766)
         )
+        media_engine = self.config.get("media_engine", {})
+        if not isinstance(media_engine, Mapping):
+            media_engine = {}
+        jellyfin = media_engine.get("jellyfin", {})
+        if not isinstance(jellyfin, Mapping):
+            jellyfin = {}
+        self.media_engine_enabled.setChecked(
+            bool(media_engine.get("enabled", True))
+        )
+        self.media_poll_ms.setValue(
+            int(
+                float(
+                    media_engine.get(
+                        "poll_interval_seconds",
+                        1.0,
+                    )
+                    or 1.0
+                )
+                * 1000
+            )
+        )
+        self.jellyfin_enabled.setChecked(
+            bool(jellyfin.get("enabled", False))
+        )
+        self.jellyfin_url.setText(
+            str(jellyfin.get("base_url") or "")
+        )
+        self.jellyfin_token.setText(
+            str(jellyfin.get("token") or "")
+        )
+        self.jellyfin_device_id.setText(
+            str(jellyfin.get("device_id") or "")
+        )
+        self.jellyfin_device_name.setText(
+            str(jellyfin.get("device_name") or "")
+        )
+        self.jellyfin_client_name.setText(
+            str(jellyfin.get("client_name") or "")
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -5080,6 +5238,27 @@ class MainWindow(QMainWindow):
         )
         widget_runtime["host"] = "127.0.0.1"
         widget_runtime["port"] = self.widget_runtime_port.value()
+        media_engine = self.config.setdefault("media_engine", {})
+        media_engine["enabled"] = (
+            self.media_engine_enabled.isChecked()
+        )
+        media_engine["poll_interval_seconds"] = (
+            self.media_poll_ms.value() / 1000.0
+        )
+        jellyfin = media_engine.setdefault("jellyfin", {})
+        jellyfin["enabled"] = self.jellyfin_enabled.isChecked()
+        jellyfin["base_url"] = self.jellyfin_url.text().strip()
+        jellyfin["token"] = self.jellyfin_token.text()
+        jellyfin["device_id"] = (
+            self.jellyfin_device_id.text().strip()
+        )
+        jellyfin["device_name"] = (
+            self.jellyfin_device_name.text().strip()
+        )
+        jellyfin["client_name"] = (
+            self.jellyfin_client_name.text().strip()
+        )
+        jellyfin.setdefault("timeout_seconds", 3.0)
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -5489,6 +5668,7 @@ class MainWindow(QMainWindow):
         self._last_saved_config = copy.deepcopy(draft)
         self._draft_dirty = False
         self._restart_api()
+        self._restart_media_engine()
         self._restart_widget_runtime()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
@@ -6635,6 +6815,93 @@ class MainWindow(QMainWindow):
             component="alerts",
             width=1920,
             height=1080,
+        )
+
+    def _install_builtin_now_playing_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/now-playing",
+            module_name="Now Playing SSR natif",
+            input_name="[SSR] Now Playing",
+            component="now-playing",
+            width=760,
+            height=180,
+        )
+
+    def _install_builtin_clock_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/clock",
+            module_name="Horloge SSR native",
+            input_name="[SSR] Clock",
+            component="clock",
+            width=520,
+            height=90,
+        )
+
+    def _install_builtin_countdown_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/countdown",
+            module_name="Countdown SSR natif",
+            input_name="[SSR] Countdown",
+            component="countdown",
+            width=560,
+            height=240,
+        )
+
+    def _start_builtin_countdown(self) -> None:
+        minutes, ok = QInputDialog.getInt(
+            self,
+            "Countdown SSR",
+            "Durée en minutes",
+            5,
+            1,
+            180,
+            1,
+        )
+        if not ok:
+            return
+        label, ok = QInputDialog.getText(
+            self,
+            "Countdown SSR",
+            "Libellé",
+            text="J’ARRIVE",
+        )
+        if not ok:
+            return
+        hide_at_zero = (
+            QMessageBox.question(
+                self,
+                "Countdown SSR",
+                "Masquer automatiquement le module à 00:00 ?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            == QMessageBox.Yes
+        )
+        self._event_bus.publish(
+            channel="countdown",
+            type="set",
+            platform="ssr",
+            payload={
+                "label": label.strip() or "J’ARRIVE",
+                "target_epoch": time.time() + minutes * 60,
+                "hide_at_zero": hide_at_zero,
+            },
+        )
+        self.statusBar().showMessage(
+            f"Countdown SSR lancé pour {minutes} min.",
+            5000,
+        )
+
+    def _clear_builtin_countdown(self) -> None:
+        self._event_bus.publish(
+            channel="countdown",
+            type="clear",
+            platform="ssr",
+            payload={},
+        )
+        self.statusBar().showMessage(
+            "Countdown SSR effacé.",
+            4000,
         )
 
     def _publish_widget_demo_events(self) -> None:
@@ -9714,11 +9981,61 @@ class MainWindow(QMainWindow):
         label.style().unpolish(label)
         label.style().polish(label)
 
+    def _start_media_engine(self) -> None:
+        cfg = build_media_engine_config(self.config)
+        jellyfin_cfg = build_jellyfin_config(self.config)
+        providers = (
+            (JellyfinProvider(jellyfin_cfg),)
+            if jellyfin_cfg.enabled
+            else ()
+        )
+        engine = MediaEngine(
+            cfg,
+            self._media_state_store,
+            providers=providers,
+            event_bus=self._event_bus,
+        )
+        self._media_engine = engine
+        try:
+            engine.start()
+            if cfg.enabled:
+                self._log(
+                    "Media Engine actif"
+                    + (
+                        " · Jellyfin natif activé."
+                        if jellyfin_cfg.enabled
+                        else " · aucun provider actif."
+                    )
+                )
+        except Exception as exc:
+            self._log(f"Media Engine indisponible : {exc}")
+
+    def _restart_media_engine(self) -> None:
+        engine = self._media_engine
+        if engine is not None:
+            engine.stop()
+        self._start_media_engine()
+
+    def _stop_media_engine(self) -> None:
+        engine = self._media_engine
+        self._media_engine = None
+        if engine is not None:
+            engine.stop()
+
     def _start_widget_runtime(self) -> None:
         cfg = build_widget_runtime_config(self.config)
         runtime = WidgetRuntime(
             cfg,
             self._presentation_state_store,
+            event_bus=self._event_bus,
+            media_store=self._media_state_store,
+            media_artwork=(
+                lambda key: (
+                    self._media_engine.artwork(key)
+                    if self._media_engine is not None
+                    else None
+                )
+            ),
         )
         self._widget_runtime = runtime
         try:
@@ -9792,6 +10109,18 @@ class MainWindow(QMainWindow):
                     and self._widget_runtime.running
                     else ""
                 ),
+            },
+            "media": {
+                "running": bool(
+                    self._media_engine
+                    and self._media_engine.running
+                ),
+                "last_error": (
+                    self._media_engine.last_error
+                    if self._media_engine
+                    else ""
+                ),
+                "state": self._media_state_store.snapshot().as_mapping(),
             },
             "control_variables": (
                 service.control_variables() if service else {}
@@ -9905,6 +10234,24 @@ class MainWindow(QMainWindow):
         if action == "layout.undo":
             request_id = self._service.request_layout("undo")
             return {"request_id": request_id, "status": "accepted"}
+        if action.startswith("media."):
+            engine = self._media_engine
+            if engine is None:
+                raise RuntimeError("Media Engine indisponible")
+            command = action.split(".", 1)[1]
+            position = payload.get("position_seconds")
+            engine.control(
+                command,
+                position_seconds=(
+                    float(position)
+                    if position is not None
+                    else None
+                ),
+            )
+            return {
+                "status": "accepted",
+                "media": self._media_state_store.snapshot().as_mapping(),
+            }
         raise ValueError(f"Action inconnue : {action}")
 
     def _edit_layout_in_obs(self) -> None:
@@ -10328,6 +10675,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._stop_media_engine()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         event.accept()
@@ -10338,6 +10686,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        self._stop_media_engine()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         self.tray.hide()
