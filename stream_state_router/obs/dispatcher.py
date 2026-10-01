@@ -741,10 +741,26 @@ class OBSDispatcher:
                             ),
                         }
                     )
-                for cue_kind, cue_name in (
-                    ("exit", profile.exit_cue),
-                    ("enter", profile.enter_cue),
-                ):
+                cue_operations: list[tuple[str, str]] = []
+                if applied and applied != desired:
+                    try:
+                        previous_profile = (
+                            self._presentation_registry.profile(applied)
+                        )
+                    except Exception:
+                        previous_profile = None
+                    if (
+                        previous_profile is not None
+                        and previous_profile.exit_cue
+                    ):
+                        cue_operations.append(
+                            ("exit", previous_profile.exit_cue)
+                        )
+                if profile.enter_cue:
+                    cue_operations.append(
+                        ("enter", profile.enter_cue)
+                    )
+                for cue_kind, cue_name in cue_operations:
                     if not cue_name:
                         continue
                     cue = self._presentation_registry.cue(cue_name)
