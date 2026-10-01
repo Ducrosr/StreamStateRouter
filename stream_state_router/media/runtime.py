@@ -272,26 +272,18 @@ class MediaRuntime:
                 )
             with self._lock:
                 stopping = self._stopping
-            state = (
-                MediaState(
-                    provider=self.provider.name,
-                    connected=bool(
-                        self.state_store.snapshot().get(
-                            "connected",
-                            False,
-                        )
-                    ),
-                )
-                if stopping
-                else self.poll_once()
-            )
+            state = None if stopping else self.poll_once()
             result = MediaCommandResult(
                 request_id=command.request_id,
                 action=command.action,
                 success=True,
                 state=self.state_store.snapshot(),
             )
-            if self.event_bus is not None and not stopping:
+            if (
+                self.event_bus is not None
+                and not stopping
+                and state is not None
+            ):
                 self.event_bus.publish(
                     channel="media",
                     type="command",
@@ -305,7 +297,10 @@ class MediaRuntime:
                 )
             return result
         except Exception as exc:
-            self.poll_once()
+            with self._lock:
+                stopping = self._stopping
+            if not stopping:
+                self.poll_once()
             return MediaCommandResult(
                 request_id=command.request_id,
                 action=command.action,
