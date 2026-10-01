@@ -116,6 +116,8 @@ _OBS_ACTION_REQUESTS: dict[str, tuple[str, ...]] = {
     "input_mute": ("SetInputMute",),
     "input_volume_db": ("SetInputVolume",),
     "set_input_settings": ("SetInputSettings",),
+    "media_input_action": ("TriggerMediaInputAction",),
+    "animate_filter_settings": ("SetSourceFilterSettings",),
 }
 
 
@@ -216,6 +218,110 @@ def _configured_obs_request_requirements(
                             owners,
                             "GetCurrentProgramScene",
                             f"{domain}/{profile_name} · condition program_scene",
+                        )
+
+    presentation_profiles = config.get("presentation_profiles")
+    transition_profiles = config.get("transition_profiles")
+    shader_sets = config.get("shader_sets")
+    cues = config.get("cues")
+
+    if isinstance(presentation_profiles, Mapping):
+        for profile_name, profile in presentation_profiles.items():
+            if not isinstance(profile, Mapping):
+                continue
+            transition_name = str(
+                profile.get("transition_profile") or ""
+            ).strip()
+            if (
+                transition_name
+                and isinstance(transition_profiles, Mapping)
+                and isinstance(
+                    transition_profiles.get(transition_name),
+                    Mapping,
+                )
+            ):
+                transition = transition_profiles[transition_name]
+                owner = (
+                    f"présentation {profile_name} · transition "
+                    f"{transition_name}"
+                )
+                _add_request_owner(
+                    owners,
+                    "SetCurrentSceneTransition",
+                    owner,
+                )
+                if transition.get("duration_ms") not in (None, ""):
+                    _add_request_owner(
+                        owners,
+                        "SetCurrentSceneTransitionDuration",
+                        owner,
+                    )
+                settings = transition.get("settings")
+                if isinstance(settings, Mapping) and settings:
+                    _add_request_owner(
+                        owners,
+                        "SetCurrentSceneTransitionSettings",
+                        owner,
+                    )
+
+            shader_name = str(
+                profile.get("shader_set") or ""
+            ).strip()
+            if (
+                shader_name
+                and isinstance(shader_sets, Mapping)
+                and isinstance(shader_sets.get(shader_name), Mapping)
+            ):
+                filters = shader_sets[shader_name].get("filters")
+                if isinstance(filters, list):
+                    for raw_filter in filters:
+                        if not isinstance(raw_filter, Mapping):
+                            continue
+                        owner = (
+                            f"présentation {profile_name} · shader "
+                            f"{shader_name}"
+                        )
+                        if isinstance(raw_filter.get("enabled"), bool):
+                            _add_request_owner(
+                                owners,
+                                "SetSourceFilterEnabled",
+                                owner,
+                            )
+                        settings = raw_filter.get("settings")
+                        if isinstance(settings, Mapping) and settings:
+                            _add_request_owner(
+                                owners,
+                                "SetSourceFilterSettings",
+                                owner,
+                            )
+
+    if isinstance(cues, Mapping):
+        for cue_name, cue in cues.items():
+            if not isinstance(cue, Mapping):
+                continue
+            frames = cue.get("frames")
+            if not isinstance(frames, list):
+                continue
+            for frame in frames:
+                if not isinstance(frame, Mapping):
+                    continue
+                actions = frame.get("actions")
+                if not isinstance(actions, list):
+                    continue
+                for action in actions:
+                    if (
+                        not isinstance(action, Mapping)
+                        or not bool(action.get("enabled", True))
+                    ):
+                        continue
+                    kind = str(
+                        action.get("type") or ""
+                    ).strip().casefold()
+                    for request in _OBS_ACTION_REQUESTS.get(kind, ()):
+                        _add_request_owner(
+                            owners,
+                            request,
+                            f"cue {cue_name} · {kind}",
                         )
 
     rules = config.get("rules")
@@ -387,6 +493,54 @@ def _configured_filter_sources(
                 source = str(params.get("source") or "").strip()
                 if source and "${" not in source:
                     sources.add(source)
+    shader_sets = config.get("shader_sets")
+    if isinstance(shader_sets, Mapping):
+        for shader_set in shader_sets.values():
+            if not isinstance(shader_set, Mapping):
+                continue
+            filters = shader_set.get("filters")
+            if not isinstance(filters, list):
+                continue
+            for raw_filter in filters:
+                if not isinstance(raw_filter, Mapping):
+                    continue
+                source = str(raw_filter.get("source") or "").strip()
+                if source and "${" not in source:
+                    sources.add(source)
+
+    cues = config.get("cues")
+    if isinstance(cues, Mapping):
+        for cue in cues.values():
+            if not isinstance(cue, Mapping):
+                continue
+            frames = cue.get("frames")
+            if not isinstance(frames, list):
+                continue
+            for frame in frames:
+                if not isinstance(frame, Mapping):
+                    continue
+                actions = frame.get("actions")
+                if not isinstance(actions, list):
+                    continue
+                for action in actions:
+                    if not isinstance(action, Mapping):
+                        continue
+                    kind = str(
+                        action.get("type") or ""
+                    ).strip().casefold()
+                    if kind not in {
+                        "source_filter_enabled",
+                        "source_filter_settings",
+                        "animate_filter_settings",
+                    }:
+                        continue
+                    params = action.get("params")
+                    if not isinstance(params, Mapping):
+                        continue
+                    source = str(params.get("source") or "").strip()
+                    if source and "${" not in source:
+                        sources.add(source)
+
     return tuple(sorted(sources, key=str.casefold))
 
 
