@@ -1178,6 +1178,21 @@ class RoutingService:
             options={"domain": str(domain), "name": str(profile_name)},
         )
 
+    def request_profile_test(
+        self,
+        domain: str,
+        profile_name: str,
+        profiles: Mapping[str, object],
+    ) -> str:
+        return self.submit_obs_command(
+            "profile.test",
+            options={
+                "domain": str(domain),
+                "name": str(profile_name),
+                "profiles": copy.deepcopy(dict(profiles)),
+            },
+        )
+
     def request_layout(self, action: str, profile_name: str = "") -> str:
         options: dict[str, object] = {}
         if profile_name:
@@ -3007,6 +3022,18 @@ class RoutingService:
                             or response.get("scene_item_id")
                         ),
                     }
+                elif command.action == "profile.test":
+                    raw_profiles = command.options.get("profiles")
+                    if not isinstance(raw_profiles, Mapping):
+                        raise ValueError("profiles brouillon requis")
+                    with self._lock:
+                        state = self.engine.current_state
+                    result = self.dispatcher.execute_profile_snapshot(
+                        str(command.options.get("domain") or ""),
+                        str(command.options.get("name") or ""),
+                        raw_profiles,
+                        state=state,
+                    )
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
