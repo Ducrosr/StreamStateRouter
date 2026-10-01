@@ -65,7 +65,7 @@ async function waitForCommand(payload: Record<string, unknown>): Promise<Record<
   if (!requestId) {
     return payload;
   }
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     const status = await request(`/requests/${encodeURIComponent(requestId)}`);
     const state = String(status.status ?? "");
@@ -84,7 +84,7 @@ async function waitForCommand(payload: Record<string, unknown>): Promise<Record<
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Commande SSR toujours en cours après 10 s (${requestId})`);
+  throw new Error(`Commande SSR toujours en cours après 30 s (${requestId})`);
 }
 
 async function command(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
