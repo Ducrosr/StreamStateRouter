@@ -11,8 +11,9 @@ from stream_state_router.media import (
 
 
 class FakeResponse:
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, content_type: str = "application/json"):
         self.body = body
+        self.headers = {"Content-Type": content_type}
 
     def __enter__(self):
         return self
@@ -25,23 +26,39 @@ class FakeResponse:
 
 
 class FakeOpener:
-    def __init__(self, body: bytes):
+    def __init__(
+        self,
+        body: bytes,
+        content_type: str = "application/json",
+    ):
         self.body = body
+        self.content_type = content_type
         self.requests = []
 
     def open(self, request, *, timeout):
         self.requests.append((request, timeout))
-        return FakeResponse(self.body)
+        return FakeResponse(self.body, self.content_type)
 
 
 class FakeTransport:
-    def __init__(self, status=None):
+    def __init__(
+        self,
+        status=None,
+        artwork: bytes = b"cover",
+        artwork_type: str = "image/jpeg",
+    ):
         self.status = status or {}
+        self.artwork = artwork
+        self.artwork_type = artwork_type
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def get_json(self, path, params=None):
         self.calls.append((str(path), dict(params or {})))
         return self.status
+
+    def get_bytes(self, path, *, max_bytes=8 * 1024 * 1024):
+        self.calls.append((str(path), {"max_bytes": max_bytes}))
+        return self.artwork, self.artwork_type
 
 
 class VLCProviderTests(unittest.TestCase):
@@ -111,6 +128,41 @@ class VLCProviderTests(unittest.TestCase):
             "trop volumineuse",
         ):
             transport.get_json("/requests/status.json")
+
+    def test_http_transport_fetches_authenticated_artwork_bytes(self) -> None:
+        transport = VLCHttpTransport(
+            VLCConfig(password="secret", timeout_seconds=1.25)
+        )
+        opener = FakeOpener(b"jpeg-bytes", "image/jpeg")
+        transport._opener = opener
+
+        body, content_type = transport.get_bytes("/art")
+
+        self.assertEqual(body, b"jpeg-bytes")
+        self.assertEqual(content_type, "image/jpeg")
+        request, timeout = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8080/art")
+        self.assertEqual(timeout, 1.25)
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Basic OnNlY3JldA==",
+        )
+
+    def test_provider_artwork_uses_vlc_art_endpoint(self) -> None:
+        transport = FakeTransport(
+            artwork=b"png-bytes",
+            artwork_type="image/png",
+        )
+        provider = VLCProvider(VLCConfig(), transport=transport)
+
+        self.assertEqual(
+            provider.artwork(),
+            (b"png-bytes", "image/png"),
+        )
+        self.assertEqual(
+            transport.calls,
+            [("/art", {"max_bytes": 8 * 1024 * 1024})],
+        )
 
     def test_status_is_normalized_without_leaking_vlc_shape(self) -> None:
         transport = FakeTransport(
