@@ -1085,6 +1085,10 @@ class CurrentStateCaptureDialog(QDialog):
         current_scene: str,
         suggested_name: str,
         matching_rules: Sequence[Mapping[str, object]] = (),
+        customization_plan: Mapping[
+            str,
+            tuple[str, str],
+        ] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Capturer l’état actuel")
@@ -1092,6 +1096,10 @@ class CurrentStateCaptureDialog(QDialog):
         self._matching_rules = [
             dict(rule) for rule in matching_rules if isinstance(rule, Mapping)
         ]
+        self._customization_plan = {
+            str(key): (str(mode), str(value))
+            for key, (mode, value) in (customization_plan or {}).items()
+        }
 
         root = QVBoxLayout(self)
         intro = QLabel(
@@ -1214,12 +1222,77 @@ class CurrentStateCaptureDialog(QDialog):
             checkbox.toggled.connect(combo.setEnabled)
             combo.setEnabled(checkbox.isChecked())
 
+        planned_controls = {
+            "Game": (
+                self.input_settings,
+                self.input_settings_domain,
+                "game",
+            ),
+            "OverlayProfile": (
+                self.visibility,
+                self.visibility_domain,
+                "overlay",
+            ),
+            "CaptureProfile": (
+                self.filters,
+                self.filters_domain,
+                "capture",
+            ),
+            "AudioProfile": (
+                self.audio_state,
+                self.audio_state_domain,
+                "audio",
+            ),
+            "LayoutProfile": (
+                self.layout,
+                None,
+                "layout",
+            ),
+        }
+        for state_key, (
+            checkbox,
+            domain_combo,
+            domain,
+        ) in planned_controls.items():
+            planned = self._customization_plan.get(state_key)
+            if planned is None:
+                continue
+            mode, selected_profile = planned
+            if mode == "capture":
+                checkbox.setChecked(True)
+                if domain_combo is not None:
+                    index = domain_combo.findData(domain)
+                    if index >= 0:
+                        domain_combo.setCurrentIndex(index)
+            else:
+                checkbox.setChecked(False)
+            checkbox.setEnabled(False)
+            if domain_combo is not None:
+                domain_combo.setEnabled(False)
+            if mode == "inherit":
+                checkbox.setToolTip(
+                    "Verrouillé par le guide : utilise le preset global."
+                )
+            elif mode == "profile":
+                checkbox.setToolTip(
+                    "Verrouillé par le guide : utilise le profil "
+                    f"« {selected_profile} »."
+                )
+            else:
+                checkbox.setToolTip(
+                    "Verrouillé par le guide : capturer cet état dans "
+                    f"{domain}."
+                )
+
         scope_note = QLabel(
             "Périmètre sûr : chaque ligne cochée devient explicitement gérée "
             "par le domaine choisi. Pour une nouvelle règle, SSR crée un profil "
             "dédié lorsqu’il faudrait sinon modifier un profil Overlay/Capture/"
             "Audio déjà utilisé ailleurs. Les lignes décochées restent hors du "
-            "contrôle de la capture."
+            "contrôle de la capture. Lorsqu’un plan du guide est actif, "
+            "les lignes correspondantes sont verrouillées pour éviter de "
+            "capturer un état qui serait ensuite remplacé par héritage ou "
+            "par un profil existant."
         )
         scope_note.setWordWrap(True)
         scope_note.setObjectName("Muted")
