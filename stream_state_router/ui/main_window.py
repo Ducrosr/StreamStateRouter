@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
         self._manual_undo: dict[str, object] | None = None
         self._manual_undo_controls: list[object] = []
         self._pending_layout_manual_apply: dict[str, str] = {}
+        self._pending_profile_tests: dict[str, str] = {}
         self._manual_undo_request_id = ""
         self._user_activity_history: list[
             tuple[str, UserActivityEntry, int, float]
@@ -5809,6 +5810,27 @@ class MainWindow(QMainWindow):
                     self._manual_undo_request_id = ""
                     self._refresh_manual_undo_controls()
 
+            tested_profile = self._pending_profile_tests.pop(
+                request_id,
+                "",
+            )
+            if tested_profile:
+                if command_success:
+                    result = getattr(payload, "result", None)
+                    executed = int(getattr(result, "executed", 0) or 0)
+                    skipped = int(getattr(result, "skipped", 0) or 0)
+                    QMessageBox.information(
+                        self,
+                        "Test du profil",
+                        f"{executed} action(s) exécutée(s), {skipped} ignorée(s).",
+                    )
+                else:
+                    QMessageBox.critical(
+                        self,
+                        "Test du profil",
+                        str(getattr(payload, "error", "") or "Échec du test"),
+                    )
+
             if (
                 action == "collection.import.preview"
                 and request_id in self._pending_collection_imports
@@ -8747,28 +8769,48 @@ class MainWindow(QMainWindow):
         current = self._current_profile()
         if not current:
             return
+        if self._service is None:
+            QMessageBox.critical(
+                self,
+                "Test du profil",
+                "Runtime non disponible.",
+            )
+            return
         if not self._safe_live_confirm("Tester ce profil directement sur OBS"):
             return
         self._collect_settings()
-        try:
-            client = OBSClientManager(build_obs_config(self.config))
-            dispatcher = OBSDispatcher(
-                client,
-                build_profiles(self.config),
-                build_layout_profiles(self.config),
-                presentation_registry=build_presentation_profiles(
-                    self.config
-                ),
+        profiles = self.config.get("profiles", {})
+        domain_profiles = (
+            profiles.get(current[0], {})
+            if isinstance(profiles, Mapping)
+            else {}
+        )
+        if not isinstance(domain_profiles, Mapping):
+            QMessageBox.critical(
+                self,
+                "Test du profil",
+                "Brouillon de profil invalide.",
             )
-            result = dispatcher.execute_profile(current[0], current[1])
+            return
+        try:
+            request_id = self._service.request_profile_test(
+                current[0],
+                current[1],
+                domain_profiles,
+            )
+            self._pending_profile_tests[request_id] = (
+                f"{current[0]}/{current[1]}"
+            )
+            self._track_obs_request(
+                request_id,
+                busy_text="Test…",
+            )
+            self.statusBar().showMessage(
+                f"Test du profil {current[1]} mis en file…",
+                5000,
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Test du profil", str(exc))
-            return
-        QMessageBox.information(
-            self,
-            "Test du profil",
-            f"{result.executed} action(s) exécutée(s), {result.skipped} ignorée(s).",
-        )
 
     def _state_profile_choices(self) -> dict[str, list[str]]:
         profiles = self.config.get("profiles", {})
