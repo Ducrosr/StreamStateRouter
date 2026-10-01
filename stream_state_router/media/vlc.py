@@ -108,6 +108,37 @@ class VLCHttpTransport:
         return payload
 
 
+    def get_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: int = 8 * 1024 * 1024,
+    ) -> tuple[bytes, str]:
+        token = base64.b64encode(
+            (":" + self.config.password).encode("utf-8")
+        ).decode("ascii")
+        request = Request(
+            self.base_url + str(path),
+            headers={
+                "Authorization": f"Basic {token}",
+                "Accept": "image/*",
+                "Cache-Control": "no-cache",
+            },
+            method="GET",
+        )
+        limit = max(1, int(max_bytes))
+        with self._opener.open(
+            request,
+            timeout=float(self.config.timeout_seconds),
+        ) as response:
+            raw = response.read(limit + 1)
+            content_type = str(
+                response.headers.get("Content-Type") or ""
+            )
+        if len(raw) > limit:
+            raise ValueError("Pochette VLC trop volumineuse")
+        return raw, content_type
+
 class VLCProvider:
     """MediaProvider implementation for VLC's local Lua HTTP interface."""
 
@@ -142,6 +173,9 @@ class VLCProvider:
             return {}
         meta = category.get("meta")
         return meta if isinstance(meta, Mapping) else {}
+
+    def artwork(self) -> tuple[bytes, str]:
+        return self._transport.get_bytes("/art")
 
     def state(self) -> MediaState:
         raw = self._transport.get_json("/requests/status.json")
