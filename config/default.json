@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "router": {
     "poll_ms": 50,
     "debounce_ms": 150,
@@ -229,5 +229,11 @@
   },
   "cues": {},
   "transition_profiles": {},
-  "shader_sets": {}
+  "shader_sets": {},
+  "sound_sets": {},
+  "widget_runtime": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 17861
+  }
 }
