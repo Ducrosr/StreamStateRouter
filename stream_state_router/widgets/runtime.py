@@ -600,7 +600,8 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
     const provider = String(state.provider || "media").toUpperCase();
     status.textContent =
       provider + " · " +
-      (playback === "playing" ? "Lecture" :
+      (state.stale ? "État obsolète" :
+       playback === "playing" ? "Lecture" :
        playback === "paused" ? "Pause" :
        playback === "stopped" ? "Arrêt" : "Indisponible");
   };
