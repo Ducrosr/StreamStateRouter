@@ -8754,25 +8754,53 @@ class MainWindow(QMainWindow):
         if not self._safe_live_confirm("Tester ce profil directement sur OBS"):
             return
         self._collect_settings()
-        try:
-            client = OBSClientManager(build_obs_config(self.config))
-            dispatcher = OBSDispatcher(
-                client,
-                build_profiles(self.config),
-                build_layout_profiles(self.config),
-                presentation_registry=build_presentation_profiles(
-                    self.config
-                ),
+        errors = validate_config(self.config)
+        if errors:
+            QMessageBox.critical(
+                self,
+                "Test du profil",
+                "Le brouillon doit être valide avant le test :\n- "
+                + "\n- ".join(errors),
             )
-            result = dispatcher.execute_profile(current[0], current[1])
+            return
+        service = self._service
+        if service is None:
+            QMessageBox.critical(
+                self,
+                "Test du profil",
+                "Runtime SSR indisponible.",
+            )
+            return
+        domain, name, _profile = current
+        profiles_root = self.config.get("profiles", {})
+        domain_profiles = (
+            profiles_root.get(domain, {})
+            if isinstance(profiles_root, Mapping)
+            else {}
+        )
+        if not isinstance(domain_profiles, Mapping):
+            QMessageBox.critical(
+                self,
+                "Test du profil",
+                "Domaine de profils invalide dans le brouillon.",
+            )
+            return
+        try:
+            request_id = service.request_profile_test(
+                domain,
+                name,
+                domain_profiles,
+            )
+            self._track_obs_request(
+                request_id,
+                busy_text="Test…",
+            )
+            self.statusBar().showMessage(
+                f"Test du profil « {name} » envoyé au worker SSR.",
+                5000,
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Test du profil", str(exc))
-            return
-        QMessageBox.information(
-            self,
-            "Test du profil",
-            f"{result.executed} action(s) exécutée(s), {result.skipped} ignorée(s).",
-        )
 
     def _state_profile_choices(self) -> dict[str, list[str]]:
         profiles = self.config.get("profiles", {})
