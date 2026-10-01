@@ -22,9 +22,10 @@ from ..presentation import (
 )
 from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
 from ..router.rules import AppRule, ResolutionKind, RuleSet
+from ..widgets.runtime import WidgetRuntimeConfig
 from .paths import backups_dir, config_path, default_config_path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 SUPPORTED_ACTION_TYPES = {
     "set_program_scene",
     "scene_item_enabled",
@@ -59,6 +60,14 @@ PRESENTATION_MAX_CUE_MS = 30000
 PRESENTATION_MAX_FRAMES = 240
 PRESENTATION_MAX_ACTIONS_PER_FRAME = 64
 PRESENTATION_MAX_ACTIONS_PER_CUE = 1024
+PRESENTATION_SOUND_ACTIONS = {
+    "play",
+    "pause",
+    "stop",
+    "restart",
+    "next",
+    "previous",
+}
 
 
 class ConfigError(ValueError):
@@ -349,6 +358,18 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
         migrated.setdefault("transition_profiles", {})
         migrated.setdefault("shader_sets", {})
         version = 7
+
+    if version == 7:
+        migrated.setdefault("sound_sets", {})
+        migrated.setdefault(
+            "widget_runtime",
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 17861,
+            },
+        )
+        version = 8
 
     migrated["schema_version"] = version
     return migrated
@@ -751,6 +772,29 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             errors.append("api.host doit rester local")
         if not _valid_int(api.get("port", 8765), minimum=1, maximum=65535):
             errors.append("api.port doit être compris entre 1 et 65535")
+
+    widget_runtime = data.get("widget_runtime", {})
+    if not isinstance(widget_runtime, Mapping):
+        errors.append("widget_runtime doit être un objet")
+    else:
+        if (
+            "enabled" in widget_runtime
+            and not isinstance(widget_runtime.get("enabled"), bool)
+        ):
+            errors.append("widget_runtime.enabled doit être booléen")
+        host = str(
+            widget_runtime.get("host") or "127.0.0.1"
+        ).strip().casefold()
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            errors.append("widget_runtime.host doit rester local")
+        if not _valid_int(
+            widget_runtime.get("port", 17861),
+            minimum=1,
+            maximum=65535,
+        ):
+            errors.append(
+                "widget_runtime.port doit être compris entre 1 et 65535"
+            )
 
     activation_policies = data.get("activation_policies", {})
     if not isinstance(activation_policies, Mapping):
@@ -1386,6 +1430,38 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 f"{PRESENTATION_MAX_ACTIONS_PER_CUE} actions"
             )
 
+    sound_sets = data.get("sound_sets", {})
+    if not isinstance(sound_sets, Mapping):
+        errors.append("sound_sets doit être un objet")
+        sound_sets = {}
+    for sound_name, sound_set in sound_sets.items():
+        prefix = f"sound_sets.{sound_name}"
+        if not str(sound_name).strip() or not isinstance(
+            sound_set,
+            Mapping,
+        ):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        for phase in ("enter", "exit"):
+            actions = sound_set.get(phase, [])
+            if not isinstance(actions, list):
+                errors.append(f"{prefix}.{phase} doit être une liste")
+                continue
+            for index, raw_action in enumerate(actions):
+                aprefix = f"{prefix}.{phase}[{index}]"
+                if not isinstance(raw_action, Mapping):
+                    errors.append(f"{aprefix} doit être un objet")
+                    continue
+                if not str(raw_action.get("input") or "").strip():
+                    errors.append(f"{aprefix}.input est requis")
+                action_name = str(
+                    raw_action.get("action") or "restart"
+                ).strip().casefold()
+                if action_name not in PRESENTATION_SOUND_ACTIONS:
+                    errors.append(
+                        f"{aprefix}.action inconnu : {action_name}"
+                    )
+
     for profile_name, profile in presentation_profiles.items():
         prefix = f"presentation_profiles.{profile_name}"
         if not str(profile_name).strip() or not isinstance(
@@ -1456,6 +1532,12 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                     f"{prefix}.{cue_key} référence un cue inexistant : "
                     f"{cue_name}"
                 )
+        sound_name = str(profile.get("sound_set") or "").strip()
+        if sound_name and sound_name not in sound_sets:
+            errors.append(
+                f"{prefix}.sound_set référence un SoundSet inexistant : "
+                f"{sound_name}"
+            )
 
         transition_name = str(
             profile.get("transition_profile") or ""
@@ -1807,6 +1889,7 @@ def build_presentation_profiles(data: Mapping[str, Any]) -> PresentationRegistry
     cues_raw = data.get("cues", {})
     transitions_raw = data.get("transition_profiles", {})
     shader_sets_raw = data.get("shader_sets", {})
+    sound_sets_raw = data.get("sound_sets", {})
     return parse_presentation_registry(
         profiles_raw=(
             profiles_raw if isinstance(profiles_raw, Mapping) else {}
@@ -1822,4 +1905,18 @@ def build_presentation_profiles(data: Mapping[str, Any]) -> PresentationRegistry
             if isinstance(shader_sets_raw, Mapping)
             else {}
         ),
+        sound_sets_raw=(
+            sound_sets_raw
+            if isinstance(sound_sets_raw, Mapping)
+            else {}
+        ),
+    )
+
+
+def build_widget_runtime_config(
+    data: Mapping[str, Any],
+) -> WidgetRuntimeConfig:
+    raw = data.get("widget_runtime", {})
+    return WidgetRuntimeConfig.from_mapping(
+        raw if isinstance(raw, Mapping) else {}
     )
