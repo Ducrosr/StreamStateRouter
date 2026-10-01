@@ -400,6 +400,49 @@ class WidgetRuntimeTests(unittest.TestCase):
                 html,
             )
 
+    def test_builtin_clock_and_countdown_are_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+
+            _status, clock, content_type = self._get(
+                runtime.base_url + "/builtin/clock"
+            )
+            self.assertIn("text/html", content_type)
+            self.assertIn(b"Intl.DateTimeFormat", clock)
+            self.assertIn(
+                b"/runtime/bridge.js?component=clock",
+                clock,
+            )
+
+            runtime.event_bus.publish(
+                channel="countdown",
+                type="set",
+                platform="ssr",
+                payload={
+                    "label": "J’ARRIVE",
+                    "target_epoch": 9999999999,
+                    "hide_at_zero": True,
+                },
+            )
+            _status, countdown, content_type = self._get(
+                runtime.base_url + "/builtin/countdown"
+            )
+            self.assertIn("text/html", content_type)
+            self.assertIn(
+                b"/runtime/events?channel=countdown",
+                countdown,
+            )
+            self.assertIn(b"hide_at_zero", countdown)
+
+            _status, host, _content_type = self._get(
+                runtime.base_url + "/component/countdown"
+            )
+            html = host.decode("utf-8")
+            self.assertIn(
+                'const fallback = "builtin:countdown"',
+                html,
+            )
+
     def test_runtime_is_read_only_and_blocks_package_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, package = self._runtime(Path(tmp))
