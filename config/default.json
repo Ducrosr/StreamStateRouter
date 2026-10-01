@@ -229,5 +229,10 @@
   },
   "cues": {},
   "transition_profiles": {},
-  "shader_sets": {}
+  "shader_sets": {},
+  "widget_runtime": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8766
+  }
 }
