@@ -14,13 +14,15 @@ from .models import (
     build_presentation_registry,
     resolve_presentation_profile,
 )
-from .timeline import CueExecutionResult, CueExecutor
+from .timeline import CueExecutionResult, CueExecutor, CueTask, CueTaskStepResult
 
 __all__ = [
     "Cue",
     "CueAction",
     "CueExecutionResult",
     "CueExecutor",
+    "CueTask",
+    "CueTaskStepResult",
     "CueFrame",
     "PresentationComponent",
     "PresentationProfile",
