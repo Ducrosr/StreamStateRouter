@@ -17,6 +17,7 @@ from ..media import JellyfinConfig, MediaEngineConfig
 from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
+from ..platforms import TwitchEventSubConfig
 from ..presentation import (
     PresentationRegistry,
     build_presentation_registry as parse_presentation_registry,
@@ -481,6 +482,11 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(jellyfin, dict):
             jellyfin["token"] = ""
             jellyfin["enabled"] = False
+
+    twitch = result.get("twitch")
+    if isinstance(twitch, dict):
+        twitch["user_access_token"] = ""
+        twitch["enabled"] = False
 
     profiles = result.get("profiles")
     if isinstance(profiles, Mapping):
@@ -1681,6 +1687,42 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         "lorsque Jellyfin est activé"
                     )
 
+    twitch = data.get("twitch", {})
+    if not isinstance(twitch, Mapping):
+        errors.append("twitch doit être un objet")
+    else:
+        if (
+            "enabled" in twitch
+            and not isinstance(twitch.get("enabled"), bool)
+        ):
+            errors.append("twitch.enabled doit être booléen")
+        for key in (
+            "client_id",
+            "user_access_token",
+            "broadcaster_user_id",
+            "user_id",
+            "moderator_user_id",
+        ):
+            if key in twitch and not isinstance(twitch.get(key), str):
+                errors.append(f"twitch.{key} doit être une chaîne")
+        subscriptions = twitch.get("subscriptions", [])
+        if not isinstance(subscriptions, list):
+            errors.append("twitch.subscriptions doit être une liste")
+        elif any(not isinstance(item, str) for item in subscriptions):
+            errors.append(
+                "twitch.subscriptions doit contenir uniquement des chaînes"
+            )
+        if bool(twitch.get("enabled", False)):
+            for key in (
+                "client_id",
+                "user_access_token",
+                "broadcaster_user_id",
+            ):
+                if not str(twitch.get(key) or "").strip():
+                    errors.append(
+                        f"twitch.{key} est requis lorsque Twitch est activé"
+                    )
+
     host_control = data.get("host_control", {})
     if not isinstance(host_control, Mapping):
         errors.append("host_control doit être un objet")
@@ -2020,6 +2062,42 @@ def build_jellyfin_config(
         client_name=str(values.get("client_name") or ""),
         timeout_seconds=float(
             values.get("timeout_seconds", 3.0) or 3.0
+        ),
+    )
+
+
+def build_twitch_config(
+    data: Mapping[str, Any],
+) -> TwitchEventSubConfig:
+    raw = data.get("twitch", {})
+    values = raw if isinstance(raw, Mapping) else {}
+    subscriptions_raw = values.get("subscriptions", [])
+    subscriptions = (
+        tuple(
+            str(item).strip()
+            for item in subscriptions_raw
+            if str(item).strip()
+        )
+        if isinstance(subscriptions_raw, list)
+        else ()
+    )
+    return TwitchEventSubConfig(
+        enabled=bool(values.get("enabled", False)),
+        client_id=str(values.get("client_id") or ""),
+        user_access_token=str(
+            values.get("user_access_token") or ""
+        ),
+        broadcaster_user_id=str(
+            values.get("broadcaster_user_id") or ""
+        ),
+        user_id=str(values.get("user_id") or ""),
+        moderator_user_id=str(
+            values.get("moderator_user_id") or ""
+        ),
+        subscriptions=(
+            subscriptions
+            if subscriptions
+            else TwitchEventSubConfig().subscriptions
         ),
     )
 
