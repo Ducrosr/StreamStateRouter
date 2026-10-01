@@ -572,12 +572,8 @@ class ConfigTests(unittest.TestCase):
                         "at_ms": 0,
                         "actions": [
                             {
-                                "type": "source_filter_enabled",
-                                "params": {
-                                    "source": "Global",
-                                    "filter": "Mako",
-                                    "enabled": True,
-                                },
+                                "type": "set_program_scene",
+                                "params": {"scene": "GameEnter"},
                             }
                         ],
                     }
@@ -589,12 +585,8 @@ class ConfigTests(unittest.TestCase):
                         "at_ms": 100,
                         "actions": [
                             {
-                                "type": "source_filter_enabled",
-                                "params": {
-                                    "source": "Global",
-                                    "filter": "Mako",
-                                    "enabled": False,
-                                },
+                                "type": "set_program_scene",
+                                "params": {"scene": "GameExit"},
                             }
                         ],
                     }
@@ -699,6 +691,38 @@ class ConfigTests(unittest.TestCase):
             errors,
         )
 
+    def test_cue_validation_rejects_filter_property_mutations(self):
+        data = self.sample()
+        data["cues"] = {
+            "UnsafeFilter": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "source_filter_settings",
+                                "params": {
+                                    "source": "Camera",
+                                    "filter": "Pulse",
+                                    "settings": {"opacity": 0.5},
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(
+                ".type inconnu : source_filter_settings" in error
+                for error in errors
+            ),
+            errors,
+        )
+
     def test_cue_validation_rejects_multi_step_obs_filter_animation(self):
         data = self.sample()
         data["cues"] = {
@@ -728,7 +752,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertTrue(
             any(
-                "animations OBS multi-étapes sont désactivées" in error
+                ".type inconnu : animate_filter_settings" in error
                 for error in errors
             ),
             errors,
