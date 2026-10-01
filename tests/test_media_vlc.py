@@ -52,6 +52,17 @@ class VLCProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "doit rester local"):
             VLCConfig(host="192.168.1.50")
 
+        normalized = VLCConfig(
+            host=" LOCALHOST ",
+            port="8081",
+            password=None,
+            timeout_seconds="1.5",
+        )
+        self.assertEqual(normalized.host, "localhost")
+        self.assertEqual(normalized.port, 8081)
+        self.assertEqual(normalized.password, "")
+        self.assertEqual(normalized.timeout_seconds, 1.5)
+
     def test_ipv6_base_url_is_bracketed(self) -> None:
         transport = VLCHttpTransport(
             VLCConfig(host="::1", port=8080, password="secret")
