@@ -20,6 +20,7 @@ class _Provider:
         self.name = name
         self.states = list(states)
         self.artwork_calls: list[str] = []
+        self.control_calls: list[tuple[str, float | None]] = []
 
     def poll(self) -> MediaState:
         if self.states:
@@ -29,6 +30,14 @@ class _Provider:
     def artwork(self, key: str):
         self.artwork_calls.append(key)
         return (b"img", "image/jpeg")
+
+    def control(
+        self,
+        action: str,
+        *,
+        position_seconds: float | None = None,
+    ) -> None:
+        self.control_calls.append((action, position_seconds))
 
 
 class MediaEngineTests(unittest.TestCase):
@@ -108,6 +117,63 @@ class MediaEngineTests(unittest.TestCase):
         )
         self.assertEqual(events[-1].payload["title"], "B")
 
+    def test_control_requires_provider_capability(self) -> None:
+        store = MediaStateStore()
+        provider = _Provider(
+            "media",
+            [
+                MediaState(
+                    provider="media",
+                    track_id="a",
+                    playback="playing",
+                    supports_media_control=False,
+                )
+            ],
+        )
+        engine = MediaEngine(
+            MediaEngineConfig(),
+            store,
+            providers=(provider,),
+        )
+        engine.poll_once()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "n’annonce pas le contrôle média distant",
+        ):
+            engine.control("next")
+
+        self.assertEqual(provider.control_calls, [])
+
+    def test_control_delegates_to_active_provider(self) -> None:
+        store = MediaStateStore()
+        provider = _Provider(
+            "media",
+            [
+                MediaState(
+                    provider="media",
+                    track_id="a",
+                    playback="playing",
+                    supports_media_control=True,
+                    supported_commands=("NextTrack", "Seek"),
+                )
+            ],
+        )
+        engine = MediaEngine(
+            MediaEngineConfig(),
+            store,
+            providers=(provider,),
+        )
+        engine.poll_once()
+
+        engine.control("next")
+        engine.control("seek", position_seconds=42.5)
+
+        self.assertEqual(
+            provider.control_calls,
+            [("next", None), ("seek", 42.5)],
+        )
+
     def test_artwork_is_delegated_to_active_provider(self) -> None:
         store = MediaStateStore()
         provider = _Provider(
@@ -149,6 +215,13 @@ class JellyfinProviderTests(unittest.TestCase):
                     "ImageTags": {"Primary": "abc"},
                     "MediaType": "Audio",
                 },
+                "SupportsMediaControl": True,
+                "SupportedCommands": [
+                    "PlayPause",
+                    "NextTrack",
+                    "PreviousTrack",
+                    "Seek",
+                ],
                 "PlayState": {
                     "IsPaused": False,
                     "PositionTicks": 600_000_000,
@@ -179,7 +252,45 @@ class JellyfinProviderTests(unittest.TestCase):
         self.assertEqual(state.position_seconds, 60.0)
         self.assertEqual(state.playback, "playing")
         self.assertEqual(state.volume, 72.0)
+        self.assertTrue(state.supports_media_control)
+        self.assertIn("NextTrack", state.supported_commands)
         self.assertEqual(state.artwork_key, "track-1")
+
+    def test_control_posts_to_active_session(self) -> None:
+        provider = JellyfinProvider(
+            JellyfinConfig(
+                enabled=True,
+                base_url="http://jellyfin.local",
+                token="secret",
+            )
+        )
+        provider._active_session_id = "session-1"
+        calls: list[tuple[str, dict, str]] = []
+
+        def request(path, *, query=None, method="GET"):
+            calls.append((path, dict(query or {}), method))
+            return b""
+
+        with patch.object(provider, "_request", side_effect=request):
+            provider.control("next")
+            provider.control("seek", position_seconds=12.5)
+
+        self.assertEqual(
+            calls[0],
+            (
+                "/Sessions/session-1/Playing/NextTrack",
+                {},
+                "POST",
+            ),
+        )
+        self.assertEqual(
+            calls[1],
+            (
+                "/Sessions/session-1/Playing/Seek",
+                {"seekPositionTicks": 125_000_000},
+                "POST",
+            ),
+        )
 
     def test_session_selector_rejects_other_device(self) -> None:
         provider = JellyfinProvider(
