@@ -235,6 +235,9 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(b'component.mode === "hidden"', bridge)
             self.assertIn(b"removeProperty", bridge)
             self.assertIn(b"ssr.widget.state", bridge)
+            self.assertIn(b"ssr.media.state", bridge)
+            self.assertIn(b"ssrmediastatechange", bridge)
+            self.assertIn(b'requested === "radio"', bridge)
             self.assertIn(b"window.parent !== window", bridge)
 
     def test_imported_html_can_receive_presentation_bridge_without_mutation(self) -> None:
@@ -336,6 +339,12 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn('if (c.mode === "hidden")', html)
             self.assertIn("host.replaceChildren()", html)
             self.assertIn("postMessage", html)
+            self.assertIn("ssr.media.state", html)
+            self.assertIn("/runtime/media", html)
+            self.assertIn(
+                'currentComponent.mode === "hidden"',
+                html,
+            )
 
             registry = build_presentation_registry(
                 profiles_raw={
