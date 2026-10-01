@@ -27,7 +27,7 @@ from ..planning import (
 )
 from ..router.engine import StateChange
 from ..router.models import DEFAULT_PROFILE_NAMES, ForegroundApp, StreamState
-from .client import OBSClientManager
+from .client import OBSClientManager, OBSRequestError
 from .layouts import OBSLayoutManager, resolve_layout_profile
 from .models import OBSAction, OBSProfile
 
@@ -1326,34 +1326,32 @@ class OBSDispatcher:
                 {"inputName": source},
                 session_generation,
             )
-        except Exception as exc:
-            # A scene/group is not an input. Only swallow a confirmed OBS
-            # request-level absence; transport/session failures remain fatal.
-            from .client import OBSRequestError
-
-            if not isinstance(exc, OBSRequestError):
-                raise
+        except OBSRequestError:
+            # A scene/group is not an input. Transport/session failures are not
+            # swallowed and therefore invalidate the preparation.
+            pass
         else:
             input_uuid = str(input_response.get("inputUuid") or "").strip()
             if input_uuid:
                 candidates.add(input_uuid)
 
-        self._yield_runtime()
-        scene_response = self._send_for_session(
-            "GetSceneList",
-            None,
-            session_generation,
-        )
         scene_names: list[str] = []
-        for row in scene_response.get("scenes", []) or []:
-            if not isinstance(row, Mapping):
-                continue
-            scene_name = str(row.get("sceneName") or "").strip()
-            scene_uuid = str(row.get("sceneUuid") or "").strip()
-            if scene_name:
-                scene_names.append(scene_name)
-            if scene_name == source and scene_uuid:
-                candidates.add(scene_uuid)
+        if not candidates:
+            self._yield_runtime()
+            scene_response = self._send_for_session(
+                "GetSceneList",
+                None,
+                session_generation,
+            )
+            for row in scene_response.get("scenes", []) or []:
+                if not isinstance(row, Mapping):
+                    continue
+                scene_name = str(row.get("sceneName") or "").strip()
+                scene_uuid = str(row.get("sceneUuid") or "").strip()
+                if scene_name:
+                    scene_names.append(scene_name)
+                if scene_name == source and scene_uuid:
+                    candidates.add(scene_uuid)
 
         if not candidates:
             containers: list[tuple[str, str]] = [
@@ -1366,7 +1364,7 @@ class OBSDispatcher:
                     None,
                     session_generation,
                 )
-            except Exception:
+            except OBSRequestError:
                 groups_response = {}
             containers.extend(
                 ("GetGroupSceneItemList", str(name).strip())
@@ -1381,7 +1379,7 @@ class OBSDispatcher:
                         {"sceneName": container},
                         session_generation,
                     )
-                except Exception:
+                except OBSRequestError:
                     continue
                 for row in response.get("sceneItems", []) or []:
                     if not isinstance(row, Mapping):
@@ -1456,7 +1454,6 @@ class OBSDispatcher:
             ),
             initial_settings=dict(settings),
         )
-        self._verify_filter_binding(binding)
         return binding
 
     def _verify_filter_binding(
