@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 from ..activation.models import TriggerPolicyConfig
 from ..host import HostControlConfig, HostControlController
-from ..media import MediaRuntimeConfig, VLCConfig
+from ..media import MediaRuntimeConfig, VLCConfig, VLCProvider
 from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
@@ -2100,6 +2100,19 @@ def build_vlc_config(
             vlc.get("timeout_seconds", 2.0) or 2.0
         ),
     )
+
+
+def build_media_provider(
+    data: Mapping[str, Any],
+):
+    raw_media = data.get("media", {})
+    media = raw_media if isinstance(raw_media, Mapping) else {}
+    provider = str(
+        media.get("provider") or "vlc"
+    ).strip().casefold()
+    if provider == "vlc":
+        return VLCProvider(build_vlc_config(data))
+    raise ConfigError(f"Provider média inconnu : {provider}")
 
 
 def build_widget_runtime_config(
