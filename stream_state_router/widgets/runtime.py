@@ -8,7 +8,7 @@ import mimetypes
 from pathlib import Path
 import threading
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from ..events import EventBus
 from ..presentation import PresentationStateStore
@@ -521,6 +521,40 @@ class WidgetRuntime:
             return None
         return candidate
 
+    @staticmethod
+    def _inject_bridge(
+        body: bytes,
+        *,
+        component: str,
+    ) -> bytes:
+        wanted = str(component or "").strip()
+        if not wanted or b"/runtime/bridge.js" in body:
+            return body
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return body
+        script = (
+            '<script src="/runtime/bridge.js?component='
+            + quote(wanted, safe="")
+            + '"></script>'
+        )
+        lowered = text.casefold()
+        head_index = lowered.rfind("</head>")
+        if head_index >= 0:
+            text = text[:head_index] + script + text[head_index:]
+        else:
+            body_index = lowered.rfind("</body>")
+            if body_index >= 0:
+                text = (
+                    text[:body_index]
+                    + script
+                    + text[body_index:]
+                )
+            else:
+                text += script
+        return text.encode("utf-8")
+
     def _handler(self):
         runtime = self
 
@@ -723,6 +757,19 @@ class WidgetRuntime:
                         file_path.name
                     )
                     content_type = guessed or "application/octet-stream"
+                    if (
+                        file_path.suffix.casefold() in {".html", ".htm"}
+                    ):
+                        component = str(
+                            parse_qs(parsed.query).get(
+                                "component",
+                                [""],
+                            )[0]
+                        ).strip()
+                        body = runtime._inject_bridge(
+                            body,
+                            component=component,
+                        )
                     if content_type.startswith("text/"):
                         content_type += "; charset=utf-8"
                     self._send_bytes(
