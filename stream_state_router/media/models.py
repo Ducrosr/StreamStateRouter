@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 MEDIA_PLAYBACK_STATES = frozenset(
@@ -30,21 +31,54 @@ class MediaState:
         state = str(self.playback_state or "unknown").strip().casefold()
         if state not in MEDIA_PLAYBACK_STATES:
             state = "unknown"
+
+        def finite_number(
+            value: object,
+            *,
+            maximum: float | None = None,
+        ) -> float:
+            try:
+                number = float(value or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                number = 0.0
+            if not math.isfinite(number):
+                number = 0.0
+            number = max(0.0, number)
+            if maximum is not None:
+                number = min(maximum, number)
+            return number
+
+        object.__setattr__(self, "provider", str(self.provider or "").strip())
+        object.__setattr__(self, "connected", bool(self.connected))
         object.__setattr__(self, "playback_state", state)
+        for field_name in (
+            "title",
+            "artist",
+            "album",
+            "artwork_url",
+            "uri",
+            "track_id",
+            "error",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                str(getattr(self, field_name) or "").strip(),
+            )
         object.__setattr__(
             self,
             "duration_seconds",
-            max(0.0, float(self.duration_seconds or 0.0)),
+            finite_number(self.duration_seconds),
         )
         object.__setattr__(
             self,
             "position_seconds",
-            max(0.0, float(self.position_seconds or 0.0)),
+            finite_number(self.position_seconds),
         )
         object.__setattr__(
             self,
             "volume_percent",
-            max(0.0, min(200.0, float(self.volume_percent or 0.0))),
+            finite_number(self.volume_percent, maximum=200.0),
         )
 
     @property
