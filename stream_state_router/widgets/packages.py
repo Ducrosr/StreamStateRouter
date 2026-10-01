@@ -274,7 +274,8 @@ def inspect_html_module(
         )
     if remote:
         warnings.append(
-            f"{len(remote)} dépendance(s) distante(s) resteront externes"
+            f"{len(remote)} dépendance(s) distante(s) détectée(s) ; "
+            "elles seront bloquées dans le runtime isolé"
         )
     if unsafe:
         warnings.append(
