@@ -11,6 +11,7 @@ _STATE_KEYS = (
     ("capture", "Capture", "CaptureProfile"),
     ("audio", "Audio", "AudioProfile"),
     ("layout", "Layout", "LayoutProfile"),
+    ("presentation", "Présentation", "PresentationProfile"),
 )
 
 
@@ -425,7 +426,12 @@ def build_rule_health(
         if not target:
             missing.append(f"{label}=<vide>")
             continue
-        pool = layouts if domain == "layout" else _mapping(profiles.get(domain))
+        if domain == "layout":
+            pool = layouts
+        elif domain == "presentation":
+            pool = _mapping(config.get("presentation_profiles"))
+        else:
+            pool = _mapping(profiles.get(domain))
         if target not in pool:
             missing.append(f"{label}={target}")
 
