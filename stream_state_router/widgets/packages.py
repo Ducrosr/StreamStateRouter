@@ -45,6 +45,7 @@ class WidgetPackage:
     total_bytes: int
     warnings: tuple[str, ...]
     remote_references: tuple[str, ...]
+    published_files: tuple[str, ...] = ()
 
     @property
     def entry_uri(self) -> str:
@@ -336,11 +337,20 @@ def import_html_module(
         )
         imported_entry = destination / entry_relative
         manifest = destination / "manifest.json"
+        published_files = tuple(
+            sorted(
+                source.relative_to(
+                    inspection.package_root
+                ).as_posix()
+                for source in inspection.local_files
+            )
+        )
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "package_id": package_id,
             "name": display_name,
             "entry": entry_relative.as_posix(),
+            "published_files": list(published_files),
             "imported_at": datetime.now(timezone.utc).isoformat(),
             "source_mode": (
                 "folder" if package_root is not None else "html"
@@ -380,6 +390,7 @@ def import_html_module(
         total_bytes=inspection.total_bytes,
         warnings=inspection.warnings,
         remote_references=inspection.remote_references,
+        published_files=published_files,
     )
 
 
@@ -409,6 +420,23 @@ def list_widget_packages(
         entry = package_root / str(payload.get("entry") or "")
         if not entry.is_file() or not _inside(package_root, entry):
             continue
+        published_raw = payload.get("published_files")
+        if isinstance(published_raw, list):
+            published_files = tuple(
+                str(item).replace("\\", "/").strip("/")
+                for item in published_raw
+                if str(item).strip()
+            )
+        else:
+            # Pre-v2 packages are intentionally restricted to their entry
+            # point until they are re-imported under the published-files
+            # contract.
+            try:
+                published_files = (
+                    entry.relative_to(package_root).as_posix(),
+                )
+            except ValueError:
+                continue
         found.append(
             WidgetPackage(
                 package_id=str(payload.get("package_id") or package_root.name),
@@ -428,6 +456,7 @@ def list_widget_packages(
                     for item in payload.get("remote_references", [])
                     if str(item)
                 ),
+                published_files=published_files,
             )
         )
     return tuple(found)
