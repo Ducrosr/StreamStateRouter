@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import json
 import math
 import re
+import socket
+import time
 from typing import Mapping
 from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -108,38 +110,165 @@ class VLCHttpTransport:
         return payload
 
 
+    @property
+    def artwork_timeout_seconds(self) -> float:
+        return min(float(self.config.timeout_seconds), 2.0)
+
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Délai total artwork VLC dépassé")
+        return remaining
+
+    @classmethod
+    def _recv_deadline(
+        cls,
+        sock: socket.socket,
+        deadline: float,
+        size: int = 65536,
+    ) -> bytes:
+        sock.settimeout(cls._remaining(deadline))
+        try:
+            return sock.recv(max(1, int(size)))
+        except socket.timeout as exc:
+            raise TimeoutError(
+                "Délai total artwork VLC dépassé"
+            ) from exc
+
     def get_bytes(
         self,
         path: str,
         *,
         max_bytes: int = 8 * 1024 * 1024,
     ) -> tuple[bytes, str]:
+        limit = max(1, int(max_bytes))
+        deadline = time.monotonic() + self.artwork_timeout_seconds
+        host = (
+            "127.0.0.1"
+            if self.config.host == "localhost"
+            else self.config.host
+        )
         token = base64.b64encode(
             (":" + self.config.password).encode("utf-8")
         ).decode("ascii")
-        request = Request(
-            self.base_url + str(path),
-            headers={
-                "Authorization": f"Basic {token}",
-                "Accept": "image/*",
-                "Cache-Control": "no-cache",
-            },
-            method="GET",
+        host_header = (
+            f"[{host}]:{self.config.port}"
+            if host == "::1"
+            else f"{host}:{self.config.port}"
         )
-        limit = max(1, int(max_bytes))
-        with self._opener.open(
-            request,
-            # Artwork is optional metadata. Never let a cover fetch block
-            # media controls for the full provider timeout.
-            timeout=min(float(self.config.timeout_seconds), 2.0),
-        ) as response:
-            raw = response.read(limit + 1)
-            content_type = str(
-                response.headers.get("Content-Type") or ""
-            )
-        if len(raw) > limit:
-            raise ValueError("Pochette VLC trop volumineuse")
-        return raw, content_type
+        request = (
+            f"GET {str(path)} HTTP/1.1\r\n"
+            f"Host: {host_header}\r\n"
+            f"Authorization: Basic {token}\r\n"
+            "Accept: image/*\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+
+        with socket.create_connection(
+            (host, int(self.config.port)),
+            timeout=self._remaining(deadline),
+        ) as sock:
+            sock.settimeout(self._remaining(deadline))
+            sock.sendall(request)
+
+            buffer = bytearray()
+            marker = b"\r\n\r\n"
+            while marker not in buffer:
+                chunk = self._recv_deadline(sock, deadline)
+                if not chunk:
+                    raise ValueError(
+                        "Réponse artwork VLC interrompue avant les en-têtes"
+                    )
+                buffer.extend(chunk)
+                if len(buffer) > 65536:
+                    raise ValueError(
+                        "En-têtes artwork VLC trop volumineux"
+                    )
+
+            header_blob, body_start = bytes(buffer).split(marker, 1)
+            lines = header_blob.split(b"\r\n")
+            try:
+                status = int(lines[0].split(b" ", 2)[1])
+            except (IndexError, ValueError) as exc:
+                raise ValueError(
+                    "Réponse HTTP artwork VLC invalide"
+                ) from exc
+            if status != 200:
+                raise ValueError(
+                    f"Réponse HTTP artwork VLC inattendue : {status}"
+                )
+
+            headers: dict[str, str] = {}
+            for raw_line in lines[1:]:
+                if b":" not in raw_line:
+                    continue
+                raw_name, raw_value = raw_line.split(b":", 1)
+                name = raw_name.decode(
+                    "ascii",
+                    errors="ignore",
+                ).strip().casefold()
+                value = raw_value.decode(
+                    "latin-1",
+                    errors="replace",
+                ).strip()
+                if name:
+                    headers[name] = value
+
+            transfer = headers.get("transfer-encoding", "").casefold()
+            if transfer and transfer != "identity":
+                raise ValueError(
+                    "Encodage artwork VLC non pris en charge"
+                )
+
+            content_length: int | None = None
+            raw_length = headers.get("content-length", "")
+            if raw_length:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise ValueError(
+                        "Content-Length artwork VLC invalide"
+                    ) from exc
+                if content_length < 0:
+                    raise ValueError(
+                        "Content-Length artwork VLC invalide"
+                    )
+                if content_length > limit:
+                    raise ValueError("Pochette VLC trop volumineuse")
+
+            body = bytearray(body_start)
+            if len(body) > limit:
+                raise ValueError("Pochette VLC trop volumineuse")
+
+            if content_length is not None:
+                while len(body) < content_length:
+                    chunk = self._recv_deadline(
+                        sock,
+                        deadline,
+                        min(65536, content_length - len(body)),
+                    )
+                    if not chunk:
+                        raise ValueError(
+                            "Réponse artwork VLC interrompue"
+                        )
+                    body.extend(chunk)
+                if len(body) > content_length:
+                    del body[content_length:]
+            else:
+                while True:
+                    chunk = self._recv_deadline(sock, deadline)
+                    if not chunk:
+                        break
+                    body.extend(chunk)
+                    if len(body) > limit:
+                        raise ValueError(
+                            "Pochette VLC trop volumineuse"
+                        )
+
+        return bytes(body), headers.get("content-type", "")
 
 class VLCProvider:
     """MediaProvider implementation for VLC's local Lua HTTP interface."""
