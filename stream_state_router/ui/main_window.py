@@ -3264,8 +3264,8 @@ class MainWindow(QMainWindow):
         demo = QPushButton("Événements de démo")
         self._set_action_risk(
             demo,
-            "read",
-            "Publie seulement des événements locaux vers les widgets SSR.",
+            "live",
+            "Publie des événements de démonstration dans les widgets SSR actifs.",
         )
         demo.clicked.connect(self._publish_widget_demo_events)
         widget_actions.addWidget(demo)
@@ -6646,6 +6646,10 @@ class MainWindow(QMainWindow):
                 "Le Widget Runtime doit être actif.",
             )
             return
+        if not self._safe_live_confirm(
+            "Envoyer des événements de démonstration aux widgets SSR actifs"
+        ):
+            return
         runtime.event_bus.publish(
             channel="chat",
             type="message",
@@ -9714,11 +9718,12 @@ class MainWindow(QMainWindow):
         label.style().unpolish(label)
         label.style().polish(label)
 
-    def _start_widget_runtime(self) -> None:
+    def _start_widget_runtime(self, *, event_bus=None) -> None:
         cfg = build_widget_runtime_config(self.config)
         runtime = WidgetRuntime(
             cfg,
             self._presentation_state_store,
+            event_bus=event_bus,
         )
         self._widget_runtime = runtime
         try:
@@ -9733,9 +9738,13 @@ class MainWindow(QMainWindow):
 
     def _restart_widget_runtime(self) -> None:
         runtime = self._widget_runtime
+        event_bus = runtime.event_bus if runtime is not None else None
         if runtime is not None:
             runtime.stop()
-        self._start_widget_runtime()
+        # Restarting the HTTP server for a saved configuration must not create
+        # a new event stream. Existing Browser Sources retain their cursor and
+        # continue on the same bus/session identity.
+        self._start_widget_runtime(event_bus=event_bus)
         self._refresh_widget_library()
 
     def _stop_widget_runtime(self) -> None:
