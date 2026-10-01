@@ -284,9 +284,7 @@ class ConfigTests(unittest.TestCase):
             exported = json.loads(path.read_text(encoding="utf-8"))
 
         self.assertEqual(exported["media"]["vlc"]["password"], "")
-        # A shareable export remains valid because media is disabled if its
-        # authentication secret is removed.
-        exported["media"]["enabled"] = False
+        self.assertFalse(exported["media"]["enabled"])
         self.assertEqual(validate_config(exported), [])
 
     def test_shareable_export_redacts_secrets_and_is_valid(self):
