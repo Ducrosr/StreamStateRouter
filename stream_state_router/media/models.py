@@ -23,6 +23,7 @@ class MediaState:
     uri: str = ""
     duration_seconds: float = 0.0
     position_seconds: float = 0.0
+    playback_rate: float = 0.0
     volume_percent: float = 0.0
     track_id: str = ""
     observed_at_unix: float = 0.0
@@ -79,6 +80,11 @@ class MediaState:
         )
         object.__setattr__(
             self,
+            "playback_rate",
+            finite_number(self.playback_rate, maximum=16.0),
+        )
+        object.__setattr__(
+            self,
             "volume_percent",
             finite_number(self.volume_percent, maximum=200.0),
         )
@@ -118,6 +124,7 @@ class MediaState:
             self.artwork_url,
             self.uri,
             round(self.duration_seconds, 3),
+            round(self.playback_rate, 3),
             round(self.volume_percent, 2),
             self.track_id,
             self.capabilities,
@@ -137,6 +144,7 @@ class MediaState:
             "uri": self.uri,
             "duration_seconds": self.duration_seconds,
             "position_seconds": self.position_seconds,
+            "playback_rate": self.playback_rate,
             "volume_percent": self.volume_percent,
             "track_id": self.track_id,
             "observed_at_unix": self.observed_at_unix,
@@ -157,6 +165,7 @@ class MediaState:
             "album": self.album,
             "duration_seconds": self.duration_seconds,
             "position_seconds": self.position_seconds,
+            "playback_rate": self.playback_rate,
             "volume_percent": self.volume_percent,
             "track_id": self.track_id,
             "observed_at_unix": self.observed_at_unix,
