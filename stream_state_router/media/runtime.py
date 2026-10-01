@@ -10,7 +10,7 @@ import uuid
 
 from ..events import EventBus
 from .base import MediaProvider
-from .models import MediaState
+from .models import MediaState, media_artwork_identity
 from .state import MediaArtworkStore, MediaCommandStore, MediaStateStore
 
 
@@ -242,14 +242,15 @@ class MediaRuntime:
         return self.state_store.snapshot()
 
     def _refresh_artwork(self, state: MediaState) -> None:
-        identity = (
-            state.track_id,
-            state.uri,
-            state.title,
-            state.artwork_url,
+        identity = media_artwork_identity(
+            provider=state.provider,
+            track_id=state.track_id,
+            uri=state.uri,
+            title=state.title,
+            artwork_url=state.artwork_url,
         )
         now = self._clock()
-        if not state.connected or not any(identity):
+        if not state.connected or not identity:
             self._last_artwork_identity = identity
             self._next_artwork_retry_at = 0.0
             self.artwork_store.clear()
@@ -259,7 +260,13 @@ class MediaRuntime:
             and now < self._next_artwork_retry_at
         ):
             return
+
+        # Never expose artwork from the previous track while the new artwork
+        # is still being resolved.
+        if identity != self._last_artwork_identity:
+            self.artwork_store.clear()
         self._last_artwork_identity = identity
+
         capabilities = {
             str(item).strip().casefold()
             for item in (
@@ -273,19 +280,15 @@ class MediaRuntime:
             self.artwork_store.clear()
             return
         try:
-            content, content_type = loader()
+            content, content_type = loader(state.track_id)
             with self._lock:
                 if self._stopping:
                     return
-            if len(content) > 8 * 1024 * 1024:
-                raise ValueError("Pochette média trop volumineuse")
             self.artwork_store.update(
                 content,
                 content_type=content_type,
-                identity="|".join(identity),
+                identity=identity,
             )
-            # A successful artwork belongs to this track identity and
-            # remains valid until that identity changes.
             self._next_artwork_retry_at = float("inf")
         except Exception:
             # Artwork is optional metadata: never make the player appear
