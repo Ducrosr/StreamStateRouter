@@ -20,6 +20,7 @@ from stream_state_router.obs.dispatcher import (
     OBSDispatcher,
     profile_map_from_raw,
 )
+from stream_state_router.presentation import build_presentation_registry
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
@@ -1170,6 +1171,121 @@ class RuntimeTests(unittest.TestCase):
                 recorded[3]["Vanilla"]["actions"][0]["params"]["input"],
                 "Music",
             )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_delayed_cue_does_not_block_foreground_replacement(self):
+        client = CatalogRuntimeClient()
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "A": {"enter_cue": "EnterA"},
+                "B": {"enter_cue": "EnterB"},
+            },
+            cues_raw={
+                "EnterA": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "A-now"},
+                                }
+                            ],
+                        },
+                        {
+                            "at_ms": 500,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "A-late"},
+                                }
+                            ],
+                        },
+                    ]
+                },
+                "EnterB": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "B-now"},
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+        provider = FakeProvider(
+            ForegroundApp(1, 1, "a.exe")
+        )
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "A",
+                        StreamState(presentation_profile="A"),
+                        priority=100,
+                        exe="a.exe",
+                    ),
+                    AppRule(
+                        "B",
+                        StreamState(presentation_profile="B"),
+                        priority=100,
+                        exe="b.exe",
+                    ),
+                ]
+            ),
+            debounce_ms=0,
+        )
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=provider,
+        )
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                scenes = [
+                    payload["sceneName"]
+                    for request, payload in client.calls
+                    if request == "SetCurrentProgramScene"
+                ]
+                if "A-now" in scenes:
+                    break
+                time.sleep(0.01)
+            self.assertIn("A-now", scenes)
+
+            provider.app = ForegroundApp(2, 2, "b.exe")
+            deadline = time.monotonic() + 0.4
+            while time.monotonic() < deadline:
+                scenes = [
+                    payload["sceneName"]
+                    for request, payload in client.calls
+                    if request == "SetCurrentProgramScene"
+                ]
+                if "B-now" in scenes:
+                    break
+                time.sleep(0.01)
+            self.assertIn("B-now", scenes)
+
+            time.sleep(0.55)
+            scenes = [
+                payload["sceneName"]
+                for request, payload in client.calls
+                if request == "SetCurrentProgramScene"
+            ]
+            self.assertNotIn("A-late", scenes)
         finally:
             self.assertTrue(service.stop())
 
