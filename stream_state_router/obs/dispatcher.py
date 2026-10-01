@@ -1870,6 +1870,7 @@ class OBSDispatcher:
 
         presentation_profile: ResolvedPresentationProfile | None = None
         presentation_failed = ""
+        presentation_partial = ""
         presentation_name = state.profile_name("presentation")
         if "presentation" in changed:
             if self._is_unmanaged_default(
@@ -1963,9 +1964,17 @@ class OBSDispatcher:
                         executed += self._apply_transition_profile(
                             presentation_profile
                         )
-                        executed += self._apply_shader_set(
-                            presentation_profile
-                        )
+                        if presentation_profile.shader_set:
+                            presentation_partial = (
+                                "ShaderSet conservé comme état souhaité mais "
+                                "non exécuté avant le contrat typé "
+                                "d'identité/ownership"
+                            )
+                            skipped += 1
+                            warnings.append(
+                                f"presentation/{presentation_name}: "
+                                f"{presentation_partial}"
+                            )
                     except Exception as exc:
                         presentation_failed = (
                             f"presentation resources {presentation_name}: {exc}"
@@ -2190,11 +2199,19 @@ class OBSDispatcher:
                         f"enter cue incertain : {exc}"
                     )
 
+            presentation_message = "; ".join(
+                item
+                for item in (
+                    presentation_partial,
+                    cue_warning,
+                )
+                if item
+            )
             status(
                 "presentation",
                 presentation_name,
-                "partial" if cue_warning else "applied",
-                cue_warning,
+                "partial" if presentation_message else "applied",
+                presentation_message,
             )
 
         return DispatchResult(
