@@ -323,13 +323,30 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
         )
         if isinstance(fallback, dict):
             fallback.setdefault("PresentationProfile", "Vanilla")
+
+        # Schema v6 resolved every domain omitted by a matching rule through
+        # StreamState.from_mapping(), i.e. against the canonical defaults,
+        # not against router.fallback_state. Schema v7 deliberately changes
+        # new rules to inherit omitted domains from the global fallback.
+        # Materialize the old implicit values while migrating so an existing
+        # v6 rule keeps exactly the same meaning.
+        legacy_rule_defaults = {
+            "Game": DEFAULT_PROFILE_NAMES["game"],
+            "OverlayProfile": DEFAULT_PROFILE_NAMES["overlay"],
+            "CaptureProfile": DEFAULT_PROFILE_NAMES["capture"],
+            "AudioProfile": DEFAULT_PROFILE_NAMES["audio"],
+            "LayoutProfile": DEFAULT_PROFILE_NAMES["layout"],
+        }
         for raw in migrated.get("rules", []):
             if (
                 isinstance(raw, dict)
                 and str(raw.get("behavior", "match")).casefold() == "match"
                 and isinstance(raw.get("state"), dict)
             ):
-                raw["state"].setdefault("PresentationProfile", "Vanilla")
+                state = raw["state"]
+                for key, value in legacy_rule_defaults.items():
+                    state.setdefault(key, value)
+                state.setdefault("PresentationProfile", "Vanilla")
         migrated.setdefault(
             "presentation_profiles",
             {
@@ -474,6 +491,22 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(host, dict):
         host["soundvolumeview_path"] = ""
 
+    def redact_obs_action(action: object) -> None:
+        if not isinstance(action, dict):
+            return
+        if str(action.get("type") or "") not in {
+            "set_input_settings",
+            "source_filter_settings",
+        }:
+            return
+        params = action.get("params")
+        if isinstance(params, dict):
+            params["settings"] = {}
+        # Arbitrary OBS settings may contain URLs, cookies, API tokens or
+        # credentials. A shareable export must never replay a redacted
+        # placeholder as an intentional write.
+        action["enabled"] = False
+
     profiles = result.get("profiles")
     if isinstance(profiles, Mapping):
         for domain_profiles in profiles.values():
@@ -486,20 +519,58 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
                 if not isinstance(actions, list):
                     continue
                 for action in actions:
-                    if not isinstance(action, dict):
-                        continue
-                    if str(action.get("type") or "") not in {
-                        "set_input_settings",
-                        "source_filter_settings",
-                    }:
-                        continue
-                    params = action.get("params")
-                    if isinstance(params, dict):
-                        params["settings"] = {}
-                    # Arbitrary OBS settings may contain URLs, cookies, API
-                    # tokens or credentials. A shareable export must never
-                    # replay the redacted placeholder as an intentional write.
-                    action["enabled"] = False
+                    redact_obs_action(action)
+
+    cues = result.get("cues")
+    if isinstance(cues, Mapping):
+        for cue in cues.values():
+            if not isinstance(cue, Mapping):
+                continue
+            frames = cue.get("frames")
+            if not isinstance(frames, list):
+                continue
+            for frame in frames:
+                if not isinstance(frame, Mapping):
+                    continue
+                actions = frame.get("actions")
+                if not isinstance(actions, list):
+                    continue
+                for action in actions:
+                    redact_obs_action(action)
+
+    # Presentation resources can also carry arbitrary settings. Clearing these
+    # mappings makes the corresponding optional Set* settings write disappear
+    # without inventing a replacement value.
+    shader_sets = result.get("shader_sets")
+    if isinstance(shader_sets, Mapping):
+        for shader_set in shader_sets.values():
+            if not isinstance(shader_set, Mapping):
+                continue
+            filters = shader_set.get("filters")
+            if not isinstance(filters, list):
+                continue
+            for filter_state in filters:
+                if isinstance(filter_state, dict):
+                    filter_state["settings"] = {}
+
+    transitions = result.get("transition_profiles")
+    if isinstance(transitions, Mapping):
+        for transition in transitions.values():
+            if isinstance(transition, dict):
+                transition["settings"] = {}
+
+    presentation_profiles = result.get("presentation_profiles")
+    if isinstance(presentation_profiles, Mapping):
+        for profile in presentation_profiles.values():
+            if not isinstance(profile, Mapping):
+                continue
+            components = profile.get("components")
+            if not isinstance(components, Mapping):
+                continue
+            for component in components.values():
+                if isinstance(component, dict):
+                    component["settings"] = {}
+
     return result
 
 
