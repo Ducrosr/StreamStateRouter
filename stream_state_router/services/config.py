@@ -346,6 +346,7 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
         )
         migrated.setdefault("cues", {})
         migrated.setdefault("transition_profiles", {})
+        migrated.setdefault("shader_sets", {})
         version = 7
 
     migrated["schema_version"] = version
@@ -1099,6 +1100,61 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         ):
             errors.append(f"{prefix}.overlay doit être booléen")
 
+    shader_sets = data.get("shader_sets", {})
+    if not isinstance(shader_sets, Mapping):
+        errors.append("shader_sets doit être un objet")
+        shader_sets = {}
+    for shader_name, shader_set in shader_sets.items():
+        prefix = f"shader_sets.{shader_name}"
+        if (
+            not str(shader_name).strip()
+            or not isinstance(shader_set, Mapping)
+        ):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        filters = shader_set.get("filters", [])
+        if not isinstance(filters, list):
+            errors.append(f"{prefix}.filters doit être une liste")
+            continue
+        identities: set[tuple[str, str]] = set()
+        for filter_index, raw_filter in enumerate(filters):
+            fprefix = f"{prefix}.filters[{filter_index}]"
+            if not isinstance(raw_filter, Mapping):
+                errors.append(f"{fprefix} doit être un objet")
+                continue
+            source = str(raw_filter.get("source") or "").strip()
+            filter_name = str(
+                raw_filter.get("filter")
+                or raw_filter.get("filter_name")
+                or ""
+            ).strip()
+            if not source:
+                errors.append(f"{fprefix}.source est requis")
+            if not filter_name:
+                errors.append(f"{fprefix}.filter est requis")
+            identity = (source.casefold(), filter_name.casefold())
+            if source and filter_name:
+                if identity in identities:
+                    errors.append(
+                        f"{fprefix} duplique {source}/{filter_name}"
+                    )
+                identities.add(identity)
+            if (
+                "enabled" in raw_filter
+                and not isinstance(raw_filter.get("enabled"), bool)
+            ):
+                errors.append(f"{fprefix}.enabled doit être booléen")
+            if (
+                "settings" in raw_filter
+                and not isinstance(raw_filter.get("settings"), Mapping)
+            ):
+                errors.append(f"{fprefix}.settings doit être un objet")
+            if (
+                "overlay" in raw_filter
+                and not isinstance(raw_filter.get("overlay"), bool)
+            ):
+                errors.append(f"{fprefix}.overlay doit être booléen")
+
     for cue_name, cue in cues.items():
         prefix = f"cues.{cue_name}"
         if not str(cue_name).strip() or not isinstance(cue, Mapping):
@@ -1340,6 +1396,15 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             errors.append(
                 f"{prefix}.transition_profile référence un preset "
                 f"inexistant : {transition_name}"
+            )
+
+        shader_name = str(
+            profile.get("shader_set") or ""
+        ).strip()
+        if shader_name and shader_name not in shader_sets:
+            errors.append(
+                f"{prefix}.shader_set référence un preset inexistant : "
+                f"{shader_name}"
             )
 
     host_control = data.get("host_control", {})
@@ -1670,6 +1735,7 @@ def build_presentation_profiles(data: Mapping[str, Any]) -> PresentationRegistry
     profiles_raw = data.get("presentation_profiles", {})
     cues_raw = data.get("cues", {})
     transitions_raw = data.get("transition_profiles", {})
+    shader_sets_raw = data.get("shader_sets", {})
     return parse_presentation_registry(
         profiles_raw=(
             profiles_raw if isinstance(profiles_raw, Mapping) else {}
@@ -1678,6 +1744,11 @@ def build_presentation_profiles(data: Mapping[str, Any]) -> PresentationRegistry
         transitions_raw=(
             transitions_raw
             if isinstance(transitions_raw, Mapping)
+            else {}
+        ),
+        shader_sets_raw=(
+            shader_sets_raw
+            if isinstance(shader_sets_raw, Mapping)
             else {}
         ),
     )
