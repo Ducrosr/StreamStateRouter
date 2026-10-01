@@ -37,6 +37,7 @@ class MediaCommandResult:
         return {
             "request_id": self.request_id,
             "action": self.action,
+            "status": "completed" if self.success else "failed",
             "success": self.success,
             "error": self.error,
             "state": dict(self.state),
