@@ -10,6 +10,30 @@ from stream_state_router.media import (
 )
 
 
+class FakeResponse:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, _limit: int = -1) -> bytes:
+        return self.body
+
+
+class FakeOpener:
+    def __init__(self, body: bytes):
+        self.body = body
+        self.requests = []
+
+    def open(self, request, *, timeout):
+        self.requests.append((request, timeout))
+        return FakeResponse(self.body)
+
+
 class FakeTransport:
     def __init__(self, status=None):
         self.status = status or {}
@@ -33,6 +57,49 @@ class VLCProviderTests(unittest.TestCase):
             VLCConfig(host="::1", port=8080, password="secret")
         )
         self.assertEqual(transport.base_url, "http://[::1]:8080")
+
+    def test_http_transport_authenticates_locally_and_url_encodes_params(self) -> None:
+        transport = VLCHttpTransport(
+            VLCConfig(password="secret", timeout_seconds=1.25)
+        )
+        opener = FakeOpener(b'{"state":"stopped"}')
+        transport._opener = opener
+
+        payload = transport.get_json(
+            "/requests/status.json",
+            {
+                "command": "in_play",
+                "input": r"C:\Music\Mako Reactor.flac",
+            },
+        )
+
+        self.assertEqual(payload["state"], "stopped")
+        self.assertEqual(len(opener.requests), 1)
+        request, timeout = opener.requests[0]
+        self.assertEqual(timeout, 1.25)
+        self.assertTrue(
+            request.full_url.startswith(
+                "http://127.0.0.1:8080/requests/status.json?"
+            )
+        )
+        self.assertIn("command=in_play", request.full_url)
+        self.assertIn("Mako+Reactor.flac", request.full_url)
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Basic OnNlY3JldA==",
+        )
+
+    def test_http_transport_rejects_oversized_json_response(self) -> None:
+        transport = VLCHttpTransport(VLCConfig(password="secret"))
+        transport._opener = FakeOpener(
+            b"x" * (2 * 1024 * 1024 + 1)
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "trop volumineuse",
+        ):
+            transport.get_json("/requests/status.json")
 
     def test_status_is_normalized_without_leaking_vlc_shape(self) -> None:
         transport = FakeTransport(
