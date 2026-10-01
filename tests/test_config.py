@@ -10,7 +10,9 @@ import copy
 from stream_state_router.router.models import DEFAULT_PROFILE_NAMES, StreamState
 from stream_state_router.services.config import (
     build_activation_policies,
+    build_media_runtime_config,
     build_ruleset,
+    build_vlc_config,
     export_config,
     list_valid_backups,
     load_config,
@@ -224,6 +226,68 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(modules["[Global] Date"]["display_name"], "Date")
         self.assertEqual(len(modules["[Global] Date"]["elements"]), 1)
 
+
+    def test_media_vlc_config_is_optional_and_builds_disabled_defaults(self):
+        data = self.sample()
+
+        runtime = build_media_runtime_config(data)
+        vlc = build_vlc_config(data)
+
+        self.assertFalse(runtime.enabled)
+        self.assertEqual(runtime.poll_seconds, 0.5)
+        self.assertEqual(vlc.host, "127.0.0.1")
+        self.assertEqual(vlc.port, 8080)
+        self.assertEqual(vlc.password, "")
+        self.assertEqual(validate_config(data), [])
+
+    def test_enabled_media_requires_local_vlc_and_password(self):
+        data = self.sample()
+        data["media"] = {
+            "enabled": True,
+            "provider": "vlc",
+            "poll_seconds": 0.5,
+            "vlc": {
+                "host": "192.168.1.20",
+                "port": 8080,
+                "password": "",
+                "timeout_seconds": 2.0,
+            },
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("media.vlc.host doit rester local" in item for item in errors),
+            errors,
+        )
+        self.assertTrue(
+            any("media.vlc.password est requis" in item for item in errors),
+            errors,
+        )
+
+    def test_shareable_export_redacts_vlc_password(self):
+        data = self.sample()
+        data["media"] = {
+            "enabled": True,
+            "provider": "vlc",
+            "poll_seconds": 0.5,
+            "vlc": {
+                "host": "127.0.0.1",
+                "port": 8080,
+                "password": "vlc-secret",
+                "timeout_seconds": 2.0,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exported["media"]["vlc"]["password"], "")
+        # A shareable export remains valid because media is disabled if its
+        # authentication secret is removed.
+        exported["media"]["enabled"] = False
+        self.assertEqual(validate_config(exported), [])
 
     def test_shareable_export_redacts_secrets_and_is_valid(self):
         data = self.sample()
