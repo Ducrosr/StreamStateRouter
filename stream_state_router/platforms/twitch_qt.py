@@ -44,6 +44,7 @@ class TwitchQtEventSubService(QObject):
         user_id: str = "",
         moderator_user_id: str = "",
         helix: TwitchHelixClient | None = None,
+        socket_factory: Callable[[QObject], QWebSocket] | None = None,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -58,6 +59,11 @@ class TwitchQtEventSubService(QObject):
             moderator_user_id or ""
         ).strip()
         self._helix = helix or TwitchHelixClient()
+        self._socket_factory = (
+            socket_factory
+            if socket_factory is not None
+            else lambda owner: QWebSocket("", parent=owner)
+        )
         self._executor = ThreadPoolExecutor(
             max_workers=4,
             thread_name_prefix="SSR-Twitch",
@@ -229,7 +235,7 @@ class TwitchQtEventSubService(QObject):
         *,
         candidate: bool,
     ) -> QWebSocket:
-        socket = QWebSocket("", parent=self)
+        socket = self._socket_factory(self)
         socket.textMessageReceived.connect(
             lambda message, s=socket: self._on_text(s, message)
         )
