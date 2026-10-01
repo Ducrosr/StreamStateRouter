@@ -43,5 +43,17 @@ def backups_dir() -> Path:
     return path
 
 
+def widgets_dir() -> Path:
+    path = user_data_dir() / "widgets"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def imported_widgets_dir() -> Path:
+    path = widgets_dir() / "imported"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def default_config_path() -> Path:
     return bundled_root() / "config" / "default.json"
