@@ -10115,6 +10115,24 @@ class MainWindow(QMainWindow):
         if action == "layout.undo":
             request_id = self._service.request_layout("undo")
             return {"request_id": request_id, "status": "accepted"}
+        if action.startswith("media."):
+            engine = self._media_engine
+            if engine is None:
+                raise RuntimeError("Media Engine indisponible")
+            command = action.split(".", 1)[1]
+            position = payload.get("position_seconds")
+            engine.control(
+                command,
+                position_seconds=(
+                    float(position)
+                    if position is not None
+                    else None
+                ),
+            )
+            return {
+                "status": "accepted",
+                "media": self._media_state_store.snapshot().as_mapping(),
+            }
         raise ValueError(f"Action inconnue : {action}")
 
     def _edit_layout_in_obs(self) -> None:
