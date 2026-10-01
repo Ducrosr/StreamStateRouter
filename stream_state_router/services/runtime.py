@@ -1184,6 +1184,43 @@ class RoutingService:
             options["name"] = str(profile_name)
         return self.submit_obs_command(f"layout.{action}", options=options)
 
+    def request_widget_browser_source(
+        self,
+        *,
+        input_name: str,
+        url: str,
+        scene: str = "",
+        width: int = 800,
+        height: int = 600,
+        shutdown_when_not_visible: bool = False,
+        restart_when_active: bool = False,
+    ) -> str:
+        name = str(input_name or "").strip()
+        target_url = str(url or "").strip()
+        target_scene = str(scene or "").strip()
+        if not name:
+            raise ValueError("input_name requis")
+        if not target_url:
+            raise ValueError("url requis")
+        if not 16 <= int(width) <= 8192:
+            raise ValueError("width doit être compris entre 16 et 8192")
+        if not 16 <= int(height) <= 8192:
+            raise ValueError("height doit être compris entre 16 et 8192")
+        return self.submit_obs_command(
+            "widget.browser_source.create",
+            options={
+                "input_name": name,
+                "url": target_url,
+                "scene": target_scene,
+                "width": int(width),
+                "height": int(height),
+                "shutdown_when_not_visible": bool(
+                    shutdown_when_not_visible
+                ),
+                "restart_when_active": bool(restart_when_active),
+            },
+        )
+
     def explain_decision(
         self,
         app: ForegroundApp | None = None,
@@ -2867,6 +2904,83 @@ class RoutingService:
                         ),
                     )
                     return
+                elif command.action == "widget.browser_source.create":
+                    client = getattr(self.dispatcher, "client", None)
+                    if client is None:
+                        raise RuntimeError("Client OBS indisponible")
+                    input_name = str(
+                        command.options.get("input_name") or ""
+                    ).strip()
+                    url = str(
+                        command.options.get("url") or ""
+                    ).strip()
+                    scene = str(
+                        command.options.get("scene") or ""
+                    ).strip()
+                    width = int(command.options.get("width", 800))
+                    height = int(command.options.get("height", 600))
+                    if not input_name:
+                        raise ValueError("input_name requis")
+                    if not url:
+                        raise ValueError("url requis")
+                    if not 16 <= width <= 8192:
+                        raise ValueError(
+                            "width doit être compris entre 16 et 8192"
+                        )
+                    if not 16 <= height <= 8192:
+                        raise ValueError(
+                            "height doit être compris entre 16 et 8192"
+                        )
+                    if not scene:
+                        current = client.send(
+                            "GetCurrentProgramScene"
+                        )
+                        scene = str(
+                            current.get("currentProgramSceneName")
+                            or current.get("current_program_scene_name")
+                            or ""
+                        ).strip()
+                    if not scene:
+                        raise RuntimeError(
+                            "Impossible de déterminer la scène OBS cible"
+                        )
+                    response = client.send(
+                        "CreateInput",
+                        {
+                            "sceneName": scene,
+                            "inputName": input_name,
+                            "inputKind": "browser_source",
+                            "inputSettings": {
+                                "url": url,
+                                "width": width,
+                                "height": height,
+                                "shutdown": bool(
+                                    command.options.get(
+                                        "shutdown_when_not_visible",
+                                        False,
+                                    )
+                                ),
+                                "restart_when_active": bool(
+                                    command.options.get(
+                                        "restart_when_active",
+                                        False,
+                                    )
+                                ),
+                            },
+                            "sceneItemEnabled": True,
+                        },
+                    )
+                    result = {
+                        "scene": scene,
+                        "input_name": input_name,
+                        "url": url,
+                        "width": width,
+                        "height": height,
+                        "scene_item_id": (
+                            response.get("sceneItemId")
+                            or response.get("scene_item_id")
+                        ),
+                    }
                 elif command.action == "profile":
                     result = self.dispatcher.execute_profile(
                         str(command.options.get("domain") or ""),
