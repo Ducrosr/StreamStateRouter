@@ -503,6 +503,10 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
         vlc = media.get("vlc")
         if isinstance(vlc, dict):
             vlc["password"] = ""
+            # A shareable export cannot authenticate to VLC once the secret is
+            # removed. Disable media rather than exporting an invalid config.
+            if bool(media.get("enabled", False)):
+                media["enabled"] = False
 
     def redact_obs_action(action: object) -> None:
         if not isinstance(action, dict):
