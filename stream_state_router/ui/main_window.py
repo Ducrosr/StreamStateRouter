@@ -6599,7 +6599,7 @@ class MainWindow(QMainWindow):
 
     def _install_builtin_chat_in_obs(self) -> None:
         self._install_builtin_widget_in_obs(
-            route="/builtin/chat",
+            route="/component/chat",
             module_name="Chat SSR natif",
             input_name="[SSR] Chat",
             component="chat",
@@ -6609,7 +6609,7 @@ class MainWindow(QMainWindow):
 
     def _install_builtin_events_in_obs(self) -> None:
         self._install_builtin_widget_in_obs(
-            route="/builtin/events",
+            route="/component/events",
             module_name="Events SSR natif",
             input_name="[SSR] Events",
             component="events",
@@ -6619,7 +6619,7 @@ class MainWindow(QMainWindow):
 
     def _install_builtin_alerts_in_obs(self) -> None:
         self._install_builtin_widget_in_obs(
-            route="/builtin/alerts",
+            route="/component/alerts",
             module_name="Alerts SSR natif",
             input_name="[SSR] Alerts",
             component="alerts",
