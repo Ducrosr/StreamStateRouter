@@ -68,6 +68,7 @@ from ..services.config import (
     build_layout_profiles,
     build_presentation_profiles,
     build_ruleset,
+    build_widget_runtime_config,
     export_config,
     import_config,
     list_valid_backups,
@@ -90,12 +91,17 @@ from ..services.config_insights import (
     scan_obs_reference_repairs,
     simulate_rule_scenario,
 )
+from ..presentation import PresentationStateStore
 from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
 from ..services.system_check import run_system_check
-from ..widgets import import_html_module, list_widget_packages
+from ..widgets import (
+    WidgetRuntime,
+    import_html_module,
+    list_widget_packages,
+)
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
@@ -200,6 +206,8 @@ class MainWindow(QMainWindow):
         self._service: RoutingService | None = None
         self._dispatcher: OBSDispatcher | None = None
         self._client: OBSClientManager | None = None
+        self._presentation_state_store = PresentationStateStore()
+        self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
         self._catalog_tree_guard = False
@@ -250,6 +258,7 @@ class MainWindow(QMainWindow):
             self._refresh_dashboard_summary
         )
         self._start_runtime()
+        self._start_widget_runtime()
         self._start_api()
         self._module_scan_timer = QTimer(self)
         self._module_scan_timer.timeout.connect(self._auto_scan_modules)
@@ -3174,6 +3183,14 @@ class MainWindow(QMainWindow):
         widgets_hint.setWordWrap(True)
         widgets_hint.setObjectName("Muted")
         widgets_lay.addWidget(widgets_hint)
+        self.widget_runtime_status = QLabel(
+            "Widget Runtime : initialisation…"
+        )
+        self.widget_runtime_status.setObjectName("Muted")
+        self.widget_runtime_status.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        widgets_lay.addWidget(self.widget_runtime_status)
         self.widget_library = QTreeWidget()
         self.widget_library.setColumnCount(5)
         self.widget_library.setHeaderLabels(
@@ -5268,6 +5285,7 @@ class MainWindow(QMainWindow):
         self._last_saved_config = copy.deepcopy(draft)
         self._draft_dirty = False
         self._restart_api()
+        self._restart_widget_runtime()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
         self._refresh_config_revision_status(draft_dirty=False)
@@ -5306,6 +5324,7 @@ class MainWindow(QMainWindow):
             presentation_registry=build_presentation_profiles(
                 runtime_config
             ),
+            presentation_state_store=self._presentation_state_store,
         )
         if startup_layout_profile:
             self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
@@ -6260,6 +6279,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "widget_library"):
             return
         self.widget_library.clear()
+        if self._widget_runtime is not None:
+            self._widget_runtime.refresh_packages()
         for package in list_widget_packages():
             state = (
                 f"⚠ {len(package.warnings)} avertissement(s)"
@@ -6275,7 +6296,8 @@ class MainWindow(QMainWindow):
                     state,
                 ]
             )
-            item.setData(0, Qt.UserRole, package.entry_uri)
+            item.setData(0, Qt.UserRole, package.package_id)
+            item.setData(3, Qt.UserRole, package.entry_uri)
             item.setToolTip(3, str(package.entry))
             if package.remote_references:
                 item.setToolTip(
@@ -6296,12 +6318,28 @@ class MainWindow(QMainWindow):
                 "Sélectionnez d’abord un module.",
             )
             return
-        uri = str(item.data(0, Qt.UserRole) or "")
+        package_id = str(item.data(0, Qt.UserRole) or "")
+        fallback_uri = str(item.data(3, Qt.UserRole) or "")
+        uri = fallback_uri
+        runtime = self._widget_runtime
+        if (
+            runtime is not None
+            and runtime.running
+            and package_id
+        ):
+            try:
+                uri = runtime.package_url(package_id)
+            except KeyError:
+                uri = fallback_uri
         if not uri:
             return
         QApplication.clipboard().setText(uri)
         self.statusBar().showMessage(
-            "URI locale du module copiée dans le presse-papiers.",
+            (
+                "URL Widget Runtime copiée."
+                if uri.startswith("http://")
+                else "URI locale du module copiée."
+            ),
             5000,
         )
 
@@ -9061,6 +9099,61 @@ class MainWindow(QMainWindow):
             self._obs_module_catalog = catalog
             self._populate_module_tree()
 
+    def _update_widget_runtime_status(self) -> None:
+        label = getattr(self, "widget_runtime_status", None)
+        if label is None:
+            return
+        runtime = self._widget_runtime
+        if runtime is not None and runtime.running:
+            label.setText(
+                "Widget Runtime : "
+                f"{runtime.base_url} · Browser Sources SSR actives"
+            )
+            label.setObjectName("Good")
+        elif runtime is not None and not runtime.config.enabled:
+            label.setText(
+                "Widget Runtime : désactivé · repli file:// disponible"
+            )
+            label.setObjectName("Muted")
+        else:
+            label.setText(
+                "Widget Runtime : indisponible · repli file:// disponible"
+            )
+            label.setObjectName("Warn")
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _start_widget_runtime(self) -> None:
+        cfg = build_widget_runtime_config(self.config)
+        runtime = WidgetRuntime(
+            cfg,
+            self._presentation_state_store,
+        )
+        self._widget_runtime = runtime
+        try:
+            runtime.start()
+            if cfg.enabled:
+                self._log(
+                    f"Widget Runtime actif sur {runtime.base_url}."
+                )
+        except Exception as exc:
+            self._log(f"Widget Runtime indisponible : {exc}")
+        self._update_widget_runtime_status()
+
+    def _restart_widget_runtime(self) -> None:
+        runtime = self._widget_runtime
+        if runtime is not None:
+            runtime.stop()
+        self._start_widget_runtime()
+        self._refresh_widget_library()
+
+    def _stop_widget_runtime(self) -> None:
+        runtime = self._widget_runtime
+        self._widget_runtime = None
+        if runtime is not None:
+            runtime.stop()
+        self._update_widget_runtime_status()
+
     def _start_api(self) -> None:
         raw = self.config.get("api", {})
         cfg = APIConfig(
@@ -9097,6 +9190,18 @@ class MainWindow(QMainWindow):
             "rule": service.engine.current_rule if service else "",
             "state": state.as_variables() if state else {},
             "obs_connected": bool(self._client.connected) if self._client else False,
+            "widget_runtime": {
+                "running": bool(
+                    self._widget_runtime
+                    and self._widget_runtime.running
+                ),
+                "base_url": (
+                    self._widget_runtime.base_url
+                    if self._widget_runtime
+                    and self._widget_runtime.running
+                    else ""
+                ),
+            },
             "control_variables": (
                 service.control_variables() if service else {}
             ),
@@ -9632,6 +9737,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         event.accept()
         QApplication.instance().quit()
@@ -9641,6 +9747,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         self.tray.hide()
         QApplication.instance().quit()
