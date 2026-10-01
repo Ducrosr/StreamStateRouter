@@ -762,11 +762,15 @@ iframe{display:block}
                             head_only=head_only,
                         )
                         return
+                    stream_id = str(
+                        query.get("stream_id", [""])[0]
+                    ).strip()
                     self._send_json(
                         runtime.event_bus.snapshot(
                             channel,
                             after=after,
                             limit=limit,
+                            stream_id=stream_id,
                         ),
                         head_only=head_only,
                     )
