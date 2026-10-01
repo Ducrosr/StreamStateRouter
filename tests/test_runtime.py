@@ -173,6 +173,26 @@ class CommandDispatcher(FakeDispatcher):
         )
         return SimpleNamespace(warnings=(), missing_sources=())
 
+    def execute_profile_snapshot(
+        self,
+        domain,
+        profile_name,
+        profiles_raw,
+        *,
+        state=None,
+    ):
+        if not hasattr(self, "profile_snapshot_threads"):
+            self.profile_snapshot_threads = []
+        self.profile_snapshot_threads.append(
+            (
+                domain,
+                profile_name,
+                copy.deepcopy(dict(profiles_raw)),
+                threading.current_thread().name,
+            )
+        )
+        return DispatchResult(1, 0, (domain,))
+
 
 class BlockingLayoutDispatcher(CommandDispatcher):
     def __init__(self):
@@ -1126,6 +1146,50 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.profile_threads,
                 [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_draft_profile_test_runs_on_runtime_worker_with_snapshot(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            draft = {
+                "Vanilla": {
+                    "actions": [
+                        {
+                            "type": "set_program_scene",
+                            "params": {"scene": "Draft Scene"},
+                        }
+                    ]
+                }
+            }
+            request_id = service.request_profile_test(
+                "game",
+                "Vanilla",
+                draft,
+            )
+            draft["Vanilla"]["actions"][0]["params"]["scene"] = "Mutated Later"
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(len(dispatcher.profile_snapshot_threads), 1)
+            domain, name, snapshot, thread_name = dispatcher.profile_snapshot_threads[0]
+            self.assertEqual((domain, name), ("game", "Vanilla"))
+            self.assertEqual(thread_name, "SSR-Router")
+            self.assertEqual(
+                snapshot["Vanilla"]["actions"][0]["params"]["scene"],
+                "Draft Scene",
             )
         finally:
             self.assertTrue(service.stop())
