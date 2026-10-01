@@ -199,5 +199,49 @@ class MediaAPIContractTests(unittest.TestCase):
             api.stop()
 
 
+    def test_uncertain_media_command_is_exposed_as_terminal_status(self):
+        api = LocalControlAPI(
+            APIConfig(
+                enabled=True,
+                host="127.0.0.1",
+                port=0,
+            ),
+            status=lambda: {},
+            action=lambda _name, _payload: {},
+            request_status=lambda request_id: (
+                {
+                    "request_id": request_id,
+                    "action": "next",
+                    "status": "uncertain",
+                    "success": False,
+                    "error": (
+                        "Résultat incertain : la commande peut avoir été "
+                        "appliquée par le lecteur"
+                    ),
+                    "state": {},
+                }
+                if request_id == "media-uncertain"
+                else None
+            ),
+        )
+        api.start()
+        try:
+            with urlopen(
+                (
+                    f"http://127.0.0.1:{api.bound_port}"
+                    "/requests/media-uncertain"
+                ),
+                timeout=2.0,
+            ) as response:
+                payload = json.loads(response.read())
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["status"], "uncertain")
+            self.assertFalse(payload["success"])
+            self.assertIn("incertain", payload["error"])
+        finally:
+            api.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
