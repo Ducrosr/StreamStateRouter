@@ -6,6 +6,7 @@ from .models import (
     PresentationProfile,
     PresentationRegistry,
     ResolvedPresentationProfile,
+    TransitionProfile,
     build_presentation_registry,
     resolve_presentation_profile,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "PresentationProfile",
     "PresentationRegistry",
     "ResolvedPresentationProfile",
+    "TransitionProfile",
     "build_presentation_registry",
     "resolve_presentation_profile",
 ]
