@@ -4507,6 +4507,9 @@ class MainWindow(QMainWindow):
         self.media_runtime_status = QLabel(
             "Media Runtime : désactivé"
         )
+        self.media_runtime_status.setTextFormat(
+            Qt.TextFormat.PlainText
+        )
         self.media_runtime_status.setObjectName("Muted")
         self.media_runtime_status.setWordWrap(True)
         media_lay.addWidget(self.media_runtime_status)
