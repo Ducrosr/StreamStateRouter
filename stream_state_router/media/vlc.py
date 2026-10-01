@@ -29,8 +29,8 @@ class VLCConfig:
         if not 1 <= port <= 65535:
             raise ValueError("Port VLC invalide")
         timeout = float(self.timeout_seconds)
-        if not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("Timeout VLC invalide")
+        if not math.isfinite(timeout) or not 0.1 <= timeout <= 10.0:
+            raise ValueError("Timeout VLC invalide (0.1..10 s)")
         object.__setattr__(self, "host", host)
         object.__setattr__(self, "port", port)
         object.__setattr__(self, "password", str(self.password or ""))
@@ -232,6 +232,7 @@ class VLCProvider:
             ).strip(),
             duration_seconds=self._number(raw.get("length"), 0.0),
             position_seconds=self._number(raw.get("time"), 0.0),
+            playback_rate=self._number(raw.get("rate"), 1.0),
             volume_percent=volume_percent,
             track_id=str(raw.get("currentplid") or "").strip(),
         )
