@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from stream_state_router.obs.client import OBSUnavailableError
 from stream_state_router.obs.dispatcher import OBSDispatcher, profile_map_from_raw
 from stream_state_router.router.engine import StateChange
 from stream_state_router.obs.models import OBSAction
@@ -81,6 +82,37 @@ class CollectionSwitchingFilterClient(FakeClient):
             if len(self.filter_writes) == 1:
                 self.current_collection = "B"
             return {}
+        return super().send(request, data)
+
+
+class FailOnceAfterMediaClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.fail_scene_once = True
+
+    def send(self, request, data=None):
+        if (
+            request == "SetCurrentProgramScene"
+            and self.fail_scene_once
+        ):
+            self.calls.append((request, data))
+            self.fail_scene_once = False
+            raise RuntimeError("scene unavailable")
+        return super().send(request, data)
+
+
+class AmbiguousMediaClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.media_attempts = 0
+
+    def send(self, request, data=None):
+        if request == "TriggerMediaInputAction":
+            self.calls.append((request, data))
+            self.media_attempts += 1
+            raise OBSUnavailableError(
+                "connection lost after media request"
+            )
         return super().send(request, data)
 
 
@@ -1192,6 +1224,112 @@ class OBSDispatcherTests(unittest.TestCase):
             {"intensity": 0.9, "speed": 1.0},
         )
         self.assertEqual(result.executed, 1)
+
+    def test_cue_retry_does_not_replay_successful_media_effect(self):
+        client = FailOnceAfterMediaClient()
+        presentation = build_presentation_registry(
+            profiles_raw={"Combat": {"enter_cue": "Enter"}},
+            cues_raw={
+                "Enter": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "media_input_action",
+                                    "params": {
+                                        "input": "Music",
+                                        "action": "next",
+                                    },
+                                },
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "Gameplay"},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+        state = StreamState(presentation_profile="Combat")
+
+        first = dispatcher.dispatch_state(state)
+        second = dispatcher.dispatch_state(state)
+
+        media = [
+            call
+            for call in client.calls
+            if call[0] == "TriggerMediaInputAction"
+        ]
+        scenes = [
+            call for call in client.calls if call[0] == "SetCurrentProgramScene"
+        ]
+        self.assertEqual(len(media), 1)
+        self.assertEqual(len(scenes), 2)
+        self.assertNotEqual(
+            first.domain_statuses[-1].status,
+            "applied",
+        )
+        self.assertEqual(
+            dispatcher.applied_profiles().get("presentation"),
+            "Combat",
+        )
+        self.assertTrue(
+            any(status.status == "applied" for status in second.domain_statuses)
+        )
+
+    def test_ambiguous_media_effect_is_not_replayed_automatically(self):
+        client = AmbiguousMediaClient()
+        presentation = build_presentation_registry(
+            profiles_raw={"Combat": {"enter_cue": "Enter"}},
+            cues_raw={
+                "Enter": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "media_input_action",
+                                    "params": {
+                                        "input": "Music",
+                                        "action": "next",
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+        state = StreamState(presentation_profile="Combat")
+
+        first = dispatcher.dispatch_state(state)
+        second = dispatcher.dispatch_state(state)
+
+        self.assertEqual(client.media_attempts, 1)
+        self.assertTrue(
+            any("résultat incertain" in warning for warning in first.warnings),
+            first.warnings,
+        )
+        self.assertTrue(
+            any("résultat incertain" in warning for warning in second.warnings),
+            second.warnings,
+        )
+        self.assertNotEqual(
+            dispatcher.applied_profiles().get("presentation"),
+            "Combat",
+        )
 
     def test_filter_animation_never_writes_to_homonymous_source_after_collection_switch(self):
         client = CollectionSwitchingFilterClient()
