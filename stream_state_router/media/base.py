@@ -5,6 +5,10 @@ from typing import Protocol
 from .models import MediaState
 
 
+class MediaProviderCommandError(RuntimeError):
+    """Provider command may have reached the external player before failure."""
+
+
 class MediaProvider(Protocol):
     """Provider contract used by SSR; concrete players remain replaceable."""
 
