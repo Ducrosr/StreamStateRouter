@@ -1,7 +1,7 @@
 from .base import MediaProvider
 from .models import MEDIA_PLAYBACK_STATES, MediaState
 from .runtime import MediaCommandResult, MediaRuntime, MediaRuntimeConfig
-from .state import MediaStateStore
+from .state import MediaArtworkStore, MediaStateStore
 from .vlc import VLCConfig, VLCHttpTransport, VLCProvider
 
 __all__ = [
@@ -11,6 +11,7 @@ __all__ = [
     "MediaRuntime",
     "MediaRuntimeConfig",
     "MediaState",
+    "MediaArtworkStore",
     "MediaStateStore",
     "VLCConfig",
     "VLCHttpTransport",
