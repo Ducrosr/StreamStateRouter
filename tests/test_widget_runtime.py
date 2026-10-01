@@ -189,6 +189,9 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["position_seconds"], 45)
             self.assertEqual(payload["revision"], 1)
             self.assertNotIn("password", payload)
+            self.assertNotIn("uri", payload)
+            self.assertNotIn("artwork_url", payload)
+            self.assertNotIn("error", payload)
 
     def test_builtin_radio_consumes_media_endpoint_without_html_injection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
