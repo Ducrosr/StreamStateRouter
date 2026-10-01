@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from .models import MediaState
 
@@ -8,9 +9,16 @@ from .models import MediaState
 class MediaStateStore:
     """Thread-safe latest-state bridge for widgets/API consumers."""
 
-    def __init__(self, provider: str = "") -> None:
+    def __init__(
+        self,
+        provider: str = "",
+        *,
+        clock=time.monotonic,
+    ) -> None:
         self._lock = threading.RLock()
+        self._clock = clock
         self._revision = 0
+        self._updated_at = 0.0
         self._state = MediaState(
             provider=str(provider or ""),
             connected=False,
@@ -20,16 +28,32 @@ class MediaStateStore:
         with self._lock:
             self._revision += 1
             self._state = state
+            self._updated_at = float(self._clock())
             return self._mapping_locked()
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return self._mapping_locked()
 
-    def public_snapshot(self) -> dict[str, object]:
+    def public_snapshot(
+        self,
+        *,
+        stale_after_seconds: float = 3.0,
+    ) -> dict[str, object]:
         with self._lock:
             payload = self._state.as_public_mapping()
             payload["revision"] = self._revision
+            now = float(self._clock())
+            age = (
+                max(0.0, now - self._updated_at)
+                if self._updated_at > 0.0
+                else 0.0
+            )
+            payload["age_seconds"] = age
+            payload["stale"] = bool(
+                self._revision == 0
+                or age > max(0.1, float(stale_after_seconds))
+            )
             return payload
 
     def _mapping_locked(self) -> dict[str, object]:
