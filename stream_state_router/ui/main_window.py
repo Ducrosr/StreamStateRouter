@@ -120,6 +120,7 @@ from .ergonomics import (
     humanize_rule,
 )
 from .setup_guide import SetupGuideDialog, WidgetObsInstallDialog
+from .presentation_editor import PresentationEditor
 from .presentation import (
     UserActivityEntry,
     build_automation_rows,
@@ -411,6 +412,15 @@ class MainWindow(QMainWindow):
         self.layouts_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_layouts_tab()), "Layouts"
         )
+        self.presentation_editor = PresentationEditor(
+            self.config,
+            self,
+        )
+        self.presentation_editor.changed.connect(self._mark_dirty)
+        self.presentation_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self.presentation_editor),
+            "Présentation",
+        )
         self.diagnostics_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_diagnostics_tab()),
             "Diagnostics",
@@ -576,6 +586,7 @@ class MainWindow(QMainWindow):
             self.rules_tab_index,
             self.profiles_tab_index,
             self.layouts_tab_index,
+            self.presentation_tab_index,
             self.diagnostics_tab_index,
             self.logs_tab_index,
         )
@@ -615,6 +626,7 @@ class MainWindow(QMainWindow):
             getattr(self, "rules_tab_index", -1),
             getattr(self, "profiles_tab_index", -1),
             getattr(self, "layouts_tab_index", -1),
+            getattr(self, "presentation_tab_index", -1),
             getattr(self, "settings_tab_index", -1),
         ):
             if index < 0 or not hasattr(self, "tabs"):
@@ -4850,6 +4862,8 @@ class MainWindow(QMainWindow):
         self._refresh_automations_view()
         self._refresh_profile_names()
         self._refresh_layout_profile_names()
+        if hasattr(self, "presentation_editor"):
+            self.presentation_editor.refresh()
         self._refresh_override_boxes()
         self.unsaved.setText("")
 
