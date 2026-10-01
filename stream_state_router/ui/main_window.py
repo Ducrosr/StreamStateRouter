@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..activation import TriggerTargetIdentity
+from ..events import EventBus
 from ..importers import (
     AdvancedSceneSwitcherImporter,
     CurrentStateCaptureOptions,
@@ -166,6 +167,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(760, 520)
         self.resize(1180, 760)
         self._window_settings = QSettings("Ducrosr", "StreamStateRouter")
+        self._widget_event_bus = EventBus()
         saved_geometry = self._window_settings.value("main_window/geometry")
         if saved_geometry is not None:
             self.restoreGeometry(saved_geometry)
@@ -9765,6 +9767,7 @@ class MainWindow(QMainWindow):
         runtime = WidgetRuntime(
             cfg,
             self._presentation_state_store,
+            event_bus=self._widget_event_bus,
         )
         self._widget_runtime = runtime
         try:
