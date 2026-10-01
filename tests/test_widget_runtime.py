@@ -276,6 +276,8 @@ class WidgetRuntimeTests(unittest.TestCase):
                 html,
             )
             self.assertIn('frame.setAttribute("sandbox", "allow-scripts")', html)
+            self.assertIn('if (c.mode === "hidden")', html)
+            self.assertIn("host.replaceChildren()", html)
             self.assertIn("postMessage", html)
 
             registry = build_presentation_registry(
