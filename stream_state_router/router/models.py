@@ -13,6 +13,7 @@ DEFAULT_PROFILE_NAMES: Mapping[str, str] = MappingProxyType(
         "capture": "Default",
         "audio": "Default",
         "layout": "Vanilla",
+        "presentation": "Vanilla",
     }
 )
 
@@ -42,6 +43,7 @@ class StreamState:
     capture_profile: str = DEFAULT_PROFILE_NAMES["capture"]
     audio_profile: str = DEFAULT_PROFILE_NAMES["audio"]
     layout_profile: str = DEFAULT_PROFILE_NAMES["layout"]
+    presentation_profile: str = DEFAULT_PROFILE_NAMES["presentation"]
     metadata: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -91,6 +93,15 @@ class StreamState:
                     ),
                 )
             ),
+            presentation_profile=str(
+                values.get(
+                    "PresentationProfile",
+                    values.get(
+                        "presentation_profile",
+                        DEFAULT_PROFILE_NAMES["presentation"],
+                    ),
+                )
+            ),
             metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
         )
 
@@ -101,6 +112,7 @@ class StreamState:
             "CaptureProfile": self.capture_profile,
             "AudioProfile": self.audio_profile,
             "LayoutProfile": self.layout_profile,
+            "PresentationProfile": self.presentation_profile,
             **dict(self.metadata),
         }
 
@@ -111,5 +123,6 @@ class StreamState:
             "capture": self.capture_profile,
             "audio": self.audio_profile,
             "layout": self.layout_profile,
+            "presentation": self.presentation_profile,
         }
         return mapping[domain]

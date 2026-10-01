@@ -16,11 +16,17 @@ from ..host import HostControlConfig, HostControlController
 from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
+from ..presentation import (
+    CUE_MAX_RUNTIME_MS,
+    PresentationRegistry,
+    build_presentation_registry as parse_presentation_registry,
+)
 from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
+from ..widgets import WidgetRuntimeConfig
 from ..router.rules import AppRule, ResolutionKind, RuleSet
 from .paths import backups_dir, config_path, default_config_path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SUPPORTED_ACTION_TYPES = {
     "set_program_scene",
     "scene_item_enabled",
@@ -32,6 +38,15 @@ SUPPORTED_ACTION_TYPES = {
     "app_audio_output",
     "windows_hdr",
     "wait_ms",
+}
+PRESENTATION_CUE_ACTION_TYPES = (
+    SUPPORTED_ACTION_TYPES
+    - {
+        "source_filter_enabled",
+        "source_filter_settings",
+    }
+) | {
+    "media_input_action",
 }
 LAYOUT_ANCHORS = {
     "top_left",
@@ -45,6 +60,12 @@ LAYOUT_ANCHORS = {
     "bottom_right",
 }
 LAYOUT_TRANSITIONS = {"instant", "move", "fade", "move_fade"}
+PRESENTATION_ANIMATION_INTENSITIES = {"off", "low", "normal", "high"}
+PRESENTATION_CUE_INTERRUPT_POLICIES = {"replace"}
+PRESENTATION_MAX_CUE_MS = 30000
+PRESENTATION_MAX_FRAMES = 240
+PRESENTATION_MAX_ACTIONS_PER_FRAME = 64
+PRESENTATION_MAX_ACTIONS_PER_CUE = 1024
 
 
 class ConfigError(ValueError):
@@ -299,6 +320,69 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
         )
         version = 6
 
+    if version == 6:
+        router = migrated.setdefault("router", {})
+        fallback = (
+            router.setdefault("fallback_state", {})
+            if isinstance(router, dict)
+            else {}
+        )
+        if isinstance(fallback, dict):
+            fallback.setdefault("PresentationProfile", "Vanilla")
+
+        # Schema v6 resolved every domain omitted by a matching rule through
+        # StreamState.from_mapping(), i.e. against the canonical defaults,
+        # not against router.fallback_state. Schema v7 deliberately changes
+        # new rules to inherit omitted domains from the global fallback.
+        # Materialize the old implicit values while migrating so an existing
+        # v6 rule keeps exactly the same meaning.
+        legacy_rule_defaults = {
+            "Game": DEFAULT_PROFILE_NAMES["game"],
+            "OverlayProfile": DEFAULT_PROFILE_NAMES["overlay"],
+            "CaptureProfile": DEFAULT_PROFILE_NAMES["capture"],
+            "AudioProfile": DEFAULT_PROFILE_NAMES["audio"],
+            "LayoutProfile": DEFAULT_PROFILE_NAMES["layout"],
+        }
+        for raw in migrated.get("rules", []):
+            if (
+                isinstance(raw, dict)
+                and str(raw.get("behavior", "match")).casefold() == "match"
+                and isinstance(raw.get("state"), dict)
+            ):
+                state = raw["state"]
+                for key, value in legacy_rule_defaults.items():
+                    state.setdefault(key, value)
+                state.setdefault("PresentationProfile", "Vanilla")
+        migrated.setdefault(
+            "presentation_profiles",
+            {
+                "Vanilla": {
+                    "extends": "",
+                    "enter_cue": "",
+                    "exit_cue": "",
+                    "transition_profile": "",
+                    "shader_set": "",
+                    "sound_set": "",
+                    "widget_theme": "",
+                    "animation_intensity": "normal",
+                    "theme": {},
+                }
+            },
+        )
+        migrated.setdefault("cues", {})
+        migrated.setdefault("transition_profiles", {})
+        migrated.setdefault("shader_sets", {})
+        migrated.setdefault("sound_sets", {})
+        migrated.setdefault(
+            "widget_runtime",
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 8766,
+            },
+        )
+        version = 7
+
     migrated["schema_version"] = version
     return migrated
 
@@ -413,6 +497,22 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(host, dict):
         host["soundvolumeview_path"] = ""
 
+    def redact_obs_action(action: object) -> None:
+        if not isinstance(action, dict):
+            return
+        if str(action.get("type") or "") not in {
+            "set_input_settings",
+            "source_filter_settings",
+        }:
+            return
+        params = action.get("params")
+        if isinstance(params, dict):
+            params["settings"] = {}
+        # Arbitrary OBS settings may contain URLs, cookies, API tokens or
+        # credentials. A shareable export must never replay a redacted
+        # placeholder as an intentional write.
+        action["enabled"] = False
+
     profiles = result.get("profiles")
     if isinstance(profiles, Mapping):
         for domain_profiles in profiles.values():
@@ -425,20 +525,58 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
                 if not isinstance(actions, list):
                     continue
                 for action in actions:
-                    if not isinstance(action, dict):
-                        continue
-                    if str(action.get("type") or "") not in {
-                        "set_input_settings",
-                        "source_filter_settings",
-                    }:
-                        continue
-                    params = action.get("params")
-                    if isinstance(params, dict):
-                        params["settings"] = {}
-                    # Arbitrary OBS settings may contain URLs, cookies, API
-                    # tokens or credentials. A shareable export must never
-                    # replay the redacted placeholder as an intentional write.
-                    action["enabled"] = False
+                    redact_obs_action(action)
+
+    cues = result.get("cues")
+    if isinstance(cues, Mapping):
+        for cue in cues.values():
+            if not isinstance(cue, Mapping):
+                continue
+            frames = cue.get("frames")
+            if not isinstance(frames, list):
+                continue
+            for frame in frames:
+                if not isinstance(frame, Mapping):
+                    continue
+                actions = frame.get("actions")
+                if not isinstance(actions, list):
+                    continue
+                for action in actions:
+                    redact_obs_action(action)
+
+    # Presentation resources can also carry arbitrary settings. Clearing these
+    # mappings makes the corresponding optional Set* settings write disappear
+    # without inventing a replacement value.
+    shader_sets = result.get("shader_sets")
+    if isinstance(shader_sets, Mapping):
+        for shader_set in shader_sets.values():
+            if not isinstance(shader_set, Mapping):
+                continue
+            filters = shader_set.get("filters")
+            if not isinstance(filters, list):
+                continue
+            for filter_state in filters:
+                if isinstance(filter_state, dict):
+                    filter_state["settings"] = {}
+
+    transitions = result.get("transition_profiles")
+    if isinstance(transitions, Mapping):
+        for transition in transitions.values():
+            if isinstance(transition, dict):
+                transition["settings"] = {}
+
+    presentation_profiles = result.get("presentation_profiles")
+    if isinstance(presentation_profiles, Mapping):
+        for profile in presentation_profiles.values():
+            if not isinstance(profile, Mapping):
+                continue
+            components = profile.get("components")
+            if not isinstance(components, Mapping):
+                continue
+            for component in components.values():
+                if isinstance(component, dict):
+                    component["settings"] = {}
+
     return result
 
 
@@ -841,6 +979,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             "CaptureProfile",
             "AudioProfile",
             "LayoutProfile",
+            "PresentationProfile",
         }
         for name, value in control_variables.items():
             text_name = str(name or "").strip()
@@ -989,6 +1128,585 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                             f"{aprefix}.params.duration_ms doit être compris entre 0 et 10000"
                         )
 
+    presentation_profiles = data.get(
+        "presentation_profiles",
+        {},
+    )
+    if not isinstance(presentation_profiles, Mapping):
+        errors.append("presentation_profiles doit être un objet")
+        presentation_profiles = {}
+    _check_inheritance_cycles(
+        presentation_profiles,
+        "presentation_profiles",
+        errors,
+    )
+
+    cues = data.get("cues", {})
+    if not isinstance(cues, Mapping):
+        errors.append("cues doit être un objet")
+        cues = {}
+
+    transition_profiles = data.get(
+        "transition_profiles",
+        {},
+    )
+    if not isinstance(transition_profiles, Mapping):
+        errors.append("transition_profiles doit être un objet")
+        transition_profiles = {}
+    for transition_name, transition in transition_profiles.items():
+        prefix = f"transition_profiles.{transition_name}"
+        if (
+            not str(transition_name).strip()
+            or not isinstance(transition, Mapping)
+        ):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        target = str(
+            transition.get("transition_name")
+            or transition.get("transition")
+            or ""
+        ).strip()
+        if not target:
+            errors.append(f"{prefix}.transition_name est requis")
+        duration = transition.get("duration_ms")
+        if duration not in (None, "") and not _valid_int(
+            duration,
+            minimum=50,
+            maximum=20000,
+        ):
+            errors.append(
+                f"{prefix}.duration_ms doit être compris entre 50 et 20000"
+            )
+        if (
+            "settings" in transition
+            and not isinstance(transition.get("settings"), Mapping)
+        ):
+            errors.append(f"{prefix}.settings doit être un objet")
+        if (
+            "overlay" in transition
+            and not isinstance(transition.get("overlay"), bool)
+        ):
+            errors.append(f"{prefix}.overlay doit être booléen")
+
+    shader_sets = data.get("shader_sets", {})
+    if not isinstance(shader_sets, Mapping):
+        errors.append("shader_sets doit être un objet")
+        shader_sets = {}
+    for shader_name, shader_set in shader_sets.items():
+        prefix = f"shader_sets.{shader_name}"
+        if (
+            not str(shader_name).strip()
+            or not isinstance(shader_set, Mapping)
+        ):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        filters = shader_set.get("filters", [])
+        if not isinstance(filters, list):
+            errors.append(f"{prefix}.filters doit être une liste")
+            continue
+        identities: set[tuple[str, str]] = set()
+        for filter_index, raw_filter in enumerate(filters):
+            fprefix = f"{prefix}.filters[{filter_index}]"
+            if not isinstance(raw_filter, Mapping):
+                errors.append(f"{fprefix} doit être un objet")
+                continue
+            source = str(raw_filter.get("source") or "").strip()
+            filter_name = str(
+                raw_filter.get("filter")
+                or raw_filter.get("filter_name")
+                or ""
+            ).strip()
+            if not source:
+                errors.append(f"{fprefix}.source est requis")
+            if not filter_name:
+                errors.append(f"{fprefix}.filter est requis")
+            identity = (source.casefold(), filter_name.casefold())
+            if source and filter_name:
+                if identity in identities:
+                    errors.append(
+                        f"{fprefix} duplique {source}/{filter_name}"
+                    )
+                identities.add(identity)
+            if (
+                "enabled" in raw_filter
+                and not isinstance(raw_filter.get("enabled"), bool)
+            ):
+                errors.append(f"{fprefix}.enabled doit être booléen")
+            if (
+                "settings" in raw_filter
+                and not isinstance(raw_filter.get("settings"), Mapping)
+            ):
+                errors.append(f"{fprefix}.settings doit être un objet")
+            if (
+                "overlay" in raw_filter
+                and not isinstance(raw_filter.get("overlay"), bool)
+            ):
+                errors.append(f"{fprefix}.overlay doit être booléen")
+
+    sound_sets = data.get("sound_sets", {})
+    if not isinstance(sound_sets, Mapping):
+        errors.append("sound_sets doit être un objet")
+        sound_sets = {}
+    for sound_name, sound_set in sound_sets.items():
+        prefix = f"sound_sets.{sound_name}"
+        if (
+            not str(sound_name).strip()
+            or not isinstance(sound_set, Mapping)
+        ):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        for phase in ("enter", "exit"):
+            triggers = sound_set.get(phase, [])
+            if not isinstance(triggers, list):
+                errors.append(f"{prefix}.{phase} doit être une liste")
+                continue
+            if len(triggers) > 32:
+                errors.append(
+                    f"{prefix}.{phase} dépasse 32 sons"
+                )
+            for index, trigger in enumerate(triggers):
+                tprefix = f"{prefix}.{phase}[{index}]"
+                if not isinstance(trigger, Mapping):
+                    errors.append(f"{tprefix} doit être un objet")
+                    continue
+                input_name = str(
+                    trigger.get("input")
+                    or trigger.get("input_name")
+                    or ""
+                ).strip()
+                if not input_name:
+                    errors.append(f"{tprefix}.input est requis")
+                action = str(
+                    trigger.get("action") or "restart"
+                ).strip().casefold()
+                if action not in {
+                    "play",
+                    "pause",
+                    "stop",
+                    "restart",
+                    "next",
+                    "previous",
+                }:
+                    errors.append(
+                        f"{tprefix}.action inconnu : {action}"
+                    )
+
+    for cue_name, cue in cues.items():
+        prefix = f"cues.{cue_name}"
+        if not str(cue_name).strip() or not isinstance(cue, Mapping):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        interrupt_policy = str(
+            cue.get("interrupt_policy") or "replace"
+        ).strip().casefold()
+        if interrupt_policy not in PRESENTATION_CUE_INTERRUPT_POLICIES:
+            errors.append(
+                f"{prefix}.interrupt_policy doit être replace"
+            )
+        frames = cue.get("frames", [])
+        if not isinstance(frames, list):
+            errors.append(f"{prefix}.frames doit être une liste")
+            continue
+        if len(frames) > PRESENTATION_MAX_FRAMES:
+            errors.append(
+                f"{prefix}.frames dépasse {PRESENTATION_MAX_FRAMES} entrées"
+            )
+        total_actions = 0
+        max_frame_at_ms = 0.0
+        sequential_wait_ms = 0.0
+        for frame_index, frame in enumerate(frames):
+            fprefix = f"{prefix}.frames[{frame_index}]"
+            if not isinstance(frame, Mapping):
+                errors.append(f"{fprefix} doit être un objet")
+                continue
+            at_ms = frame.get("at_ms", 0)
+            if (
+                not _valid_int(
+                    at_ms,
+                    minimum=0,
+                    maximum=PRESENTATION_MAX_CUE_MS,
+                )
+            ):
+                errors.append(
+                    f"{fprefix}.at_ms doit être compris entre 0 et "
+                    f"{PRESENTATION_MAX_CUE_MS}"
+                )
+            else:
+                max_frame_at_ms = max(
+                    max_frame_at_ms,
+                    float(at_ms),
+                )
+            actions = frame.get("actions", [])
+            if not isinstance(actions, list):
+                errors.append(f"{fprefix}.actions doit être une liste")
+                continue
+            if len(actions) > PRESENTATION_MAX_ACTIONS_PER_FRAME:
+                errors.append(
+                    f"{fprefix}.actions dépasse "
+                    f"{PRESENTATION_MAX_ACTIONS_PER_FRAME} entrées"
+                )
+            total_actions += len(actions)
+            for action_index, action in enumerate(actions):
+                aprefix = f"{fprefix}.actions[{action_index}]"
+                if not isinstance(action, Mapping):
+                    errors.append(f"{aprefix} doit être un objet")
+                    continue
+                action_type = str(action.get("type") or "").strip()
+                if not action_type:
+                    errors.append(f"{aprefix}.type est requis")
+                    continue
+                if action_type not in PRESENTATION_CUE_ACTION_TYPES:
+                    errors.append(
+                        f"{aprefix}.type inconnu : {action_type}"
+                    )
+                    continue
+                if (
+                    "enabled" in action
+                    and not isinstance(action.get("enabled"), bool)
+                ):
+                    errors.append(f"{aprefix}.enabled doit être booléen")
+                params = action.get("params", {})
+                if not isinstance(params, Mapping):
+                    errors.append(f"{aprefix}.params doit être un objet")
+                    continue
+
+                def cue_required_text(
+                    key: str,
+                    *,
+                    params: Mapping[str, Any] = params,
+                    aprefix: str = aprefix,
+                ) -> None:
+                    if not str(params.get(key) or "").strip():
+                        errors.append(
+                            f"{aprefix}.params.{key} est requis"
+                        )
+
+                if action_type == "set_program_scene":
+                    cue_required_text("scene")
+                elif action_type == "scene_item_enabled":
+                    cue_required_text("scene")
+                    cue_required_text("source")
+                elif action_type in {
+                    "source_filter_enabled",
+                    "source_filter_settings",
+                }:
+                    cue_required_text("source")
+                    cue_required_text("filter")
+                    if (
+                        action_type == "source_filter_settings"
+                        and not isinstance(params.get("settings"), Mapping)
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.settings doit être un objet"
+                        )
+                elif action_type == "input_mute":
+                    cue_required_text("input")
+                elif action_type == "input_volume_db":
+                    cue_required_text("input")
+                    raw_volume = params.get("volume_db")
+                    if (
+                        isinstance(raw_volume, bool)
+                        or not isinstance(raw_volume, (int, float))
+                        or not math.isfinite(float(raw_volume))
+                        or not -100.0 <= float(raw_volume) <= 26.0
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.volume_db doit être compris "
+                            "entre -100 et 26 dB"
+                        )
+                elif action_type == "set_input_settings":
+                    cue_required_text("input")
+                    if not isinstance(params.get("settings"), Mapping):
+                        errors.append(
+                            f"{aprefix}.params.settings doit être un objet"
+                        )
+                elif action_type == "app_audio_output":
+                    cue_required_text("device")
+                    cue_required_text("process")
+                elif action_type == "windows_hdr":
+                    if not isinstance(params.get("enabled"), bool):
+                        errors.append(
+                            f"{aprefix}.params.enabled doit être booléen"
+                        )
+                elif action_type == "wait_ms":
+                    raw_duration = params.get("duration_ms")
+                    if (
+                        isinstance(raw_duration, bool)
+                        or not isinstance(raw_duration, (int, float))
+                        or not math.isfinite(float(raw_duration))
+                        or not 0.0 <= float(raw_duration) <= 10000.0
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.duration_ms doit être compris "
+                            "entre 0 et 10000"
+                        )
+                    elif bool(action.get("enabled", True)):
+                        sequential_wait_ms += float(raw_duration)
+                elif action_type == "media_input_action":
+                    cue_required_text("input")
+                    action_name = str(
+                        params.get("action") or ""
+                    ).strip().casefold()
+                    if action_name not in {
+                        "play",
+                        "pause",
+                        "stop",
+                        "restart",
+                        "next",
+                        "previous",
+                    }:
+                        errors.append(
+                            f"{aprefix}.params.action doit être play, pause, "
+                            "stop, restart, next ou previous"
+                        )
+                elif action_type == "animate_filter_settings":
+                    cue_required_text("source")
+                    cue_required_text("filter")
+                    start_settings = params.get("from_settings", {})
+                    end_settings = params.get("to_settings")
+                    if not isinstance(start_settings, Mapping):
+                        errors.append(
+                            f"{aprefix}.params.from_settings doit être un objet"
+                        )
+                        start_settings = {}
+                    if not isinstance(end_settings, Mapping) or not end_settings:
+                        errors.append(
+                            f"{aprefix}.params.to_settings doit être un objet non vide"
+                        )
+                        end_settings = {}
+                    keys = set(start_settings) | set(end_settings)
+                    for key in keys:
+                        if key not in start_settings or key not in end_settings:
+                            errors.append(
+                                f"{aprefix} doit définir {key} dans from_settings "
+                                "et to_settings"
+                            )
+                            continue
+                        for side, raw_value in (
+                            ("from_settings", start_settings.get(key)),
+                            ("to_settings", end_settings.get(key)),
+                        ):
+                            if (
+                                isinstance(raw_value, bool)
+                                or not isinstance(raw_value, (int, float))
+                                or not math.isfinite(float(raw_value))
+                            ):
+                                errors.append(
+                                    f"{aprefix}.params.{side}.{key} doit être "
+                                    "un nombre fini"
+                                )
+                    animation_duration = params.get(
+                        "duration_ms",
+                        300,
+                    )
+                    if not _valid_int(
+                        animation_duration,
+                        minimum=0,
+                        maximum=10000,
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.duration_ms doit être compris "
+                            "entre 0 et 10000"
+                        )
+                    elif int(animation_duration) != 0:
+                        errors.append(
+                            f"{aprefix}.params.duration_ms doit être 0 : "
+                            "les animations OBS multi-étapes sont désactivées"
+                        )
+                    if not _valid_int(
+                        params.get("steps", 12),
+                        minimum=1,
+                        maximum=120,
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.steps doit être compris entre 1 et 120"
+                        )
+                    easing = str(
+                        params.get("easing") or "linear"
+                    ).strip().casefold()
+                    if easing not in {
+                        "linear",
+                        "ease_in",
+                        "ease_out",
+                        "ease_in_out",
+                    }:
+                        errors.append(
+                            f"{aprefix}.params.easing inconnu : {easing}"
+                        )
+        if total_actions > PRESENTATION_MAX_ACTIONS_PER_CUE:
+            errors.append(
+                f"{prefix} dépasse "
+                f"{PRESENTATION_MAX_ACTIONS_PER_CUE} actions"
+            )
+
+        theoretical_runtime_ms = (
+            max_frame_at_ms + sequential_wait_ms
+        )
+        if theoretical_runtime_ms > CUE_MAX_RUNTIME_MS:
+            errors.append(
+                f"{prefix} dépasse le budget total de "
+                f"{CUE_MAX_RUNTIME_MS} ms "
+                "(offsets de frames + attentes séquentielles)"
+            )
+
+    for profile_name, profile in presentation_profiles.items():
+        prefix = f"presentation_profiles.{profile_name}"
+        if not str(profile_name).strip() or not isinstance(
+            profile,
+            Mapping,
+        ):
+            errors.append(f"{prefix} doit être un objet nommé")
+            continue
+        intensity = str(
+            profile.get("animation_intensity") or "normal"
+        ).strip().casefold()
+        if intensity not in PRESENTATION_ANIMATION_INTENSITIES:
+            errors.append(
+                f"{prefix}.animation_intensity inconnu : {intensity}"
+            )
+        theme = profile.get("theme", {})
+        if not isinstance(theme, Mapping):
+            errors.append(f"{prefix}.theme doit être un objet")
+        components = profile.get("components", {})
+        if not isinstance(components, Mapping):
+            errors.append(f"{prefix}.components doit être un objet")
+        else:
+            for component_name, component in components.items():
+                cprefix = f"{prefix}.components.{component_name}"
+                if (
+                    not str(component_name).strip()
+                    or not isinstance(component, Mapping)
+                ):
+                    errors.append(
+                        f"{cprefix} doit être un objet nommé"
+                    )
+                    continue
+                mode = str(
+                    component.get("mode") or "inherit"
+                ).strip().casefold()
+                if mode not in {"inherit", "custom", "hidden"}:
+                    errors.append(
+                        f"{cprefix}.mode doit être inherit, custom ou hidden"
+                    )
+                if (
+                    "resource" in component
+                    and not isinstance(component.get("resource"), str)
+                ):
+                    errors.append(
+                        f"{cprefix}.resource doit être une chaîne"
+                    )
+                if (
+                    "settings" in component
+                    and not isinstance(component.get("settings"), Mapping)
+                ):
+                    errors.append(
+                        f"{cprefix}.settings doit être un objet"
+                    )
+        for key in (
+            "enter_cue",
+            "exit_cue",
+            "transition_profile",
+            "shader_set",
+            "sound_set",
+            "widget_theme",
+        ):
+            if key in profile and not isinstance(profile.get(key), str):
+                errors.append(f"{prefix}.{key} doit être une chaîne")
+        for cue_key in ("enter_cue", "exit_cue"):
+            cue_name = str(profile.get(cue_key) or "").strip()
+            if cue_name and cue_name not in cues:
+                errors.append(
+                    f"{prefix}.{cue_key} référence un cue inexistant : "
+                    f"{cue_name}"
+                )
+        transition_name = str(
+            profile.get("transition_profile") or ""
+        ).strip()
+        if (
+            transition_name
+            and transition_name not in transition_profiles
+        ):
+            errors.append(
+                f"{prefix}.transition_profile référence un profil "
+                f"inexistant : {transition_name}"
+            )
+        shader_name = str(profile.get("shader_set") or "").strip()
+        if shader_name and shader_name not in shader_sets:
+            errors.append(
+                f"{prefix}.shader_set référence un set inexistant : "
+                f"{shader_name}"
+            )
+        sound_name = str(profile.get("sound_set") or "").strip()
+        if sound_name and sound_name not in sound_sets:
+            errors.append(
+                f"{prefix}.sound_set référence un set inexistant : "
+                f"{sound_name}"
+            )
+
+        transition_name = str(
+            profile.get("transition_profile") or ""
+        ).strip()
+        if (
+            transition_name
+            and transition_name not in transition_profiles
+        ):
+            errors.append(
+                f"{prefix}.transition_profile référence un preset "
+                f"inexistant : {transition_name}"
+            )
+
+        shader_name = str(
+            profile.get("shader_set") or ""
+        ).strip()
+        if shader_name and shader_name not in shader_sets:
+            errors.append(
+                f"{prefix}.shader_set référence un preset inexistant : "
+                f"{shader_name}"
+            )
+
+    widget_runtime = data.get("widget_runtime", {})
+    if not isinstance(widget_runtime, Mapping):
+        errors.append("widget_runtime doit être un objet")
+    else:
+        widget_host = str(
+            widget_runtime.get("host") or "127.0.0.1"
+        ).strip().casefold()
+        if widget_host not in {"127.0.0.1", "localhost", "::1"}:
+            errors.append(
+                "widget_runtime.host doit rester local "
+                "(127.0.0.1, localhost ou ::1)"
+            )
+        if not _valid_int(
+            widget_runtime.get("port", 8766),
+            minimum=1,
+            maximum=65535,
+        ):
+            errors.append(
+                "widget_runtime.port doit être compris entre 1 et 65535"
+            )
+        if (
+            "enabled" in widget_runtime
+            and not isinstance(widget_runtime.get("enabled"), bool)
+        ):
+            errors.append("widget_runtime.enabled doit être booléen")
+        api_port = (
+            api.get("port", 8765)
+            if isinstance(api, Mapping)
+            else 8765
+        )
+        widget_port = widget_runtime.get("port", 8766)
+        if (
+            isinstance(api, Mapping)
+            and bool(api.get("enabled", True))
+            and bool(widget_runtime.get("enabled", True))
+            and _valid_int(api_port, minimum=1, maximum=65535)
+            and _valid_int(widget_port, minimum=1, maximum=65535)
+            and int(api_port) == int(widget_port)
+        ):
+            errors.append(
+                "widget_runtime.port doit être différent de api.port"
+            )
+
     host_control = data.get("host_control", {})
     if not isinstance(host_control, Mapping):
         errors.append("host_control doit être un objet")
@@ -1086,6 +1804,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         "capture": "CaptureProfile",
         "audio": "AudioProfile",
         "layout": "LayoutProfile",
+        "presentation": "PresentationProfile",
     }
     profile_sets = {
         domain: set((profiles.get(domain) or {}).keys())
@@ -1094,6 +1813,11 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         for domain in PROFILE_DOMAINS
     }
     profile_sets["layout"] = set(layout_profiles.keys()) if isinstance(layout_profiles, Mapping) else set()
+    profile_sets["presentation"] = (
+        set(presentation_profiles.keys())
+        if isinstance(presentation_profiles, Mapping)
+        else set()
+    )
 
     def check_state_refs(state, where: str) -> None:
         if not isinstance(state, Mapping):
@@ -1116,10 +1840,18 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             errors.append(f"{where}.{key} référence un profil inexistant : {value}")
 
     check_state_refs(fallback, "router.fallback_state")
+    fallback_state = dict(fallback) if isinstance(fallback, Mapping) else {}
     for index, raw in enumerate(rules):
-        if not isinstance(raw, Mapping) or str(raw.get("behavior", "match")).casefold() != "match":
+        if (
+            not isinstance(raw, Mapping)
+            or str(raw.get("behavior", "match")).casefold() != "match"
+        ):
             continue
-        check_state_refs(raw.get("state"), f"rules[{index}].state")
+        raw_state = raw.get("state")
+        merged_state = dict(fallback_state)
+        if isinstance(raw_state, Mapping):
+            merged_state.update(raw_state)
+        check_state_refs(merged_state, f"rules[{index}].state")
 
     return errors
 
@@ -1202,14 +1934,32 @@ def build_activation_policies(data: Mapping[str, Any]) -> dict[str, TriggerPolic
 
 def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
     router = data.get("router", {})
-    fallback = StreamState.from_mapping(router.get("fallback_state", {}))
+    fallback_raw = (
+        router.get("fallback_state", {})
+        if isinstance(router, Mapping)
+        else {}
+    )
+    fallback_mapping = (
+        dict(fallback_raw)
+        if isinstance(fallback_raw, Mapping)
+        else {}
+    )
+    fallback = StreamState.from_mapping(fallback_mapping)
     rules: list[AppRule] = []
     for raw in data.get("rules", []):
         if not isinstance(raw, Mapping):
             continue
         behavior_text = str(raw.get("behavior", "match")).casefold()
-        behavior = ResolutionKind.IGNORE if behavior_text == "ignore" else ResolutionKind.MATCH
+        behavior = (
+            ResolutionKind.IGNORE
+            if behavior_text == "ignore"
+            else ResolutionKind.MATCH
+        )
         conditions = raw.get("conditions")
+        raw_state = raw.get("state")
+        merged_state = dict(fallback_mapping)
+        if isinstance(raw_state, Mapping):
+            merged_state.update(raw_state)
         rules.append(
             AppRule(
                 name=str(raw.get("name") or "Unnamed rule"),
@@ -1221,7 +1971,7 @@ def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
                 enabled=bool(raw.get("enabled", True)),
                 behavior=behavior,
                 state=(
-                    StreamState.from_mapping(raw.get("state", {}))
+                    StreamState.from_mapping(merged_state)
                     if behavior is ResolutionKind.MATCH
                     else None
                 ),
@@ -1253,6 +2003,18 @@ def build_host_controller(data: Mapping[str, Any]) -> HostControlController:
     )
 
 
+def build_widget_runtime_config(
+    data: Mapping[str, Any],
+) -> WidgetRuntimeConfig:
+    raw = data.get("widget_runtime", {})
+    values = raw if isinstance(raw, Mapping) else {}
+    return WidgetRuntimeConfig(
+        enabled=bool(values.get("enabled", True)),
+        host=str(values.get("host") or "127.0.0.1"),
+        port=int(values.get("port", 8766) or 8766),
+    )
+
+
 def build_obs_config(data: Mapping[str, Any]) -> OBSConnectionConfig:
     obs = data.get("obs", {})
     return OBSConnectionConfig(
@@ -1279,3 +2041,32 @@ def build_layout_profiles(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         for name, profile in raw.items()
         if isinstance(profile, Mapping)
     }
+
+
+def build_presentation_profiles(data: Mapping[str, Any]) -> PresentationRegistry:
+    profiles_raw = data.get("presentation_profiles", {})
+    cues_raw = data.get("cues", {})
+    transitions_raw = data.get("transition_profiles", {})
+    shader_sets_raw = data.get("shader_sets", {})
+    sound_sets_raw = data.get("sound_sets", {})
+    return parse_presentation_registry(
+        profiles_raw=(
+            profiles_raw if isinstance(profiles_raw, Mapping) else {}
+        ),
+        cues_raw=cues_raw if isinstance(cues_raw, Mapping) else {},
+        transitions_raw=(
+            transitions_raw
+            if isinstance(transitions_raw, Mapping)
+            else {}
+        ),
+        shader_sets_raw=(
+            shader_sets_raw
+            if isinstance(shader_sets_raw, Mapping)
+            else {}
+        ),
+        sound_sets_raw=(
+            sound_sets_raw
+            if isinstance(sound_sets_raw, Mapping)
+            else {}
+        ),
+    )

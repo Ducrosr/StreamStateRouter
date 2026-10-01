@@ -26,7 +26,7 @@ from stream_state_router.services.config import (
 class ConfigTests(unittest.TestCase):
     def sample(self):
         return {
-            "schema_version": 6,
+            "schema_version": 7,
             "router": {
                 "poll_ms": 50,
                 "debounce_ms": 150,
@@ -52,6 +52,39 @@ class ConfigTests(unittest.TestCase):
                 "audio": {"Default": {"actions": []}},
             },
         }
+
+    def test_partial_rule_inherits_unchecked_domains_from_fallback(self):
+        data = self.sample()
+        data["router"]["fallback_state"] = {
+            "Game": "Vanilla",
+            "OverlayProfile": "Vanilla",
+            "CaptureProfile": "Default",
+            "AudioProfile": "Default",
+            "LayoutProfile": "Vanilla",
+            "PresentationProfile": "Midgar",
+        }
+        data["presentation_profiles"] = {
+            "Midgar": {"theme": {"accent": "#00ffff"}},
+            "Combat": {"extends": "Midgar"},
+        }
+        data["cues"] = {}
+        data["rules"][1]["state"] = {
+            "Game": "Game",
+            "PresentationProfile": "Combat",
+        }
+
+        ruleset, _poll, _debounce, _fallback = build_ruleset(data)
+        state = ruleset.rules[1].state
+
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state.game, "Game")
+        self.assertEqual(state.overlay_profile, "Vanilla")
+        self.assertEqual(state.capture_profile, "Default")
+        self.assertEqual(state.audio_profile, "Default")
+        self.assertEqual(state.layout_profile, "Vanilla")
+        self.assertEqual(state.presentation_profile, "Combat")
+        self.assertEqual(validate_config(data), [])
 
     def test_valid_config_passes(self):
         self.assertEqual(validate_config(self.sample()), [])
@@ -129,7 +162,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         self.assertEqual(migrated["router"]["fallback_state"]["LayoutProfile"], "Vanilla")
         self.assertIn("Vanilla", migrated["layout_profiles"])
         self.assertEqual(validate_config(migrated), [])
@@ -184,7 +217,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         modules = migrated["layout_profiles"]["Vanilla"]["modules"]
         self.assertEqual(set(modules), {"[Global] Date", "[Global] Signature"})
         self.assertEqual(modules["[Global] Date"]["module_type"], "Global")
@@ -202,6 +235,123 @@ class ConfigTests(unittest.TestCase):
             exported = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(exported["obs"]["password"], "")
         self.assertEqual(exported["api"]["token"], "")
+        self.assertEqual(validate_config(exported), [])
+
+    def test_schema_v6_migration_preserves_implicit_rule_defaults(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data["router"]["fallback_state"] = {
+            "Game": "Vanilla",
+            "OverlayProfile": "Special",
+            "CaptureProfile": "Default",
+            "AudioProfile": "Default",
+            "LayoutProfile": "Vanilla",
+        }
+        data["profiles"]["overlay"]["Special"] = {"actions": []}
+        data["rules"] = [
+            {
+                "name": "Legacy",
+                "behavior": "match",
+                "exe": "legacy.exe",
+                "state": {"Game": "Vanilla"},
+            }
+        ]
+        data.pop("presentation_profiles", None)
+        data.pop("cues", None)
+        data.pop("transition_profiles", None)
+        data.pop("shader_sets", None)
+        data.pop("sound_sets", None)
+        data.pop("widget_runtime", None)
+
+        migrated = migrate_config(data)
+        state = migrated["rules"][0]["state"]
+
+        self.assertEqual(state["Game"], "Vanilla")
+        self.assertEqual(state["OverlayProfile"], "Vanilla")
+        self.assertEqual(state["CaptureProfile"], "Default")
+        self.assertEqual(state["AudioProfile"], "Default")
+        self.assertEqual(state["LayoutProfile"], "Vanilla")
+        self.assertEqual(state["PresentationProfile"], "Vanilla")
+
+        ruleset, _poll, _debounce, _fallback = build_ruleset(migrated)
+        resolved = ruleset.rules[0].state
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.overlay_profile, "Vanilla")
+
+    def test_shareable_export_redacts_presentation_resource_settings(self):
+        data = self.sample()
+        data["cues"] = {
+            "SecretCue": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "set_input_settings",
+                                "enabled": True,
+                                "params": {
+                                    "input": "Browser",
+                                    "settings": {
+                                        "url": "https://example.test/?token=secret"
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        data["shader_sets"] = {
+            "SecretShaders": {
+                "filters": [
+                    {
+                        "source": "Camera",
+                        "filter": "Pulse",
+                        "enabled": True,
+                        "settings": {"token": "secret"},
+                    }
+                ]
+            }
+        }
+        data["transition_profiles"] = {
+            "SecretTransition": {
+                "transition_name": "Fade",
+                "settings": {"token": "secret"},
+            }
+        }
+        data["presentation_profiles"] = {
+            "Vanilla": {
+                "components": {
+                    "chat": {
+                        "mode": "custom",
+                        "resource": "chat",
+                        "settings": {"token": "secret"},
+                    }
+                }
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+
+        cue_action = exported["cues"]["SecretCue"]["frames"][0]["actions"][0]
+        self.assertEqual(cue_action["params"]["settings"], {})
+        self.assertFalse(cue_action["enabled"])
+        self.assertEqual(
+            exported["shader_sets"]["SecretShaders"]["filters"][0]["settings"],
+            {},
+        )
+        self.assertEqual(
+            exported["transition_profiles"]["SecretTransition"]["settings"],
+            {},
+        )
+        self.assertEqual(
+            exported["presentation_profiles"]["Vanilla"]["components"]["chat"]["settings"],
+            {},
+        )
         self.assertEqual(validate_config(exported), [])
 
     def test_shareable_export_redacts_imported_obs_settings_and_host_path(self):
@@ -374,9 +524,239 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         self.assertEqual(migrated["activation_policies"], {})
         self.assertEqual(validate_config(migrated), [])
+
+    def test_schema_v6_adds_presentation_defaults(self):
+        data = self.sample()
+        data["schema_version"] = 6
+        data.pop("presentation_profiles", None)
+        data.pop("cues", None)
+        data["router"]["fallback_state"].pop(
+            "PresentationProfile",
+            None,
+        )
+        for rule in data["rules"]:
+            if isinstance(rule.get("state"), dict):
+                rule["state"].pop("PresentationProfile", None)
+
+        migrated = migrate_config(data)
+
+        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(
+            migrated["router"]["fallback_state"]["PresentationProfile"],
+            "Vanilla",
+        )
+        self.assertIn("Vanilla", migrated["presentation_profiles"])
+        self.assertEqual(migrated["cues"], {})
+        self.assertEqual(validate_config(migrated), [])
+
+    def test_presentation_profiles_and_cues_validate(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {
+                "theme": {"accent": "#00ffff"},
+            },
+            "Combat": {
+                "extends": "Vanilla",
+                "enter_cue": "GameEnter",
+                "exit_cue": "GameExit",
+                "animation_intensity": "high",
+            },
+        }
+        data["cues"] = {
+            "GameEnter": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "GameEnter"},
+                            }
+                        ],
+                    }
+                ]
+            },
+            "GameExit": {
+                "frames": [
+                    {
+                        "at_ms": 100,
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "GameExit"},
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        data["router"]["fallback_state"]["PresentationProfile"] = "Vanilla"
+        data["rules"][1]["state"]["PresentationProfile"] = "Combat"
+
+        self.assertEqual(validate_config(data), [])
+
+    def test_presentation_sound_sets_validate_and_profile_refs_resolve(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {},
+            "Combat": {"sound_set": "CombatSounds"},
+        }
+        data["sound_sets"] = {
+            "CombatSounds": {
+                "enter": [
+                    {
+                        "input": "SSR Combat In",
+                        "action": "restart",
+                    }
+                ],
+                "exit": [
+                    {
+                        "input": "SSR Combat Out",
+                        "action": "stop",
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(validate_config(data), [])
+
+        data["presentation_profiles"]["Combat"]["sound_set"] = "Missing"
+        errors = validate_config(data)
+        self.assertTrue(
+            any("sound_set référence un set inexistant" in item for item in errors),
+            errors,
+        )
+
+    def test_presentation_validation_rejects_unknown_cue_and_unsafe_timeline(self):
+        data = self.sample()
+        data["presentation_profiles"] = {
+            "Vanilla": {"enter_cue": "Missing"},
+        }
+        data["cues"] = {
+            "TooLate": {
+                "frames": [
+                    {
+                        "at_ms": 30001,
+                        "actions": [
+                            {
+                                "type": "source_filter_enabled",
+                                "params": {
+                                    "source": "Global",
+                                    "filter": "Mako",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("référence un cue inexistant" in item for item in errors),
+            errors,
+        )
+        self.assertTrue(
+            any(".at_ms doit être compris" in item for item in errors),
+            errors,
+        )
+
+    def test_cue_validation_rejects_unbounded_wait_budget(self):
+        data = self.sample()
+        data["cues"] = {
+            "TooLong": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "wait_ms",
+                                "params": {"duration_ms": 10000},
+                            }
+                            for _ in range(7)
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("budget total de 60000 ms" in error for error in errors),
+            errors,
+        )
+
+    def test_cue_validation_rejects_filter_property_mutations(self):
+        data = self.sample()
+        data["cues"] = {
+            "UnsafeFilter": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "source_filter_settings",
+                                "params": {
+                                    "source": "Camera",
+                                    "filter": "Pulse",
+                                    "settings": {"opacity": 0.5},
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(
+                ".type inconnu : source_filter_settings" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_cue_validation_rejects_multi_step_obs_filter_animation(self):
+        data = self.sample()
+        data["cues"] = {
+            "UnsafeAnimation": {
+                "frames": [
+                    {
+                        "at_ms": 0,
+                        "actions": [
+                            {
+                                "type": "animate_filter_settings",
+                                "params": {
+                                    "source": "Camera",
+                                    "filter": "Pulse",
+                                    "from_settings": {"opacity": 0.0},
+                                    "to_settings": {"opacity": 1.0},
+                                    "duration_ms": 300,
+                                    "steps": 12,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(
+                ".type inconnu : animate_filter_settings" in error
+                for error in errors
+            ),
+            errors,
+        )
 
     def test_schema_v5_adds_host_control_defaults(self):
         data = self.sample()
@@ -385,7 +765,7 @@ class ConfigTests(unittest.TestCase):
 
         migrated = migrate_config(data)
 
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         self.assertEqual(
             migrated["host_control"],
             {
@@ -397,7 +777,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_host_and_filter_actions_validate(self):
         data = self.sample()
-        data["schema_version"] = 6
+        data["schema_version"] = 7
         data["host_control"] = {
             "soundvolumeview_path": r"C:\\Tools\\SoundVolumeView.exe",
             "audio_timeout_seconds": 4.0,
@@ -432,7 +812,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_invalid_host_actions_are_rejected(self):
         data = self.sample()
-        data["schema_version"] = 6
+        data["schema_version"] = 7
         data["host_control"] = {
             "soundvolumeview_path": 42,
             "audio_timeout_seconds": 0,

@@ -11,6 +11,7 @@ _STATE_KEYS = (
     ("capture", "Capture", "CaptureProfile"),
     ("audio", "Audio", "AudioProfile"),
     ("layout", "Layout", "LayoutProfile"),
+    ("presentation", "Présentation", "PresentationProfile"),
 )
 
 
@@ -417,16 +418,33 @@ def build_rule_health(
         )
 
     state = _mapping(rule.get("state"))
+    router = _mapping(config.get("router"))
+    fallback = _mapping(router.get("fallback_state"))
     profiles = _mapping(config.get("profiles"))
     layouts = _mapping(config.get("layout_profiles"))
     missing: list[str] = []
     for domain, label, key in _STATE_KEYS:
-        target = str(state.get(key) or "").strip()
+        target = str(
+            state.get(key)
+            if key in state
+            else fallback.get(key)
+            or ""
+        ).strip()
+        # A missing key means "inherit". If the fallback is also omitted,
+        # config validation/runtime canonical defaults remain authoritative;
+        # the compact health badge must not invent a broken reference.
         if not target:
-            missing.append(f"{label}=<vide>")
             continue
-        pool = layouts if domain == "layout" else _mapping(profiles.get(domain))
+        if domain == "layout":
+            pool = layouts
+        elif domain == "presentation":
+            pool = _mapping(config.get("presentation_profiles"))
+        else:
+            pool = _mapping(profiles.get(domain))
         if target not in pool:
+            # Empty domain maps are allowed for canonical/unmanaged defaults.
+            if not pool and key not in state:
+                continue
             missing.append(f"{label}={target}")
 
     if missing:

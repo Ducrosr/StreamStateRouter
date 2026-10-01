@@ -20,6 +20,7 @@ from stream_state_router.obs.dispatcher import (
     OBSDispatcher,
     profile_map_from_raw,
 )
+from stream_state_router.presentation import build_presentation_registry
 from stream_state_router.router.engine import StateRouterEngine
 from stream_state_router.router.models import ForegroundApp, StreamState
 from stream_state_router.router.rules import AppRule, ResolutionKind, RuleSet
@@ -165,6 +166,24 @@ class CommandDispatcher(FakeDispatcher):
 
     def execute_profile(self, domain, profile_name, *, state=None):
         self.profile_threads.append((domain, profile_name, threading.current_thread().name))
+        return DispatchResult(1, 0, (domain,))
+
+    def execute_profile_snapshot(
+        self,
+        domain,
+        profile_name,
+        profiles_raw,
+        *,
+        state=None,
+    ):
+        self.profile_threads.append(
+            (
+                domain,
+                profile_name,
+                threading.current_thread().name,
+                dict(profiles_raw),
+            )
+        )
         return DispatchResult(1, 0, (domain,))
 
     def execute_layout_profile(self, profile_name, preview=False):
@@ -355,6 +374,8 @@ class CatalogRuntimeClient:
                 "currentProgramSceneName": self.program_scene,
                 "currentProgramSceneUuid": "idle-uuid",
             }
+        if request == "CreateInput":
+            return {"sceneItemId": 77}
         if request == "GetStreamStatus":
             return {"outputActive": False}
         if request == "GetRecordStatus":
@@ -1104,6 +1125,265 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(
                 dispatcher.profile_threads,
                 [("game", "Vanilla", "SSR-Router")],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_draft_profile_test_runs_snapshot_on_runtime_worker(self):
+        app = ForegroundApp(1, 1, "terminal.exe")
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(app),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            draft = {
+                "Vanilla": {
+                    "actions": [
+                        {
+                            "type": "input_mute",
+                            "params": {
+                                "input": "Music",
+                                "muted": True,
+                            },
+                        }
+                    ]
+                }
+            }
+            request_id = service.request_profile_test(
+                "audio",
+                "Vanilla",
+                draft,
+            )
+            draft["Vanilla"]["actions"][0]["params"]["input"] = "Changed"
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            recorded = dispatcher.profile_threads[-1]
+            self.assertEqual(recorded[0:3], ("audio", "Vanilla", "SSR-Router"))
+            self.assertEqual(
+                recorded[3]["Vanilla"]["actions"][0]["params"]["input"],
+                "Music",
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_delayed_cue_does_not_block_foreground_replacement(self):
+        client = CatalogRuntimeClient()
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "A": {"enter_cue": "EnterA"},
+                "B": {"enter_cue": "EnterB"},
+            },
+            cues_raw={
+                "EnterA": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "A-now"},
+                                }
+                            ],
+                        },
+                        {
+                            "at_ms": 500,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "A-late"},
+                                }
+                            ],
+                        },
+                    ]
+                },
+                "EnterB": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "B-now"},
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+        provider = FakeProvider(
+            ForegroundApp(1, 1, "a.exe")
+        )
+        engine = StateRouterEngine(
+            RuleSet(
+                [
+                    AppRule(
+                        "A",
+                        StreamState(presentation_profile="A"),
+                        priority=100,
+                        exe="a.exe",
+                    ),
+                    AppRule(
+                        "B",
+                        StreamState(presentation_profile="B"),
+                        priority=100,
+                        exe="b.exe",
+                    ),
+                ]
+            ),
+            debounce_ms=0,
+        )
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=provider,
+        )
+        service.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                scenes = [
+                    payload["sceneName"]
+                    for request, payload in client.calls
+                    if request == "SetCurrentProgramScene"
+                ]
+                if "A-now" in scenes:
+                    break
+                time.sleep(0.01)
+            self.assertIn("A-now", scenes)
+
+            provider.app = ForegroundApp(2, 2, "b.exe")
+            deadline = time.monotonic() + 0.4
+            while time.monotonic() < deadline:
+                scenes = [
+                    payload["sceneName"]
+                    for request, payload in client.calls
+                    if request == "SetCurrentProgramScene"
+                ]
+                if "B-now" in scenes:
+                    break
+                time.sleep(0.01)
+            self.assertIn("B-now", scenes)
+
+            time.sleep(0.55)
+            scenes = [
+                payload["sceneName"]
+                for request, payload in client.calls
+                if request == "SetCurrentProgramScene"
+            ]
+            self.assertNotIn("A-late", scenes)
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_widget_browser_source_creation_runs_on_runtime_worker(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        client = CatalogRuntimeClient()
+        dispatcher = OBSDispatcher(client, {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_widget_browser_source(
+                input_name="[SSR] Loveless Chat",
+                url="http://127.0.0.1:8766/widgets/loveless-chat/",
+                width=720,
+                height=900,
+            )
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(
+                result.result["scene"],
+                "Idle",
+            )
+            self.assertEqual(
+                result.result["scene_item_id"],
+                77,
+            )
+            create_calls = [
+                (request, payload)
+                for request, payload in client.calls
+                if request == "CreateInput"
+            ]
+            self.assertEqual(len(create_calls), 1)
+            payload = create_calls[0][1]
+            self.assertEqual(payload["sceneName"], "Idle")
+            self.assertEqual(
+                payload["inputName"],
+                "[SSR] Loveless Chat",
+            )
+            self.assertEqual(payload["inputKind"], "browser_source")
+            self.assertEqual(
+                payload["inputSettings"]["url"],
+                "http://127.0.0.1:8766/widgets/loveless-chat/",
+            )
+            self.assertEqual(payload["inputSettings"]["width"], 720)
+            self.assertEqual(payload["inputSettings"]["height"], 900)
+            self.assertTrue(payload["sceneItemEnabled"])
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_widget_browser_source_creation_accepts_explicit_scene(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        client = CatalogRuntimeClient()
+        dispatcher = OBSDispatcher(client, {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.start()
+        try:
+            request_id = service.request_widget_browser_source(
+                input_name="[SSR] Events",
+                url="http://127.0.0.1:8766/widgets/events/",
+                scene="Gameplay",
+                width=1920,
+                height=1080,
+                shutdown_when_not_visible=True,
+                restart_when_active=True,
+            )
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            self.assertFalse(
+                any(
+                    request == "GetCurrentProgramScene"
+                    for request, _payload in client.calls
+                )
+            )
+            payload = next(
+                payload
+                for request, payload in client.calls
+                if request == "CreateInput"
+            )
+            self.assertEqual(payload["sceneName"], "Gameplay")
+            self.assertTrue(payload["inputSettings"]["shutdown"])
+            self.assertTrue(
+                payload["inputSettings"]["restart_when_active"]
             )
         finally:
             self.assertTrue(service.stop())

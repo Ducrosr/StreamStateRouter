@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import hashlib
 import json
@@ -9,6 +10,17 @@ import time
 from typing import Any, Mapping, Sequence
 
 from ..host import HostControlController
+from ..presentation import (
+    Cue,
+    CueAction,
+    CueExecutor,
+    CueFrame,
+    CueTask,
+    PresentationRegistry,
+    PresentationStateStore,
+    ResolvedPresentationProfile,
+    build_presentation_registry,
+)
 from ..planning import (
     DesiredAssignment,
     DesiredOwnershipConflict,
@@ -26,7 +38,7 @@ from .models import OBSAction, OBSProfile
 
 ACTION_PROFILE_DOMAINS = ("game", "overlay", "capture", "audio")
 PROFILE_DOMAINS = ACTION_PROFILE_DOMAINS
-STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout",)
+STATE_DOMAINS = ACTION_PROFILE_DOMAINS + ("layout", "presentation")
 _TEMPLATE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -79,6 +91,8 @@ class OBSDispatcher:
         profiles: Mapping[str, Mapping[str, OBSProfile]] | None = None,
         layout_profiles: Mapping[str, Mapping[str, object]] | None = None,
         host_controller: HostControlController | None = None,
+        presentation_registry: PresentationRegistry | None = None,
+        presentation_state_store: PresentationStateStore | None = None,
     ):
         self.client = client
         self.host_controller = host_controller
@@ -87,6 +101,35 @@ class OBSDispatcher:
             str(name): dict(value) for name, value in (layout_profiles or {}).items()
         }
         self._layout_manager = OBSLayoutManager(client)
+        self._presentation_registry = (
+            presentation_registry
+            if presentation_registry is not None
+            else build_presentation_registry(
+                profiles_raw={},
+                cues_raw={},
+            )
+        )
+        self._presentation_state_store = (
+            presentation_state_store
+            if presentation_state_store is not None
+            else PresentationStateStore()
+        )
+        self._cue_executor = CueExecutor(
+            action_executor=self._execute_cue_action,
+        )
+        self._presentation_tasks: deque[CueTask] = deque()
+        self._presentation_task_counter = 0
+        self._presentation_attempt_target = ""
+        self._presentation_exit_consumed_from = ""
+        self._presentation_enter_scheduled_for = ""
+        self._presentation_execution_status: dict[str, object] = {
+            "status": "idle",
+            "execution_id": "",
+            "cue": "",
+            "phase": "",
+            "target_profile": "",
+            "error": "",
+        }
         self._last_state: StreamState | None = None
         self._desired_state: StreamState | None = None
         self._applied_profiles: dict[str, str] = {}
@@ -191,6 +234,10 @@ class OBSDispatcher:
         """Install the runtime shutdown checkpoint for long OBS batches."""
         self._cooperative_yield = callback
         self._layout_manager.set_cooperative_yield(callback)
+        self._cue_executor = CueExecutor(
+            action_executor=self._execute_cue_action,
+            cooperative_yield=callback,
+        )
 
     def _yield_runtime(self) -> None:
         callback = self._cooperative_yield
@@ -218,6 +265,19 @@ class OBSDispatcher:
         self._manual_layout_hold_active = False
         self._manual_layout_routing_baseline = ""
         self._context_cache = None
+
+    def configure_presentation(
+        self,
+        registry: PresentationRegistry,
+    ) -> None:
+        self._presentation_registry = registry
+        self._last_state = None
+        self._desired_state = None
+        self._applied_profiles.pop("presentation", None)
+        self._presentation_state_store.clear()
+
+    def presentation_state_store(self) -> PresentationStateStore:
+        return self._presentation_state_store
 
     def reset(self) -> None:
         self._last_state = None
@@ -275,6 +335,8 @@ class OBSDispatcher:
             return False
         if domain == "layout":
             return not self._layout_profiles
+        if domain == "presentation":
+            return not self._presentation_registry.profiles
         if domain in ACTION_PROFILE_DOMAINS:
             return not self._profiles.get(domain, {})
         return False
@@ -402,7 +464,21 @@ class OBSDispatcher:
             "type": action.type,
             "enabled": bool(action.enabled),
         }
-        if kind == "set_program_scene":
+        if kind == "media_input_action":
+            description["target"] = str(params.get("input") or "")
+            description["value"] = str(params.get("action") or "restart")
+        elif kind == "animate_filter_settings":
+            description["target"] = (
+                f"{params.get('source', '')}/{params.get('filter', '')}"
+            )
+            end_settings = params.get("to_settings")
+            description["setting_keys"] = (
+                sorted(str(key) for key in end_settings)
+                if isinstance(end_settings, Mapping)
+                else []
+            )
+            description["duration_ms"] = params.get("duration_ms", 300)
+        elif kind == "set_program_scene":
             description["target"] = str(params.get("scene") or "")
         elif kind == "scene_item_enabled":
             description["target"] = (
@@ -570,6 +646,196 @@ class OBSDispatcher:
                 "status": "held" if held else ("noop" if applied == desired else "planned"),
                 "operations": [],
             }
+
+            if domain == "presentation":
+                try:
+                    profile = self._presentation_registry.profile(desired)
+                except Exception as exc:
+                    row.update(status="failed", message=str(exc))
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": (
+                                "Résolution PresentationProfile impossible : "
+                                f"{exc}"
+                            ),
+                        }
+                    )
+                    domains.append(row)
+                    continue
+                if profile is None:
+                    if self._is_unmanaged_default(domain, desired):
+                        row.update(
+                            status="unmanaged",
+                            message=(
+                                "Aucun PresentationProfile configuré "
+                                "pour ce domaine"
+                            ),
+                        )
+                    else:
+                        row.update(
+                            status="missing",
+                            message="PresentationProfile introuvable",
+                        )
+                        declarative_blocks.append(
+                            {
+                                "provenance": f"{domain}:{desired}",
+                                "reason": "PresentationProfile introuvable",
+                            }
+                        )
+                    domains.append(row)
+                    continue
+                operations: list[dict[str, object]] = []
+                if profile.transition_profile:
+                    transition = self._presentation_registry.transition(
+                        profile.transition_profile
+                    )
+                    operations.append(
+                        {
+                            "type": "transition_profile",
+                            "profile": profile.transition_profile,
+                            "transition": (
+                                transition.transition_name
+                                if transition is not None
+                                else ""
+                            ),
+                            "duration_ms": (
+                                transition.duration_ms
+                                if transition is not None
+                                else None
+                            ),
+                        }
+                    )
+                if profile.shader_set:
+                    shader_set = self._presentation_registry.shader_set(
+                        profile.shader_set
+                    )
+                    operations.append(
+                        {
+                            "type": "shader_set",
+                            "profile": profile.shader_set,
+                            "filters": (
+                                len(shader_set.filters)
+                                if shader_set is not None
+                                else 0
+                            ),
+                        }
+                    )
+                if applied and applied != desired:
+                    try:
+                        previous_profile_for_sound = (
+                            self._presentation_registry.profile(applied)
+                        )
+                    except Exception:
+                        previous_profile_for_sound = None
+                    if (
+                        previous_profile_for_sound is not None
+                        and previous_profile_for_sound.sound_set
+                    ):
+                        previous_sound_set = (
+                            self._presentation_registry.sound_set(
+                                previous_profile_for_sound.sound_set
+                            )
+                        )
+                        operations.append(
+                            {
+                                "type": "sound_set",
+                                "phase": "exit",
+                                "profile": (
+                                    previous_profile_for_sound.sound_set
+                                ),
+                                "triggers": [
+                                    {
+                                        "input": trigger.input_name,
+                                        "action": trigger.action,
+                                    }
+                                    for trigger in (
+                                        previous_sound_set.exit
+                                        if previous_sound_set is not None
+                                        else ()
+                                    )
+                                ],
+                            }
+                        )
+                if profile.sound_set:
+                    sound_set = self._presentation_registry.sound_set(
+                        profile.sound_set
+                    )
+                    operations.append(
+                        {
+                            "type": "sound_set",
+                            "phase": "enter",
+                            "profile": profile.sound_set,
+                            "triggers": [
+                                {
+                                    "input": trigger.input_name,
+                                    "action": trigger.action,
+                                }
+                                for trigger in (
+                                    sound_set.enter
+                                    if sound_set is not None
+                                    else ()
+                                )
+                            ],
+                        }
+                    )
+                cue_operations: list[tuple[str, str]] = []
+                if applied and applied != desired:
+                    try:
+                        previous_profile = (
+                            self._presentation_registry.profile(applied)
+                        )
+                    except Exception:
+                        previous_profile = None
+                    if (
+                        previous_profile is not None
+                        and previous_profile.exit_cue
+                    ):
+                        cue_operations.append(
+                            ("exit", previous_profile.exit_cue)
+                        )
+                if profile.enter_cue:
+                    cue_operations.append(
+                        ("enter", profile.enter_cue)
+                    )
+                for cue_kind, cue_name in cue_operations:
+                    if not cue_name:
+                        continue
+                    cue = self._presentation_registry.cue(cue_name)
+                    operations.append(
+                        {
+                            "type": "cue",
+                            "phase": cue_kind,
+                            "cue": cue_name,
+                            "duration_ms": (
+                                cue.duration_ms if cue is not None else 0
+                            ),
+                            "actions": (
+                                cue.action_count if cue is not None else 0
+                            ),
+                        }
+                    )
+                row["operations"] = operations
+                row["extends"] = (
+                    " ← ".join(profile.lineage[:-1])
+                    if len(profile.lineage) > 1
+                    else ""
+                )
+                row["theme_keys"] = sorted(
+                    str(key) for key in profile.theme
+                )
+                if operations:
+                    declarative_blocks.append(
+                        {
+                            "provenance": f"{domain}:{desired}",
+                            "reason": (
+                                "PresentationProfile avec Cue/Timeline : "
+                                "exécution classic-only sérialisée"
+                            ),
+                        }
+                    )
+                domains.append(row)
+                continue
 
             if domain == "layout":
                 if held:
@@ -1063,6 +1329,541 @@ class OBSDispatcher:
         )
         return bool(key and key in self._launcher_override_keys)
 
+    def _apply_shader_set(
+        self,
+        profile: ResolvedPresentationProfile,
+    ) -> int:
+        name = str(profile.shader_set or "").strip()
+        if not name:
+            return 0
+        raise RuntimeError(
+            "Exécution ShaderSet différée : les propriétés de filtres "
+            "doivent passer par le contrat typé d'identité/ownership"
+        )
+        shader_set = self._presentation_registry.shader_set(name)
+        if shader_set is None:
+            raise ValueError(f"ShaderSet introuvable : {name}")
+        executed = 0
+        for item in shader_set.filters:
+            self._yield_runtime()
+            if item.enabled is not None:
+                self.client.send(
+                    "SetSourceFilterEnabled",
+                    {
+                        "sourceName": item.source,
+                        "filterName": item.filter_name,
+                        "filterEnabled": bool(item.enabled),
+                    },
+                )
+                executed += 1
+            if item.settings:
+                self._yield_runtime()
+                self.client.send(
+                    "SetSourceFilterSettings",
+                    {
+                        "sourceName": item.source,
+                        "filterName": item.filter_name,
+                        "filterSettings": dict(item.settings),
+                        "overlay": bool(item.overlay),
+                    },
+                )
+                executed += 1
+        return executed
+
+    def _apply_transition_profile(
+        self,
+        profile: ResolvedPresentationProfile,
+    ) -> int:
+        name = str(profile.transition_profile or "").strip()
+        if not name:
+            return 0
+        transition = self._presentation_registry.transition(name)
+        if transition is None:
+            raise ValueError(
+                f"TransitionProfile introuvable : {name}"
+            )
+        self._yield_runtime()
+        self.client.send(
+            "SetCurrentSceneTransition",
+            {"transitionName": transition.transition_name},
+        )
+        executed = 1
+        if transition.duration_ms is not None:
+            self._yield_runtime()
+            self.client.send(
+                "SetCurrentSceneTransitionDuration",
+                {"transitionDuration": transition.duration_ms},
+            )
+            executed += 1
+        if transition.settings:
+            self._yield_runtime()
+            self.client.send(
+                "SetCurrentSceneTransitionSettings",
+                {
+                    "transitionSettings": dict(transition.settings),
+                    "overlay": bool(transition.overlay),
+                },
+            )
+            executed += 1
+        return executed
+
+    @staticmethod
+    def _ease_value(progress: float, easing: str) -> float:
+        t = max(0.0, min(1.0, float(progress)))
+        mode = str(easing or "linear").strip().casefold()
+        if mode == "ease_in":
+            return t * t
+        if mode == "ease_out":
+            return 1.0 - (1.0 - t) * (1.0 - t)
+        if mode == "ease_in_out":
+            if t < 0.5:
+                return 2.0 * t * t
+            return 1.0 - ((-2.0 * t + 2.0) ** 2) / 2.0
+        return t
+
+    def _animate_filter_settings(
+        self,
+        params: Mapping[str, object],
+    ) -> None:
+        source = self._need(params, "source")
+        filter_name = self._need(params, "filter")
+        start_raw = params.get("from_settings")
+        end_raw = params.get("to_settings")
+        if not isinstance(start_raw, Mapping) or not isinstance(
+            end_raw,
+            Mapping,
+        ):
+            raise ValueError(
+                "animate_filter_settings requiert from_settings/to_settings"
+            )
+        keys = tuple(sorted(set(start_raw) | set(end_raw), key=str))
+        if not keys or any(
+            key not in start_raw or key not in end_raw for key in keys
+        ):
+            raise ValueError(
+                "animate_filter_settings requiert les mêmes clés de départ/fin"
+            )
+        start_values: dict[str, float] = {}
+        end_values: dict[str, float] = {}
+        for key in keys:
+            start_value = start_raw[key]
+            end_value = end_raw[key]
+            for label, raw_value in (
+                ("from", start_value),
+                ("to", end_value),
+            ):
+                if (
+                    isinstance(raw_value, bool)
+                    or not isinstance(raw_value, (int, float))
+                    or not math.isfinite(float(raw_value))
+                ):
+                    raise ValueError(
+                        f"animate_filter_settings {label}.{key} invalide"
+                    )
+            start_values[str(key)] = float(start_value)
+            end_values[str(key)] = float(end_value)
+
+        raw_duration = params.get("duration_ms", 300)
+        raw_steps = params.get("steps", 12)
+        if (
+            isinstance(raw_duration, bool)
+            or not isinstance(raw_duration, (int, float))
+            or not math.isfinite(float(raw_duration))
+        ):
+            raise ValueError(
+                "animate_filter_settings duration_ms invalide"
+            )
+        duration_ms = float(raw_duration)
+        if not 0.0 <= duration_ms <= 10000.0:
+            raise ValueError(
+                "animate_filter_settings duration_ms hors plage"
+            )
+        if duration_ms != 0.0:
+            raise ValueError(
+                "animate_filter_settings multi-étapes désactivé : "
+                "utiliser une interpolation locale shader/widget"
+            )
+        if isinstance(raw_steps, bool):
+            raise ValueError("animate_filter_settings steps invalide")
+        try:
+            steps = int(raw_steps)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "animate_filter_settings steps invalide"
+            ) from exc
+        if not 1 <= steps <= 120:
+            raise ValueError(
+                "animate_filter_settings steps hors plage"
+            )
+        if duration_ms == 0.0:
+            steps = 1
+        easing = str(
+            params.get("easing") or "linear"
+        ).strip().casefold()
+        if easing not in {
+            "linear",
+            "ease_in",
+            "ease_out",
+            "ease_in_out",
+        }:
+            raise ValueError(
+                f"animate_filter_settings easing inconnu : {easing}"
+            )
+        overlay = bool(params.get("overlay", True))
+        started = time.monotonic()
+
+        for step in range(1, steps + 1):
+            deadline = (
+                started
+                + (duration_ms / 1000.0) * (step / steps)
+            )
+            while True:
+                self._yield_runtime()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+            if step == steps:
+                settings = dict(end_values)
+            else:
+                factor = self._ease_value(step / steps, easing)
+                settings = {
+                    key: (
+                        start_values[key]
+                        + (
+                            end_values[key] - start_values[key]
+                        )
+                        * factor
+                    )
+                    for key in start_values
+                }
+            self.client.send(
+                "SetSourceFilterSettings",
+                {
+                    "sourceName": source,
+                    "filterName": filter_name,
+                    "filterSettings": settings,
+                    "overlay": overlay,
+                },
+            )
+
+    def _execute_sound_set_phase(
+        self,
+        profile: ResolvedPresentationProfile,
+        *,
+        phase: str,
+        state: StreamState,
+    ) -> int:
+        name = str(profile.sound_set or "").strip()
+        if not name:
+            return 0
+        sound_set = self._presentation_registry.sound_set(name)
+        if sound_set is None:
+            raise ValueError(f"SoundSet introuvable : {name}")
+        triggers = (
+            sound_set.enter
+            if str(phase).casefold() == "enter"
+            else sound_set.exit
+        )
+        executed = 0
+        variables = self._execution_variables(state)
+        for trigger in triggers:
+            self._yield_runtime()
+            self.execute_action(
+                OBSAction(
+                    type="media_input_action",
+                    params={
+                        "input": trigger.input_name,
+                        "action": trigger.action,
+                    },
+                    enabled=True,
+                    name=f"{name}:{phase}",
+                    preapply_on_launcher=False,
+                ),
+                variables=variables,
+            )
+            executed += 1
+        return executed
+
+    def _execute_cue_action(
+        self,
+        action: CueAction,
+        variables: Mapping[str, str] | None,
+    ) -> None:
+        action_type = action.type.strip().casefold()
+        if action_type in {
+            "source_filter_enabled",
+            "source_filter_settings",
+            "animate_filter_settings",
+        }:
+            raise ValueError(
+                "Les mutations de propriétés de filtre sont interdites "
+                "dans un Cue ; utiliser le contrat de propriétés typées"
+            )
+        self.execute_action(
+            OBSAction(
+                type=action.type,
+                params=dict(action.params),
+                enabled=action.enabled,
+                name=action.name,
+                preapply_on_launcher=False,
+            ),
+            variables=variables,
+        )
+
+    def _cue_wait_duration_ms(
+        self,
+        action: CueAction,
+        variables: Mapping[str, str] | None,
+    ) -> float:
+        rendered = self._render_value(
+            dict(action.params),
+            variables or self._execution_variables(),
+        )
+        raw = rendered.get("duration_ms")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(
+                "wait_ms requiert params.duration_ms numérique"
+            )
+        duration_ms = float(raw)
+        if (
+            not math.isfinite(duration_ms)
+            or not 0.0 <= duration_ms <= 10000.0
+        ):
+            raise ValueError(
+                "wait_ms params.duration_ms doit être compris entre 0 et 10000"
+            )
+        return duration_ms
+
+    def _new_presentation_task(
+        self,
+        cue: Cue,
+        *,
+        state: StreamState,
+        target_profile: str,
+        phase: str,
+    ) -> CueTask:
+        self._presentation_task_counter += 1
+        execution_id = (
+            f"presentation-{self._presentation_task_counter}"
+        )
+        task = CueTask(
+            cue=cue,
+            variables=self._execution_variables(state),
+            execution_id=execution_id,
+            target_profile=str(target_profile),
+            phase=str(phase),
+            started_at=time.monotonic(),
+        )
+        self._presentation_tasks.append(task)
+        self._presentation_execution_status = {
+            "status": "scheduled",
+            "execution_id": execution_id,
+            "cue": cue.name,
+            "phase": str(phase),
+            "target_profile": str(target_profile),
+            "error": "",
+        }
+        return task
+
+    def _schedule_presentation_cue(
+        self,
+        cue_name: str,
+        *,
+        state: StreamState,
+        target_profile: str,
+        phase: str,
+    ) -> CueTask | None:
+        wanted = str(cue_name or "").strip()
+        if not wanted:
+            return None
+        cue = self._presentation_registry.cue(wanted)
+        if cue is None:
+            raise ValueError(f"Cue introuvable : {wanted}")
+        return self._new_presentation_task(
+            cue,
+            state=state,
+            target_profile=target_profile,
+            phase=phase,
+        )
+
+    def _schedule_sound_set_phase(
+        self,
+        profile: ResolvedPresentationProfile,
+        *,
+        phase: str,
+        state: StreamState,
+        target_profile: str,
+    ) -> CueTask | None:
+        name = str(profile.sound_set or "").strip()
+        if not name:
+            return None
+        sound_set = self._presentation_registry.sound_set(name)
+        if sound_set is None:
+            raise ValueError(f"SoundSet introuvable : {name}")
+        triggers = (
+            sound_set.enter
+            if str(phase).casefold() == "enter"
+            else sound_set.exit
+        )
+        actions = tuple(
+            CueAction(
+                type="media_input_action",
+                params={
+                    "input": trigger.input_name,
+                    "action": trigger.action,
+                },
+                enabled=True,
+                name=f"{name}:{phase}",
+            )
+            for trigger in triggers
+        )
+        if not actions:
+            return None
+        synthetic = Cue(
+            name=f"[SoundSet] {name}:{phase}",
+            frames=(CueFrame(at_ms=0, actions=actions),),
+            interrupt_policy="replace",
+        )
+        return self._new_presentation_task(
+            synthetic,
+            state=state,
+            target_profile=target_profile,
+            phase=f"sound:{phase}",
+        )
+
+    def cancel_presentation_tasks(
+        self,
+        reason: str = "replaced",
+    ) -> int:
+        cancelled = 0
+        while self._presentation_tasks:
+            task = self._presentation_tasks.popleft()
+            if not task.terminal:
+                task.cancel(reason)
+                cancelled += 1
+        if cancelled:
+            self._presentation_execution_status = {
+                "status": "cancelled",
+                "execution_id": "",
+                "cue": "",
+                "phase": "",
+                "target_profile": self._presentation_attempt_target,
+                "error": str(reason),
+            }
+        return cancelled
+
+    def cancel_presentation_tasks_for_state(
+        self,
+        state: StreamState | None,
+    ) -> int:
+        if state is None or not self._presentation_tasks:
+            return 0
+        wanted = state.profile_name("presentation")
+        if all(
+            task.target_profile == wanted
+            for task in self._presentation_tasks
+        ):
+            return 0
+        return self.cancel_presentation_tasks(
+            "remplacé par un nouvel état de routage"
+        )
+
+    def presentation_execution_status(self) -> dict[str, object]:
+        result = dict(self._presentation_execution_status)
+        result["pending_tasks"] = len(self._presentation_tasks)
+        return result
+
+    def next_presentation_deadline(self) -> float | None:
+        if not self._presentation_tasks:
+            return None
+        return self._presentation_tasks[0].next_deadline
+
+    def tick_presentation_tasks(
+        self,
+        *,
+        max_actions: int = 16,
+    ) -> DispatchResult:
+        executed = 0
+        skipped = 0
+        warnings: list[str] = []
+        remaining = max(1, int(max_actions))
+
+        while self._presentation_tasks and remaining > 0:
+            task = self._presentation_tasks[0]
+            step = task.advance(
+                action_executor=self._execute_cue_action,
+                wait_resolver=self._cue_wait_duration_ms,
+                max_actions=remaining,
+            )
+            executed += step.actions_executed
+            skipped += step.actions_skipped
+            remaining -= (
+                step.actions_executed + step.actions_skipped
+            )
+            self._presentation_execution_status = {
+                "status": step.status,
+                "execution_id": step.execution_id,
+                "cue": step.cue,
+                "phase": step.phase,
+                "target_profile": task.target_profile,
+                "error": step.error,
+            }
+
+            if step.status in {"failed", "uncertain"}:
+                warnings.append(
+                    f"{step.phase}/{step.cue}: "
+                    f"{step.error or step.status}"
+                )
+                terminal_status = dict(
+                    self._presentation_execution_status
+                )
+                self._presentation_tasks.popleft()
+                # Do not continue a transition chain after an uncertain
+                # one-shot effect. The remaining actions are cancelled and
+                # never replayed automatically, while the root failure remains
+                # the published execution status.
+                cancelled_followups = 0
+                while self._presentation_tasks:
+                    followup = self._presentation_tasks.popleft()
+                    if not followup.terminal:
+                        followup.cancel(
+                            "chaîne annulée après effet échoué ou incertain"
+                        )
+                        cancelled_followups += 1
+                terminal_status["cancelled_followups"] = (
+                    cancelled_followups
+                )
+                self._presentation_execution_status = terminal_status
+                break
+
+            if step.status in {"completed", "cancelled"}:
+                self._presentation_tasks.popleft()
+                continue
+
+            # Active but waiting for a frame/wait deadline, or this tick's
+            # mutation budget was exhausted.
+            if (
+                step.actions_executed == 0
+                and step.actions_skipped == 0
+            ):
+                break
+            if remaining <= 0:
+                break
+
+        return DispatchResult(
+            executed,
+            skipped,
+            ("presentation",) if executed or skipped or warnings else (),
+            tuple(warnings),
+        )
+
+    def _resolve_presentation(
+        self,
+        name: str,
+    ) -> ResolvedPresentationProfile | None:
+        return self._presentation_registry.profile(name)
+
     def dispatch_state(
         self,
         state: StreamState,
@@ -1080,7 +1881,10 @@ class OBSDispatcher:
         changed = [
             domain
             for domain in STATE_DOMAINS
-            if not (domain == "layout" and self._layout_is_manually_held_for(state))
+            if not (
+                domain == "layout"
+                and self._layout_is_manually_held_for(state)
+            )
             and (
                 force
                 or (
@@ -1099,56 +1903,222 @@ class OBSDispatcher:
         warnings: list[str] = []
         statuses: list[DomainDispatchStatus] = []
 
-        def status(domain: str, desired: str, value: str, message: str = "") -> None:
+        def status(
+            domain: str,
+            desired: str,
+            value: str,
+            message: str = "",
+        ) -> None:
             statuses.append(
                 DomainDispatchStatus(
                     domain=domain,
                     desired_profile=desired,
-                    applied_profile=self._applied_profiles.get(domain, ""),
+                    applied_profile=self._applied_profiles.get(
+                        domain,
+                        "",
+                    ),
                     status=value,
                     message=message,
                 )
             )
 
+        presentation_profile: ResolvedPresentationProfile | None = None
+        presentation_failed = ""
+        presentation_partial = ""
+        presentation_name = state.profile_name("presentation")
+        if "presentation" in changed:
+            if self._is_unmanaged_default(
+                "presentation",
+                presentation_name,
+            ):
+                self.cancel_presentation_tasks(
+                    "domaine présentation non géré"
+                )
+                skipped += 1
+                self._presentation_state_store.clear()
+                status(
+                    "presentation",
+                    presentation_name,
+                    "unmanaged",
+                    "Aucun PresentationProfile configuré pour ce domaine",
+                )
+            else:
+                try:
+                    presentation_profile = self._resolve_presentation(
+                        presentation_name
+                    )
+                except Exception as exc:
+                    presentation_failed = str(exc)
+                if presentation_profile is None and not presentation_failed:
+                    presentation_failed = "PresentationProfile introuvable"
+
+                previous_name = self._applied_profiles.get(
+                    "presentation",
+                    "",
+                )
+                new_attempt = (
+                    self._presentation_attempt_target
+                    != presentation_name
+                )
+                if new_attempt:
+                    self.cancel_presentation_tasks(
+                        "PresentationProfile remplacé"
+                    )
+                    self._presentation_attempt_target = presentation_name
+                    self._presentation_enter_scheduled_for = ""
+
+                if (
+                    new_attempt
+                    and presentation_profile is not None
+                    and previous_name
+                    and previous_name != presentation_name
+                    and self._presentation_exit_consumed_from
+                    != previous_name
+                ):
+                    # Mark the departure effects consumed before any external
+                    # write. A failed/ambiguous one-shot must not be replayed by
+                    # automatic reconciliation.
+                    self._presentation_exit_consumed_from = previous_name
+                    try:
+                        previous_profile = self._resolve_presentation(
+                            previous_name
+                        )
+                        if previous_profile is not None:
+                            self._schedule_sound_set_phase(
+                                previous_profile,
+                                phase="exit",
+                                state=state,
+                                target_profile=presentation_name,
+                            )
+                            self._schedule_presentation_cue(
+                                previous_profile.exit_cue,
+                                state=state,
+                                target_profile=presentation_name,
+                                phase="exit",
+                            )
+                            progress = self.tick_presentation_tasks()
+                            executed += progress.executed
+                            skipped += progress.skipped
+                            warnings.extend(progress.warnings)
+                            if progress.warnings:
+                                presentation_failed = (
+                                    "exit presentation incertaine : "
+                                    + "; ".join(progress.warnings)
+                                )
+                    except Exception as exc:
+                        presentation_failed = (
+                            f"exit cue {previous_name}: {exc}"
+                        )
+
+                if (
+                    presentation_profile is not None
+                    and not presentation_failed
+                ):
+                    try:
+                        executed += self._apply_transition_profile(
+                            presentation_profile
+                        )
+                        if presentation_profile.shader_set:
+                            presentation_partial = (
+                                "ShaderSet conservé comme état souhaité mais "
+                                "non exécuté avant le contrat typé "
+                                "d'identité/ownership"
+                            )
+                            skipped += 1
+                            warnings.append(
+                                f"presentation/{presentation_name}: "
+                                f"{presentation_partial}"
+                            )
+                    except Exception as exc:
+                        presentation_failed = (
+                            f"presentation resources {presentation_name}: {exc}"
+                        )
+
+                if presentation_failed:
+                    skipped += 1
+                    warnings.append(
+                        f"presentation/{presentation_name}: "
+                        f"{presentation_failed}"
+                    )
+                    status(
+                        "presentation",
+                        presentation_name,
+                        "failed",
+                        presentation_failed,
+                    )
+                    presentation_profile = None
+
         for domain in changed:
+            if domain == "presentation":
+                continue
             self._yield_runtime()
             profile_name = state.profile_name(domain)
             if self._is_unmanaged_default(domain, profile_name):
                 skipped += 1
+                if domain == "layout":
+                    message = (
+                        "Aucun LayoutProfile configuré pour ce domaine"
+                    )
+                else:
+                    message = (
+                        "Aucun profil OBS configuré pour ce domaine"
+                    )
                 status(
                     domain,
                     profile_name,
                     "unmanaged",
-                    (
-                        "Aucun LayoutProfile configuré pour ce domaine"
-                        if domain == "layout"
-                        else "Aucun profil OBS configuré pour ce domaine"
-                    ),
+                    message,
                 )
                 continue
             if domain == "layout":
                 if profile_name not in self._layout_profiles:
                     skipped += 1
-                    status(domain, profile_name, "missing", "LayoutProfile introuvable")
+                    status(
+                        domain,
+                        profile_name,
+                        "missing",
+                        "LayoutProfile introuvable",
+                    )
                     continue
                 try:
-                    layout = resolve_layout_profile(profile_name, self._layout_profiles)
+                    layout = resolve_layout_profile(
+                        profile_name,
+                        self._layout_profiles,
+                    )
                 except Exception as exc:
                     skipped += 1
                     warnings.append(str(exc))
-                    status(domain, profile_name, "failed", str(exc))
+                    status(
+                        domain,
+                        profile_name,
+                        "failed",
+                        str(exc),
+                    )
                     continue
                 conditions = layout.get("conditions")
-                if isinstance(conditions, Mapping) and not self.conditions_match(conditions):
+                if (
+                    isinstance(conditions, Mapping)
+                    and not self.conditions_match(conditions)
+                ):
                     skipped += 1
-                    status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
+                    status(
+                        domain,
+                        profile_name,
+                        "blocked",
+                        "conditions OBS non satisfaites",
+                    )
                     continue
                 try:
                     result = self._layout_manager.apply_profile(layout)
                 except Exception as exc:
                     skipped += 1
                     warnings.append(str(exc))
-                    status(domain, profile_name, "failed", str(exc))
+                    status(
+                        domain,
+                        profile_name,
+                        "failed",
+                        str(exc),
+                    )
                     continue
                 executed += result.elements_applied
                 skipped += result.elements_skipped
@@ -1156,18 +2126,29 @@ class OBSDispatcher:
                 if result.missing_sources or result.warnings:
                     message = "; ".join(
                         [
-                            *(f"source manquante: {name}" for name in result.missing_sources),
+                            *(
+                                f"source manquante: {name}"
+                                for name in result.missing_sources
+                            ),
                             *result.warnings,
                         ]
                     )
-                    status(domain, profile_name, "partial", message)
+                    status(
+                        domain,
+                        profile_name,
+                        "partial",
+                        message,
+                    )
                     continue
                 self._applied_profiles[domain] = profile_name
                 status(domain, profile_name, "applied")
                 continue
 
             try:
-                profile = self._resolve_action_profile(domain, profile_name)
+                profile = self._resolve_action_profile(
+                    domain,
+                    profile_name,
+                )
             except Exception as exc:
                 skipped += 1
                 warnings.append(str(exc))
@@ -1175,43 +2156,117 @@ class OBSDispatcher:
                 continue
             if profile is None:
                 skipped += 1
-                status(domain, profile_name, "missing", "Profil OBS introuvable")
+                status(
+                    domain,
+                    profile_name,
+                    "missing",
+                    "Profil OBS introuvable",
+                )
                 continue
             if not self.conditions_match(profile.conditions):
                 skipped += len(profile.actions) or 1
-                status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
+                status(
+                    domain,
+                    profile_name,
+                    "blocked",
+                    "conditions OBS non satisfaites",
+                )
                 continue
 
-            domain_executed = 0
-            domain_skipped = 0
-            failed = ""
+            domain_failed = ""
             variables = self._execution_variables(state)
             for action in profile.actions:
                 self._yield_runtime()
                 if not action.enabled:
                     skipped += 1
-                    domain_skipped += 1
                     continue
                 if self._action_overridden_by_launcher(
                     action,
                     variables,
                 ):
                     skipped += 1
-                    domain_skipped += 1
                     continue
                 try:
-                    self.execute_action(action, variables=variables)
+                    self.execute_action(
+                        action,
+                        variables=variables,
+                    )
                 except Exception as exc:
-                    failed = str(exc)
-                    warnings.append(f"{domain}/{profile_name}: {exc}")
+                    domain_failed = str(exc)
+                    warnings.append(
+                        f"{domain}/{profile_name}: {exc}"
+                    )
                     break
                 executed += 1
-                domain_executed += 1
-            if failed:
-                status(domain, profile_name, "failed", failed)
+            if domain_failed:
+                status(
+                    domain,
+                    profile_name,
+                    "failed",
+                    domain_failed,
+                )
                 continue
             self._applied_profiles[domain] = profile_name
             status(domain, profile_name, "applied")
+
+        if presentation_profile is not None:
+            # Convergent presentation resources are committed independently
+            # from one-shot Cue/SoundSet effects. This prevents automatic
+            # reconciliation from replaying an effect after a partial or
+            # ambiguous execution.
+            self._applied_profiles["presentation"] = presentation_name
+            self._presentation_state_store.update(
+                presentation_profile
+            )
+            cue_warning = ""
+            if (
+                force
+                or self._presentation_enter_scheduled_for
+                != presentation_name
+            ):
+                self._presentation_enter_scheduled_for = (
+                    presentation_name
+                )
+                try:
+                    self._schedule_presentation_cue(
+                        presentation_profile.enter_cue,
+                        state=state,
+                        target_profile=presentation_name,
+                        phase="enter",
+                    )
+                    self._schedule_sound_set_phase(
+                        presentation_profile,
+                        phase="enter",
+                        state=state,
+                        target_profile=presentation_name,
+                    )
+                    progress = self.tick_presentation_tasks()
+                    executed += progress.executed
+                    skipped += progress.skipped
+                    warnings.extend(progress.warnings)
+                    if progress.warnings:
+                        cue_warning = "; ".join(progress.warnings)
+                except Exception as exc:
+                    cue_warning = str(exc)
+                    warnings.append(
+                        f"presentation/{presentation_name}: "
+                        f"enter cue incertain : {exc}"
+                    )
+
+            presentation_message = "; ".join(
+                item
+                for item in (
+                    presentation_partial,
+                    cue_warning,
+                )
+                if item
+            )
+            status(
+                "presentation",
+                presentation_name,
+                "partial" if presentation_message else "applied",
+                presentation_message,
+            )
 
         return DispatchResult(
             executed,
@@ -1317,6 +2372,54 @@ class OBSDispatcher:
             raise ValueError(f"Profil introuvable : {domain}/{profile_name}")
         if not self.conditions_match(profile.conditions):
             return DispatchResult(0, len(profile.actions) or 1, (domain,))
+        executed = 0
+        skipped = 0
+        variables = self._execution_variables(state)
+        for action in profile.actions:
+            self._yield_runtime()
+            if not action.enabled:
+                skipped += 1
+                continue
+            self.execute_action(action, variables=variables)
+            executed += 1
+        return DispatchResult(executed, skipped, (domain,))
+
+    def execute_profile_snapshot(
+        self,
+        domain: str,
+        profile_name: str,
+        profiles_raw: Mapping[str, Mapping[str, object]],
+        *,
+        state: StreamState | None = None,
+    ) -> DispatchResult:
+        """Execute a validated draft profile without mutating live config.
+
+        The caller owns validation of the draft. Parsing and all OBS I/O still
+        happen on the runtime worker, and inheritance is resolved only inside
+        the supplied immutable snapshot.
+        """
+        if domain not in ACTION_PROFILE_DOMAINS:
+            raise ValueError(f"Domaine inconnu : {domain}")
+        parsed = profile_map_from_raw(
+            {
+                domain: profiles_raw,
+            }
+        ).get(domain, {})
+        if profile_name not in parsed:
+            raise ValueError(
+                f"Profil de brouillon introuvable : {domain}/{profile_name}"
+            )
+        profile = self._resolve_action_profile_inner(
+            parsed,
+            profile_name,
+            (),
+        )
+        if not self.conditions_match(profile.conditions):
+            return DispatchResult(
+                0,
+                len(profile.actions) or 1,
+                (domain,),
+            )
         executed = 0
         skipped = 0
         variables = self._execution_variables(state)
@@ -1460,6 +2563,35 @@ class OBSDispatcher:
                     "filterName": self._need(p, "filter"),
                     "filterSettings": dict(settings),
                     "overlay": bool(p.get("overlay", True)),
+                },
+            )
+            return
+        if kind == "animate_filter_settings":
+            self._animate_filter_settings(p)
+            return
+        if kind == "media_input_action":
+            input_name = self._need(p, "input")
+            action_name = str(
+                p.get("action") or "restart"
+            ).strip().casefold()
+            media_actions = {
+                "play": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY",
+                "pause": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE",
+                "stop": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP",
+                "restart": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+                "next": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_NEXT",
+                "previous": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PREVIOUS",
+            }
+            media_action = media_actions.get(action_name)
+            if media_action is None:
+                raise ValueError(
+                    "media_input_action params.action inconnu"
+                )
+            self.client.send(
+                "TriggerMediaInputAction",
+                {
+                    "inputName": input_name,
+                    "mediaAction": media_action,
                 },
             )
             return

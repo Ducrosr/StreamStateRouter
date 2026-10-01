@@ -66,7 +66,9 @@ from ..services.config import (
     build_host_controller,
     build_profiles,
     build_layout_profiles,
+    build_presentation_profiles,
     build_ruleset,
+    build_widget_runtime_config,
     export_config,
     import_config,
     list_valid_backups,
@@ -89,11 +91,17 @@ from ..services.config_insights import (
     scan_obs_reference_repairs,
     simulate_rule_scenario,
 )
+from ..presentation import PresentationStateStore
 from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
 from ..services.system_check import run_system_check
+from ..widgets import (
+    WidgetRuntime,
+    import_html_module,
+    list_widget_packages,
+)
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
@@ -111,6 +119,8 @@ from .ergonomics import (
     build_status_strip,
     humanize_rule,
 )
+from .setup_guide import SetupGuideDialog, WidgetObsInstallDialog
+from .presentation_editor import PresentationEditor
 from .presentation import (
     UserActivityEntry,
     build_automation_rows,
@@ -130,6 +140,7 @@ DOMAIN_LABELS = {
     "capture": "CaptureProfile",
     "audio": "AudioProfile",
     "layout": "LayoutProfile",
+    "presentation": "PresentationProfile",
 }
 
 
@@ -196,6 +207,8 @@ class MainWindow(QMainWindow):
         self._service: RoutingService | None = None
         self._dispatcher: OBSDispatcher | None = None
         self._client: OBSClientManager | None = None
+        self._presentation_state_store = PresentationStateStore()
+        self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
         self._catalog_tree_guard = False
@@ -219,6 +232,7 @@ class MainWindow(QMainWindow):
             tuple[str, UserActivityEntry, int, float]
         ] = []
         self._last_system_check_report = None
+        self._current_foreground_app: ForegroundApp | None = None
         self._recent_inspector_targets: list[
             tuple[str, str, str]
         ] = []
@@ -245,6 +259,7 @@ class MainWindow(QMainWindow):
             self._refresh_dashboard_summary
         )
         self._start_runtime()
+        self._start_widget_runtime()
         self._start_api()
         self._module_scan_timer = QTimer(self)
         self._module_scan_timer.timeout.connect(self._auto_scan_modules)
@@ -396,6 +411,15 @@ class MainWindow(QMainWindow):
         )
         self.layouts_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_layouts_tab()), "Layouts"
+        )
+        self.presentation_editor = PresentationEditor(
+            self.config,
+            self,
+        )
+        self.presentation_editor.changed.connect(self._mark_dirty)
+        self.presentation_tab_index = self.tabs.addTab(
+            self._scrollable_tab(self.presentation_editor),
+            "Présentation",
         )
         self.diagnostics_tab_index = self.tabs.addTab(
             self._scrollable_tab(self._build_diagnostics_tab()),
@@ -562,6 +586,7 @@ class MainWindow(QMainWindow):
             self.rules_tab_index,
             self.profiles_tab_index,
             self.layouts_tab_index,
+            self.presentation_tab_index,
             self.diagnostics_tab_index,
             self.logs_tab_index,
         )
@@ -601,6 +626,7 @@ class MainWindow(QMainWindow):
             getattr(self, "rules_tab_index", -1),
             getattr(self, "profiles_tab_index", -1),
             getattr(self, "layouts_tab_index", -1),
+            getattr(self, "presentation_tab_index", -1),
             getattr(self, "settings_tab_index", -1),
         ):
             if index < 0 or not hasattr(self, "tabs"):
@@ -2551,6 +2577,7 @@ class MainWindow(QMainWindow):
             "CaptureProfile",
             "AudioProfile",
             "LayoutProfile",
+            "PresentationProfile",
         ):
             value = QLabel("—")
             value.setStyleSheet("font-weight: 700;")
@@ -3074,6 +3101,23 @@ class MainWindow(QMainWindow):
         intro.setObjectName("Muted")
         root.addWidget(intro)
 
+        guide_card, guide_lay = self._card(
+            "Guide pas à pas"
+        )
+        guide_hint = QLabel(
+            "Choisissez simplement votre objectif. SSR vérifie les prérequis, "
+            "montre un aperçu et vous conduit vers le bon workflow sans vous "
+            "obliger à connaître Règles, Profils ou Layouts."
+        )
+        guide_hint.setWordWrap(True)
+        guide_hint.setObjectName("Muted")
+        guide_lay.addWidget(guide_hint)
+        guide = QPushButton("Lancer le guide pas à pas…")
+        guide.setObjectName("Primary")
+        guide.clicked.connect(self._open_setup_guide)
+        guide_lay.addWidget(guide, alignment=Qt.AlignLeft)
+        root.addWidget(guide_card)
+
         app_card, app_lay = self._card(
             "Configurer l’application courante"
         )
@@ -3140,6 +3184,119 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         collection_lay.addLayout(row)
         root.addWidget(collection_card)
+
+        widgets_card, widgets_lay = self._card(
+            "Modules HTML gérés par SSR"
+        )
+        widgets_hint = QLabel(
+            "Les modules importés restent locaux. SSR conserve leur point "
+            "d’entrée et leurs assets sans exécuter le HTML pendant l’import."
+        )
+        widgets_hint.setWordWrap(True)
+        widgets_hint.setObjectName("Muted")
+        widgets_lay.addWidget(widgets_hint)
+        self.widget_runtime_status = QLabel(
+            "Widget Runtime : initialisation…"
+        )
+        self.widget_runtime_status.setObjectName("Muted")
+        self.widget_runtime_status.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        widgets_lay.addWidget(self.widget_runtime_status)
+        self.widget_library = QTreeWidget()
+        self.widget_library.setColumnCount(5)
+        self.widget_library.setHeaderLabels(
+            ["Module", "Fichiers", "Taille", "Point d’entrée", "État"]
+        )
+        self.widget_library.setRootIsDecorated(False)
+        self.widget_library.setAlternatingRowColors(True)
+        self.widget_library.setMaximumHeight(220)
+        self.widget_library.header().setSectionResizeMode(
+            0,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.widget_library.header().setSectionResizeMode(
+            1,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.widget_library.header().setSectionResizeMode(
+            2,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.widget_library.header().setStretchLastSection(True)
+        widgets_lay.addWidget(self.widget_library)
+        widget_actions = QHBoxLayout()
+        import_widget = QPushButton("Importer un module HTML…")
+        import_widget.setObjectName("DraftAction")
+        import_widget.clicked.connect(self._open_html_widget_guide)
+        widget_actions.addWidget(import_widget)
+        install_chat = QPushButton("Installer le chat SSR natif…")
+        self._set_action_risk(
+            install_chat,
+            "live",
+            "Crée une Browser Source locale pour le chat SSR natif.",
+        )
+        install_chat.clicked.connect(self._install_builtin_chat_in_obs)
+        self._register_obs_connected_control(install_chat)
+        widget_actions.addWidget(install_chat)
+        install_events = QPushButton("Installer Events…")
+        self._set_action_risk(
+            install_events,
+            "live",
+            "Crée une Browser Source locale pour les événements SSR.",
+        )
+        install_events.clicked.connect(
+            self._install_builtin_events_in_obs
+        )
+        self._register_obs_connected_control(install_events)
+        widget_actions.addWidget(install_events)
+        install_alerts = QPushButton("Installer Alerts…")
+        self._set_action_risk(
+            install_alerts,
+            "live",
+            "Crée une Browser Source locale pour les alertes SSR.",
+        )
+        install_alerts.clicked.connect(
+            self._install_builtin_alerts_in_obs
+        )
+        self._register_obs_connected_control(install_alerts)
+        widget_actions.addWidget(install_alerts)
+        demo = QPushButton("Événements de démo")
+        self._set_action_risk(
+            demo,
+            "live",
+            "Publie des événements de démonstration dans les widgets SSR actifs.",
+        )
+        demo.clicked.connect(self._publish_widget_demo_events)
+        widget_actions.addWidget(demo)
+        bind_profile = QPushButton("Associer à Présentation…")
+        self._set_action_risk(
+            bind_profile,
+            "draft",
+            "Associe le package au composant d’un PresentationProfile.",
+        )
+        bind_profile.clicked.connect(
+            self._bind_selected_widget_to_presentation
+        )
+        widget_actions.addWidget(bind_profile)
+        create_obs = QPushButton("Créer dans OBS…")
+        self._set_action_risk(
+            create_obs,
+            "live",
+            "Crée immédiatement une Browser Source OBS via le worker SSR.",
+        )
+        create_obs.clicked.connect(self._create_selected_widget_in_obs)
+        self._register_obs_connected_control(create_obs)
+        widget_actions.addWidget(create_obs)
+        copy_uri = QPushButton("Copier l’URL du Widget Runtime")
+        copy_uri.clicked.connect(self._copy_selected_widget_uri)
+        widget_actions.addWidget(copy_uri)
+        refresh_widgets = QPushButton("Actualiser")
+        refresh_widgets.clicked.connect(self._refresh_widget_library)
+        widget_actions.addWidget(refresh_widgets)
+        widget_actions.addStretch(1)
+        widgets_lay.addLayout(widget_actions)
+        root.addWidget(widgets_card)
 
         recipes_card, recipes_lay = self._card(
             "Recettes rapides"
@@ -3209,6 +3366,7 @@ class MainWindow(QMainWindow):
         legend_lay.addWidget(legend)
         root.addWidget(legend_card)
         root.addStretch(1)
+        self._refresh_widget_library()
         return page
 
     def _populate_attention_center(self, report) -> None:
@@ -4275,6 +4433,27 @@ class MainWindow(QMainWindow):
         obs_lay.addWidget(test, alignment=Qt.AlignLeft)
         root.addWidget(obs_card)
 
+        widget_card, widget_lay = self._card(
+            "Widget Runtime local"
+        )
+        widget_form = QFormLayout()
+        self.widget_runtime_enabled = QCheckBox(
+            "Activer les widgets SSR locaux"
+        )
+        self.widget_runtime_port = QSpinBox()
+        self.widget_runtime_port.setRange(1024, 65535)
+        widget_form.addRow("", self.widget_runtime_enabled)
+        widget_form.addRow("Port localhost", self.widget_runtime_port)
+        widget_lay.addLayout(widget_form)
+        widget_note = QLabel(
+            "Le serveur reste lié à 127.0.0.1. Il fournit les modules HTML, "
+            "le chat natif et l’état PresentationProfile aux Browser Sources OBS."
+        )
+        widget_note.setWordWrap(True)
+        widget_note.setObjectName("Muted")
+        widget_lay.addWidget(widget_note)
+        root.addWidget(widget_card)
+
         host_card, host_lay = self._card("Contrôle Windows")
         host_form = QFormLayout()
         self.soundvolumeview_path = QLineEdit()
@@ -4446,6 +4625,13 @@ class MainWindow(QMainWindow):
                     lambda: navigate_tab(self.configure_tab_index),
                 ),
                 (
+                    "Navigation · Présentation",
+                    lambda: (
+                        self._ensure_expert_mode(),
+                        navigate_tab(self.presentation_tab_index),
+                    ),
+                ),
+                (
                     "Navigation · Diagnostics",
                     lambda: (
                         self._ensure_expert_mode(),
@@ -4593,6 +4779,83 @@ class MainWindow(QMainWindow):
                     )
                 )
 
+        presentation_profiles = self.config.get(
+            "presentation_profiles"
+        )
+        if isinstance(presentation_profiles, Mapping):
+            for name, raw in presentation_profiles.items():
+                profile_name = str(name)
+                raw = raw if isinstance(raw, Mapping) else {}
+                label = (
+                    f"Présentation · {profile_name}"
+                    + (
+                        f" · transition={raw.get('transition_profile')}"
+                        if raw.get("transition_profile")
+                        else ""
+                    )
+                    + (
+                        f" · shader={raw.get('shader_set')}"
+                        if raw.get("shader_set")
+                        else ""
+                    )
+                    + (
+                        f" · sons={raw.get('sound_set')}"
+                        if raw.get("sound_set")
+                        else ""
+                    )
+                )
+                def open_presentation(
+                    wanted_name=profile_name,
+                ) -> None:
+                    self._ensure_expert_mode()
+                    self.tabs.setCurrentIndex(
+                        self.presentation_tab_index
+                    )
+                    self.presentation_editor.tabs.setCurrentIndex(0)
+                    self.presentation_editor.profile_name.setCurrentText(
+                        wanted_name
+                    )
+                entries.append((label, open_presentation))
+
+        for resource_key, label_prefix, tab_index in (
+            ("cues", "Cue", 1),
+            ("transition_profiles", "Transition", 2),
+            ("shader_sets", "ShaderSet", 3),
+            ("sound_sets", "SoundSet", 4),
+        ):
+            resources = self.config.get(resource_key)
+            if not isinstance(resources, Mapping):
+                continue
+            for name in resources:
+                resource_name = str(name)
+                def open_resource(
+                    wanted_name=resource_name,
+                    wanted_key=resource_key,
+                    wanted_tab=tab_index,
+                ) -> None:
+                    self._ensure_expert_mode()
+                    self.tabs.setCurrentIndex(
+                        self.presentation_tab_index
+                    )
+                    self.presentation_editor.tabs.setCurrentIndex(
+                        wanted_tab
+                    )
+                    combos = {
+                        "cues": self.presentation_editor.cue_name,
+                        "transition_profiles": (
+                            self.presentation_editor.transition_name
+                        ),
+                        "shader_sets": self.presentation_editor.shader_name,
+                        "sound_sets": self.presentation_editor.sound_name,
+                    }
+                    combos[wanted_key].setCurrentText(wanted_name)
+                entries.append(
+                    (
+                        f"{label_prefix} · {resource_name}",
+                        open_resource,
+                    )
+                )
+
         for kind, domain, target in self._favorite_targets:
             label = (
                 f"★ Favori · {DOMAIN_LABELS.get(domain, domain)} · {target}"
@@ -4737,6 +5000,15 @@ class MainWindow(QMainWindow):
             )
             or ""
         )
+        widget_runtime = self.config.get("widget_runtime", {})
+        if not isinstance(widget_runtime, Mapping):
+            widget_runtime = {}
+        self.widget_runtime_enabled.setChecked(
+            bool(widget_runtime.get("enabled", True))
+        )
+        self.widget_runtime_port.setValue(
+            int(widget_runtime.get("port", 8766) or 8766)
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -4753,17 +5025,28 @@ class MainWindow(QMainWindow):
         self._refresh_automations_view()
         self._refresh_profile_names()
         self._refresh_layout_profile_names()
+        if hasattr(self, "presentation_editor"):
+            self.presentation_editor.refresh()
         self._refresh_override_boxes()
         self.unsaved.setText("")
 
     def _wire_dirty_signals(self) -> None:
-        for widget in (self.poll_ms, self.debounce_ms, self.fallback_debounce_ms, self.obs_port, self.api_port, self.module_scan_seconds):
+        for widget in (
+            self.poll_ms,
+            self.debounce_ms,
+            self.fallback_debounce_ms,
+            self.obs_port,
+            self.api_port,
+            self.widget_runtime_port,
+            self.module_scan_seconds,
+        ):
             widget.valueChanged.connect(self._mark_dirty)
         for widget in (
             self.obs_enabled,
             self.close_to_tray,
             self.start_with_windows,
             self.api_enabled,
+            self.widget_runtime_enabled,
             self.auto_detect_modules,
             self.safe_live,
         ):
@@ -4788,6 +5071,15 @@ class MainWindow(QMainWindow):
         host = self.config.setdefault("host_control", {})
         host["soundvolumeview_path"] = self.soundvolumeview_path.text().strip()
         host.setdefault("audio_timeout_seconds", 5.0)
+        widget_runtime = self.config.setdefault(
+            "widget_runtime",
+            {},
+        )
+        widget_runtime["enabled"] = (
+            self.widget_runtime_enabled.isChecked()
+        )
+        widget_runtime["host"] = "127.0.0.1"
+        widget_runtime["port"] = self.widget_runtime_port.value()
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -4813,6 +5105,9 @@ class MainWindow(QMainWindow):
             build_profiles(config_data),
             build_layout_profiles(config_data),
             host_controller=build_host_controller(config_data),
+            presentation_registry=build_presentation_profiles(
+                config_data
+            ),
         )
         StateRouterEngine(
             rules,
@@ -5194,6 +5489,7 @@ class MainWindow(QMainWindow):
         self._last_saved_config = copy.deepcopy(draft)
         self._draft_dirty = False
         self._restart_api()
+        self._restart_widget_runtime()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
         self._refresh_config_revision_status(draft_dirty=False)
@@ -5229,6 +5525,10 @@ class MainWindow(QMainWindow):
             build_profiles(runtime_config),
             build_layout_profiles(runtime_config),
             host_controller=build_host_controller(runtime_config),
+            presentation_registry=build_presentation_profiles(
+                runtime_config
+            ),
+            presentation_state_store=self._presentation_state_store,
         )
         if startup_layout_profile:
             self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
@@ -5354,6 +5654,7 @@ class MainWindow(QMainWindow):
                 timer.start()
 
     def _on_foreground(self, app: ForegroundApp | None) -> None:
+        self._current_foreground_app = app
         if app is None:
             self.fg_exe.setText("Aucune fenêtre exploitable")
             self.fg_title.setText("—")
@@ -5517,6 +5818,25 @@ class MainWindow(QMainWindow):
                 self._update_obs_status()
                 return
             if bool(getattr(payload, "success", False)):
+                if action == "widget.browser_source.create":
+                    result = getattr(payload, "result", None)
+                    detail = ""
+                    if isinstance(result, Mapping):
+                        detail = (
+                            f"{result.get('input_name', '')} → "
+                            f"{result.get('scene', '')}"
+                        ).strip(" →")
+                    self._record_user_activity(
+                        UserActivityEntry(
+                            "Good",
+                            "Module SSR créé dans OBS",
+                            detail,
+                        )
+                    )
+                    self.statusBar().showMessage(
+                        "Browser Source SSR créée dans OBS.",
+                        6000,
+                    )
                 if action == "layout.preview":
                     self._preview_active = True
                 elif action in {"layout.cancel-preview", "layout.apply"}:
@@ -5886,6 +6206,9 @@ class MainWindow(QMainWindow):
             capture_profile=self.override_boxes["capture"].currentText(),
             audio_profile=self.override_boxes["audio"].currentText(),
             layout_profile=self.override_boxes["layout"].currentText(),
+            presentation_profile=(
+                self.override_boxes["presentation"].currentText()
+            ),
         )
         release_mode = str(
             self.override_release_mode.currentData() or "manual"
@@ -6067,11 +6390,568 @@ class MainWindow(QMainWindow):
         if callable(schedule):
             schedule()
 
-    def _configure_current_application(self) -> None:
+    def _setup_guide_dialog(
+        self,
+        *,
+        force_task: str = "",
+    ) -> SetupGuideDialog:
+        client = self._client
+        dialog = SetupGuideDialog(
+            self,
+            foreground=self._current_foreground_app,
+            obs_enabled=bool(
+                client is not None
+                and getattr(client.config, "enabled", False)
+            ),
+            obs_connected=bool(
+                client is not None and client.connected
+            ),
+            profile_choices=self._state_profile_choices(),
+            fallback_state=(
+                self.config.get("router", {}).get(
+                    "fallback_state",
+                    {},
+                )
+                if isinstance(self.config.get("router"), Mapping)
+                else {}
+            ),
+        )
+        if force_task:
+            index = dialog.task.findData(force_task)
+            if index >= 0:
+                dialog.task.setCurrentIndex(index)
+        return dialog
+
+    def _open_setup_guide(self) -> None:
+        dialog = self._setup_guide_dialog()
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._execute_setup_guide_result(dialog.result_value())
+
+    def _open_html_widget_guide(self) -> None:
+        dialog = self._setup_guide_dialog(force_task="html")
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._execute_setup_guide_result(dialog.result_value())
+
+    def _execute_setup_guide_result(self, result) -> None:
+        if result.task == "app":
+            self._configure_current_application(
+                customizations=result.app_customizations,
+            )
+            return
+        if result.task == "collection":
+            self._guided_analyze_collection()
+            return
+        if result.task == "repair":
+            self._configure_repair_refs()
+            return
+        if result.task != "html":
+            return
+
+        try:
+            package = import_html_module(
+                result.html_entry,
+                name=result.html_name,
+                package_root=(
+                    result.html_package_root or None
+                ),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Import module HTML",
+                str(exc),
+            )
+            return
+
+        self._refresh_widget_library()
+        details = [
+            f"Module : {package.name}",
+            f"Fichiers : {package.file_count}",
+            f"Point d’entrée : {package.entry}",
+            "",
+            (
+                "Le package est prêt dans la bibliothèque SSR. "
+                "Le futur Widget Runtime pourra l’exposer directement "
+                "à OBS sans dépendre de Streamlabs."
+            ),
+        ]
+        if package.warnings:
+            details.extend(
+                ["", "Avertissements :"]
+                + [f"• {item}" for item in package.warnings]
+            )
+        QMessageBox.information(
+            self,
+            "Module HTML importé",
+            "\n".join(details),
+        )
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Module HTML importé",
+                (
+                    f"{package.name} · {package.file_count} fichier(s) · "
+                    f"{package.total_bytes / 1024:.1f} Kio"
+                ),
+            )
+        )
+
+    def _refresh_widget_library(self) -> None:
+        if not hasattr(self, "widget_library"):
+            return
+        self.widget_library.clear()
+        if self._widget_runtime is not None:
+            self._widget_runtime.refresh_packages()
+        for package in list_widget_packages():
+            state = (
+                f"⚠ {len(package.warnings)} avertissement(s)"
+                if package.warnings
+                else "✓ Prêt"
+            )
+            item = QTreeWidgetItem(
+                [
+                    package.name,
+                    str(package.file_count),
+                    f"{package.total_bytes / 1024:.1f} Kio",
+                    package.entry.name,
+                    state,
+                ]
+            )
+            item.setData(0, Qt.UserRole, package.package_id)
+            item.setData(0, Qt.UserRole + 1, package.name)
+            item.setData(3, Qt.UserRole, package.entry_uri)
+            item.setToolTip(3, str(package.entry))
+            if package.remote_references:
+                item.setToolTip(
+                    4,
+                    "Dépendances distantes :\n"
+                    + "\n".join(package.remote_references[:20]),
+                )
+            self.widget_library.addTopLevelItem(item)
+
+    def _install_builtin_widget_in_obs(
+        self,
+        *,
+        route: str,
+        module_name: str,
+        input_name: str,
+        component: str,
+        width: int,
+        height: int,
+    ) -> None:
+        runtime = self._widget_runtime
+        if runtime is None or not runtime.running:
+            QMessageBox.warning(
+                self,
+                module_name,
+                "Le Widget Runtime doit être actif.",
+            )
+            return
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                module_name,
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+
+        default_scene = ""
+        if self._dispatcher is not None:
+            default_scene = str(
+                self._dispatcher.cached_obs_context().get(
+                    "program_scene",
+                    "",
+                )
+                or ""
+            ).strip()
+        dialog = WidgetObsInstallDialog(
+            self,
+            module_name=module_name,
+            default_scene=default_scene,
+        )
+        dialog.input_name.setText(input_name)
+        dialog.component.setText(component)
+        dialog.width.setValue(width)
+        dialog.height.setValue(height)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selection = dialog.result_value()
+
+        if not self._safe_live_confirm(
+            f"Créer la Browser Source « {selection.input_name} »"
+        ):
+            return
+        url = f"{runtime.base_url}{route}"
+        try:
+            request_id = self._service.request_widget_browser_source(
+                input_name=selection.input_name,
+                url=url,
+                scene=selection.scene,
+                width=selection.width,
+                height=selection.height,
+                shutdown_when_not_visible=(
+                    selection.shutdown_when_not_visible
+                ),
+                restart_when_active=selection.restart_when_active,
+            )
+            self._track_obs_request(
+                request_id,
+                busy_text="Installation…",
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                module_name,
+                str(exc),
+            )
+
+    def _install_builtin_chat_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/chat",
+            module_name="Chat SSR natif",
+            input_name="[SSR] Chat",
+            component="chat",
+            width=720,
+            height=900,
+        )
+
+    def _install_builtin_events_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/events",
+            module_name="Events SSR natif",
+            input_name="[SSR] Events",
+            component="events",
+            width=700,
+            height=500,
+        )
+
+    def _install_builtin_alerts_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/alerts",
+            module_name="Alerts SSR natif",
+            input_name="[SSR] Alerts",
+            component="alerts",
+            width=1920,
+            height=1080,
+        )
+
+    def _publish_widget_demo_events(self) -> None:
+        runtime = self._widget_runtime
+        if runtime is None or not runtime.running:
+            QMessageBox.warning(
+                self,
+                "Widgets SSR",
+                "Le Widget Runtime doit être actif.",
+            )
+            return
+        if not self._safe_live_confirm(
+            "Envoyer des événements de démonstration aux widgets SSR actifs"
+        ):
+            return
+        runtime.event_bus.publish(
+            channel="chat",
+            type="message",
+            platform="demo",
+            payload={
+                "display_name": "Shinra Operator",
+                "text": "Connexion au réseau Midgar établie.",
+                "color": "#63e6ff",
+            },
+        )
+        runtime.event_bus.publish(
+            channel="events",
+            type="follow",
+            platform="demo",
+            payload={
+                "label": "Nouveau follower",
+                "display_name": "Cloud_Strife",
+            },
+        )
+        runtime.event_bus.publish(
+            channel="alerts",
+            type="subscription",
+            platform="demo",
+            payload={
+                "title": "NOUVEAU SOLDAT",
+                "text": "Cloud_Strife rejoint le programme Shinra",
+                "duration_ms": 4500,
+            },
+        )
+        self.statusBar().showMessage(
+            "Événements de démonstration envoyés aux widgets SSR.",
+            5000,
+        )
+
+    def _bind_selected_widget_to_presentation(self) -> None:
+        if not hasattr(self, "widget_library"):
+            return
+        item = self.widget_library.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self,
+                "Associer à Présentation",
+                "Sélectionnez d’abord un module HTML.",
+            )
+            return
+        if not self._edit_mode:
+            self._toggle_edit_mode()
+        if not self._edit_mode:
+            return
+
+        package_id = str(item.data(0, Qt.UserRole) or "").strip()
+        module_name = str(
+            item.data(0, Qt.UserRole + 1) or item.text(0)
+        ).strip()
+        profiles = self.config.setdefault(
+            "presentation_profiles",
+            {},
+        )
+        if not isinstance(profiles, dict) or not profiles:
+            QMessageBox.warning(
+                self,
+                "Associer à Présentation",
+                "Aucun PresentationProfile disponible.",
+            )
+            return
+
+        names = sorted(profiles, key=str.casefold)
+        profile_name, ok = QInputDialog.getItem(
+            self,
+            "Associer à Présentation",
+            "PresentationProfile",
+            names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        component, ok = QInputDialog.getText(
+            self,
+            "Associer à Présentation",
+            "Composant (ex. chat, events, alerts, radio)",
+            text=(
+                "chat"
+                if "chat" in module_name.casefold()
+                else "events"
+                if "event" in module_name.casefold()
+                else "radio"
+                if "radio" in module_name.casefold()
+                else ""
+            ),
+        )
+        component = component.strip().casefold()
+        if not ok or not component:
+            return
+
+        profile = profiles.get(profile_name)
+        if not isinstance(profile, dict):
+            return
+        previous = copy.deepcopy(self.config)
+        components = profile.setdefault("components", {})
+        if not isinstance(components, dict):
+            components = {}
+            profile["components"] = components
+        existing = components.get(component)
+        settings = (
+            copy.deepcopy(existing.get("settings", {}))
+            if isinstance(existing, Mapping)
+            and isinstance(existing.get("settings"), Mapping)
+            else {}
+        )
+        components[component] = {
+            "mode": "custom",
+            "resource": f"widget:{package_id}",
+            "settings": settings,
+        }
+        errors = validate_config(self.config)
+        if errors:
+            self.config.clear()
+            self.config.update(previous)
+            QMessageBox.critical(
+                self,
+                "Associer à Présentation",
+                "\n".join(errors),
+            )
+            return
+
+        self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            (
+                f"Association {module_name} → "
+                f"{profile_name}/{component}"
+            ),
+            previous,
+        )
+        self.presentation_editor.refresh()
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.presentation_tab_index)
+        self.presentation_editor.tabs.setCurrentIndex(0)
+        self.presentation_editor.profile_name.setCurrentText(
+            profile_name
+        )
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Module associé à un PresentationProfile",
+                f"{module_name} → {profile_name}/{component}",
+            )
+        )
+
+    def _create_selected_widget_in_obs(self) -> None:
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Créer le module dans OBS",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        runtime = self._widget_runtime
+        if runtime is None or not runtime.running:
+            QMessageBox.warning(
+                self,
+                "Créer le module dans OBS",
+                "Le Widget Runtime doit être actif.",
+            )
+            return
+        if not hasattr(self, "widget_library"):
+            return
+        item = self.widget_library.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self,
+                "Créer le module dans OBS",
+                "Sélectionnez d’abord un module HTML.",
+            )
+            return
+
+        package_id = str(item.data(0, Qt.UserRole) or "").strip()
+        module_name = str(
+            item.data(0, Qt.UserRole + 1) or item.text(0)
+        ).strip()
+        if not package_id:
+            QMessageBox.warning(
+                self,
+                "Créer le module dans OBS",
+                "Identifiant du package introuvable.",
+            )
+            return
+
+        default_scene = ""
+        if self._dispatcher is not None:
+            default_scene = str(
+                self._dispatcher.cached_obs_context().get(
+                    "program_scene",
+                    "",
+                )
+                or ""
+            ).strip()
+
+        dialog = WidgetObsInstallDialog(
+            self,
+            module_name=module_name,
+            default_scene=default_scene,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selection = dialog.result_value()
+
+        try:
+            url = runtime.package_url(
+                package_id,
+                component=selection.component,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Créer le module dans OBS",
+                str(exc),
+            )
+            return
+
+        if not self._safe_live_confirm(
+            f"Créer la Browser Source « {selection.input_name} »"
+        ):
+            return
+
+        try:
+            request_id = self._service.request_widget_browser_source(
+                input_name=selection.input_name,
+                url=url,
+                scene=selection.scene,
+                width=selection.width,
+                height=selection.height,
+                shutdown_when_not_visible=(
+                    selection.shutdown_when_not_visible
+                ),
+                restart_when_active=selection.restart_when_active,
+            )
+            self._track_obs_request(
+                request_id,
+                busy_text="Création…",
+            )
+            self.statusBar().showMessage(
+                "Création de la Browser Source OBS en cours…",
+                6000,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Créer le module dans OBS",
+                str(exc),
+            )
+
+    def _copy_selected_widget_uri(self) -> None:
+        if not hasattr(self, "widget_library"):
+            return
+        item = self.widget_library.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self,
+                "Module HTML",
+                "Sélectionnez d’abord un module.",
+            )
+            return
+        package_id = str(item.data(0, Qt.UserRole) or "")
+        fallback_uri = str(item.data(3, Qt.UserRole) or "")
+        uri = fallback_uri
+        runtime = self._widget_runtime
+        if (
+            runtime is not None
+            and runtime.running
+            and package_id
+        ):
+            try:
+                uri = runtime.package_url(package_id)
+            except KeyError:
+                uri = fallback_uri
+        if not uri:
+            return
+        QApplication.clipboard().setText(uri)
+        self.statusBar().showMessage(
+            (
+                "URL Widget Runtime copiée."
+                if uri.startswith("http://")
+                else "URI locale du module copiée."
+            ),
+            5000,
+        )
+
+    def _configure_current_application(
+        self,
+        *,
+        customizations: tuple[
+            tuple[str, str, str],
+            ...,
+        ] = (),
+    ) -> None:
         if not self._edit_mode:
             self._toggle_edit_mode()
         if self._edit_mode:
-            self._guided_capture_current_state()
+            self._guided_capture_current_state(
+                customizations=customizations,
+            )
 
     def _configure_repair_refs(self) -> None:
         if not self._edit_mode:
@@ -6159,7 +7039,15 @@ class MainWindow(QMainWindow):
         return rows[0].row() if rows else None
 
     def _add_rule(self) -> None:
-        dlg = RuleDialog(self, profile_choices=self._state_profile_choices())
+        dlg = RuleDialog(
+            self,
+            profile_choices=self._state_profile_choices(),
+            fallback_state=(
+                self.config.get("router", {}).get("fallback_state", {})
+                if isinstance(self.config.get("router"), Mapping)
+                else {}
+            ),
+        )
         if dlg.exec() == QDialog.Accepted:
             self.config.setdefault("rules", []).append(dlg.result_rule())
             self._mark_dirty()
@@ -6173,6 +7061,11 @@ class MainWindow(QMainWindow):
             self,
             self.config["rules"][idx],
             profile_choices=self._state_profile_choices(),
+            fallback_state=(
+                self.config.get("router", {}).get("fallback_state", {})
+                if isinstance(self.config.get("router"), Mapping)
+                else {}
+            ),
         )
         if dlg.exec() == QDialog.Accepted:
             self.config["rules"][idx] = dlg.result_rule()
@@ -6668,7 +7561,14 @@ class MainWindow(QMainWindow):
         self._refresh_profile_names()
         self._refresh_override_boxes()
 
-    def _guided_capture_current_state(self) -> None:
+    def _guided_capture_current_state(
+        self,
+        *,
+        customizations: tuple[
+            tuple[str, str, str],
+            ...,
+        ] = (),
+    ) -> None:
         if not self._require_edit_mode("Capturer l’état actuel"):
             return
         service = self._service
@@ -6833,6 +7733,10 @@ class MainWindow(QMainWindow):
                 "title": str(app.window_title or ""),
             },
             "logical_state": logical_state,
+            "app_customizations": [
+                [key, mode, value]
+                for key, mode, value in customizations
+            ],
         }
         self._record_user_activity(
             UserActivityEntry(
@@ -6873,6 +7777,24 @@ class MainWindow(QMainWindow):
             if matches
             else suggest_capture_name(self.config, base_name)
         )
+        raw_customizations = context.get("app_customizations")
+        customization_plan: dict[str, tuple[str, str]] = {}
+        if isinstance(raw_customizations, list):
+            for raw in raw_customizations:
+                if (
+                    isinstance(raw, (list, tuple))
+                    and len(raw) == 3
+                ):
+                    key = str(raw[0] or "").strip()
+                    mode = str(raw[1] or "").strip().casefold()
+                    value = str(raw[2] or "").strip()
+                    if key and mode in {
+                        "inherit",
+                        "capture",
+                        "profile",
+                    }:
+                        customization_plan[key] = (mode, value)
+
         dialog = CurrentStateCaptureDialog(
             self,
             process=process,
@@ -6881,6 +7803,7 @@ class MainWindow(QMainWindow):
             current_scene=str(snapshot.current_program_scene or ""),
             suggested_name=suggested_name,
             matching_rules=matches,
+            customization_plan=customization_plan,
         )
         if dialog.exec() != QDialog.Accepted:
             self._record_user_activity(
@@ -6925,6 +7848,18 @@ class MainWindow(QMainWindow):
             ),
             visibility_domain=str(
                 raw_options.get("visibility_domain") or "game"
+            ),
+            state_overrides={
+                key: value
+                for key, (mode, value)
+                in customization_plan.items()
+                if mode == "profile" and value
+            },
+            inherit_state_keys=tuple(
+                key
+                for key, (mode, _value)
+                in customization_plan.items()
+                if mode == "inherit"
             ),
         )
         raw_layouts = raw_result.get("layouts")
@@ -7819,22 +8754,53 @@ class MainWindow(QMainWindow):
         if not self._safe_live_confirm("Tester ce profil directement sur OBS"):
             return
         self._collect_settings()
-        try:
-            client = OBSClientManager(build_obs_config(self.config))
-            dispatcher = OBSDispatcher(
-                client,
-                build_profiles(self.config),
-                build_layout_profiles(self.config),
+        errors = validate_config(self.config)
+        if errors:
+            QMessageBox.critical(
+                self,
+                "Test du profil",
+                "Le brouillon doit être valide avant le test :\n- "
+                + "\n- ".join(errors),
             )
-            result = dispatcher.execute_profile(current[0], current[1])
+            return
+        service = self._service
+        if service is None:
+            QMessageBox.critical(
+                self,
+                "Test du profil",
+                "Runtime SSR indisponible.",
+            )
+            return
+        domain, name, _profile = current
+        profiles_root = self.config.get("profiles", {})
+        domain_profiles = (
+            profiles_root.get(domain, {})
+            if isinstance(profiles_root, Mapping)
+            else {}
+        )
+        if not isinstance(domain_profiles, Mapping):
+            QMessageBox.critical(
+                self,
+                "Test du profil",
+                "Domaine de profils invalide dans le brouillon.",
+            )
+            return
+        try:
+            request_id = service.request_profile_test(
+                domain,
+                name,
+                domain_profiles,
+            )
+            self._track_obs_request(
+                request_id,
+                busy_text="Test…",
+            )
+            self.statusBar().showMessage(
+                f"Test du profil « {name} » envoyé au worker SSR.",
+                5000,
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Test du profil", str(exc))
-            return
-        QMessageBox.information(
-            self,
-            "Test du profil",
-            f"{result.executed} action(s) exécutée(s), {result.skipped} ignorée(s).",
-        )
 
     def _state_profile_choices(self) -> dict[str, list[str]]:
         profiles = self.config.get("profiles", {})
@@ -7843,7 +8809,19 @@ class MainWindow(QMainWindow):
             for domain in PROFILE_DOMAINS
         }
         choices["layout"] = sorted(
-            self.config.get("layout_profiles", {}).keys(), key=str.casefold
+            self.config.get("layout_profiles", {}).keys(),
+            key=str.casefold,
+        )
+        choices["presentation"] = sorted(
+            (
+                self.config.get("presentation_profiles", {})
+                if isinstance(
+                    self.config.get("presentation_profiles"),
+                    Mapping,
+                )
+                else {}
+            ).keys(),
+            key=str.casefold,
         )
         return choices
 
@@ -8744,6 +9722,66 @@ class MainWindow(QMainWindow):
             self._obs_module_catalog = catalog
             self._populate_module_tree()
 
+    def _update_widget_runtime_status(self) -> None:
+        label = getattr(self, "widget_runtime_status", None)
+        if label is None:
+            return
+        runtime = self._widget_runtime
+        if runtime is not None and runtime.running:
+            label.setText(
+                "Widget Runtime : "
+                f"{runtime.base_url} · Browser Sources SSR actives"
+            )
+            label.setObjectName("Good")
+        elif runtime is not None and not runtime.config.enabled:
+            label.setText(
+                "Widget Runtime : désactivé · repli file:// disponible"
+            )
+            label.setObjectName("Muted")
+        else:
+            label.setText(
+                "Widget Runtime : indisponible · repli file:// disponible"
+            )
+            label.setObjectName("Warn")
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _start_widget_runtime(self, *, event_bus=None) -> None:
+        cfg = build_widget_runtime_config(self.config)
+        runtime = WidgetRuntime(
+            cfg,
+            self._presentation_state_store,
+            event_bus=event_bus,
+        )
+        self._widget_runtime = runtime
+        try:
+            runtime.start()
+            if cfg.enabled:
+                self._log(
+                    f"Widget Runtime actif sur {runtime.base_url}."
+                )
+        except Exception as exc:
+            self._log(f"Widget Runtime indisponible : {exc}")
+        self._update_widget_runtime_status()
+
+    def _restart_widget_runtime(self) -> None:
+        runtime = self._widget_runtime
+        event_bus = runtime.event_bus if runtime is not None else None
+        if runtime is not None:
+            runtime.stop()
+        # Restarting the HTTP server for a saved configuration must not create
+        # a new event stream. Existing Browser Sources retain their cursor and
+        # continue on the same bus/session identity.
+        self._start_widget_runtime(event_bus=event_bus)
+        self._refresh_widget_library()
+
+    def _stop_widget_runtime(self) -> None:
+        runtime = self._widget_runtime
+        self._widget_runtime = None
+        if runtime is not None:
+            runtime.stop()
+        self._update_widget_runtime_status()
+
     def _start_api(self) -> None:
         raw = self.config.get("api", {})
         cfg = APIConfig(
@@ -8780,6 +9818,18 @@ class MainWindow(QMainWindow):
             "rule": service.engine.current_rule if service else "",
             "state": state.as_variables() if state else {},
             "obs_connected": bool(self._client.connected) if self._client else False,
+            "widget_runtime": {
+                "running": bool(
+                    self._widget_runtime
+                    and self._widget_runtime.running
+                ),
+                "base_url": (
+                    self._widget_runtime.base_url
+                    if self._widget_runtime
+                    and self._widget_runtime.running
+                    else ""
+                ),
+            },
             "control_variables": (
                 service.control_variables() if service else {}
             ),
@@ -9315,6 +10365,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         event.accept()
         QApplication.instance().quit()
@@ -9324,6 +10375,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         self.tray.hide()
         QApplication.instance().quit()
