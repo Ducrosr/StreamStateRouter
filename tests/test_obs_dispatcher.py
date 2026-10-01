@@ -939,6 +939,93 @@ class OBSDispatcherTests(unittest.TestCase):
             "PB",
         )
 
+    def test_transition_profile_is_applied_before_state_and_enter_sound(self):
+        client = FakeClient()
+        profiles = profile_map_from_raw(
+            {
+                "game": {
+                    "Game": {
+                        "actions": [
+                            {
+                                "type": "set_program_scene",
+                                "params": {"scene": "Gameplay"},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "Combat": {
+                    "transition_profile": "Mako",
+                    "enter_cue": "Enter",
+                }
+            },
+            transitions_raw={
+                "Mako": {
+                    "transition_name": "Move",
+                    "duration_ms": 450,
+                    "settings": {"curve": 0.8},
+                    "overlay": True,
+                }
+            },
+            cues_raw={
+                "Enter": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "media_input_action",
+                                    "params": {
+                                        "input": "SSR Jingle",
+                                        "action": "restart",
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            profiles,
+            presentation_registry=presentation,
+        )
+
+        result = dispatcher.dispatch_state(
+            StreamState(
+                game="Game",
+                presentation_profile="Combat",
+            )
+        )
+
+        requests = [request for request, _payload in client.calls]
+        self.assertEqual(
+            requests,
+            [
+                "SetCurrentSceneTransition",
+                "SetCurrentSceneTransitionDuration",
+                "SetCurrentSceneTransitionSettings",
+                "SetCurrentProgramScene",
+                "TriggerMediaInputAction",
+            ],
+        )
+        transition_payload = client.calls[0][1]
+        self.assertEqual(transition_payload["transitionName"], "Move")
+        self.assertEqual(
+            client.calls[-1][1],
+            {
+                "inputName": "SSR Jingle",
+                "mediaAction": (
+                    "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
+                ),
+            },
+        )
+        self.assertEqual(result.executed, 5)
+
     def test_force_reapply_replays_enter_without_exiting_same_presentation(self):
         client = FakeClient()
         presentation = build_presentation_registry(
