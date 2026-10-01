@@ -3273,6 +3273,19 @@ class MainWindow(QMainWindow):
         )
         self._register_obs_connected_control(install_alerts)
         widget_actions.addWidget(install_alerts)
+        install_now_playing = QPushButton("Installer Now Playing…")
+        self._set_action_risk(
+            install_now_playing,
+            "live",
+            "Crée une Browser Source locale pour le Media Engine SSR.",
+        )
+        install_now_playing.clicked.connect(
+            self._install_builtin_now_playing_in_obs
+        )
+        self._register_obs_connected_control(
+            install_now_playing
+        )
+        widget_actions.addWidget(install_now_playing)
         demo = QPushButton("Événements de démo")
         self._set_action_risk(
             demo,
@@ -4466,6 +4479,58 @@ class MainWindow(QMainWindow):
         widget_lay.addWidget(widget_note)
         root.addWidget(widget_card)
 
+        media_card, media_lay = self._card(
+            "Media Engine / Now Playing"
+        )
+        media_form = QFormLayout()
+        self.media_engine_enabled = QCheckBox(
+            "Activer le moteur média SSR"
+        )
+        self.media_poll_ms = QSpinBox()
+        self.media_poll_ms.setRange(250, 60000)
+        self.media_poll_ms.setSuffix(" ms")
+        self.jellyfin_enabled = QCheckBox(
+            "Utiliser Jellyfin nativement"
+        )
+        self.jellyfin_url = QLineEdit()
+        self.jellyfin_url.setPlaceholderText(
+            "http://127.0.0.1:8096"
+        )
+        self.jellyfin_token = QLineEdit()
+        self.jellyfin_token.setEchoMode(
+            QLineEdit.EchoMode.Password
+        )
+        self.jellyfin_device_id = QLineEdit()
+        self.jellyfin_device_id.setPlaceholderText(
+            "Facultatif — filtre exact DeviceId"
+        )
+        self.jellyfin_device_name = QLineEdit()
+        self.jellyfin_device_name.setPlaceholderText(
+            "Facultatif — ex. PC-Streaming"
+        )
+        self.jellyfin_client_name = QLineEdit()
+        self.jellyfin_client_name.setPlaceholderText(
+            "Facultatif — ex. Jellyfin Media Player"
+        )
+        media_form.addRow("", self.media_engine_enabled)
+        media_form.addRow("Actualisation", self.media_poll_ms)
+        media_form.addRow("", self.jellyfin_enabled)
+        media_form.addRow("Serveur Jellyfin", self.jellyfin_url)
+        media_form.addRow("Token Jellyfin", self.jellyfin_token)
+        media_form.addRow("Device ID", self.jellyfin_device_id)
+        media_form.addRow("Nom du périphérique", self.jellyfin_device_name)
+        media_form.addRow("Client", self.jellyfin_client_name)
+        media_lay.addLayout(media_form)
+        media_note = QLabel(
+            "Le token reste exclusivement côté SSR. Les Browser Sources "
+            "reçoivent uniquement l’état média normalisé et l’artwork "
+            "proxyfié par le Widget Runtime local."
+        )
+        media_note.setWordWrap(True)
+        media_note.setObjectName("Muted")
+        media_lay.addWidget(media_note)
+        root.addWidget(media_card)
+
         host_card, host_lay = self._card("Contrôle Windows")
         host_form = QFormLayout()
         self.soundvolumeview_path = QLineEdit()
@@ -5021,6 +5086,45 @@ class MainWindow(QMainWindow):
         self.widget_runtime_port.setValue(
             int(widget_runtime.get("port", 8766) or 8766)
         )
+        media_engine = self.config.get("media_engine", {})
+        if not isinstance(media_engine, Mapping):
+            media_engine = {}
+        jellyfin = media_engine.get("jellyfin", {})
+        if not isinstance(jellyfin, Mapping):
+            jellyfin = {}
+        self.media_engine_enabled.setChecked(
+            bool(media_engine.get("enabled", True))
+        )
+        self.media_poll_ms.setValue(
+            int(
+                float(
+                    media_engine.get(
+                        "poll_interval_seconds",
+                        1.0,
+                    )
+                    or 1.0
+                )
+                * 1000
+            )
+        )
+        self.jellyfin_enabled.setChecked(
+            bool(jellyfin.get("enabled", False))
+        )
+        self.jellyfin_url.setText(
+            str(jellyfin.get("base_url") or "")
+        )
+        self.jellyfin_token.setText(
+            str(jellyfin.get("token") or "")
+        )
+        self.jellyfin_device_id.setText(
+            str(jellyfin.get("device_id") or "")
+        )
+        self.jellyfin_device_name.setText(
+            str(jellyfin.get("device_name") or "")
+        )
+        self.jellyfin_client_name.setText(
+            str(jellyfin.get("client_name") or "")
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -5092,6 +5196,27 @@ class MainWindow(QMainWindow):
         )
         widget_runtime["host"] = "127.0.0.1"
         widget_runtime["port"] = self.widget_runtime_port.value()
+        media_engine = self.config.setdefault("media_engine", {})
+        media_engine["enabled"] = (
+            self.media_engine_enabled.isChecked()
+        )
+        media_engine["poll_interval_seconds"] = (
+            self.media_poll_ms.value() / 1000.0
+        )
+        jellyfin = media_engine.setdefault("jellyfin", {})
+        jellyfin["enabled"] = self.jellyfin_enabled.isChecked()
+        jellyfin["base_url"] = self.jellyfin_url.text().strip()
+        jellyfin["token"] = self.jellyfin_token.text()
+        jellyfin["device_id"] = (
+            self.jellyfin_device_id.text().strip()
+        )
+        jellyfin["device_name"] = (
+            self.jellyfin_device_name.text().strip()
+        )
+        jellyfin["client_name"] = (
+            self.jellyfin_client_name.text().strip()
+        )
+        jellyfin.setdefault("timeout_seconds", 3.0)
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -6648,6 +6773,16 @@ class MainWindow(QMainWindow):
             component="alerts",
             width=1920,
             height=1080,
+        )
+
+    def _install_builtin_now_playing_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/now-playing",
+            module_name="Now Playing SSR natif",
+            input_name="[SSR] Now Playing",
+            component="now-playing",
+            width=760,
+            height=180,
         )
 
     def _publish_widget_demo_events(self) -> None:
