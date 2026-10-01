@@ -1,3 +1,9 @@
+from .runtime import (
+    WidgetEvent,
+    WidgetEventHub,
+    WidgetRuntime,
+    WidgetRuntimeConfig,
+)
 from .packages import (
     HtmlModuleInspection,
     WidgetPackage,
@@ -7,6 +13,10 @@ from .packages import (
 )
 
 __all__ = [
+    "WidgetEvent",
+    "WidgetEventHub",
+    "WidgetRuntime",
+    "WidgetRuntimeConfig",
     "HtmlModuleInspection",
     "WidgetPackage",
     "import_html_module",
