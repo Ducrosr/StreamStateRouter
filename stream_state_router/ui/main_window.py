@@ -3239,6 +3239,36 @@ class MainWindow(QMainWindow):
         install_chat.clicked.connect(self._install_builtin_chat_in_obs)
         self._register_obs_connected_control(install_chat)
         widget_actions.addWidget(install_chat)
+        install_events = QPushButton("Installer Events…")
+        self._set_action_risk(
+            install_events,
+            "live",
+            "Crée une Browser Source locale pour les événements SSR.",
+        )
+        install_events.clicked.connect(
+            self._install_builtin_events_in_obs
+        )
+        self._register_obs_connected_control(install_events)
+        widget_actions.addWidget(install_events)
+        install_alerts = QPushButton("Installer Alerts…")
+        self._set_action_risk(
+            install_alerts,
+            "live",
+            "Crée une Browser Source locale pour les alertes SSR.",
+        )
+        install_alerts.clicked.connect(
+            self._install_builtin_alerts_in_obs
+        )
+        self._register_obs_connected_control(install_alerts)
+        widget_actions.addWidget(install_alerts)
+        demo = QPushButton("Événements de démo")
+        self._set_action_risk(
+            demo,
+            "read",
+            "Publie seulement des événements locaux vers les widgets SSR.",
+        )
+        demo.clicked.connect(self._publish_widget_demo_events)
+        widget_actions.addWidget(demo)
         create_obs = QPushButton("Créer dans OBS…")
         self._set_action_risk(
             create_obs,
@@ -6491,19 +6521,28 @@ class MainWindow(QMainWindow):
                 )
             self.widget_library.addTopLevelItem(item)
 
-    def _install_builtin_chat_in_obs(self) -> None:
+    def _install_builtin_widget_in_obs(
+        self,
+        *,
+        route: str,
+        module_name: str,
+        input_name: str,
+        component: str,
+        width: int,
+        height: int,
+    ) -> None:
         runtime = self._widget_runtime
         if runtime is None or not runtime.running:
             QMessageBox.warning(
                 self,
-                "Chat SSR natif",
+                module_name,
                 "Le Widget Runtime doit être actif.",
             )
             return
         if self._service is None:
             QMessageBox.warning(
                 self,
-                "Chat SSR natif",
+                module_name,
                 "Le runtime SSR n’est pas disponible.",
             )
             return
@@ -6519,13 +6558,13 @@ class MainWindow(QMainWindow):
             ).strip()
         dialog = WidgetObsInstallDialog(
             self,
-            module_name="Chat SSR",
+            module_name=module_name,
             default_scene=default_scene,
         )
-        dialog.input_name.setText("[SSR] Chat")
-        dialog.component.setText("chat")
-        dialog.width.setValue(720)
-        dialog.height.setValue(900)
+        dialog.input_name.setText(input_name)
+        dialog.component.setText(component)
+        dialog.width.setValue(width)
+        dialog.height.setValue(height)
         if dialog.exec() != QDialog.Accepted:
             return
         selection = dialog.result_value()
@@ -6534,7 +6573,7 @@ class MainWindow(QMainWindow):
             f"Créer la Browser Source « {selection.input_name} »"
         ):
             return
-        url = f"{runtime.base_url}/builtin/chat"
+        url = f"{runtime.base_url}{route}"
         try:
             request_id = self._service.request_widget_browser_source(
                 input_name=selection.input_name,
@@ -6554,9 +6593,82 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(
                 self,
-                "Chat SSR natif",
+                module_name,
                 str(exc),
             )
+
+    def _install_builtin_chat_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/builtin/chat",
+            module_name="Chat SSR natif",
+            input_name="[SSR] Chat",
+            component="chat",
+            width=720,
+            height=900,
+        )
+
+    def _install_builtin_events_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/builtin/events",
+            module_name="Events SSR natif",
+            input_name="[SSR] Events",
+            component="events",
+            width=700,
+            height=500,
+        )
+
+    def _install_builtin_alerts_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/builtin/alerts",
+            module_name="Alerts SSR natif",
+            input_name="[SSR] Alerts",
+            component="alerts",
+            width=1920,
+            height=1080,
+        )
+
+    def _publish_widget_demo_events(self) -> None:
+        runtime = self._widget_runtime
+        if runtime is None or not runtime.running:
+            QMessageBox.warning(
+                self,
+                "Widgets SSR",
+                "Le Widget Runtime doit être actif.",
+            )
+            return
+        runtime.event_bus.publish(
+            channel="chat",
+            type="message",
+            platform="demo",
+            payload={
+                "display_name": "Shinra Operator",
+                "text": "Connexion au réseau Midgar établie.",
+                "color": "#63e6ff",
+            },
+        )
+        runtime.event_bus.publish(
+            channel="events",
+            type="follow",
+            platform="demo",
+            payload={
+                "label": "Nouveau follower",
+                "display_name": "Cloud_Strife",
+            },
+        )
+        runtime.event_bus.publish(
+            channel="alerts",
+            type="subscription",
+            platform="demo",
+            payload={
+                "title": "NOUVEAU SOLDAT",
+                "text": "Cloud_Strife rejoint le programme Shinra",
+                "duration_ms": 4500,
+            },
+        )
+        self.statusBar().showMessage(
+            "Événements de démonstration envoyés aux widgets SSR.",
+            5000,
+        )
 
     def _create_selected_widget_in_obs(self) -> None:
         if self._service is None:
