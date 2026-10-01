@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from ..events import EventBus
+from ..media import MediaStateStore
 from ..presentation import PresentationStateStore
 from ..services.paths import imported_widgets_dir
 from .packages import WidgetPackage, list_widget_packages
@@ -471,6 +472,116 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
 </html>""".strip()
 
 
+_RADIO_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="radio">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root {
+  --ssr-accent: #63e6ff;
+  --ssr-panel-opacity: .82;
+  --ssr-glow: 12px;
+  --ssr-font-size: 20px;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin:0; width:100%; height:100%; overflow:hidden;
+  background:transparent; color:white;
+  font-family:Inter,"Segoe UI",sans-serif;
+}
+#radio {
+  width:100%; height:100%; display:flex; flex-direction:column;
+  justify-content:center; gap:6px; padding:12px 16px;
+  background:rgba(8,17,24,var(--ssr-panel-opacity));
+  border-left:2px solid var(--ssr-accent);
+  box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.18);
+}
+#title {
+  color:var(--ssr-accent);
+  font-size:var(--ssr-font-size);
+  font-weight:800;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+#artist {
+  opacity:.78;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+#status {
+  font-size:.72em;
+  opacity:.62;
+}
+#progress {
+  height:3px;
+  width:100%;
+  background:rgba(255,255,255,.16);
+  overflow:hidden;
+}
+#bar {
+  height:100%;
+  width:0;
+  background:var(--ssr-accent);
+  transition:width 250ms linear;
+}
+html[data-ssr-animation-intensity="off"] #bar { transition:none; }
+</style>
+</head>
+<body>
+<div id="radio">
+  <div id="title">Midgar Radio</div>
+  <div id="artist">Aucun média</div>
+  <div id="progress"><div id="bar"></div></div>
+  <div id="status">SSR Media</div>
+</div>
+<script src="/runtime/bridge.js?component=radio"></script>
+<script>
+(() => {
+  const title = document.getElementById("title");
+  const artist = document.getElementById("artist");
+  const status = document.getElementById("status");
+  const bar = document.getElementById("bar");
+  let lastRevision = -1;
+
+  const render = (state) => {
+    if (!state || state.revision === lastRevision) return;
+    lastRevision = Number(state.revision) || 0;
+    title.textContent = state.title || "Midgar Radio";
+    artist.textContent =
+      [state.artist, state.album].filter(Boolean).join(" · ") ||
+      (state.connected ? "Aucun média" : "Lecteur indisponible");
+    const duration = Math.max(0, Number(state.duration_seconds) || 0);
+    const position = Math.max(0, Number(state.position_seconds) || 0);
+    const percent = duration > 0
+      ? Math.max(0, Math.min(100, position * 100 / duration))
+      : 0;
+    bar.style.width = percent + "%";
+    const playback = String(state.playback_state || "unknown");
+    const provider = String(state.provider || "media").toUpperCase();
+    status.textContent =
+      provider + " · " +
+      (playback === "playing" ? "Lecture" :
+       playback === "paused" ? "Pause" :
+       playback === "stopped" ? "Arrêt" : "Indisponible");
+  };
+
+  const refresh = async () => {
+    try {
+      const response = await fetch("/runtime/media", { cache: "no-store" });
+      if (response.ok) render(await response.json());
+    } catch (_) {}
+    finally { window.setTimeout(refresh, 500); }
+  };
+  refresh();
+})();
+</script>
+</body>
+</html>""".strip()
+
+
 class _WidgetServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -489,10 +600,16 @@ class WidgetRuntime:
         state_store: PresentationStateStore,
         *,
         event_bus: EventBus | None = None,
+        media_state_store: MediaStateStore | None = None,
         library_root: str | Path | None = None,
     ):
         self.config = config
         self.state_store = state_store
+        self.media_state_store = (
+            media_state_store
+            if media_state_store is not None
+            else MediaStateStore()
+        )
         self.event_bus = event_bus if event_bus is not None else EventBus()
         self.library_root = (
             Path(library_root).expanduser().resolve()
@@ -659,7 +776,7 @@ class WidgetRuntime:
         component_json = json.dumps(wanted, ensure_ascii=False)
         fallback = (
             f"builtin:{wanted}"
-            if wanted in {"chat", "events", "alerts"}
+            if wanted in {"chat", "events", "alerts", "radio"}
             else ""
         )
         fallback_json = json.dumps(fallback)
@@ -700,7 +817,7 @@ iframe{display:block}
     const value = String(resource || fallback || "").trim();
     if (value.startsWith("builtin:")) {
       const name = value.slice("builtin:".length);
-      if (["chat","events","alerts"].includes(name)) {
+      if (["chat","events","alerts","radio"].includes(name)) {
         return "/builtin/" + encodeURIComponent(name);
       }
       return "";
@@ -937,6 +1054,13 @@ iframe{display:block}
                     )
                     return
 
+                if path == "/runtime/media":
+                    self._send_json(
+                        runtime.media_state_store.snapshot(),
+                        head_only=head_only,
+                    )
+                    return
+
                 if path == "/runtime/events":
                     query = parse_qs(parsed.query)
                     channel = str(
@@ -1052,6 +1176,15 @@ iframe{display:block}
                 if path in {"/builtin/alerts", "/builtin/alerts/"}:
                     self._send_bytes(
                         _ALERTS_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {"/builtin/radio", "/builtin/radio/"}:
+                    self._send_bytes(
+                        _RADIO_HTML.encode("utf-8"),
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
