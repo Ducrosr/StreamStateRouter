@@ -116,6 +116,54 @@ class PresentationEngineTests(unittest.TestCase):
         )
         self.assertNotIn("events", resolved.components)
 
+    def test_sound_sets_are_parsed_as_reusable_resources(self) -> None:
+        registry = build_presentation_registry(
+            profiles_raw={
+                "Combat": {"sound_set": "CombatSounds"},
+            },
+            cues_raw={},
+            sound_sets_raw={
+                "CombatSounds": {
+                    "enter": [
+                        {
+                            "input": "SSR Combat In",
+                            "action": "restart",
+                        },
+                        {
+                            "input": "SSR Ambience",
+                            "action": "play",
+                        },
+                    ],
+                    "exit": [
+                        {
+                            "input": "SSR Combat Out",
+                            "action": "restart",
+                        }
+                    ],
+                }
+            },
+        )
+
+        profile = registry.profile("Combat")
+        sound_set = registry.sound_set("CombatSounds")
+
+        self.assertIsNotNone(profile)
+        self.assertIsNotNone(sound_set)
+        assert profile is not None
+        assert sound_set is not None
+        self.assertEqual(profile.sound_set, "CombatSounds")
+        self.assertEqual(
+            [(item.input_name, item.action) for item in sound_set.enter],
+            [
+                ("SSR Combat In", "restart"),
+                ("SSR Ambience", "play"),
+            ],
+        )
+        self.assertEqual(
+            [(item.input_name, item.action) for item in sound_set.exit],
+            [("SSR Combat Out", "restart")],
+        )
+
     def test_profile_inheritance_rejects_cycle(self) -> None:
         registry = build_presentation_registry(
             profiles_raw={
