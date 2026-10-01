@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+import time
 import unittest
 
 from stream_state_router.media import (
@@ -38,6 +41,72 @@ class FakeOpener:
     def open(self, request, *, timeout):
         self.requests.append((request, timeout))
         return FakeResponse(self.body, self.content_type)
+
+
+class ArtworkServer:
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        content_type: str = "image/jpeg",
+        chunk_delay: float = 0.0,
+        pre_header_delay: float = 0.0,
+    ):
+        self.body = body
+        self.content_type = content_type
+        self.chunk_delay = float(chunk_delay)
+        self.pre_header_delay = float(pre_header_delay)
+        self.authorization = ""
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return
+
+            def do_GET(self):
+                outer.authorization = self.headers.get(
+                    "Authorization",
+                    "",
+                )
+                if outer.pre_header_delay > 0:
+                    time.sleep(outer.pre_header_delay)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", outer.content_type)
+                    self.send_header(
+                        "Content-Length",
+                        str(len(outer.body)),
+                    )
+                    self.end_headers()
+                    if outer.chunk_delay > 0:
+                        for byte in outer.body:
+                            self.wfile.write(bytes([byte]))
+                            self.wfile.flush()
+                            time.sleep(outer.chunk_delay)
+                    else:
+                        self.wfile.write(outer.body)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            daemon=True,
+        )
+
+    @property
+    def port(self) -> int:
+        return int(self.server.server_port)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1.0)
 
 
 class FakeTransport:
@@ -152,21 +221,24 @@ class VLCProviderTests(unittest.TestCase):
             transport.get_json("/requests/status.json")
 
     def test_http_transport_fetches_authenticated_artwork_bytes(self) -> None:
-        transport = VLCHttpTransport(
-            VLCConfig(password="secret", timeout_seconds=1.25)
-        )
-        opener = FakeOpener(b"jpeg-bytes", "image/jpeg")
-        transport._opener = opener
+        with ArtworkServer(
+            b"jpeg-bytes",
+            content_type="image/jpeg",
+        ) as server:
+            transport = VLCHttpTransport(
+                VLCConfig(
+                    port=server.port,
+                    password="secret",
+                    timeout_seconds=1.25,
+                )
+            )
 
-        body, content_type = transport.get_bytes("/art")
+            body, content_type = transport.get_bytes("/art")
 
         self.assertEqual(body, b"jpeg-bytes")
         self.assertEqual(content_type, "image/jpeg")
-        request, timeout = opener.requests[0]
-        self.assertEqual(request.full_url, "http://127.0.0.1:8080/art")
-        self.assertEqual(timeout, 1.25)
         self.assertEqual(
-            request.get_header("Authorization"),
+            server.authorization,
             "Basic OnNlY3JldA==",
         )
 
@@ -174,13 +246,8 @@ class VLCProviderTests(unittest.TestCase):
         transport = VLCHttpTransport(
             VLCConfig(password="secret", timeout_seconds=10.0)
         )
-        opener = FakeOpener(b"jpeg-bytes", "image/jpeg")
-        transport._opener = opener
 
-        transport.get_bytes("/art")
-
-        _request, timeout = opener.requests[0]
-        self.assertEqual(timeout, 2.0)
+        self.assertEqual(transport.artwork_timeout_seconds, 2.0)
 
     def test_provider_artwork_uses_vlc_art_endpoint(self) -> None:
         transport = FakeTransport(
@@ -199,17 +266,62 @@ class VLCProviderTests(unittest.TestCase):
         )
 
     def test_http_transport_rejects_oversized_artwork(self) -> None:
-        transport = VLCHttpTransport(VLCConfig(password="secret"))
-        transport._opener = FakeOpener(
-            b"x" * 9,
-            "image/jpeg",
-        )
+        with ArtworkServer(b"x" * 9) as server:
+            transport = VLCHttpTransport(
+                VLCConfig(
+                    port=server.port,
+                    password="secret",
+                )
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "trop volumineuse",
+            ):
+                transport.get_bytes("/art", max_bytes=8)
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "trop volumineuse",
-        ):
-            transport.get_bytes("/art", max_bytes=8)
+    def test_artwork_deadline_is_total_for_progressive_body(self) -> None:
+        with ArtworkServer(
+            b"abcdef",
+            chunk_delay=0.12,
+        ) as server:
+            transport = VLCHttpTransport(
+                VLCConfig(
+                    port=server.port,
+                    password="secret",
+                    timeout_seconds=0.3,
+                )
+            )
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                TimeoutError,
+                "Délai total",
+            ):
+                transport.get_bytes("/art")
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.7)
+
+    def test_artwork_deadline_includes_delayed_headers(self) -> None:
+        with ArtworkServer(
+            b"jpeg",
+            pre_header_delay=0.35,
+        ) as server:
+            transport = VLCHttpTransport(
+                VLCConfig(
+                    port=server.port,
+                    password="secret",
+                    timeout_seconds=0.2,
+                )
+            )
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                TimeoutError,
+                "Délai total",
+            ):
+                transport.get_bytes("/art")
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.6)
 
     def test_status_is_normalized_without_leaking_vlc_shape(self) -> None:
         transport = FakeTransport(
