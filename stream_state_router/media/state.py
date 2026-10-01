@@ -19,6 +19,7 @@ class MediaStateStore:
         self._clock = clock
         self._revision = 0
         self._updated_at = 0.0
+        self._stale_after_seconds = 3.0
         self._state = MediaState(
             provider=str(provider or ""),
             connected=False,
@@ -35,10 +36,15 @@ class MediaStateStore:
         with self._lock:
             return self._mapping_locked()
 
+    def set_expected_poll(self, poll_seconds: float) -> None:
+        value = max(0.1, float(poll_seconds))
+        with self._lock:
+            self._stale_after_seconds = max(1.0, value * 3.0)
+
     def public_snapshot(
         self,
         *,
-        stale_after_seconds: float = 3.0,
+        stale_after_seconds: float | None = None,
     ) -> dict[str, object]:
         with self._lock:
             payload = self._state.as_public_mapping()
@@ -50,9 +56,14 @@ class MediaStateStore:
                 else 0.0
             )
             payload["age_seconds"] = age
+            threshold = (
+                self._stale_after_seconds
+                if stale_after_seconds is None
+                else max(0.1, float(stale_after_seconds))
+            )
             payload["stale"] = bool(
                 self._revision == 0
-                or age > max(0.1, float(stale_after_seconds))
+                or age > threshold
             )
             return payload
 
