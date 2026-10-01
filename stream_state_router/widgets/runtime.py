@@ -35,6 +35,7 @@ _BRIDGE_JS = r"""
   if (requested) stateUrl.searchParams.set("component", requested);
 
   let lastRevision = -1;
+  let managedTokens = new Set();
   const normalizeKey = (key) =>
     String(key).trim().replace(/[^A-Za-z0-9_-]+/g, "-").toLowerCase();
 
@@ -50,15 +51,22 @@ _BRIDGE_JS = r"""
       state.theme || {},
       (state.component_state && state.component_state.settings) || {}
     );
+    const nextTokens = new Set();
     for (const [key, value] of Object.entries(tokens)) {
       if (
         typeof value === "string" ||
         typeof value === "number" ||
         typeof value === "boolean"
       ) {
-        root.style.setProperty("--ssr-" + normalizeKey(key), String(value));
+        const cssKey = "--ssr-" + normalizeKey(key);
+        nextTokens.add(cssKey);
+        root.style.setProperty(cssKey, String(value));
       }
     }
+    for (const cssKey of managedTokens) {
+      if (!nextTokens.has(cssKey)) root.style.removeProperty(cssKey);
+    }
+    managedTokens = nextTokens;
 
     const component = state.component_state || {};
     root.dataset.ssrComponentMode = component.mode || "inherit";
@@ -82,6 +90,77 @@ _BRIDGE_JS = r"""
     }
   };
   refresh();
+})();
+""".strip()
+
+
+_TRUSTED_CSP = (
+    "default-src 'self' data: blob:; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "connect-src 'self'; img-src 'self' data: blob:; "
+    "font-src 'self' data:; media-src 'self' data: blob:; "
+    "frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+)
+_PACKAGE_CSP = (
+    "sandbox allow-scripts; default-src 'self' data: blob:; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "connect-src 'none'; img-src 'self' data: blob:; "
+    "font-src 'self' data:; media-src 'self' data: blob:; "
+    "frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+)
+
+_SANDBOX_BRIDGE_JS = r"""
+(() => {
+  let lastRevision = -1;
+  let managedTokens = new Set();
+  const normalizeKey = (key) =>
+    String(key).trim().replace(/[^A-Za-z0-9_-]+/g, "-").toLowerCase();
+
+  const apply = (state) => {
+    if (!state || state.revision === lastRevision) return;
+    lastRevision = state.revision;
+    const root = document.documentElement;
+    root.dataset.ssrPresentation = state.profile || "";
+    root.dataset.ssrAnimationIntensity = state.animation_intensity || "normal";
+    const tokens = Object.assign(
+      {},
+      state.theme || {},
+      (state.component_state && state.component_state.settings) || {}
+    );
+    const nextTokens = new Set();
+    for (const [key, value] of Object.entries(tokens)) {
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
+        const cssKey = "--ssr-" + normalizeKey(key);
+        nextTokens.add(cssKey);
+        root.style.setProperty(cssKey, String(value));
+      }
+    }
+    for (const cssKey of managedTokens) {
+      if (!nextTokens.has(cssKey)) root.style.removeProperty(cssKey);
+    }
+    managedTokens = nextTokens;
+    const component = state.component_state || {};
+    root.dataset.ssrComponentMode = component.mode || "inherit";
+    root.dataset.ssrComponentResource = component.resource || "";
+    root.style.visibility = component.mode === "hidden" ? "hidden" : "visible";
+    window.dispatchEvent(
+      new CustomEvent("ssrstatechange", { detail: state })
+    );
+  };
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const message = event.data || {};
+    if (message.type !== "ssr-state") return;
+    apply(message.state);
+  });
+  window.parent.postMessage({ type: "ssr-ready" }, "*");
 })();
 """.strip()
 
@@ -570,6 +649,10 @@ class WidgetRuntime:
             or not candidate.is_file()
         ):
             return None
+        published = set(package.published_files)
+        relative_name = candidate.relative_to(root).as_posix()
+        if published and relative_name not in published:
+            return None
         return candidate
 
     @staticmethod
@@ -603,41 +686,70 @@ iframe{display:block}
   const host = document.getElementById("host");
   let current = "";
   let frame = null;
+  let frameImported = false;
+  let latestState = null;
 
   const routeFor = (resource) => {
     const value = String(resource || fallback || "").trim();
     if (value.startsWith("builtin:")) {
       const name = value.slice("builtin:".length);
       if (["chat","events","alerts"].includes(name)) {
-        return "/builtin/" + encodeURIComponent(name);
+        return { url: "/builtin/" + encodeURIComponent(name), imported: false };
       }
-      return "";
+      return { url: "", imported: false };
     }
     if (value.startsWith("widget:") || value.startsWith("package:")) {
       const id = value.slice(value.indexOf(":") + 1).trim();
-      if (!id) return "";
-      return "/widgets/" + encodeURIComponent(id) + "/?component=" + encodeURIComponent(component);
+      if (!id) return { url: "", imported: true };
+      return {
+        url: "/widgets/" + encodeURIComponent(id) + "/?component=" + encodeURIComponent(component),
+        imported: true
+      };
     }
-    return "";
+    return { url: "", imported: false };
   };
 
+  const postState = () => {
+    if (!frame || !frameImported || !frame.contentWindow || !latestState) return;
+    frame.contentWindow.postMessage(
+      { type: "ssr-state", state: latestState },
+      "*"
+    );
+  };
+
+  window.addEventListener("message", (event) => {
+    if (!frame || event.source !== frame.contentWindow) return;
+    const message = event.data || {};
+    if (message.type === "ssr-ready") postState();
+  });
+
   const apply = (state) => {
+    latestState = state;
     const c = (state && state.component_state) || {};
     if (c.mode === "hidden") {
       host.style.visibility = "hidden";
       return;
     }
     host.style.visibility = "visible";
-    const route = routeFor(c.resource);
-    if (route === current) return;
-    current = route;
+    const target = routeFor(c.resource);
+    const key = (target.imported ? "imported:" : "trusted:") + target.url;
+    if (key === current) {
+      postState();
+      return;
+    }
+    current = key;
     host.replaceChildren();
     frame = null;
-    if (!route) return;
+    frameImported = false;
+    if (!target.url) return;
     frame = document.createElement("iframe");
-    frame.src = route;
+    frameImported = target.imported;
+    frame.src = target.url;
     frame.setAttribute("allowtransparency", "true");
     frame.setAttribute("scrolling", "no");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    if (frameImported) frame.setAttribute("sandbox", "allow-scripts");
+    frame.addEventListener("load", postState);
     host.appendChild(frame);
   };
 
@@ -667,17 +779,13 @@ iframe{display:block}
         component: str,
     ) -> bytes:
         wanted = str(component or "").strip()
-        if not wanted or b"/runtime/bridge.js" in body:
+        if not wanted or b"ssr-ready" in body:
             return body
         try:
             text = body.decode("utf-8")
         except UnicodeDecodeError:
             return body
-        script = (
-            '<script src="/runtime/bridge.js?component='
-            + quote(wanted, safe="")
-            + '"></script>'
-        )
+        script = "<script>" + _SANDBOX_BRIDGE_JS + "</script>"
         lowered = text.casefold()
         head_index = lowered.rfind("</head>")
         if head_index >= 0:
@@ -685,11 +793,7 @@ iframe{display:block}
         else:
             body_index = lowered.rfind("</body>")
             if body_index >= 0:
-                text = (
-                    text[:body_index]
-                    + script
-                    + text[body_index:]
-                )
+                text = text[:body_index] + script + text[body_index:]
             else:
                 text += script
         return text.encode("utf-8")
@@ -709,12 +813,15 @@ iframe{display:block}
                 content_type: str,
                 length: int,
                 cache: str = "no-store",
+                csp: str = "",
             ) -> None:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(length))
                 self.send_header("Cache-Control", cache)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
+                if csp:
+                    self.send_header("Content-Security-Policy", csp)
 
             def _send_bytes(
                 self,
@@ -724,12 +831,14 @@ iframe{display:block}
                 status: int = HTTPStatus.OK,
                 head_only: bool = False,
                 cache: str = "no-store",
+                csp: str = "",
             ) -> None:
                 self.send_response(int(status))
                 self._common_headers(
                     content_type=content_type,
                     length=len(body),
                     cache=cache,
+                    csp=csp,
                 )
                 self.end_headers()
                 if not head_only:
@@ -755,6 +864,38 @@ iframe{display:block}
                 )
 
             def _serve(self, *, head_only: bool) -> None:
+                host_value = str(self.headers.get("Host") or "").strip()
+                try:
+                    host_name = (urlsplit("//" + host_value).hostname or "").casefold()
+                except ValueError:
+                    host_name = ""
+                if host_name not in {"127.0.0.1", "localhost", "::1"}:
+                    self._send_json(
+                        {"error": "invalid_host"},
+                        status=HTTPStatus.FORBIDDEN,
+                        head_only=head_only,
+                    )
+                    return
+                origin = str(self.headers.get("Origin") or "").strip()
+                if origin:
+                    try:
+                        parsed_origin = urlsplit(origin)
+                        origin_host = (parsed_origin.hostname or "").casefold()
+                        origin_port = parsed_origin.port
+                    except ValueError:
+                        origin_host = ""
+                        origin_port = None
+                    if (
+                        parsed_origin.scheme.casefold() != "http"
+                        or origin_host not in {"127.0.0.1", "localhost", "::1"}
+                        or origin_port != runtime.port
+                    ):
+                        self._send_json(
+                            {"error": "invalid_origin"},
+                            status=HTTPStatus.FORBIDDEN,
+                            head_only=head_only,
+                        )
+                        return
                 parsed = urlsplit(self.path)
                 path = parsed.path or "/"
                 if path == "/health":
@@ -857,6 +998,7 @@ iframe{display:block}
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
+                        csp=_TRUSTED_CSP,
                     )
                     return
 
@@ -877,6 +1019,7 @@ iframe{display:block}
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
+                        csp=_TRUSTED_CSP,
                     )
                     return
 
@@ -886,6 +1029,7 @@ iframe{display:block}
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
+                        csp=_TRUSTED_CSP,
                     )
                     return
 
@@ -895,6 +1039,7 @@ iframe{display:block}
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
+                        csp=_TRUSTED_CSP,
                     )
                     return
 
@@ -953,6 +1098,7 @@ iframe{display:block}
                         content_type=content_type,
                         head_only=head_only,
                         cache="no-cache",
+                        csp=_PACKAGE_CSP,
                     )
                     return
 
