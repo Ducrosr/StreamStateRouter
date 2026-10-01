@@ -780,8 +780,9 @@ class WidgetRuntime:
         )
 
     def _media_payload(self) -> dict[str, Any]:
-        payload = self.media_state_store.public_snapshot()
-        internal = self.media_state_store.snapshot()
+        payload, internal = (
+            self.media_state_store.public_and_private_snapshot()
+        )
         artwork = self.media_artwork_store.snapshot()
         expected_identity = media_artwork_identity(
             provider=internal.get("provider", ""),
@@ -953,7 +954,6 @@ iframe{display:block}
       },
       "*"
     );
-    postMediaState();
   };
 
   const routeFor = (resource) => {

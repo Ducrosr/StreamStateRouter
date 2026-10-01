@@ -47,25 +47,44 @@ class MediaStateStore:
         stale_after_seconds: float | None = None,
     ) -> dict[str, object]:
         with self._lock:
-            payload = self._state.as_public_mapping()
-            payload["revision"] = self._revision
-            now = float(self._clock())
-            age = (
-                max(0.0, now - self._updated_at)
-                if self._updated_at > 0.0
-                else 0.0
+            return self._public_mapping_locked(stale_after_seconds)
+
+    def public_and_private_snapshot(
+        self,
+        *,
+        stale_after_seconds: float | None = None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Return one atomic public/private view of the same media revision."""
+
+        with self._lock:
+            return (
+                self._public_mapping_locked(stale_after_seconds),
+                self._mapping_locked(),
             )
-            payload["age_seconds"] = age
-            threshold = (
-                self._stale_after_seconds
-                if stale_after_seconds is None
-                else max(0.1, float(stale_after_seconds))
-            )
-            payload["stale"] = bool(
-                self._revision == 0
-                or age > threshold
-            )
-            return payload
+
+    def _public_mapping_locked(
+        self,
+        stale_after_seconds: float | None,
+    ) -> dict[str, object]:
+        payload = self._state.as_public_mapping()
+        payload["revision"] = self._revision
+        now = float(self._clock())
+        age = (
+            max(0.0, now - self._updated_at)
+            if self._updated_at > 0.0
+            else 0.0
+        )
+        payload["age_seconds"] = age
+        threshold = (
+            self._stale_after_seconds
+            if stale_after_seconds is None
+            else max(0.1, float(stale_after_seconds))
+        )
+        payload["stale"] = bool(
+            self._revision == 0
+            or age > threshold
+        )
+        return payload
 
     def _mapping_locked(self) -> dict[str, object]:
         payload = self._state.as_mapping()

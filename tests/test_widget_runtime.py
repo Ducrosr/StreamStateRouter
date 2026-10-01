@@ -281,6 +281,51 @@ class WidgetRuntimeTests(unittest.TestCase):
                 )
             self.assertEqual(expired.exception.code, 404)
 
+    def test_media_payload_uses_one_atomic_media_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+
+            class PairOnlyStore(MediaStateStore):
+                def public_snapshot(self, **_kwargs):
+                    raise AssertionError("public_snapshot séparé interdit")
+
+                def snapshot(self):
+                    raise AssertionError("snapshot séparé interdit")
+
+            media = PairOnlyStore("vlc")
+            current = MediaState(
+                provider="vlc",
+                connected=True,
+                playback_state="playing",
+                title="Track B",
+                uri="file:///C:/Music/b.flac",
+                track_id="2",
+            )
+            media.update(current)
+            runtime.media_state_store = media
+
+            artwork = MediaArtworkStore()
+            artwork.update(
+                b"\x89PNG\r\n\x1a\nSSR-PNG",
+                content_type="image/png",
+                identity=media_artwork_identity(
+                    provider=current.provider,
+                    track_id=current.track_id,
+                    uri=current.uri,
+                    title=current.title,
+                ),
+            )
+            runtime.media_artwork_store = artwork
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+
+            self.assertEqual(payload["title"], "Track B")
+            self.assertEqual(payload["revision"], 1)
+            self.assertTrue(payload["artwork_available"])
+
     def test_media_payload_hides_artwork_from_previous_track(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _package = self._runtime(Path(tmp))
@@ -480,6 +525,10 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(
                 'currentComponent.mode === "hidden"',
                 html,
+            )
+            self.assertEqual(
+                html.count("postMediaState();"),
+                1,
             )
 
             registry = build_presentation_registry(
