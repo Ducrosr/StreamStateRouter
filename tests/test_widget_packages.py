@@ -81,6 +81,10 @@ class HtmlWidgetPackageTests(unittest.TestCase):
                 "<svg/>",
                 encoding="utf-8",
             )
+            (source / "private.txt").write_text(
+                "not a web asset",
+                encoding="utf-8",
+            )
             (source / "node_modules").mkdir()
             (source / "node_modules" / "ignored.js").write_text(
                 "ignored",
@@ -98,6 +102,9 @@ class HtmlWidgetPackageTests(unittest.TestCase):
                 (package.root / "assets" / "unused.svg").is_file()
             )
             self.assertFalse((package.root / "node_modules").exists())
+            self.assertFalse((package.root / "private.txt").exists())
+            self.assertIn("assets/unused.svg", package.published_files)
+            self.assertNotIn("private.txt", package.published_files)
 
     def test_import_reports_remote_missing_and_unsafe_references(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
