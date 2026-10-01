@@ -3230,6 +3230,15 @@ class MainWindow(QMainWindow):
         import_widget.setObjectName("DraftAction")
         import_widget.clicked.connect(self._open_html_widget_guide)
         widget_actions.addWidget(import_widget)
+        install_chat = QPushButton("Installer le chat SSR natif…")
+        self._set_action_risk(
+            install_chat,
+            "live",
+            "Crée une Browser Source locale pour le chat SSR natif.",
+        )
+        install_chat.clicked.connect(self._install_builtin_chat_in_obs)
+        self._register_obs_connected_control(install_chat)
+        widget_actions.addWidget(install_chat)
         create_obs = QPushButton("Créer dans OBS…")
         self._set_action_risk(
             create_obs,
@@ -4384,6 +4393,27 @@ class MainWindow(QMainWindow):
         obs_lay.addWidget(test, alignment=Qt.AlignLeft)
         root.addWidget(obs_card)
 
+        widget_card, widget_lay = self._card(
+            "Widget Runtime local"
+        )
+        widget_form = QFormLayout()
+        self.widget_runtime_enabled = QCheckBox(
+            "Activer les widgets SSR locaux"
+        )
+        self.widget_runtime_port = QSpinBox()
+        self.widget_runtime_port.setRange(1024, 65535)
+        widget_form.addRow("", self.widget_runtime_enabled)
+        widget_form.addRow("Port localhost", self.widget_runtime_port)
+        widget_lay.addLayout(widget_form)
+        widget_note = QLabel(
+            "Le serveur reste lié à 127.0.0.1. Il fournit les modules HTML, "
+            "le chat natif et l’état PresentationProfile aux Browser Sources OBS."
+        )
+        widget_note.setWordWrap(True)
+        widget_note.setObjectName("Muted")
+        widget_lay.addWidget(widget_note)
+        root.addWidget(widget_card)
+
         host_card, host_lay = self._card("Contrôle Windows")
         host_form = QFormLayout()
         self.soundvolumeview_path = QLineEdit()
@@ -4555,6 +4585,13 @@ class MainWindow(QMainWindow):
                     lambda: navigate_tab(self.configure_tab_index),
                 ),
                 (
+                    "Navigation · Présentation",
+                    lambda: (
+                        self._ensure_expert_mode(),
+                        navigate_tab(self.presentation_tab_index),
+                    ),
+                ),
+                (
                     "Navigation · Diagnostics",
                     lambda: (
                         self._ensure_expert_mode(),
@@ -4702,6 +4739,83 @@ class MainWindow(QMainWindow):
                     )
                 )
 
+        presentation_profiles = self.config.get(
+            "presentation_profiles"
+        )
+        if isinstance(presentation_profiles, Mapping):
+            for name, raw in presentation_profiles.items():
+                profile_name = str(name)
+                raw = raw if isinstance(raw, Mapping) else {}
+                label = (
+                    f"Présentation · {profile_name}"
+                    + (
+                        f" · transition={raw.get('transition_profile')}"
+                        if raw.get("transition_profile")
+                        else ""
+                    )
+                    + (
+                        f" · shader={raw.get('shader_set')}"
+                        if raw.get("shader_set")
+                        else ""
+                    )
+                    + (
+                        f" · sons={raw.get('sound_set')}"
+                        if raw.get("sound_set")
+                        else ""
+                    )
+                )
+                def open_presentation(
+                    wanted_name=profile_name,
+                ) -> None:
+                    self._ensure_expert_mode()
+                    self.tabs.setCurrentIndex(
+                        self.presentation_tab_index
+                    )
+                    self.presentation_editor.tabs.setCurrentIndex(0)
+                    self.presentation_editor.profile_name.setCurrentText(
+                        wanted_name
+                    )
+                entries.append((label, open_presentation))
+
+        for resource_key, label_prefix, tab_index in (
+            ("cues", "Cue", 1),
+            ("transition_profiles", "Transition", 2),
+            ("shader_sets", "ShaderSet", 3),
+            ("sound_sets", "SoundSet", 4),
+        ):
+            resources = self.config.get(resource_key)
+            if not isinstance(resources, Mapping):
+                continue
+            for name in resources:
+                resource_name = str(name)
+                def open_resource(
+                    wanted_name=resource_name,
+                    wanted_key=resource_key,
+                    wanted_tab=tab_index,
+                ) -> None:
+                    self._ensure_expert_mode()
+                    self.tabs.setCurrentIndex(
+                        self.presentation_tab_index
+                    )
+                    self.presentation_editor.tabs.setCurrentIndex(
+                        wanted_tab
+                    )
+                    combos = {
+                        "cues": self.presentation_editor.cue_name,
+                        "transition_profiles": (
+                            self.presentation_editor.transition_name
+                        ),
+                        "shader_sets": self.presentation_editor.shader_name,
+                        "sound_sets": self.presentation_editor.sound_name,
+                    }
+                    combos[wanted_key].setCurrentText(wanted_name)
+                entries.append(
+                    (
+                        f"{label_prefix} · {resource_name}",
+                        open_resource,
+                    )
+                )
+
         for kind, domain, target in self._favorite_targets:
             label = (
                 f"★ Favori · {DOMAIN_LABELS.get(domain, domain)} · {target}"
@@ -4846,6 +4960,15 @@ class MainWindow(QMainWindow):
             )
             or ""
         )
+        widget_runtime = self.config.get("widget_runtime", {})
+        if not isinstance(widget_runtime, Mapping):
+            widget_runtime = {}
+        self.widget_runtime_enabled.setChecked(
+            bool(widget_runtime.get("enabled", True))
+        )
+        self.widget_runtime_port.setValue(
+            int(widget_runtime.get("port", 8766) or 8766)
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -4868,13 +4991,22 @@ class MainWindow(QMainWindow):
         self.unsaved.setText("")
 
     def _wire_dirty_signals(self) -> None:
-        for widget in (self.poll_ms, self.debounce_ms, self.fallback_debounce_ms, self.obs_port, self.api_port, self.module_scan_seconds):
+        for widget in (
+            self.poll_ms,
+            self.debounce_ms,
+            self.fallback_debounce_ms,
+            self.obs_port,
+            self.api_port,
+            self.widget_runtime_port,
+            self.module_scan_seconds,
+        ):
             widget.valueChanged.connect(self._mark_dirty)
         for widget in (
             self.obs_enabled,
             self.close_to_tray,
             self.start_with_windows,
             self.api_enabled,
+            self.widget_runtime_enabled,
             self.auto_detect_modules,
             self.safe_live,
         ):
@@ -4899,6 +5031,15 @@ class MainWindow(QMainWindow):
         host = self.config.setdefault("host_control", {})
         host["soundvolumeview_path"] = self.soundvolumeview_path.text().strip()
         host.setdefault("audio_timeout_seconds", 5.0)
+        widget_runtime = self.config.setdefault(
+            "widget_runtime",
+            {},
+        )
+        widget_runtime["enabled"] = (
+            self.widget_runtime_enabled.isChecked()
+        )
+        widget_runtime["host"] = "127.0.0.1"
+        widget_runtime["port"] = self.widget_runtime_port.value()
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -6349,6 +6490,73 @@ class MainWindow(QMainWindow):
                     + "\n".join(package.remote_references[:20]),
                 )
             self.widget_library.addTopLevelItem(item)
+
+    def _install_builtin_chat_in_obs(self) -> None:
+        runtime = self._widget_runtime
+        if runtime is None or not runtime.running:
+            QMessageBox.warning(
+                self,
+                "Chat SSR natif",
+                "Le Widget Runtime doit être actif.",
+            )
+            return
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Chat SSR natif",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+
+        default_scene = ""
+        if self._dispatcher is not None:
+            default_scene = str(
+                self._dispatcher.cached_obs_context().get(
+                    "program_scene",
+                    "",
+                )
+                or ""
+            ).strip()
+        dialog = WidgetObsInstallDialog(
+            self,
+            module_name="Chat SSR",
+            default_scene=default_scene,
+        )
+        dialog.input_name.setText("[SSR] Chat")
+        dialog.component.setText("chat")
+        dialog.width.setValue(720)
+        dialog.height.setValue(900)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selection = dialog.result_value()
+
+        if not self._safe_live_confirm(
+            f"Créer la Browser Source « {selection.input_name} »"
+        ):
+            return
+        url = f"{runtime.base_url}/builtin/chat"
+        try:
+            request_id = self._service.request_widget_browser_source(
+                input_name=selection.input_name,
+                url=url,
+                scene=selection.scene,
+                width=selection.width,
+                height=selection.height,
+                shutdown_when_not_visible=(
+                    selection.shutdown_when_not_visible
+                ),
+                restart_when_active=selection.restart_when_active,
+            )
+            self._track_obs_request(
+                request_id,
+                busy_text="Installation…",
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Chat SSR natif",
+                str(exc),
+            )
 
     def _create_selected_widget_in_obs(self) -> None:
         if self._service is None:
