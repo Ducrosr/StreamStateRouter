@@ -7,6 +7,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from stream_state_router.media import MediaState, MediaStateStore
 from stream_state_router.presentation import (
     PresentationStateStore,
     build_presentation_registry,
@@ -316,6 +317,87 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(alerts_body)["events"][0]["type"],
                 "subscription",
+            )
+
+    def test_now_playing_endpoint_and_builtin_widget_are_token_free(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, _package = self._runtime(root)
+            runtime.stop()
+
+            media_store = MediaStateStore()
+            media_store.update(
+                MediaState(
+                    provider="jellyfin",
+                    player="Streaming PC",
+                    track_id="track-1",
+                    title="Mako Reactor",
+                    artists=("Shinra Radio",),
+                    album="Midgar",
+                    duration_seconds=240.0,
+                    position_seconds=60.0,
+                    playback="playing",
+                    artwork_key="track-1",
+                )
+            )
+            calls: list[str] = []
+            runtime = WidgetRuntime(
+                WidgetRuntimeConfig(
+                    enabled=True,
+                    host="127.0.0.1",
+                    port=0,
+                ),
+                PresentationStateStore(),
+                media_store=media_store,
+                media_artwork=lambda key: (
+                    calls.append(key) or (b"cover", "image/jpeg")
+                ),
+                library_root=root / "library",
+            )
+            runtime.start()
+            self.addCleanup(runtime.stop)
+
+            _status, body, content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+            self.assertIn("application/json", content_type)
+            self.assertEqual(payload["title"], "Mako Reactor")
+            self.assertEqual(payload["artists"], ["Shinra Radio"])
+            self.assertNotIn("token", payload)
+
+            _status, artwork, content_type = self._get(
+                runtime.base_url
+                + "/runtime/media/artwork?key=track-1"
+            )
+            self.assertEqual(artwork, b"cover")
+            self.assertEqual(content_type, "image/jpeg")
+            self.assertEqual(calls, ["track-1"])
+
+            _status, html, content_type = self._get(
+                runtime.base_url + "/builtin/now-playing"
+            )
+            self.assertIn("text/html", content_type)
+            self.assertIn(b"/runtime/media", html)
+            self.assertIn(b"/runtime/media/artwork", html)
+            self.assertNotIn(b"X-Emby-Token", html)
+
+    def test_component_host_supports_builtin_now_playing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/component/now-playing"
+            )
+            html = body.decode("utf-8")
+
+            self.assertIn(
+                'const fallback = "builtin:now-playing"',
+                html,
+            )
+            self.assertIn(
+                '["chat","events","alerts","now-playing"]',
+                html,
             )
 
     def test_runtime_is_read_only_and_blocks_package_escape(self) -> None:
