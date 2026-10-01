@@ -501,6 +501,55 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent
 </html>""".strip()
 
 
+_CLOCK_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="clock">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--ssr-accent:#63e6ff;--ssr-panel-opacity:.72;--ssr-glow:12px;--ssr-font-size:30px}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:white;font-family:Inter,"Segoe UI",sans-serif}
+#root{width:100%;height:100%;display:flex;align-items:center;justify-content:center;gap:12px;padding:8px 14px;background:rgba(8,17,24,var(--ssr-panel-opacity));border-bottom:2px solid var(--ssr-accent);box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.18);border-radius:6px}
+#time{font-size:var(--ssr-font-size);font-weight:800;color:var(--ssr-accent)}
+#date{opacity:.78;font-size:.65em}
+</style></head>
+<body><div id="root"><span id="time"></span><span id="date"></span></div>
+<script src="/runtime/bridge.js?component=clock"></script>
+<script>
+(() => {
+ const t=document.getElementById("time"), d=document.getElementById("date");
+ const render=()=>{const now=new Date();t.textContent=new Intl.DateTimeFormat("fr-FR",{hour:"2-digit",minute:"2-digit",second:"2-digit"}).format(now);d.textContent=new Intl.DateTimeFormat("fr-FR",{weekday:"short",day:"2-digit",month:"short"}).format(now);};
+ render();window.setInterval(render,250);
+})();
+</script></body></html>""".strip()
+
+
+_COUNTDOWN_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="countdown">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--ssr-accent:#63e6ff;--ssr-panel-opacity:.82;--ssr-glow:18px;--ssr-font-size:54px}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:white;font-family:Inter,"Segoe UI",sans-serif}
+#root{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(8,17,24,var(--ssr-panel-opacity));border:1px solid var(--ssr-accent);box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.25);border-radius:10px}
+#label{font-size:.35em;letter-spacing:.12em;text-transform:uppercase;opacity:.78}
+#time{font-size:var(--ssr-font-size);font-weight:900;color:var(--ssr-accent);font-variant-numeric:tabular-nums}
+.done #time{animation:pulse .8s ease-in-out infinite alternate}
+@keyframes pulse{to{filter:brightness(1.6);transform:scale(1.03)}}
+html[data-ssr-animation-intensity="off"] .done #time{animation:none}
+</style></head>
+<body><div id="root"><div id="label">J’ARRIVE</div><div id="time">00:00</div></div>
+<script src="/runtime/bridge.js?component=countdown"></script>
+<script>
+(() => {
+ const root=document.getElementById("root"), label=document.getElementById("label"), out=document.getElementById("time");
+ let after=0,target=0,hiddenAtZero=false;
+ const render=()=>{const remaining=Math.max(0,target-Date.now()/1000);const total=Math.ceil(remaining);const m=Math.floor(total/60),s=total%60;out.textContent=String(m).padStart(2,"0")+":"+String(s).padStart(2,"0");root.classList.toggle("done",!!target&&remaining<=0);root.style.visibility=(hiddenAtZero&&target&&remaining<=0)?"hidden":"visible";};
+ const refresh=async()=>{try{const response=await fetch("/runtime/events?channel=countdown&after="+after+"&limit=20",{cache:"no-store"});if(response.ok){const data=await response.json();for(const event of data.events||[]){after=Math.max(after,Number(event.sequence)||0);const p=event.payload||{};if(event.type==="clear"){target=0;root.style.visibility="hidden";continue;}if(event.type==="set"){target=Number(p.target_epoch)||0;hiddenAtZero=!!p.hide_at_zero;label.textContent=p.label||"J’ARRIVE";root.style.visibility="visible";}}}}catch(_){}finally{window.setTimeout(refresh,300);}};
+ render();window.setInterval(render,200);refresh();
+})();
+</script></body></html>""".strip()
+
+
 class _WidgetServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -630,7 +679,7 @@ class WidgetRuntime:
         component_json = json.dumps(wanted, ensure_ascii=False)
         fallback = (
             f"builtin:{wanted}"
-            if wanted in {"chat", "events", "alerts", "now-playing"}
+            if wanted in {"chat", "events", "alerts", "now-playing", "clock", "countdown"}
             else ""
         )
         fallback_json = json.dumps(fallback)
@@ -658,7 +707,7 @@ iframe{display:block}
     const value = String(resource || fallback || "").trim();
     if (value.startsWith("builtin:")) {
       const name = value.slice("builtin:".length);
-      if (["chat","events","alerts","now-playing"].includes(name)) {
+      if (["chat","events","alerts","now-playing","clock","countdown"].includes(name)) {
         return "/builtin/" + encodeURIComponent(name);
       }
       return "";
@@ -988,6 +1037,27 @@ iframe{display:block}
                 }:
                     self._send_bytes(
                         _NOW_PLAYING_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {"/builtin/clock", "/builtin/clock/"}:
+                    self._send_bytes(
+                        _CLOCK_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {
+                    "/builtin/countdown",
+                    "/builtin/countdown/",
+                }:
+                    self._send_bytes(
+                        _COUNTDOWN_HTML.encode("utf-8"),
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
