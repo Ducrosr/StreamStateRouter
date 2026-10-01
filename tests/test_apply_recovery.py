@@ -78,6 +78,49 @@ class ApplyRecoveryTests(unittest.TestCase):
         startup.assert_called_once_with(False)
         self.assertEqual(dummy._saved_revision, "new-revision")
 
+    def test_media_restart_refusal_is_reported_and_does_not_replace_worker(self) -> None:
+        runtime = Mock()
+        runtime.stop.return_value = False
+        logger = Mock()
+        updater = Mock()
+        starter = Mock()
+        dummy = SimpleNamespace(
+            _media_runtime=runtime,
+            _log=logger,
+            _update_media_runtime_status=updater,
+            _start_media_runtime=starter,
+        )
+
+        restarted = MainWindow._restart_media_runtime(dummy)
+
+        self.assertFalse(restarted)
+        self.assertIs(dummy._media_runtime, runtime)
+        starter.assert_not_called()
+        updater.assert_called_once_with()
+        self.assertTrue(
+            any(
+                "redémarrage refusé" in str(call.args[0])
+                for call in logger.call_args_list
+            )
+        )
+
+    def test_media_restart_success_replaces_worker(self) -> None:
+        runtime = Mock()
+        runtime.stop.return_value = True
+        starter = Mock()
+        dummy = SimpleNamespace(
+            _media_runtime=runtime,
+            _log=Mock(),
+            _update_media_runtime_status=Mock(),
+            _start_media_runtime=starter,
+        )
+
+        restarted = MainWindow._restart_media_runtime(dummy)
+
+        self.assertTrue(restarted)
+        self.assertIsNone(dummy._media_runtime)
+        starter.assert_called_once_with()
+
     def test_recovery_merges_pending_cleanup_before_restart(self) -> None:
         pending_from_failed_runtime = (
             {"kind": "layout_fade", "source": "Avatar"},
