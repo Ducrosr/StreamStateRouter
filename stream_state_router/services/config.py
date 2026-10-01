@@ -21,6 +21,7 @@ from ..presentation import (
     build_presentation_registry as parse_presentation_registry,
 )
 from ..router.models import DEFAULT_PROFILE_NAMES, StreamState
+from ..widgets import WidgetRuntimeConfig
 from ..router.rules import AppRule, ResolutionKind, RuleSet
 from .paths import backups_dir, config_path, default_config_path
 
@@ -348,6 +349,14 @@ def migrate_config(data: Mapping[str, Any]) -> dict[str, Any]:
         migrated.setdefault("cues", {})
         migrated.setdefault("transition_profiles", {})
         migrated.setdefault("shader_sets", {})
+        migrated.setdefault(
+            "widget_runtime",
+            {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 8766,
+            },
+        )
         version = 7
 
     migrated["schema_version"] = version
@@ -1478,6 +1487,42 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 f"{shader_name}"
             )
 
+    widget_runtime = data.get("widget_runtime", {})
+    if not isinstance(widget_runtime, Mapping):
+        errors.append("widget_runtime doit être un objet")
+    else:
+        widget_host = str(
+            widget_runtime.get("host") or "127.0.0.1"
+        ).strip().casefold()
+        if widget_host not in {"127.0.0.1", "localhost", "::1"}:
+            errors.append(
+                "widget_runtime.host doit rester local "
+                "(127.0.0.1, localhost ou ::1)"
+            )
+        if not _valid_int(
+            widget_runtime.get("port", 8766),
+            minimum=1,
+            maximum=65535,
+        ):
+            errors.append(
+                "widget_runtime.port doit être compris entre 1 et 65535"
+            )
+        if (
+            "enabled" in widget_runtime
+            and not isinstance(widget_runtime.get("enabled"), bool)
+        ):
+            errors.append("widget_runtime.enabled doit être booléen")
+        if (
+            isinstance(api, Mapping)
+            and bool(api.get("enabled", True))
+            and bool(widget_runtime.get("enabled", True))
+            and int(api.get("port", 8765) or 8765)
+            == int(widget_runtime.get("port", 8766) or 8766)
+        ):
+            errors.append(
+                "widget_runtime.port doit être différent de api.port"
+            )
+
     host_control = data.get("host_control", {})
     if not isinstance(host_control, Mapping):
         errors.append("host_control doit être un objet")
@@ -1771,6 +1816,18 @@ def build_host_controller(data: Mapping[str, Any]) -> HostControlController:
             soundvolumeview_path=str(host.get("soundvolumeview_path") or ""),
             audio_timeout_seconds=max(0.1, timeout),
         )
+    )
+
+
+def build_widget_runtime_config(
+    data: Mapping[str, Any],
+) -> WidgetRuntimeConfig:
+    raw = data.get("widget_runtime", {})
+    values = raw if isinstance(raw, Mapping) else {}
+    return WidgetRuntimeConfig(
+        enabled=bool(values.get("enabled", True)),
+        host=str(values.get("host") or "127.0.0.1"),
+        port=int(values.get("port", 8766) or 8766),
     )
 
 
