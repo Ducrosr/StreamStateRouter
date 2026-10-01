@@ -25,9 +25,26 @@ class FakeClient:
         self.scene_item_ids = [42]
         self.streaming = False
         self.config = SimpleNamespace(enabled=True)
+        self.session_generation = 1
+        self.current_collection = "Default"
 
     def send(self, request, data=None):
         self.calls.append((request, data))
+        if request == "GetSceneCollectionList":
+            return {"currentSceneCollectionName": self.current_collection}
+        if request == "GetInputSettings":
+            input_name = str((data or {}).get("inputName") or "")
+            return {
+                "inputUuid": f"{self.current_collection}:{input_name}:uuid",
+                "inputKind": "test_input",
+                "inputSettings": {},
+            }
+        if request == "GetSourceFilter":
+            return {
+                "filterEnabled": True,
+                "filterKind": "test_filter",
+                "filterSettings": {"baseline": 1.0},
+            }
         if request == "GetSceneItemId":
             if len(self.scene_item_ids) > 1:
                 return {"sceneItemId": self.scene_item_ids.pop(0)}
@@ -39,6 +56,32 @@ class FakeClient:
         if request == "GetCurrentProgramScene":
             return {"currentProgramSceneName": "OW"}
         return {}
+
+
+class CollectionSwitchingFilterClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.current_collection = "A"
+        self.filter_writes: list[tuple[str, dict]] = []
+
+    def send(self, request, data=None):
+        if request == "SetSourceFilterSettings":
+            payload = dict(data or {})
+            expected_uuid = (
+                f"{self.current_collection}:Global FX:uuid"
+            )
+            if payload.get("sourceUuid") != expected_uuid:
+                raise RuntimeError(
+                    "filter write targeted a source from another collection"
+                )
+            self.calls.append((request, data))
+            self.filter_writes.append(
+                (self.current_collection, payload)
+            )
+            if len(self.filter_writes) == 1:
+                self.current_collection = "B"
+            return {}
+        return super().send(request, data)
 
 
 class OBSDispatcherTests(unittest.TestCase):
@@ -1008,7 +1051,11 @@ class OBSDispatcherTests(unittest.TestCase):
             )
         )
 
-        requests = [request for request, _payload in client.calls]
+        requests = [
+            request
+            for request, _payload in client.calls
+            if not request.startswith("Get")
+        ]
         self.assertEqual(
             requests,
             [
@@ -1145,6 +1192,57 @@ class OBSDispatcherTests(unittest.TestCase):
             {"intensity": 0.9, "speed": 1.0},
         )
         self.assertEqual(result.executed, 1)
+
+    def test_filter_animation_never_writes_to_homonymous_source_after_collection_switch(self):
+        client = CollectionSwitchingFilterClient()
+        presentation = build_presentation_registry(
+            profiles_raw={"Pulse": {"enter_cue": "PulseIn"}},
+            cues_raw={
+                "PulseIn": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "animate_filter_settings",
+                                    "params": {
+                                        "source": "Global FX",
+                                        "filter": "Mako Glow",
+                                        "from_settings": {"intensity": 0.0},
+                                        "to_settings": {"intensity": 1.0},
+                                        "duration_ms": 2,
+                                        "steps": 2,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+
+        result = dispatcher.dispatch_state(
+            StreamState(presentation_profile="Pulse")
+        )
+
+        self.assertEqual(len(client.filter_writes), 1)
+        collection, payload = client.filter_writes[0]
+        self.assertEqual(collection, "A")
+        self.assertEqual(payload["sourceUuid"], "A:Global FX:uuid")
+        self.assertNotIn("sourceName", payload)
+        self.assertNotEqual(
+            dispatcher.applied_profiles().get("presentation"),
+            "Pulse",
+        )
+        self.assertTrue(
+            any("Scene Collection changed" in warning for warning in result.warnings),
+            result.warnings,
+        )
 
     def test_force_reapply_replays_enter_without_exiting_same_presentation(self):
         client = FakeClient()
