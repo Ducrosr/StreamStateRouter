@@ -10,6 +10,7 @@ import threading
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from ..events import EventBus
 from ..presentation import PresentationStateStore
 from ..services.paths import imported_widgets_dir
 from .packages import WidgetPackage, list_widget_packages
@@ -85,6 +86,140 @@ _BRIDGE_JS = r"""
 """.strip()
 
 
+_CHAT_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="chat">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --ssr-accent: #63e6ff;
+    --ssr-panel-opacity: .82;
+    --ssr-glow: 10px;
+    --ssr-font-size: 18px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    color: white;
+    font-family: Inter, "Segoe UI", sans-serif;
+    font-size: var(--ssr-font-size);
+  }
+  #chat {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 6px;
+    width: 100%;
+    height: 100%;
+    padding: 8px;
+  }
+  .message {
+    align-self: flex-start;
+    max-width: 100%;
+    padding: 7px 10px;
+    border-left: 2px solid var(--ssr-accent);
+    border-radius: 4px;
+    background: rgba(8, 17, 24, var(--ssr-panel-opacity));
+    box-shadow: 0 0 var(--ssr-glow) rgba(80, 220, 255, .18);
+    overflow-wrap: anywhere;
+    animation: ssr-enter 180ms ease-out both;
+  }
+  .author {
+    font-weight: 700;
+    margin-right: 7px;
+    color: var(--ssr-accent);
+  }
+  .platform {
+    margin-right: 6px;
+    opacity: .65;
+    font-size: .72em;
+    text-transform: uppercase;
+  }
+  @keyframes ssr-enter {
+    from { opacity: 0; transform: translateX(-8px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  html[data-ssr-animation-intensity="off"] .message {
+    animation: none;
+  }
+  html[data-ssr-animation-intensity="low"] .message {
+    animation-duration: 90ms;
+  }
+</style>
+</head>
+<body>
+<div id="chat" aria-live="polite"></div>
+<script src="/runtime/bridge.js?component=chat"></script>
+<script>
+(() => {
+  const root = document.getElementById("chat");
+  let after = 0;
+  const maxMessages = 80;
+
+  const addMessage = (event) => {
+    const payload = event.payload || {};
+    const row = document.createElement("div");
+    row.className = "message";
+    row.dataset.sequence = String(event.sequence || "");
+
+    const platform = document.createElement("span");
+    platform.className = "platform";
+    platform.textContent = event.platform || "";
+    row.appendChild(platform);
+
+    const author = document.createElement("span");
+    author.className = "author";
+    author.textContent =
+      payload.display_name || payload.user_name || payload.author || "—";
+    if (typeof payload.color === "string" && payload.color) {
+      author.style.color = payload.color;
+    }
+    row.appendChild(author);
+
+    const text = document.createElement("span");
+    text.className = "text";
+    text.textContent = payload.text || "";
+    row.appendChild(text);
+
+    root.appendChild(row);
+    while (root.children.length > maxMessages) {
+      root.removeChild(root.firstChild);
+    }
+  };
+
+  const refresh = async () => {
+    try {
+      const response = await fetch(
+        "/runtime/events?channel=chat&after=" + after + "&limit=50",
+        { cache: "no-store" }
+      );
+      if (response.ok) {
+        const snapshot = await response.json();
+        for (const event of snapshot.events || []) {
+          after = Math.max(after, Number(event.sequence) || 0);
+          if (event.type === "message") addMessage(event);
+        }
+      }
+    } catch (_) {
+      // Keep current chat visible during short SSR restarts.
+    } finally {
+      window.setTimeout(refresh, 300);
+    }
+  };
+  refresh();
+})();
+</script>
+</body>
+</html>
+""".strip()
+
+
 class _WidgetServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -98,10 +233,12 @@ class WidgetRuntime:
         config: WidgetRuntimeConfig,
         state_store: PresentationStateStore,
         *,
+        event_bus: EventBus | None = None,
         library_root: str | Path | None = None,
     ):
         self.config = config
         self.state_store = state_store
+        self.event_bus = event_bus if event_bus is not None else EventBus()
         self.library_root = (
             Path(library_root).expanduser().resolve()
             if library_root is not None
@@ -288,6 +425,47 @@ class WidgetRuntime:
                     )
                     return
 
+                if path == "/runtime/events":
+                    query = parse_qs(parsed.query)
+                    channel = str(
+                        query.get("channel", [""])[0]
+                    ).strip()
+                    try:
+                        after = max(
+                            0,
+                            int(query.get("after", ["0"])[0]),
+                        )
+                        limit = max(
+                            1,
+                            min(
+                                500,
+                                int(query.get("limit", ["100"])[0]),
+                            ),
+                        )
+                    except (TypeError, ValueError):
+                        self._send_json(
+                            {"error": "invalid_cursor"},
+                            status=HTTPStatus.BAD_REQUEST,
+                            head_only=head_only,
+                        )
+                        return
+                    if not channel:
+                        self._send_json(
+                            {"error": "channel_required"},
+                            status=HTTPStatus.BAD_REQUEST,
+                            head_only=head_only,
+                        )
+                        return
+                    self._send_json(
+                        runtime.event_bus.snapshot(
+                            channel,
+                            after=after,
+                            limit=limit,
+                        ),
+                        head_only=head_only,
+                    )
+                    return
+
                 if path == "/runtime/bridge.js":
                     body = _BRIDGE_JS.encode("utf-8")
                     self._send_bytes(
@@ -296,6 +474,15 @@ class WidgetRuntime:
                             "application/javascript; charset=utf-8"
                         ),
                         head_only=head_only,
+                    )
+                    return
+
+                if path in {"/builtin/chat", "/builtin/chat/"}:
+                    self._send_bytes(
+                        _CHAT_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
                     )
                     return
 
