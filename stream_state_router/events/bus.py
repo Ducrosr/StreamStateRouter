@@ -22,6 +22,8 @@ class EventBus:
         self._clock = clock
         self._lock = threading.RLock()
         self._sequence = 0
+        self._stream_id = uuid.uuid4().hex
+        self._dropped_through: dict[str, int] = {}
         self._history: dict[str, deque[EventEnvelope]] = defaultdict(
             lambda: deque(maxlen=self._history_limit)
         )
@@ -34,6 +36,10 @@ class EventBus:
     def sequence(self) -> int:
         with self._lock:
             return self._sequence
+
+    @property
+    def stream_id(self) -> str:
+        return self._stream_id
 
     def publish(
         self,
@@ -60,7 +66,13 @@ class EventBus:
                 emitted_at=self._clock(),
                 payload=payload or {},
             )
-            self._history[normalized_channel].append(event)
+            history = self._history[normalized_channel]
+            if len(history) == self._history_limit and history:
+                self._dropped_through[normalized_channel] = max(
+                    self._dropped_through.get(normalized_channel, 0),
+                    int(history[0].sequence),
+                )
+            history.append(event)
             subscribers = tuple(self._subscribers.values())
 
         for wanted_channel, callback in subscribers:
@@ -110,7 +122,10 @@ class EventBus:
             for event in values
             if event.sequence > wanted_after
         ]
-        return tuple(selected[-wanted_limit:])
+        # Continuation cursors must consume the oldest pending page first.
+        # Returning the newest page makes the client advance past events that
+        # were still retained but never delivered.
+        return tuple(selected[:wanted_limit])
 
     def snapshot(
         self,
@@ -118,19 +133,60 @@ class EventBus:
         *,
         after: int = 0,
         limit: int = 100,
+        stream_id: str = "",
     ) -> dict[str, object]:
-        events = self.events(
-            channel,
-            after=after,
-            limit=limit,
+        normalized = str(channel or "").strip().casefold()
+        requested_after = max(0, int(after))
+        expected_stream = str(stream_id or "").strip()
+        reset_required = bool(
+            expected_stream and expected_stream != self._stream_id
         )
+        effective_after = 0 if reset_required else requested_after
+        wanted_limit = max(1, min(500, int(limit)))
+
         with self._lock:
+            values = tuple(self._history.get(normalized, ()))
+            dropped_through = int(
+                self._dropped_through.get(normalized, 0)
+            )
             latest = self._sequence
+
+        pending = [
+            event for event in values if event.sequence > effective_after
+        ]
+        page = pending[:wanted_limit]
+        mode = (
+            "reset"
+            if reset_required
+            else "incremental"
+            if expected_stream
+            else "initial"
+        )
+        gap = bool(
+            mode == "incremental"
+            and effective_after < dropped_through
+        )
+        next_after = (
+            int(page[-1].sequence)
+            if page
+            else effective_after
+        )
         return {
-            "channel": str(channel or "").strip().casefold(),
-            "after": max(0, int(after)),
+            "channel": normalized,
+            "stream_id": self._stream_id,
+            "mode": mode,
+            "reset_required": reset_required,
+            "requested_after": requested_after,
+            "after": effective_after,
+            "next_after": next_after,
             "latest_sequence": latest,
-            "events": [event.as_mapping() for event in events],
+            "has_more": len(pending) > len(page),
+            "gap": gap,
+            "dropped_through": dropped_through if gap else 0,
+            "initial_history_truncated": bool(
+                mode in {"initial", "reset"} and dropped_through
+            ),
+            "events": [event.as_mapping() for event in page],
         }
 
     def clear(self, channel: str = "") -> None:
@@ -138,5 +194,7 @@ class EventBus:
         with self._lock:
             if normalized:
                 self._history.pop(normalized, None)
+                self._dropped_through.pop(normalized, None)
             else:
                 self._history.clear()
+                self._dropped_through.clear()
