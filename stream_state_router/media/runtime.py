@@ -248,13 +248,6 @@ class MediaRuntime:
                 raise TypeError(
                     "Le provider média doit retourner MediaState"
                 )
-            state = replace(
-                state,
-                observed_at_unix=float(self._wall_clock()),
-                capabilities=tuple(
-                    getattr(self.provider, "capabilities", ()) or ()
-                ),
-            )
         except Exception as exc:
             state = MediaState(
                 provider=self.provider.name,
@@ -262,6 +255,13 @@ class MediaRuntime:
                 playback_state="unknown",
                 error=str(exc),
             )
+        state = replace(
+            state,
+            observed_at_unix=float(self._wall_clock()),
+            capabilities=tuple(
+                getattr(self.provider, "capabilities", ()) or ()
+            ),
+        )
         self.state_store.update(state)
         self._refresh_artwork(state)
         semantic_key = state.semantic_key()
