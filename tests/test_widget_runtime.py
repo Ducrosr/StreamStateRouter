@@ -132,6 +132,38 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(b"--ssr-", bridge)
             self.assertIn(b'component.mode === "hidden"', bridge)
 
+    def test_imported_html_can_receive_presentation_bridge_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, package = self._runtime(root)
+            source_entry = root / "source" / "index.html"
+            source_before = source_entry.read_text(encoding="utf-8")
+
+            _status, body, _content_type = self._get(
+                runtime.package_url(
+                    package.package_id,
+                    component="chat",
+                )
+            )
+            rendered = body.decode("utf-8")
+
+            self.assertIn(
+                '/runtime/bridge.js?component=chat',
+                rendered,
+            )
+            self.assertEqual(
+                source_entry.read_text(encoding="utf-8"),
+                source_before,
+            )
+
+            _status, plain_body, _content_type = self._get(
+                runtime.package_url(package.package_id)
+            )
+            self.assertNotIn(
+                b"/runtime/bridge.js",
+                plain_body,
+            )
+
     def test_events_endpoint_and_builtin_chat_are_platform_agnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _package = self._runtime(Path(tmp))
