@@ -148,7 +148,7 @@ class HtmlWidgetPackageTests(unittest.TestCase):
             discovered = list_widget_packages(root=target)
 
             self.assertNotIn("source_path", manifest)
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["schema_version"], 3)
             self.assertEqual(
                 manifest["published_files"],
                 ["widget.html"],
@@ -163,6 +163,14 @@ class HtmlWidgetPackageTests(unittest.TestCase):
             self.assertEqual(
                 discovered[0].published_files,
                 ("widget.html",),
+            )
+            self.assertEqual(
+                set(manifest["published_hashes"]),
+                {"widget.html"},
+            )
+            self.assertEqual(
+                dict(discovered[0].published_hashes),
+                manifest["published_hashes"],
             )
 
     def test_import_rejects_source_manifest_name_reserved_by_ssr(self) -> None:
