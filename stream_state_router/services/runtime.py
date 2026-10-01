@@ -2944,32 +2944,47 @@ class RoutingService:
                         raise RuntimeError(
                             "Impossible de déterminer la scène OBS cible"
                         )
-                    response = client.send(
-                        "CreateInput",
-                        {
-                            "sceneName": scene,
-                            "inputName": input_name,
-                            "inputKind": "browser_source",
-                            "inputSettings": {
-                                "url": url,
-                                "width": width,
-                                "height": height,
-                                "shutdown": bool(
-                                    command.options.get(
-                                        "shutdown_when_not_visible",
-                                        False,
-                                    )
-                                ),
-                                "restart_when_active": bool(
-                                    command.options.get(
-                                        "restart_when_active",
-                                        False,
-                                    )
-                                ),
-                            },
-                            "sceneItemEnabled": True,
+                    create_payload = {
+                        "sceneName": scene,
+                        "inputName": input_name,
+                        "inputKind": "browser_source",
+                        "inputSettings": {
+                            "url": url,
+                            "width": width,
+                            "height": height,
+                            "shutdown": bool(
+                                command.options.get(
+                                    "shutdown_when_not_visible",
+                                    False,
+                                )
+                            ),
+                            "restart_when_active": bool(
+                                command.options.get(
+                                    "restart_when_active",
+                                    False,
+                                )
+                            ),
                         },
-                    )
+                        "sceneItemEnabled": True,
+                    }
+                    # Discovery above may block in OBS. Re-admit the mutation
+                    # against the current lifecycle/generation immediately
+                    # before CreateInput, and keep that local lifecycle stable
+                    # until the single mutating request returns.
+                    with self._lock:
+                        if (
+                            self._stopping
+                            or not self._runtime_operational
+                            or not self._accept_obs_commands
+                            or command.generation != self._command_generation
+                        ):
+                            raise RuntimeError(
+                                "Commande annulée par arrêt/reconfiguration du runtime"
+                            )
+                        response = client.send(
+                            "CreateInput",
+                            create_payload,
+                        )
                     result = {
                         "scene": scene,
                         "input_name": input_name,
