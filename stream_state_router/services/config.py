@@ -1365,10 +1365,18 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             errors.append(f"{where}.{key} référence un profil inexistant : {value}")
 
     check_state_refs(fallback, "router.fallback_state")
+    fallback_state = dict(fallback) if isinstance(fallback, Mapping) else {}
     for index, raw in enumerate(rules):
-        if not isinstance(raw, Mapping) or str(raw.get("behavior", "match")).casefold() != "match":
+        if (
+            not isinstance(raw, Mapping)
+            or str(raw.get("behavior", "match")).casefold() != "match"
+        ):
             continue
-        check_state_refs(raw.get("state"), f"rules[{index}].state")
+        raw_state = raw.get("state")
+        merged_state = dict(fallback_state)
+        if isinstance(raw_state, Mapping):
+            merged_state.update(raw_state)
+        check_state_refs(merged_state, f"rules[{index}].state")
 
     return errors
 
@@ -1451,14 +1459,32 @@ def build_activation_policies(data: Mapping[str, Any]) -> dict[str, TriggerPolic
 
 def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
     router = data.get("router", {})
-    fallback = StreamState.from_mapping(router.get("fallback_state", {}))
+    fallback_raw = (
+        router.get("fallback_state", {})
+        if isinstance(router, Mapping)
+        else {}
+    )
+    fallback_mapping = (
+        dict(fallback_raw)
+        if isinstance(fallback_raw, Mapping)
+        else {}
+    )
+    fallback = StreamState.from_mapping(fallback_mapping)
     rules: list[AppRule] = []
     for raw in data.get("rules", []):
         if not isinstance(raw, Mapping):
             continue
         behavior_text = str(raw.get("behavior", "match")).casefold()
-        behavior = ResolutionKind.IGNORE if behavior_text == "ignore" else ResolutionKind.MATCH
+        behavior = (
+            ResolutionKind.IGNORE
+            if behavior_text == "ignore"
+            else ResolutionKind.MATCH
+        )
         conditions = raw.get("conditions")
+        raw_state = raw.get("state")
+        merged_state = dict(fallback_mapping)
+        if isinstance(raw_state, Mapping):
+            merged_state.update(raw_state)
         rules.append(
             AppRule(
                 name=str(raw.get("name") or "Unnamed rule"),
@@ -1470,7 +1496,7 @@ def build_ruleset(data: Mapping[str, Any]) -> tuple[RuleSet, int, int, int]:
                 enabled=bool(raw.get("enabled", True)),
                 behavior=behavior,
                 state=(
-                    StreamState.from_mapping(raw.get("state", {}))
+                    StreamState.from_mapping(merged_state)
                     if behavior is ResolutionKind.MATCH
                     else None
                 ),
