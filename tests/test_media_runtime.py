@@ -16,6 +16,19 @@ from stream_state_router.media import (
 
 class FakeProvider:
     name = "fake"
+    capabilities = (
+        "play",
+        "pause",
+        "stop",
+        "next",
+        "previous",
+        "seek",
+        "set_volume",
+        "play_uri",
+        "enqueue_uri",
+        "clear_queue",
+        "artwork",
+    )
 
     def __init__(self) -> None:
         self.playback_state = "stopped"
@@ -115,6 +128,43 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertEqual(state.duration_seconds, 0.0)
         self.assertEqual(state.position_seconds, 0.0)
         self.assertEqual(state.volume_percent, 0.0)
+
+    def test_runtime_stamps_observation_time_and_capabilities(self) -> None:
+        provider = FakeProvider()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=False),
+            provider,
+            wall_clock=lambda: 1234.5,
+        )
+
+        state = runtime.poll_once()
+
+        self.assertEqual(state.observed_at_unix, 1234.5)
+        self.assertIn("play", state.capabilities)
+        self.assertIn("artwork", state.capabilities)
+        public = runtime.state_store.public_snapshot()
+        self.assertEqual(public["observed_at_unix"], 1234.5)
+        self.assertIn("play", public["capabilities"])
+
+    def test_state_store_marks_old_observation_stale(self) -> None:
+        now = [10.0]
+        store = MediaStateStore("fake", clock=lambda: now[0])
+        store.update(
+            MediaState(
+                provider="fake",
+                connected=True,
+                playback_state="playing",
+            )
+        )
+
+        fresh = store.public_snapshot(stale_after_seconds=3.0)
+        self.assertFalse(fresh["stale"])
+        self.assertEqual(fresh["age_seconds"], 0.0)
+
+        now[0] = 13.5
+        stale = store.public_snapshot(stale_after_seconds=3.0)
+        self.assertTrue(stale["stale"])
+        self.assertEqual(stale["age_seconds"], 3.5)
 
     def test_poll_contains_invalid_provider_return_in_disconnected_state(self) -> None:
         provider = FakeProvider()
