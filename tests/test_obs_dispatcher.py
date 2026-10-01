@@ -1397,16 +1397,38 @@ class OBSDispatcherTests(unittest.TestCase):
         client = FakeClient()
         presentation = build_presentation_registry(
             profiles_raw={
-                "A": {"exit_cue": "ExitA"},
+                "A": {
+                    "exit_cue": "ExitA",
+                    "sound_set": "SoundA",
+                },
                 "B": {
                     "enter_cue": "EnterB",
                     "exit_cue": "ExitB",
+                    "sound_set": "SoundB",
                 },
             },
             cues_raw={
                 "ExitA": {"frames": []},
                 "EnterB": {"frames": []},
                 "ExitB": {"frames": []},
+            },
+            sound_sets_raw={
+                "SoundA": {
+                    "exit": [
+                        {
+                            "input": "Outro A",
+                            "action": "restart",
+                        }
+                    ]
+                },
+                "SoundB": {
+                    "enter": [
+                        {
+                            "input": "Intro B",
+                            "action": "play",
+                        }
+                    ]
+                },
             },
         )
         dispatcher = OBSDispatcher(
@@ -1443,6 +1465,38 @@ class OBSDispatcherTests(unittest.TestCase):
         self.assertNotIn(
             ("exit", "ExitB"),
             cues,
+        )
+        sound_ops = [
+            item
+            for item in row["operations"]
+            if item["type"] == "sound_set"
+        ]
+        self.assertEqual(
+            sound_ops,
+            [
+                {
+                    "type": "sound_set",
+                    "phase": "exit",
+                    "profile": "SoundA",
+                    "triggers": [
+                        {
+                            "input": "Outro A",
+                            "action": "restart",
+                        }
+                    ],
+                },
+                {
+                    "type": "sound_set",
+                    "phase": "enter",
+                    "profile": "SoundB",
+                    "triggers": [
+                        {
+                            "input": "Intro B",
+                            "action": "play",
+                        }
+                    ],
+                },
+            ],
         )
         self.assertEqual(client.calls, [])
 
