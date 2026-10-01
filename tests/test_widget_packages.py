@@ -173,7 +173,7 @@ class HtmlWidgetPackageTests(unittest.TestCase):
                 manifest["published_hashes"],
             )
 
-    def test_import_rejects_source_manifest_name_reserved_by_ssr(self) -> None:
+    def test_import_preserves_user_manifest_separate_from_ssr_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "module"
@@ -182,21 +182,38 @@ class HtmlWidgetPackageTests(unittest.TestCase):
                 "<html></html>",
                 encoding="utf-8",
             )
+            user_manifest = '{"name":"user-manifest"}'
             (source / "manifest.json").write_text(
-                '{"name":"user-manifest"}',
+                user_manifest,
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(
-                ValueError,
-                "manifest.json est réservé",
-            ):
-                import_html_module(
-                    source / "index.html",
-                    name="Unsafe Manifest",
-                    package_root=source,
-                    target_root=root / "library",
-                )
+            package = import_html_module(
+                source / "index.html",
+                name="PWA Widget",
+                package_root=source,
+                target_root=root / "library",
+            )
+
+            self.assertEqual(
+                (package.root / "manifest.json").read_text(
+                    encoding="utf-8"
+                ),
+                user_manifest,
+            )
+            self.assertEqual(
+                package.manifest.name,
+                ".ssr-package.json",
+            )
+            self.assertTrue(package.manifest.is_file())
+            self.assertIn(
+                "manifest.json",
+                package.published_files,
+            )
+            self.assertIn(
+                "manifest.json",
+                dict(package.published_hashes),
+            )
 
     def test_oversized_entry_is_rejected_before_reference_parsing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
