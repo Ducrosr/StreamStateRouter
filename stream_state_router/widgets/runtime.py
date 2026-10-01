@@ -81,7 +81,20 @@ _BRIDGE_JS = r"""
     );
   };
 
+  window.addEventListener("message", (event) => {
+    const message = event.data;
+    if (event.origin !== sourceUrl.origin) return;
+    if (!message || message.type !== "ssr.widget.state") return;
+    if (
+      requested &&
+      message.component &&
+      String(message.component) !== requested
+    ) return;
+    apply(message.state);
+  });
+
   const refresh = async () => {
+    if (window.parent !== window) return;
     try {
       const response = await fetch(stateUrl, { cache: "no-store" });
       if (response.ok) apply(await response.json());
@@ -568,7 +581,45 @@ class WidgetRuntime:
             or not candidate.is_file()
         ):
             return None
+        try:
+            published_relative = candidate.relative_to(root).as_posix()
+        except ValueError:
+            return None
+        if published_relative not in set(package.published_files):
+            return None
         return candidate
+
+    @staticmethod
+    def _package_csp(package: WidgetPackage) -> str:
+        origins: set[str] = set()
+        for raw in package.remote_references:
+            parts = urlsplit(str(raw))
+            if (
+                parts.scheme.casefold() not in {"http", "https"}
+                or not parts.netloc
+            ):
+                continue
+            origins.add(f"{parts.scheme.casefold()}://{parts.netloc}")
+        remote = " ".join(sorted(origins))
+        passive = "'self' data: blob:" + (
+            f" {remote}" if remote else ""
+        )
+        active = "'self' 'unsafe-inline'" + (
+            f" {remote}" if remote else ""
+        )
+        return (
+            f"default-src {passive}; "
+            f"script-src {active}; "
+            f"style-src {active}; "
+            f"img-src {passive}; "
+            f"media-src {passive}; "
+            f"font-src {passive}; "
+            "connect-src 'none'; "
+            "frame-src 'none'; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "form-action 'none'"
+        )
 
     @staticmethod
     def _component_host_html(component: str) -> bytes:
@@ -601,6 +652,19 @@ iframe{display:block}
   const host = document.getElementById("host");
   let current = "";
   let frame = null;
+  let lastState = null;
+
+  const postState = () => {
+    if (!frame || !frame.contentWindow || !lastState) return;
+    frame.contentWindow.postMessage(
+      {
+        type: "ssr.widget.state",
+        component,
+        state: lastState,
+      },
+      "*"
+    );
+  };
 
   const routeFor = (resource) => {
     const value = String(resource || fallback || "").trim();
@@ -620,6 +684,7 @@ iframe{display:block}
   };
 
   const apply = (state) => {
+    lastState = state || null;
     const c = (state && state.component_state) || {};
     if (c.mode === "hidden") {
       host.style.visibility = "hidden";
@@ -627,7 +692,10 @@ iframe{display:block}
     }
     host.style.visibility = "visible";
     const route = routeFor(c.resource);
-    if (route === current) return;
+    if (route === current) {
+      postState();
+      return;
+    }
     current = route;
     host.replaceChildren();
     frame = null;
@@ -636,6 +704,10 @@ iframe{display:block}
     frame.src = route;
     frame.setAttribute("allowtransparency", "true");
     frame.setAttribute("scrolling", "no");
+    if (route.startsWith("/widgets/")) {
+      frame.setAttribute("sandbox", "allow-scripts");
+    }
+    frame.addEventListener("load", postState);
     host.appendChild(frame);
   };
 
