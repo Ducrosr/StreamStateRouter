@@ -1146,6 +1146,130 @@ class OBSDispatcherTests(unittest.TestCase):
         )
         self.assertEqual(result.executed, 1)
 
+    def test_partial_cue_failure_does_not_replay_one_shot_effect(self):
+        client = FakeClient()
+        original_send = client.send
+
+        def send(request, data=None):
+            if (
+                request == "SetCurrentProgramScene"
+                and data
+                and data.get("sceneName") == "Missing"
+            ):
+                client.calls.append((request, data))
+                raise RuntimeError("missing scene")
+            return original_send(request, data)
+
+        client.send = send
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "Combat": {"enter_cue": "Enter"},
+            },
+            cues_raw={
+                "Enter": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "media_input_action",
+                                    "params": {
+                                        "input": "Music",
+                                        "action": "next",
+                                    },
+                                },
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "Missing"},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+        state = StreamState(presentation_profile="Combat")
+
+        first = dispatcher.dispatch_state(state)
+        second = dispatcher.dispatch_state(state)
+
+        media_calls = [
+            payload
+            for request, payload in client.calls
+            if request == "TriggerMediaInputAction"
+        ]
+        self.assertEqual(len(media_calls), 1)
+        self.assertTrue(first.warnings)
+        self.assertEqual(second.executed, 0)
+        self.assertEqual(
+            dispatcher.applied_profiles().get("presentation"),
+            "Combat",
+        )
+        self.assertEqual(
+            dispatcher.presentation_execution_status()["status"],
+            "uncertain",
+        )
+
+    def test_replaced_presentation_cancels_delayed_cue_before_next_write(self):
+        client = FakeClient()
+        presentation = build_presentation_registry(
+            profiles_raw={
+                "A": {"enter_cue": "EnterA"},
+                "B": {},
+            },
+            cues_raw={
+                "EnterA": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "A-now"},
+                                }
+                            ],
+                        },
+                        {
+                            "at_ms": 5000,
+                            "actions": [
+                                {
+                                    "type": "set_program_scene",
+                                    "params": {"scene": "A-late"},
+                                }
+                            ],
+                        },
+                    ]
+                }
+            },
+        )
+        dispatcher = OBSDispatcher(
+            client,
+            {},
+            presentation_registry=presentation,
+        )
+
+        dispatcher.dispatch_state(
+            StreamState(presentation_profile="A")
+        )
+        cancelled = dispatcher.cancel_presentation_tasks_for_state(
+            StreamState(presentation_profile="B")
+        )
+        progress = dispatcher.tick_presentation_tasks()
+
+        self.assertEqual(cancelled, 1)
+        self.assertEqual(progress.executed, 0)
+        scenes = [
+            payload["sceneName"]
+            for request, payload in client.calls
+            if request == "SetCurrentProgramScene"
+        ]
+        self.assertEqual(scenes, ["A-now"])
+
     def test_force_reapply_replays_enter_without_exiting_same_presentation(self):
         client = FakeClient()
         presentation = build_presentation_registry(
