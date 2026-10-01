@@ -4,7 +4,7 @@ import base64
 from dataclasses import dataclass
 import json
 import math
-from typing import Callable, Mapping
+from typing import Mapping
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
