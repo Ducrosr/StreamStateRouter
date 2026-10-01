@@ -148,6 +148,18 @@ class MediaRuntimeTests(unittest.TestCase):
 
         self.assertFalse(store.snapshot()["available"])
 
+    def test_media_state_clamps_position_to_known_duration(self) -> None:
+        state = MediaState(
+            provider="vlc",
+            connected=True,
+            playback_state="playing",
+            duration_seconds=60,
+            position_seconds=75,
+        )
+
+        self.assertEqual(state.duration_seconds, 60)
+        self.assertEqual(state.position_seconds, 60)
+
     def test_artwork_store_rejects_active_svg_content(self) -> None:
         store = MediaArtworkStore()
 
