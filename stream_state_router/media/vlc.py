@@ -8,6 +8,7 @@ import re
 import socket
 import time
 from typing import Mapping
+from urllib.error import HTTPError
 from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -177,17 +178,24 @@ class VLCHttpTransport:
 
             buffer = bytearray()
             marker = b"\r\n\r\n"
-            while marker not in buffer:
+            while True:
+                marker_index = buffer.find(marker)
+                if marker_index >= 0:
+                    if marker_index > 65536:
+                        raise ValueError(
+                            "En-têtes artwork VLC trop volumineux"
+                        )
+                    break
+                if len(buffer) > 65536:
+                    raise ValueError(
+                        "En-têtes artwork VLC trop volumineux"
+                    )
                 chunk = self._recv_deadline(sock, deadline)
                 if not chunk:
                     raise ValueError(
                         "Réponse artwork VLC interrompue avant les en-têtes"
                     )
                 buffer.extend(chunk)
-                if len(buffer) > 65536:
-                    raise ValueError(
-                        "En-têtes artwork VLC trop volumineux"
-                    )
 
             header_blob, body_start = bytes(buffer).split(marker, 1)
             lines = header_blob.split(b"\r\n")
@@ -324,9 +332,11 @@ class VLCProvider:
 
     def artwork(self, track_id: str = "") -> tuple[bytes, str]:
         item = str(track_id or "").strip()
-        path = "/art"
-        if item:
-            path += "?" + urlencode({"item": item})
+        if not item:
+            raise ValueError(
+                "Identifiant de playlist VLC requis pour une pochette qualifiée"
+            )
+        path = "/art?" + urlencode({"item": item})
         return self._transport.get_bytes(path)
 
     def state(self) -> MediaState:
@@ -403,6 +413,15 @@ class VLCProvider:
                 "/requests/status.json",
                 values,
             )
+        except HTTPError as exc:
+            if 400 <= int(exc.code) < 500:
+                raise RuntimeError(
+                    "VLC a refusé la commande "
+                    f"{command} (HTTP {int(exc.code)})"
+                ) from exc
+            raise MediaProviderCommandError(
+                f"Réponse VLC ambiguë après commande {command}"
+            ) from exc
         except Exception as exc:
             raise MediaProviderCommandError(
                 f"Réponse VLC ambiguë après commande {command}"

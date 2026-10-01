@@ -4,6 +4,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import time
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from stream_state_router.media import (
     MediaProviderCommandError,
@@ -269,21 +271,68 @@ class VLCProviderTests(unittest.TestCase):
             ],
         )
 
-    def test_provider_artwork_uses_vlc_art_endpoint(self) -> None:
+    def test_provider_artwork_refuses_unqualified_current_item(self) -> None:
         transport = FakeTransport(
             artwork=b"png-bytes",
             artwork_type="image/png",
         )
         provider = VLCProvider(VLCConfig(), transport=transport)
 
-        self.assertEqual(
-            provider.artwork(),
-            (b"png-bytes", "image/png"),
+        with self.assertRaisesRegex(ValueError, "playlist VLC requis"):
+            provider.artwork()
+
+        self.assertEqual(transport.calls, [])
+
+    def test_artwork_header_limit_ignores_body_bytes_received_with_marker(self) -> None:
+        body = b"\xff\xd8\xff" + b"x" * 65500
+        header = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: image/jpeg\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode("ascii")
+            + b"\r\n"
         )
-        self.assertEqual(
-            transport.calls,
-            [("/art", {"max_bytes": 8 * 1024 * 1024})],
+        first = header[:40]
+        second_capacity = 65536
+        second = (header[40:] + body)[:second_capacity]
+        consumed = max(0, second_capacity - len(header[40:]))
+        third = body[consumed:]
+
+        class FakeSocket:
+            def __init__(self):
+                self.chunks = [first, second, third, b""]
+                self.sent = b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _value):
+                return None
+
+            def sendall(self, data):
+                self.sent += bytes(data)
+
+            def recv(self, size):
+                if not self.chunks:
+                    return b""
+                chunk = self.chunks.pop(0)
+                self.assert_size = size
+                return chunk
+
+        fake = FakeSocket()
+        transport = VLCHttpTransport(
+            VLCConfig(password="secret", timeout_seconds=1.0)
         )
+        with patch(
+            "stream_state_router.media.vlc.socket.create_connection",
+            return_value=fake,
+        ):
+            content, content_type = transport.get_bytes("/art")
+
+        self.assertEqual(content, body)
+        self.assertEqual(content_type, "image/jpeg")
 
     def test_http_transport_rejects_oversized_artwork(self) -> None:
         with ArtworkServer(b"x" * 9) as server:
@@ -453,6 +502,34 @@ class VLCProviderTests(unittest.TestCase):
 
         with self.assertRaises(MediaProviderCommandError):
             provider.next()
+
+    def test_http_401_command_refusal_is_certain_failure(self) -> None:
+        class UnauthorizedTransport(FakeTransport):
+            def get_json(self, path, params=None):
+                values = dict(params or {})
+                self.calls.append((str(path), values))
+                if values.get("command"):
+                    raise HTTPError(
+                        "http://127.0.0.1:8080/requests/status.json",
+                        401,
+                        "Unauthorized",
+                        {},
+                        None,
+                    )
+                return {"state": "playing"}
+
+        provider = VLCProvider(
+            VLCConfig(),
+            transport=UnauthorizedTransport({"state": "playing"}),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "HTTP 401") as caught:
+            provider.next()
+
+        self.assertNotIsInstance(
+            caught.exception,
+            MediaProviderCommandError,
+        )
 
     def test_controls_use_explicit_pause_and_encoded_values(self) -> None:
         transport = FakeTransport({"state": "playing"})
