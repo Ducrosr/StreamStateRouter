@@ -26,6 +26,12 @@ class MediaStateStore:
         with self._lock:
             return self._mapping_locked()
 
+    def public_snapshot(self) -> dict[str, object]:
+        with self._lock:
+            payload = self._state.as_public_mapping()
+            payload["revision"] = self._revision
+            return payload
+
     def _mapping_locked(self) -> dict[str, object]:
         payload = self._state.as_mapping()
         payload["revision"] = self._revision
