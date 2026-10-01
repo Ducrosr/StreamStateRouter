@@ -72,8 +72,15 @@ async function waitForCommand(payload: Record<string, unknown>): Promise<Record<
     if (state === "completed") {
       return status;
     }
-    if (state === "failed") {
-      throw new Error(String(status.error ?? "Commande SSR échouée"));
+    if (state === "failed" || state === "expired") {
+      throw new Error(
+        String(
+          status.error ??
+          (state === "expired"
+            ? "Résultat de commande SSR expiré"
+            : "Commande SSR échouée")
+        )
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
