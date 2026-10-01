@@ -24,11 +24,16 @@ class VLCConfig:
             raise ValueError(
                 "VLC HTTP doit rester local (127.0.0.1, localhost ou ::1)"
             )
-        if not 1 <= int(self.port) <= 65535:
+        port = int(self.port)
+        if not 1 <= port <= 65535:
             raise ValueError("Port VLC invalide")
         timeout = float(self.timeout_seconds)
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("Timeout VLC invalide")
+        object.__setattr__(self, "host", host)
+        object.__setattr__(self, "port", port)
+        object.__setattr__(self, "password", str(self.password or ""))
+        object.__setattr__(self, "timeout_seconds", timeout)
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
