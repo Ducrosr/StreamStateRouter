@@ -8,6 +8,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from stream_state_router.media import MediaState, MediaStateStore
 from stream_state_router.presentation import (
     PresentationStateStore,
     build_presentation_registry,
@@ -155,6 +156,58 @@ class WidgetRuntimeTests(unittest.TestCase):
                 json.dumps(payload, ensure_ascii=False),
             )
 
+    def test_media_endpoint_exposes_normalized_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            media = MediaStateStore("vlc")
+            media.update(
+                MediaState(
+                    provider="vlc",
+                    connected=True,
+                    playback_state="playing",
+                    title="Mako Reactor",
+                    artist="Suno",
+                    album="Midgar Radio",
+                    duration_seconds=180,
+                    position_seconds=45,
+                    volume_percent=75,
+                    track_id="42",
+                )
+            )
+            runtime.media_state_store = media
+
+            status, body, content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+
+            self.assertEqual(status, 200)
+            self.assertIn("application/json", content_type)
+            self.assertEqual(payload["provider"], "vlc")
+            self.assertEqual(payload["playback_state"], "playing")
+            self.assertEqual(payload["title"], "Mako Reactor")
+            self.assertEqual(payload["position_seconds"], 45)
+            self.assertEqual(payload["revision"], 1)
+            self.assertNotIn("password", payload)
+
+    def test_builtin_radio_consumes_media_endpoint_without_html_injection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+
+            status, body, content_type = self._get(
+                runtime.base_url + "/builtin/radio"
+            )
+
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", content_type)
+            self.assertIn(b"/runtime/media", body)
+            self.assertIn(b"textContent", body)
+            self.assertNotIn(b"innerHTML", body)
+            self.assertIn(
+                b"/runtime/bridge.js?component=radio",
+                body,
+            )
+
     def test_runtime_serves_widget_entry_and_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, package = self._runtime(Path(tmp))
@@ -267,6 +320,7 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn("text/html", content_type)
             self.assertIn('const component = "chat"', html)
             self.assertIn('const fallback = "builtin:chat"', html)
+            self.assertIn('"radio"', html)
             self.assertIn(
                 '"/runtime/state?component="',
                 html,
