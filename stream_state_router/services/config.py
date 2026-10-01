@@ -1303,23 +1303,24 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                 f"{prefix}.frames dépasse {PRESENTATION_MAX_FRAMES} entrées"
             )
         total_actions = 0
+        cue_timing: list[tuple[float, float]] = []
         for frame_index, frame in enumerate(frames):
             fprefix = f"{prefix}.frames[{frame_index}]"
             if not isinstance(frame, Mapping):
                 errors.append(f"{fprefix} doit être un objet")
                 continue
             at_ms = frame.get("at_ms", 0)
-            if (
-                not _valid_int(
-                    at_ms,
-                    minimum=0,
-                    maximum=PRESENTATION_MAX_CUE_MS,
-                )
-            ):
+            valid_at_ms = _valid_int(
+                at_ms,
+                minimum=0,
+                maximum=PRESENTATION_MAX_CUE_MS,
+            )
+            if not valid_at_ms:
                 errors.append(
                     f"{fprefix}.at_ms doit être compris entre 0 et "
                     f"{PRESENTATION_MAX_CUE_MS}"
                 )
+            frame_delay_ms = 0.0
             actions = frame.get("actions", [])
             if not isinstance(actions, list):
                 errors.append(f"{fprefix}.actions doit être une liste")
@@ -1414,16 +1415,19 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         )
                 elif action_type == "wait_ms":
                     raw_duration = params.get("duration_ms")
-                    if (
+                    valid_duration = not (
                         isinstance(raw_duration, bool)
                         or not isinstance(raw_duration, (int, float))
                         or not math.isfinite(float(raw_duration))
                         or not 0.0 <= float(raw_duration) <= 10000.0
-                    ):
+                    )
+                    if not valid_duration:
                         errors.append(
                             f"{aprefix}.params.duration_ms doit être compris "
                             "entre 0 et 10000"
                         )
+                    else:
+                        frame_delay_ms += float(raw_duration)
                 elif action_type == "media_input_action":
                     cue_required_text("input")
                     action_name = str(
@@ -1477,15 +1481,19 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                                     f"{aprefix}.params.{side}.{key} doit être "
                                     "un nombre fini"
                                 )
-                    if not _valid_int(
-                        params.get("duration_ms", 300),
+                    animation_duration = params.get("duration_ms", 300)
+                    valid_animation_duration = _valid_int(
+                        animation_duration,
                         minimum=0,
                         maximum=10000,
-                    ):
+                    )
+                    if not valid_animation_duration:
                         errors.append(
                             f"{aprefix}.params.duration_ms doit être compris "
                             "entre 0 et 10000"
                         )
+                    else:
+                        frame_delay_ms += float(animation_duration)
                     if not _valid_int(
                         params.get("steps", 12),
                         minimum=1,
@@ -1506,6 +1514,20 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         errors.append(
                             f"{aprefix}.params.easing inconnu : {easing}"
                         )
+            if valid_at_ms:
+                cue_timing.append((float(at_ms), frame_delay_ms))
+        cursor_ms = 0.0
+        for frame_at_ms, frame_delay_ms in sorted(
+            cue_timing,
+            key=lambda item: item[0],
+        ):
+            cursor_ms = max(cursor_ms, frame_at_ms) + frame_delay_ms
+        if cursor_ms > PRESENTATION_MAX_CUE_MS:
+            errors.append(
+                f"{prefix} dépasse le budget temporel global de "
+                f"{PRESENTATION_MAX_CUE_MS} ms (durée sérielle "
+                f"{cursor_ms:.0f} ms)"
+            )
         if total_actions > PRESENTATION_MAX_ACTIONS_PER_CUE:
             errors.append(
                 f"{prefix} dépasse "
