@@ -173,6 +173,69 @@ class WidgetRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(body)["events"], [])
 
+    def test_builtin_events_and_alerts_use_normalized_event_channels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+
+            runtime.event_bus.publish(
+                channel="events",
+                type="follow",
+                platform="demo",
+                payload={
+                    "label": "Nouveau follower",
+                    "display_name": "Cloud",
+                },
+            )
+            runtime.event_bus.publish(
+                channel="alerts",
+                type="subscription",
+                platform="demo",
+                payload={
+                    "title": "NOUVEAU SOLDAT",
+                    "text": "Cloud rejoint le programme",
+                    "duration_ms": 4000,
+                },
+            )
+
+            _status, events_html, content_type = self._get(
+                runtime.base_url + "/builtin/events"
+            )
+            self.assertIn("text/html", content_type)
+            self.assertIn(
+                b"/runtime/events?channel=events",
+                events_html,
+            )
+            self.assertIn(b"textContent", events_html)
+            self.assertNotIn(b"innerHTML", events_html)
+
+            _status, alerts_html, content_type = self._get(
+                runtime.base_url + "/builtin/alerts"
+            )
+            self.assertIn("text/html", content_type)
+            self.assertIn(
+                b"/runtime/events?channel=alerts",
+                alerts_html,
+            )
+            self.assertIn(b"queue.push(event)", alerts_html)
+            self.assertNotIn(b"innerHTML", alerts_html)
+
+            _status, events_body, _content_type = self._get(
+                runtime.base_url
+                + "/runtime/events?channel=events&after=0"
+            )
+            _status, alerts_body, _content_type = self._get(
+                runtime.base_url
+                + "/runtime/events?channel=alerts&after=0"
+            )
+            self.assertEqual(
+                json.loads(events_body)["events"][0]["type"],
+                "follow",
+            )
+            self.assertEqual(
+                json.loads(alerts_body)["events"][0]["type"],
+                "subscription",
+            )
+
     def test_runtime_is_read_only_and_blocks_package_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, package = self._runtime(Path(tmp))
