@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import threading
-import time
 from typing import Any, Mapping
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
