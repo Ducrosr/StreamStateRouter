@@ -6,7 +6,6 @@ from typing import Mapping, Sequence
 
 from PySide6.QtWidgets import (
     QCheckBox,
-    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
