@@ -406,6 +406,7 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
   let after = 0;
   let streamId = "";
   const queue = [];
+  const maxQueuedAlerts = 100;
   let active = false;
   const showNext = () => {
     if (active || !queue.length) return;
@@ -447,11 +448,13 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
         ) {
           streamId = incomingStreamId;
           after = 0;
+          queue.length = 0;
           return;
         }
         if (incomingStreamId) streamId = incomingStreamId;
         for (const event of snapshot.events || []) {
           after = Math.max(after, Number(event.sequence) || 0);
+          if (queue.length >= maxQueuedAlerts) queue.shift();
           queue.push(event);
         }
         after = Math.max(after, Number(snapshot.next_after) || after);
