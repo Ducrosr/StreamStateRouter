@@ -8,7 +8,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from stream_state_router.media import MediaState, MediaStateStore
+from stream_state_router.media import MediaArtworkStore, MediaState, MediaStateStore
 from stream_state_router.presentation import (
     PresentationStateStore,
     build_presentation_registry,
@@ -190,8 +190,38 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["revision"], 1)
             self.assertNotIn("password", payload)
             self.assertNotIn("uri", payload)
-            self.assertNotIn("artwork_url", payload)
+            self.assertFalse(payload["artwork_available"])
+            self.assertEqual(payload["artwork_url"], "")
             self.assertNotIn("error", payload)
+
+    def test_media_artwork_is_served_from_safe_runtime_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            artwork = MediaArtworkStore()
+            artwork.update(
+                b"jpeg-cover",
+                content_type="image/jpeg",
+                identity="track-42",
+            )
+            runtime.media_artwork_store = artwork
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+            self.assertTrue(payload["artwork_available"])
+            self.assertEqual(payload["artwork_revision"], 1)
+            self.assertEqual(
+                payload["artwork_url"],
+                "/runtime/media/artwork?revision=1",
+            )
+
+            status, cover, content_type = self._get(
+                runtime.base_url + payload["artwork_url"]
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(cover, b"jpeg-cover")
+            self.assertIn("image/jpeg", content_type)
 
     def test_builtin_radio_consumes_media_endpoint_without_html_injection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,6 +234,8 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn("text/html", content_type)
             self.assertIn(b"/runtime/media", body)
+            self.assertIn(b'id="cover"', body)
+            self.assertIn(b"state.artwork_url", body)
             self.assertIn(b"textContent", body)
             self.assertNotIn(b"innerHTML", body)
             self.assertIn(
