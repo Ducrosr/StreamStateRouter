@@ -490,11 +490,14 @@ class VLCProvider:
         playback = self._playback_state(before)
         if playback == "playing":
             return
-        command = (
-            "pl_forceresume"
-            if playback == "paused"
-            else "pl_play"
-        )
+        if playback == "paused":
+            command = "pl_forceresume"
+        elif playback == "stopped":
+            command = "pl_play"
+        else:
+            raise RuntimeError(
+                "État VLC inconnu : lecture non déclenchée"
+            )
         after = self._command(command)
         if self._playback_state(after) != "playing":
             raise RuntimeError("VLC n'a pas démarré la lecture")

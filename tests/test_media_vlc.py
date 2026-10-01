@@ -516,6 +516,18 @@ class VLCProviderTests(unittest.TestCase):
             ],
         )
 
+    def test_play_rejects_unknown_state_without_sending_command(self) -> None:
+        transport = FakeTransport({"state": "buffering"})
+        provider = VLCProvider(VLCConfig(), transport=transport)
+
+        with self.assertRaisesRegex(RuntimeError, "État VLC inconnu"):
+            provider.play()
+
+        self.assertEqual(
+            transport.calls,
+            [("/requests/status.json", {})],
+        )
+
     def test_play_maps_stopped_paused_and_playing_without_toggle(self) -> None:
         for initial, expected_command in (
             ("stopped", "pl_play"),
