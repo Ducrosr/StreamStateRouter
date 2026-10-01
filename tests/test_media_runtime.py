@@ -129,6 +129,21 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertEqual(state.position_seconds, 0.0)
         self.assertEqual(state.volume_percent, 0.0)
 
+    def test_artwork_store_rejects_active_svg_content(self) -> None:
+        store = MediaArtworkStore()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Type de pochette",
+        ):
+            store.update(
+                b"<svg><script>alert(1)</script></svg>",
+                content_type="image/svg+xml",
+                identity="track-svg",
+            )
+
+        self.assertFalse(store.snapshot()["available"])
+
     def test_runtime_stamps_observation_time_and_capabilities(self) -> None:
         provider = FakeProvider()
         runtime = MediaRuntime(
