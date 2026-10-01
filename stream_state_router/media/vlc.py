@@ -4,8 +4,9 @@ import base64
 from dataclasses import dataclass
 import json
 import math
+import re
 from typing import Mapping
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .models import MediaState
@@ -190,6 +191,29 @@ class VLCProvider:
             values,
         )
 
+    @staticmethod
+    def _validated_media_uri(uri: str) -> str:
+        value = str(uri or "").strip()
+        if not value:
+            raise ValueError("URI média requise")
+        if re.match(r"^[A-Za-z]:[\\/]", value):
+            return value
+        parts = urlsplit(value)
+        scheme = parts.scheme.casefold()
+        if scheme in {"http", "https"} and parts.netloc:
+            return value
+        if (
+            scheme == "file"
+            and parts.path
+            and str(parts.hostname or "").casefold()
+            in {"", "localhost"}
+        ):
+            return value
+        raise ValueError(
+            "URI média non autorisée : utiliser un chemin local, "
+            "file:// local, http:// ou https://"
+        )
+
     def play(self) -> None:
         self._command("pl_forceresume")
 
@@ -219,16 +243,16 @@ class VLCProvider:
         self._command("volume", val=vlc_value)
 
     def play_uri(self, uri: str) -> None:
-        value = str(uri or "").strip()
-        if not value:
-            raise ValueError("URI média requise")
-        self._command("in_play", input=value)
+        self._command(
+            "in_play",
+            input=self._validated_media_uri(uri),
+        )
 
     def enqueue_uri(self, uri: str) -> None:
-        value = str(uri or "").strip()
-        if not value:
-            raise ValueError("URI média requise")
-        self._command("in_enqueue", input=value)
+        self._command(
+            "in_enqueue",
+            input=self._validated_media_uri(uri),
+        )
 
     def clear_queue(self) -> None:
         self._command("pl_empty")
