@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 import threading
 from typing import Any, Mapping
 
@@ -28,27 +29,34 @@ class PresentationStateSnapshot:
             if wanted
             else {}
         )
+        component_state = (
+            copy.deepcopy(selected)
+            if selected
+            else {
+                "mode": "inherit",
+                "resource": "",
+                "settings": {},
+            }
+        )
         return {
             "revision": self.revision,
             "profile": self.profile,
             "lineage": list(self.lineage),
-            "theme": dict(self.theme),
+            "theme": copy.deepcopy(dict(self.theme)),
             "animation_intensity": self.animation_intensity,
             "widget_theme": self.widget_theme,
             "component": wanted,
-            "component_state": (
-                selected
-                if selected
+            "component_state": component_state,
+            # A component-scoped request must never expose sibling component
+            # settings to an imported renderer sharing the runtime transport.
+            "components": (
+                {wanted: copy.deepcopy(component_state)}
+                if wanted
                 else {
-                    "mode": "inherit",
-                    "resource": "",
-                    "settings": {},
+                    key: copy.deepcopy(dict(value))
+                    for key, value in self.components.items()
                 }
             ),
-            "components": {
-                key: dict(value)
-                for key, value in self.components.items()
-            },
         }
 
 
@@ -88,9 +96,11 @@ class PresentationStateStore:
                 revision=self._revision,
                 profile=profile.name,
                 lineage=tuple(profile.lineage),
-                theme=dict(profile.theme),
+                theme=copy.deepcopy(dict(profile.theme)),
                 components={
-                    str(key): _component_mapping(value)
+                    str(key): copy.deepcopy(
+                        dict(_component_mapping(value))
+                    )
                     for key, value in profile.components.items()
                 },
                 animation_intensity=profile.animation_intensity,
@@ -119,9 +129,9 @@ class PresentationStateStore:
                 revision=current.revision,
                 profile=current.profile,
                 lineage=tuple(current.lineage),
-                theme=dict(current.theme),
+                theme=copy.deepcopy(dict(current.theme)),
                 components={
-                    key: dict(value)
+                    key: copy.deepcopy(dict(value))
                     for key, value in current.components.items()
                 },
                 animation_intensity=current.animation_intensity,
