@@ -14,8 +14,11 @@ __all__ = [
     "required_scopes",
     "TWITCH_EVENTSUB_CREATE_URL",
     "TWITCH_EVENTSUB_WS_URL",
+    "TwitchDeviceAuthorization",
     "TwitchEventSubSessionCoordinator",
     "TwitchHelixClient",
+    "TwitchOAuthDeviceClient",
+    "TwitchOAuthTokens",
     "TwitchSessionInstruction",
     "TwitchTokenValidation",
 ]
@@ -23,8 +26,11 @@ __all__ = [
 from .twitch_session import (
     TWITCH_EVENTSUB_CREATE_URL,
     TWITCH_EVENTSUB_WS_URL,
+    TwitchDeviceAuthorization,
     TwitchEventSubSessionCoordinator,
     TwitchHelixClient,
+    TwitchOAuthDeviceClient,
+    TwitchOAuthTokens,
     TwitchSessionInstruction,
     TwitchTokenValidation,
 )
