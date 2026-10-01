@@ -97,7 +97,9 @@ class VLCHttpTransport:
         )
         with self._opener.open(
             request,
-            timeout=float(self.config.timeout_seconds),
+            # Artwork is optional metadata. Never let a cover fetch block
+            # media controls for the full provider timeout.
+            timeout=min(float(self.config.timeout_seconds), 2.0),
         ) as response:
             raw = response.read(2 * 1024 * 1024 + 1)
         if len(raw) > 2 * 1024 * 1024:
