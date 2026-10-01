@@ -9,6 +9,8 @@ export type SSRStatus = {
   media?: {
     running?: boolean;
     state?: {
+      connected?: boolean;
+      stale?: boolean;
       playback_state?: string;
       title?: string;
     };
