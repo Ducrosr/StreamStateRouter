@@ -396,7 +396,7 @@ class WidgetRuntimeTests(unittest.TestCase):
                 html,
             )
             self.assertIn(
-                '["chat","events","alerts","now-playing","clock","countdown"]',
+                '["chat","events","alerts","now-playing","clock","countdown","audience"]',
                 html,
             )
 
@@ -441,6 +441,44 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(
                 'const fallback = "builtin:countdown"',
                 html,
+            )
+
+    def test_builtin_audience_consumes_normalized_audience_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            runtime.event_bus.publish(
+                channel="audience",
+                type="state",
+                platform="twitch",
+                payload={
+                    "live": True,
+                    "viewer_count": 42,
+                    "title": "Midgar Live",
+                    "game_name": "Final Fantasy VII",
+                },
+            )
+
+            _status, html, content_type = self._get(
+                runtime.base_url + "/builtin/audience"
+            )
+            self.assertIn("text/html", content_type)
+            self.assertIn(
+                b"/runtime/events?channel=audience",
+                html,
+            )
+            self.assertIn(b"viewer_count", html)
+
+            _status, host, _content_type = self._get(
+                runtime.base_url + "/component/audience"
+            )
+            rendered = host.decode("utf-8")
+            self.assertIn(
+                'const fallback = "builtin:audience"',
+                rendered,
+            )
+            self.assertIn(
+                '["chat","events","alerts","now-playing","clock","countdown","audience"]',
+                rendered,
             )
 
     def test_runtime_is_read_only_and_blocks_package_escape(self) -> None:
