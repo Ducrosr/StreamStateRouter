@@ -1545,25 +1545,238 @@ class OBSDispatcher:
             variables=variables,
         )
 
-    def _execute_presentation_cue(
+    def _cue_wait_duration_ms(
+        self,
+        action: CueAction,
+        variables: Mapping[str, str] | None,
+    ) -> float:
+        rendered = self._render_value(
+            dict(action.params),
+            variables or self._execution_variables(),
+        )
+        raw = rendered.get("duration_ms")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(
+                "wait_ms requiert params.duration_ms numérique"
+            )
+        duration_ms = float(raw)
+        if (
+            not math.isfinite(duration_ms)
+            or not 0.0 <= duration_ms <= 10000.0
+        ):
+            raise ValueError(
+                "wait_ms params.duration_ms doit être compris entre 0 et 10000"
+            )
+        return duration_ms
+
+    def _new_presentation_task(
+        self,
+        cue: Cue,
+        *,
+        state: StreamState,
+        target_profile: str,
+        phase: str,
+    ) -> CueTask:
+        self._presentation_task_counter += 1
+        execution_id = (
+            f"presentation-{self._presentation_task_counter}"
+        )
+        task = CueTask(
+            cue=cue,
+            variables=self._execution_variables(state),
+            execution_id=execution_id,
+            target_profile=str(target_profile),
+            phase=str(phase),
+            started_at=time.monotonic(),
+        )
+        self._presentation_tasks.append(task)
+        self._presentation_execution_status = {
+            "status": "scheduled",
+            "execution_id": execution_id,
+            "cue": cue.name,
+            "phase": str(phase),
+            "target_profile": str(target_profile),
+            "error": "",
+        }
+        return task
+
+    def _schedule_presentation_cue(
         self,
         cue_name: str,
         *,
         state: StreamState,
-    ) -> tuple[int, int]:
+        target_profile: str,
+        phase: str,
+    ) -> CueTask | None:
         wanted = str(cue_name or "").strip()
         if not wanted:
-            return (0, 0)
+            return None
         cue = self._presentation_registry.cue(wanted)
         if cue is None:
             raise ValueError(f"Cue introuvable : {wanted}")
-        result = self._cue_executor.execute(
+        return self._new_presentation_task(
             cue,
-            variables=self._execution_variables(state),
+            state=state,
+            target_profile=target_profile,
+            phase=phase,
         )
-        return (
-            result.actions_executed,
-            result.actions_skipped,
+
+    def _schedule_sound_set_phase(
+        self,
+        profile: ResolvedPresentationProfile,
+        *,
+        phase: str,
+        state: StreamState,
+        target_profile: str,
+    ) -> CueTask | None:
+        name = str(profile.sound_set or "").strip()
+        if not name:
+            return None
+        sound_set = self._presentation_registry.sound_set(name)
+        if sound_set is None:
+            raise ValueError(f"SoundSet introuvable : {name}")
+        triggers = (
+            sound_set.enter
+            if str(phase).casefold() == "enter"
+            else sound_set.exit
+        )
+        actions = tuple(
+            CueAction(
+                type="media_input_action",
+                params={
+                    "input": trigger.input_name,
+                    "action": trigger.action,
+                },
+                enabled=True,
+                name=f"{name}:{phase}",
+            )
+            for trigger in triggers
+        )
+        if not actions:
+            return None
+        synthetic = Cue(
+            name=f"[SoundSet] {name}:{phase}",
+            frames=(CueFrame(at_ms=0, actions=actions),),
+            interrupt_policy="replace",
+        )
+        return self._new_presentation_task(
+            synthetic,
+            state=state,
+            target_profile=target_profile,
+            phase=f"sound:{phase}",
+        )
+
+    def cancel_presentation_tasks(
+        self,
+        reason: str = "replaced",
+    ) -> int:
+        cancelled = 0
+        while self._presentation_tasks:
+            task = self._presentation_tasks.popleft()
+            if not task.terminal:
+                task.cancel(reason)
+                cancelled += 1
+        if cancelled:
+            self._presentation_execution_status = {
+                "status": "cancelled",
+                "execution_id": "",
+                "cue": "",
+                "phase": "",
+                "target_profile": self._presentation_attempt_target,
+                "error": str(reason),
+            }
+        return cancelled
+
+    def cancel_presentation_tasks_for_state(
+        self,
+        state: StreamState | None,
+    ) -> int:
+        if state is None or not self._presentation_tasks:
+            return 0
+        wanted = state.profile_name("presentation")
+        if all(
+            task.target_profile == wanted
+            for task in self._presentation_tasks
+        ):
+            return 0
+        return self.cancel_presentation_tasks(
+            "remplacé par un nouvel état de routage"
+        )
+
+    def presentation_execution_status(self) -> dict[str, object]:
+        result = dict(self._presentation_execution_status)
+        result["pending_tasks"] = len(self._presentation_tasks)
+        return result
+
+    def next_presentation_deadline(self) -> float | None:
+        if not self._presentation_tasks:
+            return None
+        return self._presentation_tasks[0].next_deadline
+
+    def tick_presentation_tasks(
+        self,
+        *,
+        max_actions: int = 16,
+    ) -> DispatchResult:
+        executed = 0
+        skipped = 0
+        warnings: list[str] = []
+        remaining = max(1, int(max_actions))
+
+        while self._presentation_tasks and remaining > 0:
+            task = self._presentation_tasks[0]
+            step = task.advance(
+                action_executor=self._execute_cue_action,
+                wait_resolver=self._cue_wait_duration_ms,
+                max_actions=remaining,
+            )
+            executed += step.actions_executed
+            skipped += step.actions_skipped
+            remaining -= (
+                step.actions_executed + step.actions_skipped
+            )
+            self._presentation_execution_status = {
+                "status": step.status,
+                "execution_id": step.execution_id,
+                "cue": step.cue,
+                "phase": step.phase,
+                "target_profile": task.target_profile,
+                "error": step.error,
+            }
+
+            if step.status in {"failed", "uncertain"}:
+                warnings.append(
+                    f"{step.phase}/{step.cue}: "
+                    f"{step.error or step.status}"
+                )
+                self._presentation_tasks.popleft()
+                # Do not continue a transition chain after an uncertain
+                # one-shot effect. The remaining actions are cancelled and
+                # never replayed automatically.
+                self.cancel_presentation_tasks(
+                    "chaîne annulée après effet échoué ou incertain"
+                )
+                break
+
+            if step.status in {"completed", "cancelled"}:
+                self._presentation_tasks.popleft()
+                continue
+
+            # Active but waiting for a frame/wait deadline, or this tick's
+            # mutation budget was exhausted.
+            if (
+                step.actions_executed == 0
+                and step.actions_skipped == 0
+            ):
+                break
+            if remaining <= 0:
+                break
+
+        return DispatchResult(
+            executed,
+            skipped,
+            ("presentation",) if executed or skipped or warnings else (),
+            tuple(warnings),
         )
 
     def _resolve_presentation(
