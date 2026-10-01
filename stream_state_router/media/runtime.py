@@ -85,6 +85,7 @@ class MediaRuntime:
         self.config = config
         self.provider = provider
         self.state_store = state_store or MediaStateStore(provider.name)
+        self.state_store.set_expected_poll(config.poll_seconds)
         self.artwork_store = artwork_store or MediaArtworkStore()
         self.event_bus = event_bus
         self._clock = clock
