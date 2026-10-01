@@ -39,9 +39,14 @@ SUPPORTED_ACTION_TYPES = {
     "windows_hdr",
     "wait_ms",
 }
-PRESENTATION_CUE_ACTION_TYPES = SUPPORTED_ACTION_TYPES | {
+PRESENTATION_CUE_ACTION_TYPES = (
+    SUPPORTED_ACTION_TYPES
+    - {
+        "source_filter_enabled",
+        "source_filter_settings",
+    }
+) | {
     "media_input_action",
-    "animate_filter_settings",
 }
 LAYOUT_ANCHORS = {
     "top_left",
