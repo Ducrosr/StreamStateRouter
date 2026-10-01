@@ -50,6 +50,79 @@ class EventBusTests(unittest.TestCase):
             [3],
         )
 
+    def test_snapshot_paginates_oldest_pending_events_without_skipping(self) -> None:
+        bus = EventBus(history_limit=50)
+        for index in range(30):
+            bus.publish(
+                channel="chat",
+                type="message",
+                payload={"index": index + 1},
+            )
+
+        first = bus.snapshot("chat", after=0, limit=20)
+        self.assertEqual(
+            [event["sequence"] for event in first["events"]],
+            list(range(1, 21)),
+        )
+        self.assertTrue(first["has_more"])
+        self.assertEqual(first["next_after"], 20)
+
+        second = bus.snapshot(
+            "chat",
+            after=first["next_after"],
+            limit=20,
+            stream_id=first["stream_id"],
+        )
+        self.assertEqual(
+            [event["sequence"] for event in second["events"]],
+            list(range(21, 31)),
+        )
+        self.assertFalse(second["has_more"])
+        self.assertEqual(second["mode"], "incremental")
+
+    def test_snapshot_resets_cursor_when_stream_identity_changes(self) -> None:
+        old_bus = EventBus()
+        old_bus.publish(channel="events", type="old")
+        old_stream = old_bus.stream_id
+
+        new_bus = EventBus()
+        new_bus.publish(channel="events", type="new")
+        snapshot = new_bus.snapshot(
+            "events",
+            after=30,
+            limit=20,
+            stream_id=old_stream,
+        )
+
+        self.assertNotEqual(snapshot["stream_id"], old_stream)
+        self.assertTrue(snapshot["reset_required"])
+        self.assertEqual(snapshot["mode"], "reset")
+        self.assertEqual(snapshot["after"], 0)
+        self.assertEqual(
+            [event["type"] for event in snapshot["events"]],
+            ["new"],
+        )
+
+    def test_snapshot_reports_incremental_gap_after_history_eviction(self) -> None:
+        bus = EventBus(history_limit=2)
+        first = bus.publish(channel="alerts", type="one")
+        bus.publish(channel="alerts", type="two")
+        bus.publish(channel="alerts", type="three")
+
+        snapshot = bus.snapshot(
+            "alerts",
+            after=first.sequence - 1,
+            limit=20,
+            stream_id=bus.stream_id,
+        )
+
+        self.assertTrue(snapshot["gap"])
+        self.assertEqual(snapshot["dropped_through"], first.sequence)
+        self.assertEqual(
+            [event["type"] for event in snapshot["events"]],
+            ["two", "three"],
+        )
+
     def test_subscriber_can_filter_channel_and_failure_is_isolated(self) -> None:
         bus = EventBus()
         seen: list[str] = []
