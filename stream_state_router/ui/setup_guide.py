@@ -6,6 +6,7 @@ from typing import Mapping, Sequence
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -679,4 +681,125 @@ class SetupGuideDialog(QDialog):
                 else ""
             ),
             html_name=self.html_name.text().strip(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WidgetObsInstallResult:
+    input_name: str
+    scene: str
+    component: str
+    width: int
+    height: int
+    shutdown_when_not_visible: bool
+    restart_when_active: bool
+
+
+class WidgetObsInstallDialog(QDialog):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        module_name: str,
+        default_scene: str = "",
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Créer le module dans OBS")
+        self.resize(560, 390)
+
+        root = QVBoxLayout(self)
+        title = QLabel(f"Créer « {module_name} » comme Browser Source")
+        title.setStyleSheet("font-size: 15pt; font-weight: 700;")
+        root.addWidget(title)
+
+        note = QLabel(
+            "La création passe par le worker SSR. Laissez la scène vide "
+            "pour utiliser la scène programme courante."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("Muted")
+        root.addWidget(note)
+
+        form = QFormLayout()
+        self.input_name = QLineEdit(f"[SSR] {module_name}")
+        form.addRow("Nom dans OBS", self.input_name)
+
+        self.scene = QLineEdit(default_scene)
+        self.scene.setPlaceholderText(
+            "Vide = scène programme courante"
+        )
+        form.addRow("Scène OBS", self.scene)
+
+        self.component = QLineEdit()
+        self.component.setPlaceholderText(
+            "Optionnel, ex. chat / events / radio"
+        )
+        form.addRow("Composant SSR", self.component)
+
+        size_row = QWidget()
+        size_lay = QHBoxLayout(size_row)
+        size_lay.setContentsMargins(0, 0, 0, 0)
+        self.width = QSpinBox()
+        self.width.setRange(16, 8192)
+        self.width.setValue(800)
+        self.height = QSpinBox()
+        self.height.setRange(16, 8192)
+        self.height.setValue(600)
+        size_lay.addWidget(QLabel("L"))
+        size_lay.addWidget(self.width)
+        size_lay.addWidget(QLabel("H"))
+        size_lay.addWidget(self.height)
+        size_lay.addStretch(1)
+        form.addRow("Taille navigateur", size_row)
+
+        self.shutdown = QCheckBox(
+            "Fermer la page quand la source n’est pas visible"
+        )
+        form.addRow("", self.shutdown)
+
+        self.restart = QCheckBox(
+            "Recharger la page quand la source devient active"
+        )
+        form.addRow("", self.restart)
+
+        root.addLayout(form)
+
+        warning = QLabel(
+            "Cette opération modifie OBS immédiatement et est protégée "
+            "par Safe Live lorsqu’un stream ou un enregistrement est actif."
+        )
+        warning.setWordWrap(True)
+        warning.setObjectName("Warn")
+        root.addWidget(warning)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        create = QPushButton("Créer dans OBS")
+        create.setObjectName("LiveAction")
+        create.clicked.connect(self._accept_checked)
+        actions.addWidget(create)
+        root.addLayout(actions)
+
+    def _accept_checked(self) -> None:
+        if not self.input_name.text().strip():
+            QMessageBox.warning(
+                self,
+                "Créer le module dans OBS",
+                "Le nom de la source OBS est requis.",
+            )
+            return
+        self.accept()
+
+    def result_value(self) -> WidgetObsInstallResult:
+        return WidgetObsInstallResult(
+            input_name=self.input_name.text().strip(),
+            scene=self.scene.text().strip(),
+            component=self.component.text().strip(),
+            width=self.width.value(),
+            height=self.height.value(),
+            shutdown_when_not_visible=self.shutdown.isChecked(),
+            restart_when_active=self.restart.isChecked(),
         )
