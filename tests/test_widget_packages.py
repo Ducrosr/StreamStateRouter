@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from stream_state_router.widgets import (
     import_html_module,
@@ -163,6 +164,55 @@ class HtmlWidgetPackageTests(unittest.TestCase):
                 discovered[0].published_files,
                 ("widget.html",),
             )
+
+    def test_import_rejects_source_manifest_name_reserved_by_ssr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "module"
+            source.mkdir()
+            (source / "index.html").write_text(
+                "<html></html>",
+                encoding="utf-8",
+            )
+            (source / "manifest.json").write_text(
+                '{"name":"user-manifest"}',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "manifest.json est réservé",
+            ):
+                import_html_module(
+                    source / "index.html",
+                    name="Unsafe Manifest",
+                    package_root=source,
+                    target_root=root / "library",
+                )
+
+    def test_oversized_entry_is_rejected_before_reference_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = root / "index.html"
+            entry.write_text(
+                "<html><body>too-large</body></html>",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "stream_state_router.widgets.packages._MAX_BYTES",
+                8,
+            ):
+                with patch(
+                    "stream_state_router.widgets.packages._references_for_file"
+                ) as parser:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "limite d’import",
+                    ):
+                        inspect_html_module(entry)
+
+            parser.assert_not_called()
 
     def test_entry_cannot_escape_selected_package_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
