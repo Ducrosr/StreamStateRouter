@@ -4,6 +4,7 @@ import unittest
 
 from stream_state_router.presentation import (
     CueExecutor,
+    CueTask,
     PresentationStateStore,
     build_presentation_registry,
 )
@@ -266,6 +267,135 @@ class PresentationEngineTests(unittest.TestCase):
         )
         self.assertEqual(cue.duration_ms, 200)
         self.assertEqual(cue.action_count, 3)
+
+    def test_progressive_cue_wait_never_sleeps_or_blocks_next_observation(self) -> None:
+        registry = build_presentation_registry(
+            profiles_raw={},
+            cues_raw={
+                "Enter": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {"type": "first", "params": {}},
+                                {
+                                    "type": "wait_ms",
+                                    "params": {"duration_ms": 10000},
+                                },
+                                {"type": "second", "params": {}},
+                            ],
+                        },
+                        {
+                            "at_ms": 100,
+                            "actions": [
+                                {"type": "third", "params": {}},
+                            ],
+                        },
+                    ]
+                }
+            },
+        )
+        cue = registry.cue("Enter")
+        assert cue is not None
+        clock = _Clock()
+        calls: list[str] = []
+        task = CueTask(
+            cue=cue,
+            variables={},
+            execution_id="cue-1",
+            target_profile="A",
+            phase="enter",
+            started_at=clock.monotonic(),
+        )
+
+        first = task.advance(
+            action_executor=lambda action, _variables: calls.append(action.type),
+            wait_resolver=lambda action, _variables: float(
+                action.params["duration_ms"]
+            ),
+            clock=clock.monotonic,
+        )
+
+        self.assertEqual(calls, ["first"])
+        self.assertEqual(first.actions_executed, 2)
+        self.assertEqual(task.status, "active")
+        self.assertEqual(clock.now, 0.0)
+        self.assertEqual(task.next_deadline, 10.0)
+
+        clock.now = 5.0
+        blocked = task.advance(
+            action_executor=lambda action, _variables: calls.append(action.type),
+            wait_resolver=lambda action, _variables: float(
+                action.params["duration_ms"]
+            ),
+            clock=clock.monotonic,
+        )
+        self.assertEqual(blocked.actions_executed, 0)
+        self.assertEqual(calls, ["first"])
+
+        clock.now = 10.0
+        final = task.advance(
+            action_executor=lambda action, _variables: calls.append(action.type),
+            wait_resolver=lambda action, _variables: float(
+                action.params["duration_ms"]
+            ),
+            clock=clock.monotonic,
+        )
+        self.assertEqual(final.status, "completed")
+        self.assertEqual(calls, ["first", "second", "third"])
+
+    def test_progressive_cue_never_retries_consumed_uncertain_action(self) -> None:
+        registry = build_presentation_registry(
+            profiles_raw={},
+            cues_raw={
+                "Enter": {
+                    "frames": [
+                        {
+                            "at_ms": 0,
+                            "actions": [
+                                {"type": "media_input_action", "params": {}},
+                                {"type": "set_program_scene", "params": {}},
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        cue = registry.cue("Enter")
+        assert cue is not None
+        clock = _Clock()
+        calls: list[str] = []
+
+        def execute(action, _variables) -> None:
+            calls.append(action.type)
+            if action.type == "set_program_scene":
+                raise RuntimeError("missing scene")
+
+        task = CueTask(
+            cue=cue,
+            variables={},
+            execution_id="cue-2",
+            target_profile="A",
+            phase="enter",
+            started_at=clock.monotonic(),
+        )
+        first = task.advance(
+            action_executor=execute,
+            wait_resolver=lambda _action, _variables: 0.0,
+            clock=clock.monotonic,
+        )
+        second = task.advance(
+            action_executor=execute,
+            wait_resolver=lambda _action, _variables: 0.0,
+            clock=clock.monotonic,
+        )
+
+        self.assertEqual(first.status, "uncertain")
+        self.assertEqual(second.status, "uncertain")
+        self.assertEqual(
+            calls,
+            ["media_input_action", "set_program_scene"],
+        )
 
     def test_timeline_waits_cooperatively_and_serializes_frame_actions(self) -> None:
         registry = build_presentation_registry(
