@@ -276,14 +276,6 @@ def inspect_html_module(
                         pending.append(candidate)
 
     files = sorted(local_files)
-    if any(
-        path.relative_to(root).as_posix().casefold() == "manifest.json"
-        for path in files
-    ):
-        raise ValueError(
-            "manifest.json est réservé au manifeste technique SSR ; "
-            "renommez ce fichier dans le module avant l’import"
-        )
     if len(files) > _MAX_FILES:
         raise ValueError(
             f"Le module contient plus de {_MAX_FILES} fichiers gérés"
@@ -373,7 +365,7 @@ def import_html_module(
             inspection.package_root
         )
         imported_entry = destination / entry_relative
-        manifest = destination / "manifest.json"
+        manifest = destination / ".ssr-package.json"
         published_files = tuple(
             sorted(
                 source.relative_to(
@@ -452,7 +444,21 @@ def list_widget_packages(
         return ()
 
     found: list[WidgetPackage] = []
-    for manifest in sorted(library_root.glob("*/manifest.json")):
+    modern_manifests = sorted(
+        library_root.glob("*/.ssr-package.json")
+    )
+    modern_roots = {
+        manifest.parent.resolve()
+        for manifest in modern_manifests
+    }
+    legacy_manifests = [
+        manifest
+        for manifest in sorted(
+            library_root.glob("*/manifest.json")
+        )
+        if manifest.parent.resolve() not in modern_roots
+    ]
+    for manifest in (*modern_manifests, *legacy_manifests):
         try:
             payload = json.loads(
                 manifest.read_text(encoding="utf-8")
