@@ -39,6 +39,7 @@ SUPPORTED_ACTION_TYPES = {
 }
 PRESENTATION_CUE_ACTION_TYPES = SUPPORTED_ACTION_TYPES | {
     "media_input_action",
+    "animate_filter_settings",
 }
 LAYOUT_ANCHORS = {
     "top_left",
@@ -1308,6 +1309,71 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
                         errors.append(
                             f"{aprefix}.params.action doit être play, pause, "
                             "stop, restart, next ou previous"
+                        )
+                elif action_type == "animate_filter_settings":
+                    cue_required_text("source")
+                    cue_required_text("filter")
+                    start_settings = params.get("from_settings", {})
+                    end_settings = params.get("to_settings")
+                    if not isinstance(start_settings, Mapping):
+                        errors.append(
+                            f"{aprefix}.params.from_settings doit être un objet"
+                        )
+                        start_settings = {}
+                    if not isinstance(end_settings, Mapping) or not end_settings:
+                        errors.append(
+                            f"{aprefix}.params.to_settings doit être un objet non vide"
+                        )
+                        end_settings = {}
+                    keys = set(start_settings) | set(end_settings)
+                    for key in keys:
+                        if key not in start_settings or key not in end_settings:
+                            errors.append(
+                                f"{aprefix} doit définir {key} dans from_settings "
+                                "et to_settings"
+                            )
+                            continue
+                        for side, raw_value in (
+                            ("from_settings", start_settings.get(key)),
+                            ("to_settings", end_settings.get(key)),
+                        ):
+                            if (
+                                isinstance(raw_value, bool)
+                                or not isinstance(raw_value, (int, float))
+                                or not math.isfinite(float(raw_value))
+                            ):
+                                errors.append(
+                                    f"{aprefix}.params.{side}.{key} doit être "
+                                    "un nombre fini"
+                                )
+                    if not _valid_int(
+                        params.get("duration_ms", 300),
+                        minimum=0,
+                        maximum=10000,
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.duration_ms doit être compris "
+                            "entre 0 et 10000"
+                        )
+                    if not _valid_int(
+                        params.get("steps", 12),
+                        minimum=1,
+                        maximum=120,
+                    ):
+                        errors.append(
+                            f"{aprefix}.params.steps doit être compris entre 1 et 120"
+                        )
+                    easing = str(
+                        params.get("easing") or "linear"
+                    ).strip().casefold()
+                    if easing not in {
+                        "linear",
+                        "ease_in",
+                        "ease_out",
+                        "ease_in_out",
+                    }:
+                        errors.append(
+                            f"{aprefix}.params.easing inconnu : {easing}"
                         )
         if total_actions > PRESENTATION_MAX_ACTIONS_PER_CUE:
             errors.append(
