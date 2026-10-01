@@ -53,7 +53,15 @@ class FakeTransport:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def get_json(self, path, params=None):
-        self.calls.append((str(path), dict(params or {})))
+        values = dict(params or {})
+        self.calls.append((str(path), values))
+        command = str(values.get("command") or "")
+        if command in {"pl_play", "pl_forceresume"}:
+            self.status["state"] = "playing"
+        elif command == "pl_forcepause":
+            self.status["state"] = "paused"
+        elif command == "pl_stop":
+            self.status["state"] = "stopped"
         return self.status
 
     def get_bytes(self, path, *, max_bytes=8 * 1024 * 1024):
@@ -273,11 +281,10 @@ class VLCProviderTests(unittest.TestCase):
         self.assertEqual(state.title, "track.ogg")
         self.assertEqual(state.playback_state, "paused")
 
-    def test_controls_use_idempotent_pause_resume_and_encoded_values(self) -> None:
-        transport = FakeTransport({})
+    def test_controls_use_explicit_pause_and_encoded_values(self) -> None:
+        transport = FakeTransport({"state": "playing"})
         provider = VLCProvider(VLCConfig(), transport=transport)
 
-        provider.play()
         provider.pause()
         provider.stop()
         provider.next()
@@ -291,10 +298,6 @@ class VLCProviderTests(unittest.TestCase):
         self.assertEqual(
             transport.calls,
             [
-                (
-                    "/requests/status.json",
-                    {"command": "pl_forceresume"},
-                ),
                 (
                     "/requests/status.json",
                     {"command": "pl_forcepause"},
@@ -338,6 +341,80 @@ class VLCProviderTests(unittest.TestCase):
                     {"command": "pl_empty"},
                 ),
             ],
+        )
+
+    def test_play_maps_stopped_paused_and_playing_without_toggle(self) -> None:
+        for initial, expected_command in (
+            ("stopped", "pl_play"),
+            ("paused", "pl_forceresume"),
+            ("playing", None),
+        ):
+            with self.subTest(initial=initial):
+                transport = FakeTransport({"state": initial})
+                provider = VLCProvider(VLCConfig(), transport=transport)
+
+                provider.play()
+
+                commands = [
+                    row[1].get("command")
+                    for row in transport.calls
+                    if row[1].get("command")
+                ]
+                if expected_command is None:
+                    self.assertEqual(commands, [])
+                else:
+                    self.assertEqual(commands, [expected_command])
+                self.assertEqual(transport.status["state"], "playing")
+
+    def test_play_reports_failure_when_playlist_cannot_start(self) -> None:
+        class EmptyPlaylistTransport(FakeTransport):
+            def get_json(self, path, params=None):
+                values = dict(params or {})
+                self.calls.append((str(path), values))
+                return {"state": "stopped"}
+
+        provider = VLCProvider(
+            VLCConfig(),
+            transport=EmptyPlaylistTransport({"state": "stopped"}),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "pas démarré"):
+            provider.play()
+
+    def test_media_uri_rejects_unc_encoded_and_ambiguous_file_forms(self) -> None:
+        provider = VLCProvider(
+            VLCConfig(),
+            transport=FakeTransport({}),
+        )
+        rejected = (
+            "file://///server/share/music.flac",
+            "file:///%2F%2Fserver/share/music.flac",
+            "file:///%5C%5Cserver/share/music.flac",
+            "file:relative.mp3",
+            "file:///relative.mp3",
+            "file://user@localhost/C:/Music/a.mp3",
+            "https://user:secret@example.test/audio",
+            "https://example.test:bad/audio",
+            "https://example.test/audio\nnext",
+        )
+        for value in rejected:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "non autorisée"):
+                    provider.play_uri(value)
+
+    def test_media_uri_accepts_windows_file_uri_with_unicode_and_percent(self) -> None:
+        transport = FakeTransport({})
+        provider = VLCProvider(VLCConfig(), transport=transport)
+
+        value = "file:///C:/Musique/%C3%89t%C3%A9%20Mako%25.flac"
+        provider.play_uri(value)
+
+        self.assertEqual(
+            transport.calls[-1],
+            (
+                "/requests/status.json",
+                {"command": "in_play", "input": value},
+            ),
         )
 
     def test_control_validation_rejects_unsafe_numbers_and_empty_uri(self) -> None:
