@@ -87,13 +87,27 @@ _BRIDGE_JS = r"""
   window.addEventListener("message", (event) => {
     const message = event.data;
     if (event.origin !== sourceUrl.origin) return;
-    if (!message || message.type !== "ssr.widget.state") return;
+    if (!message) return;
+    if (message.type === "ssr.widget.state") {
+      if (
+        requested &&
+        message.component &&
+        String(message.component) !== requested
+      ) return;
+      apply(message.state);
+      return;
+    }
     if (
-      requested &&
-      message.component &&
-      String(message.component) !== requested
-    ) return;
-    apply(message.state);
+      message.type === "ssr.media.state" &&
+      requested === "radio"
+    ) {
+      window.dispatchEvent(
+        new CustomEvent(
+          "ssrmediastatechange",
+          { detail: message.state || {} }
+        )
+      );
+    }
   });
 
   const refresh = async () => {
@@ -803,6 +817,24 @@ iframe{display:block}
   let current = "";
   let frame = null;
   let lastState = null;
+  let lastMediaState = null;
+
+  const postMediaState = () => {
+    if (
+      component !== "radio" ||
+      !frame ||
+      !frame.contentWindow ||
+      !lastMediaState
+    ) return;
+    frame.contentWindow.postMessage(
+      {
+        type: "ssr.media.state",
+        component,
+        state: lastMediaState,
+      },
+      "*"
+    );
+  };
 
   const postState = () => {
     if (!frame || !frame.contentWindow || !lastState) return;
@@ -814,6 +846,7 @@ iframe{display:block}
       },
       "*"
     );
+    postMediaState();
   };
 
   const routeFor = (resource) => {
@@ -864,6 +897,21 @@ iframe{display:block}
     host.appendChild(frame);
   };
 
+  const refreshMedia = async () => {
+    if (component !== "radio") return;
+    try {
+      const response = await fetch(
+        "/runtime/media",
+        { cache: "no-store" }
+      );
+      if (response.ok) {
+        lastMediaState = await response.json();
+        postMediaState();
+      }
+    } catch (_) {}
+    finally { window.setTimeout(refreshMedia, 500); }
+  };
+
   const refresh = async () => {
     try {
       const response = await fetch(
@@ -875,6 +923,7 @@ iframe{display:block}
     finally { window.setTimeout(refresh, 250); }
   };
   refresh();
+  refreshMedia();
 })();
 </script>
 </body>
