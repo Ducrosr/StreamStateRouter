@@ -24,6 +24,10 @@ __all__ = [
     "TwitchQtEventSubService",
     "TwitchCredentialBundle",
     "TwitchCredentialStore",
+    "TwitchPlatformConfig",
+    "TwitchPlatformController",
+    "build_twitch_platform_config",
+    "twitch_default_scopes",
 ]
 
 from .twitch_session import (
@@ -43,4 +47,11 @@ from .twitch_qt import TwitchQtEventSubService
 from .twitch_credentials import (
     TwitchCredentialBundle,
     TwitchCredentialStore,
+)
+
+from .twitch_controller import (
+    TwitchPlatformConfig,
+    TwitchPlatformController,
+    build_twitch_platform_config,
+    twitch_default_scopes,
 )
