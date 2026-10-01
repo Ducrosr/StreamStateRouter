@@ -164,6 +164,19 @@ class VLCProviderTests(unittest.TestCase):
             [("/art", {"max_bytes": 8 * 1024 * 1024})],
         )
 
+    def test_http_transport_rejects_oversized_artwork(self) -> None:
+        transport = VLCHttpTransport(VLCConfig(password="secret"))
+        transport._opener = FakeOpener(
+            b"x" * 9,
+            "image/jpeg",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "trop volumineuse",
+        ):
+            transport.get_bytes("/art", max_bytes=8)
+
     def test_status_is_normalized_without_leaking_vlc_shape(self) -> None:
         transport = FakeTransport(
             {
