@@ -20,6 +20,26 @@ abstract class CommandAction<T extends JsonObject> extends SingletonAction<T> {
   }
 }
 
+abstract class ExclusiveCommandAction<T extends JsonObject>
+  extends CommandAction<T> {
+  private pending = false;
+
+  protected async runExclusive(
+    ev: KeyDownEvent<T>,
+    fn: () => Promise<unknown>,
+  ): Promise<void> {
+    if (this.pending) {
+      return;
+    }
+    this.pending = true;
+    try {
+      await this.run(ev, fn);
+    } finally {
+      this.pending = false;
+    }
+  }
+}
+
 @action({ UUID: "com.remyducros.streamstaterouter.toggle-pause" })
 export class TogglePauseAction extends CommandAction<EmptySettings> {
   override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
@@ -72,9 +92,9 @@ export class CancelPreviewAction extends CommandAction<EmptySettings> {
 }
 
 @action({ UUID: "com.remyducros.streamstaterouter.media-toggle" })
-export class MediaToggleAction extends CommandAction<EmptySettings> {
+export class MediaToggleAction extends ExclusiveCommandAction<EmptySettings> {
   override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
-    await this.run(ev, async () => {
+    await this.runExclusive(ev, async () => {
       const status = await ssrClient.status();
       const media = status.media;
       if (!media?.running) {
@@ -97,23 +117,23 @@ export class MediaToggleAction extends CommandAction<EmptySettings> {
 }
 
 @action({ UUID: "com.remyducros.streamstaterouter.media-next" })
-export class MediaNextAction extends CommandAction<EmptySettings> {
+export class MediaNextAction extends ExclusiveCommandAction<EmptySettings> {
   override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
-    await this.run(ev, () => ssrClient.mediaNext());
+    await this.runExclusive(ev, () => ssrClient.mediaNext());
   }
 }
 
 @action({ UUID: "com.remyducros.streamstaterouter.media-previous" })
-export class MediaPreviousAction extends CommandAction<EmptySettings> {
+export class MediaPreviousAction extends ExclusiveCommandAction<EmptySettings> {
   override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
-    await this.run(ev, () => ssrClient.mediaPrevious());
+    await this.runExclusive(ev, () => ssrClient.mediaPrevious());
   }
 }
 
 @action({ UUID: "com.remyducros.streamstaterouter.media-stop" })
-export class MediaStopAction extends CommandAction<EmptySettings> {
+export class MediaStopAction extends ExclusiveCommandAction<EmptySettings> {
   override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
-    await this.run(ev, () => ssrClient.mediaStop());
+    await this.runExclusive(ev, () => ssrClient.mediaStop());
   }
 }
 
