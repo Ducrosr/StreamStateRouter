@@ -779,12 +779,15 @@ iframe{display:block}
                 content_type: str,
                 length: int,
                 cache: str = "no-store",
+                csp: str = "",
             ) -> None:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(length))
                 self.send_header("Cache-Control", cache)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
+                if csp:
+                    self.send_header("Content-Security-Policy", csp)
 
             def _send_bytes(
                 self,
@@ -794,12 +797,14 @@ iframe{display:block}
                 status: int = HTTPStatus.OK,
                 head_only: bool = False,
                 cache: str = "no-store",
+                csp: str = "",
             ) -> None:
                 self.send_response(int(status))
                 self._common_headers(
                     content_type=content_type,
                     length=len(body),
                     cache=cache,
+                    csp=csp,
                 )
                 self.end_headers()
                 if not head_only:
@@ -825,6 +830,20 @@ iframe{display:block}
                 )
 
             def _serve(self, *, head_only: bool) -> None:
+                raw_host = str(self.headers.get("Host") or "").strip()
+                parsed_host = urlsplit("//" + raw_host) if raw_host else None
+                host_name = (
+                    str(parsed_host.hostname or "").casefold()
+                    if parsed_host is not None
+                    else ""
+                )
+                if host_name not in {"127.0.0.1", "localhost", "::1"}:
+                    self._send_json(
+                        {"error": "invalid_host"},
+                        status=HTTPStatus.FORBIDDEN,
+                        head_only=head_only,
+                    )
+                    return
                 parsed = urlsplit(self.path)
                 path = parsed.path or "/"
                 if path == "/health":
@@ -923,6 +942,15 @@ iframe{display:block}
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
+                        csp=(
+                            "default-src 'self'; "
+                            "script-src 'self' 'unsafe-inline'; "
+                            "style-src 'self' 'unsafe-inline'; "
+                            "connect-src 'self'; "
+                            "frame-src 'self'; "
+                            "img-src 'self' data: blob:; "
+                            "object-src 'none'; base-uri 'none'"
+                        ),
                     )
                     return
 
@@ -975,11 +1003,13 @@ iframe{display:block}
                             head_only=head_only,
                         )
                         return
+                    decoded_package_id = unquote(package_id)
+                    package = runtime._package(decoded_package_id)
                     file_path = runtime._static_file(
-                        unquote(package_id),
+                        decoded_package_id,
                         relative if separator else "",
                     )
-                    if file_path is None:
+                    if package is None or file_path is None:
                         self._send_json(
                             {"error": "widget_file_not_found"},
                             status=HTTPStatus.NOT_FOUND,
@@ -1019,6 +1049,7 @@ iframe{display:block}
                         content_type=content_type,
                         head_only=head_only,
                         cache="no-cache",
+                        csp=runtime._package_csp(package),
                     )
                     return
 
