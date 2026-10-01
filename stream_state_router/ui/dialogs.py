@@ -1571,6 +1571,8 @@ class ActionDialog(QDialog):
         ("Afficher/masquer une source de scène", "scene_item_enabled"),
         ("Activer/désactiver un filtre", "source_filter_enabled"),
         ("Modifier les réglages d'un filtre", "source_filter_settings"),
+        ("Animer les réglages d'un filtre", "animate_filter_settings"),
+        ("Contrôler une source média", "media_input_action"),
         ("Mute/unmute une entrée", "input_mute"),
         ("Régler le volume d'une entrée (dB)", "input_volume_db"),
         ("Réglages avancés d'une entrée", "set_input_settings"),
@@ -1683,6 +1685,79 @@ class ActionDialog(QDialog):
             line("filter", "Filtre")
             json_settings("Settings du filtre (JSON)")
             check("overlay", "Fusionner avec les réglages existants", True)
+        elif kind == "animate_filter_settings":
+            line("source", "Source")
+            line("filter", "Filtre")
+            from_editor = QPlainTextEdit()
+            from_editor.setPlaceholderText(
+                '{"intensity": 0.2, "speed": 0.5}'
+            )
+            from_editor.setPlainText(
+                json.dumps(
+                    params.get("from_settings", {}),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            fields["from_settings"] = from_editor
+            form.addRow("Départ (JSON)", from_editor)
+
+            to_editor = QPlainTextEdit()
+            to_editor.setPlaceholderText(
+                '{"intensity": 0.9, "speed": 1.0}'
+            )
+            to_editor.setPlainText(
+                json.dumps(
+                    params.get("to_settings", {}),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            fields["to_settings"] = to_editor
+            form.addRow("Arrivée (JSON)", to_editor)
+
+            duration = QSpinBox()
+            duration.setRange(0, 10000)
+            duration.setSuffix(" ms")
+            duration.setValue(
+                int(params.get("duration_ms", 300) or 0)
+            )
+            fields["duration_ms"] = duration
+            form.addRow("Durée", duration)
+
+            steps = QSpinBox()
+            steps.setRange(1, 120)
+            steps.setValue(int(params.get("steps", 12) or 12))
+            fields["steps"] = steps
+            form.addRow("Étapes", steps)
+
+            combo(
+                "easing",
+                "Courbe",
+                [
+                    ("Linéaire", "linear"),
+                    ("Ease in", "ease_in"),
+                    ("Ease out", "ease_out"),
+                    ("Ease in/out", "ease_in_out"),
+                ],
+                "linear",
+            )
+            check("overlay", "Fusionner avec les réglages existants", True)
+        elif kind == "media_input_action":
+            line("input", "Source média OBS")
+            combo(
+                "action",
+                "Commande",
+                [
+                    ("Lire", "play"),
+                    ("Pause", "pause"),
+                    ("Arrêter", "stop"),
+                    ("Redémarrer", "restart"),
+                    ("Suivant", "next"),
+                    ("Précédent", "previous"),
+                ],
+                "restart",
+            )
         elif kind == "input_mute":
             line("input", "Entrée OBS")
             check("muted", "Couper le son", True)
@@ -1780,6 +1855,16 @@ class ActionDialog(QDialog):
             "scene_item_enabled": ("scene", "source"),
             "source_filter_enabled": ("source", "filter"),
             "source_filter_settings": ("source", "filter", "settings"),
+            "animate_filter_settings": (
+                "source",
+                "filter",
+                "from_settings",
+                "to_settings",
+                "duration_ms",
+                "steps",
+                "easing",
+            ),
+            "media_input_action": ("input", "action"),
             "input_mute": ("input",),
             "input_volume_db": ("input",),
             "set_input_settings": ("input", "settings"),
