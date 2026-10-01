@@ -170,6 +170,57 @@ class ShaderSet:
 
 
 @dataclass(frozen=True, slots=True)
+class SoundTrigger:
+    input_name: str
+    action: str = "restart"
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any],
+    ) -> "SoundTrigger":
+        return cls(
+            input_name=str(
+                raw.get("input")
+                or raw.get("input_name")
+                or ""
+            ).strip(),
+            action=str(
+                raw.get("action") or "restart"
+            ).strip().casefold(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SoundSet:
+    name: str
+    enter: tuple[SoundTrigger, ...] = ()
+    exit: tuple[SoundTrigger, ...] = ()
+
+    @classmethod
+    def from_mapping(
+        cls,
+        name: str,
+        raw: Mapping[str, Any],
+    ) -> "SoundSet":
+        def parse(key: str) -> tuple[SoundTrigger, ...]:
+            value = raw.get(key)
+            return tuple(
+                SoundTrigger.from_mapping(item)
+                for item in (
+                    value if isinstance(value, list) else []
+                )
+                if isinstance(item, Mapping)
+            )
+
+        return cls(
+            name=str(name),
+            enter=parse("enter"),
+            exit=parse("exit"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TransitionProfile:
     name: str
     transition_name: str
@@ -282,6 +333,7 @@ class PresentationRegistry:
     cues: Mapping[str, Cue]
     transitions: Mapping[str, TransitionProfile]
     shader_sets: Mapping[str, ShaderSet]
+    sound_sets: Mapping[str, SoundSet]
 
     def profile(self, name: str) -> ResolvedPresentationProfile | None:
         if str(name) not in self.profiles:
@@ -299,6 +351,9 @@ class PresentationRegistry:
 
     def shader_set(self, name: str) -> ShaderSet | None:
         return self.shader_sets.get(str(name))
+
+    def sound_set(self, name: str) -> SoundSet | None:
+        return self.sound_sets.get(str(name))
 
 
 def resolve_presentation_profile(
@@ -402,6 +457,7 @@ def build_presentation_registry(
     cues_raw: Mapping[str, Any] | None,
     transitions_raw: Mapping[str, Any] | None = None,
     shader_sets_raw: Mapping[str, Any] | None = None,
+    sound_sets_raw: Mapping[str, Any] | None = None,
 ) -> PresentationRegistry:
     profiles = {
         str(name): PresentationProfile.from_mapping(str(name), raw)
@@ -423,9 +479,15 @@ def build_presentation_registry(
         for name, raw in (shader_sets_raw or {}).items()
         if isinstance(raw, Mapping)
     }
+    sound_sets = {
+        str(name): SoundSet.from_mapping(str(name), raw)
+        for name, raw in (sound_sets_raw or {}).items()
+        if isinstance(raw, Mapping)
+    }
     return PresentationRegistry(
         profiles=MappingProxyType(profiles),
         cues=MappingProxyType(cues),
         transitions=MappingProxyType(transitions),
         shader_sets=MappingProxyType(shader_sets),
+        sound_sets=MappingProxyType(sound_sets),
     )
