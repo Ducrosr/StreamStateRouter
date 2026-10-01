@@ -690,6 +690,21 @@ class OBSDispatcher:
                             ),
                         }
                     )
+                if profile.shader_set:
+                    shader_set = self._presentation_registry.shader_set(
+                        profile.shader_set
+                    )
+                    operations.append(
+                        {
+                            "type": "shader_set",
+                            "profile": profile.shader_set,
+                            "filters": (
+                                len(shader_set.filters)
+                                if shader_set is not None
+                                else 0
+                            ),
+                        }
+                    )
                 for cue_kind, cue_name in (
                     ("exit", profile.exit_cue),
                     ("enter", profile.enter_cue),
@@ -1224,6 +1239,43 @@ class OBSDispatcher:
         )
         return bool(key and key in self._launcher_override_keys)
 
+    def _apply_shader_set(
+        self,
+        profile: ResolvedPresentationProfile,
+    ) -> int:
+        name = str(profile.shader_set or "").strip()
+        if not name:
+            return 0
+        shader_set = self._presentation_registry.shader_set(name)
+        if shader_set is None:
+            raise ValueError(f"ShaderSet introuvable : {name}")
+        executed = 0
+        for item in shader_set.filters:
+            self._yield_runtime()
+            if item.enabled is not None:
+                self.client.send(
+                    "SetSourceFilterEnabled",
+                    {
+                        "sourceName": item.source,
+                        "filterName": item.filter_name,
+                        "filterEnabled": bool(item.enabled),
+                    },
+                )
+                executed += 1
+            if item.settings:
+                self._yield_runtime()
+                self.client.send(
+                    "SetSourceFilterSettings",
+                    {
+                        "sourceName": item.source,
+                        "filterName": item.filter_name,
+                        "filterSettings": dict(item.settings),
+                        "overlay": bool(item.overlay),
+                    },
+                )
+                executed += 1
+        return executed
+
     def _apply_transition_profile(
         self,
         profile: ResolvedPresentationProfile,
@@ -1422,9 +1474,12 @@ class OBSDispatcher:
                         executed += self._apply_transition_profile(
                             presentation_profile
                         )
+                        executed += self._apply_shader_set(
+                            presentation_profile
+                        )
                     except Exception as exc:
                         presentation_failed = (
-                            f"transition {presentation_name}: {exc}"
+                            f"presentation resources {presentation_name}: {exc}"
                         )
 
                 if presentation_failed:
