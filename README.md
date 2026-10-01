@@ -13,9 +13,18 @@ jamais le mot de passe à une Browser Source. Les réglages sont disponibles dan
 **Paramètres > Média / VLC**. Le média est désactivé par défaut.
 
 État normalisé : lecteur connecté, lecture/pause/arrêt, titre, artiste, album,
-durée, position, volume et identifiant de piste. La Browser Source native
-**Radio** utilise la route stable `/component/radio` et ne reçoit qu'une
-projection minimale de cet état.
+durée, position, volume, identifiant de piste, horodatage d'observation et
+capacités du provider. Le snapshot public expose aussi un indicateur de
+fraîcheur dérivé du rythme de polling réel.
+
+La pochette courante est lue depuis `/art` uniquement par
+`SSR-MediaRuntime`, mise en cache en mémoire, limitée à 8 Mio et restreinte à
+JPEG/PNG/WebP/GIF. Les Browser Sources ne reçoivent ni mot de passe VLC, ni
+`file://`, ni chemin local : elles utilisent la route SSR
+`/runtime/media/artwork`.
+
+La Browser Source native **Radio** utilise la route stable
+`/component/radio` et ne reçoit qu'une projection minimale de cet état.
 Un renderer HTML personnalisé affecté au composant `radio` reste sandboxé.
 Il reçoit l'état média public par `postMessage` via le pont SSR, qui déclenche
 l'événement navigateur `ssrmediastatechange`. Il n'a donc besoin ni d'accès
