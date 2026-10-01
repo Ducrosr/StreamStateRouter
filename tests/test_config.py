@@ -411,6 +411,63 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(migrated["activation_policies"], {})
         self.assertEqual(validate_config(migrated), [])
 
+    def test_twitch_platform_config_requires_client_id_when_enabled(self):
+        data = self.sample()
+        data["platforms"] = {
+            "twitch": {
+                "enabled": True,
+                "client_id": "",
+                "broadcaster_user_id": "",
+                "moderator_user_id": "",
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any(
+                "platforms.twitch.client_id est requis"
+                in item
+                for item in errors
+            ),
+            errors,
+        )
+
+        data["platforms"]["twitch"]["client_id"] = "public-client"
+        self.assertEqual(validate_config(data), [])
+
+    def test_twitch_platform_config_rejects_secret_like_non_string_values(self):
+        data = self.sample()
+        data["platforms"] = {
+            "twitch": {
+                "enabled": False,
+                "client_id": 123,
+                "broadcaster_user_id": [],
+                "moderator_user_id": {},
+            }
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("platforms.twitch.client_id" in item for item in errors),
+            errors,
+        )
+        self.assertTrue(
+            any(
+                "platforms.twitch.broadcaster_user_id" in item
+                for item in errors
+            ),
+            errors,
+        )
+        self.assertTrue(
+            any(
+                "platforms.twitch.moderator_user_id" in item
+                for item in errors
+            ),
+            errors,
+        )
+
     def test_schema_v6_adds_presentation_defaults(self):
         data = self.sample()
         data["schema_version"] = 6
