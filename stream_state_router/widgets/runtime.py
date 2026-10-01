@@ -593,7 +593,7 @@ class WidgetRuntime:
                 return None
             candidate = (root / decoded).resolve()
         if (
-            candidate.name.casefold() == "manifest.json"
+            candidate.name.casefold() == ".ssr-package.json"
             or not self._inside(root, candidate)
             or not candidate.is_file()
         ):
