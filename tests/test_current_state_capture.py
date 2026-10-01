@@ -19,7 +19,7 @@ from stream_state_router.services.config import validate_config
 
 def _config() -> dict:
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "router": {
             "poll_ms": 50,
             "debounce_ms": 150,
@@ -30,6 +30,7 @@ def _config() -> dict:
                 "CaptureProfile": "Default",
                 "AudioProfile": "Default",
                 "LayoutProfile": "Vanilla",
+                "PresentationProfile": "Vanilla",
             }
         },
         "obs": {
@@ -105,6 +106,21 @@ def _config() -> dict:
                 },
             },
         },
+        "presentation_profiles": {
+            "Vanilla": {
+                "extends": "",
+                "enter_cue": "",
+                "exit_cue": "",
+                "transition_profile": "",
+                "shader_set": "",
+                "sound_set": "",
+                "widget_theme": "",
+                "animation_intensity": "normal",
+                "theme": {},
+                "components": {},
+            }
+        },
+        "cues": {},
         "layout_profiles": {
             "Vanilla": {
                 "scene": "Just Chatting",
