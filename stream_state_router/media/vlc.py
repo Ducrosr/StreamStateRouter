@@ -7,7 +7,7 @@ import math
 import re
 from typing import Mapping
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .models import MediaState
 
@@ -55,7 +55,10 @@ class VLCHttpTransport:
 
     def __init__(self, config: VLCConfig):
         self.config = config
-        self._opener = build_opener(_NoRedirectHandler())
+        self._opener = build_opener(
+            ProxyHandler({}),
+            _NoRedirectHandler(),
+        )
 
     @property
     def base_url(self) -> str:
