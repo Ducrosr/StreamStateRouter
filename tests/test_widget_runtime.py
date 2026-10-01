@@ -52,7 +52,14 @@ class WidgetRuntimeTests(unittest.TestCase):
                             "settings": {
                                 "glow": "14px",
                             },
-                        }
+                        },
+                        "events": {
+                            "mode": "custom",
+                            "resource": "events/midgar",
+                            "settings": {
+                                "private_marker": "must-not-leak",
+                            },
+                        },
                     },
                 }
             },
@@ -108,6 +115,11 @@ class WidgetRuntimeTests(unittest.TestCase):
             )
             self.assertNotIn("obs", payload)
             self.assertNotIn("token", payload)
+            self.assertEqual(set(payload["components"]), {"chat"})
+            self.assertNotIn(
+                "must-not-leak",
+                json.dumps(payload, ensure_ascii=False),
+            )
 
     def test_runtime_serves_widget_entry_and_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,6 +143,9 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(b"ssrstatechange", bridge)
             self.assertIn(b"--ssr-", bridge)
             self.assertIn(b'component.mode === "hidden"', bridge)
+            self.assertIn(b"removeProperty", bridge)
+            self.assertIn(b"ssr.widget.state", bridge)
+            self.assertIn(b"window.parent !== window", bridge)
 
     def test_imported_html_can_receive_presentation_bridge_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,6 +199,8 @@ class WidgetRuntimeTests(unittest.TestCase):
             )
             snapshot = json.loads(body)
             self.assertEqual(status, 200)
+            self.assertTrue(snapshot["stream_id"])
+            self.assertEqual(snapshot["next_after"], 1)
             self.assertEqual(len(snapshot["events"]), 1)
             self.assertEqual(
                 snapshot["events"][0]["payload"]["text"],
@@ -224,6 +241,8 @@ class WidgetRuntimeTests(unittest.TestCase):
                 'value.startsWith("widget:")',
                 html,
             )
+            self.assertIn('frame.setAttribute("sandbox", "allow-scripts")', html)
+            self.assertIn("postMessage", html)
 
             registry = build_presentation_registry(
                 profiles_raw={
@@ -317,6 +336,48 @@ class WidgetRuntimeTests(unittest.TestCase):
                 json.loads(alerts_body)["events"][0]["type"],
                 "subscription",
             )
+
+    def test_runtime_rejects_unpublished_files_added_after_import(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, package = self._runtime(Path(tmp))
+            secret = package.root / "secret.txt"
+            secret.write_text("not published", encoding="utf-8")
+
+            with self.assertRaises(HTTPError) as error:
+                self._get(
+                    runtime.base_url
+                    + f"/widgets/{package.package_id}/secret.txt"
+                )
+            self.assertEqual(error.exception.code, 404)
+
+    def test_runtime_rejects_untrusted_host_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            request = Request(
+                runtime.base_url + "/health",
+                headers={"Host": "attacker.example"},
+            )
+            with self.assertRaises(HTTPError) as error:
+                urlopen(request, timeout=2.0)
+            self.assertEqual(error.exception.code, 403)
+
+    def test_imported_package_response_has_restrictive_csp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, package = self._runtime(Path(tmp))
+            with urlopen(
+                runtime.package_url(
+                    package.package_id,
+                    component="chat",
+                ),
+                timeout=2.0,
+            ) as response:
+                csp = response.headers.get(
+                    "Content-Security-Policy",
+                    "",
+                )
+            self.assertIn("connect-src 'none'", csp)
+            self.assertIn("frame-src 'none'", csp)
+            self.assertIn("object-src 'none'", csp)
 
     def test_runtime_is_read_only_and_blocks_package_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
