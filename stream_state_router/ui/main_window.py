@@ -3269,6 +3269,16 @@ class MainWindow(QMainWindow):
         )
         demo.clicked.connect(self._publish_widget_demo_events)
         widget_actions.addWidget(demo)
+        bind_profile = QPushButton("Associer à Présentation…")
+        self._set_action_risk(
+            bind_profile,
+            "draft",
+            "Associe le package au composant d’un PresentationProfile.",
+        )
+        bind_profile.clicked.connect(
+            self._bind_selected_widget_to_presentation
+        )
+        widget_actions.addWidget(bind_profile)
         create_obs = QPushButton("Créer dans OBS…")
         self._set_action_risk(
             create_obs,
@@ -6668,6 +6678,121 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Événements de démonstration envoyés aux widgets SSR.",
             5000,
+        )
+
+    def _bind_selected_widget_to_presentation(self) -> None:
+        if not hasattr(self, "widget_library"):
+            return
+        item = self.widget_library.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self,
+                "Associer à Présentation",
+                "Sélectionnez d’abord un module HTML.",
+            )
+            return
+        if not self._edit_mode:
+            self._toggle_edit_mode()
+        if not self._edit_mode:
+            return
+
+        package_id = str(item.data(0, Qt.UserRole) or "").strip()
+        module_name = str(
+            item.data(0, Qt.UserRole + 1) or item.text(0)
+        ).strip()
+        profiles = self.config.setdefault(
+            "presentation_profiles",
+            {},
+        )
+        if not isinstance(profiles, dict) or not profiles:
+            QMessageBox.warning(
+                self,
+                "Associer à Présentation",
+                "Aucun PresentationProfile disponible.",
+            )
+            return
+
+        names = sorted(profiles, key=str.casefold)
+        profile_name, ok = QInputDialog.getItem(
+            self,
+            "Associer à Présentation",
+            "PresentationProfile",
+            names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        component, ok = QInputDialog.getText(
+            self,
+            "Associer à Présentation",
+            "Composant (ex. chat, events, alerts, radio)",
+            text=(
+                "chat"
+                if "chat" in module_name.casefold()
+                else "events"
+                if "event" in module_name.casefold()
+                else "radio"
+                if "radio" in module_name.casefold()
+                else ""
+            ),
+        )
+        component = component.strip().casefold()
+        if not ok or not component:
+            return
+
+        profile = profiles.get(profile_name)
+        if not isinstance(profile, dict):
+            return
+        previous = copy.deepcopy(self.config)
+        components = profile.setdefault("components", {})
+        if not isinstance(components, dict):
+            components = {}
+            profile["components"] = components
+        existing = components.get(component)
+        settings = (
+            copy.deepcopy(existing.get("settings", {}))
+            if isinstance(existing, Mapping)
+            and isinstance(existing.get("settings"), Mapping)
+            else {}
+        )
+        components[component] = {
+            "mode": "custom",
+            "resource": f"widget:{package_id}",
+            "settings": settings,
+        }
+        errors = validate_config(self.config)
+        if errors:
+            self.config.clear()
+            self.config.update(previous)
+            QMessageBox.critical(
+                self,
+                "Associer à Présentation",
+                "\n".join(errors),
+            )
+            return
+
+        self._mark_dirty()
+        self._set_config_undo_checkpoint(
+            (
+                f"Association {module_name} → "
+                f"{profile_name}/{component}"
+            ),
+            previous,
+        )
+        self.presentation_editor.refresh()
+        self._ensure_expert_mode()
+        self.tabs.setCurrentIndex(self.presentation_tab_index)
+        self.presentation_editor.tabs.setCurrentIndex(0)
+        self.presentation_editor.profile_name.setCurrentText(
+            profile_name
+        )
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Module associé à un PresentationProfile",
+                f"{module_name} → {profile_name}/{component}",
+            )
         )
 
     def _create_selected_widget_in_obs(self) -> None:
