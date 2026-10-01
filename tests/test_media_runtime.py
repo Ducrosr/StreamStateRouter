@@ -816,6 +816,115 @@ class MediaRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(command_events, [])
 
+    def test_manual_poll_and_start_never_overlap_provider_io(self) -> None:
+        provider = FakeProvider()
+        entered = threading.Event()
+        release = threading.Event()
+        active = [0]
+        maximum = [0]
+        active_lock = threading.Lock()
+        original_state = provider.state
+
+        def blocking_state() -> MediaState:
+            with active_lock:
+                active[0] += 1
+                maximum[0] = max(maximum[0], active[0])
+            entered.set()
+            release.wait(1.0)
+            try:
+                return original_state()
+            finally:
+                with active_lock:
+                    active[0] -= 1
+
+        provider.state = blocking_state
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+        )
+
+        manual_errors: list[BaseException] = []
+
+        def manual_poll() -> None:
+            try:
+                runtime.poll_once()
+            except BaseException as exc:
+                manual_errors.append(exc)
+
+        manual = threading.Thread(target=manual_poll)
+        manual.start()
+        self.assertTrue(entered.wait(1.0))
+
+        runtime.start()
+        time.sleep(0.05)
+        self.assertEqual(maximum[0], 1)
+
+        release.set()
+        manual.join(1.0)
+        self.assertFalse(manual.is_alive())
+        self.assertEqual(manual_errors, [])
+
+        deadline = time.monotonic() + 1.0
+        while (
+            len([row for row in provider.calls if row[0] == "state"]) < 2
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+
+        self.assertEqual(maximum[0], 1)
+        self.assertTrue(runtime.stop())
+
+    def test_stop_is_serialized_with_command_event_publication(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingEventBus(EventBus):
+            def publish(self, **kwargs):
+                if kwargs.get("type") == "command":
+                    entered.set()
+                    release.wait(1.0)
+                return super().publish(**kwargs)
+
+        provider = FakeProvider()
+        bus = BlockingEventBus()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+            event_bus=bus,
+        )
+        runtime.start()
+
+        deadline = time.monotonic() + 1.0
+        while (
+            not any(row[0] == "state" for row in provider.calls)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+
+        request_id = runtime.request("play")
+        self.assertTrue(entered.wait(1.0))
+
+        stopped: list[bool] = []
+        stopper = threading.Thread(
+            target=lambda: stopped.append(runtime.stop(timeout=1.0))
+        )
+        stopper.start()
+        time.sleep(0.05)
+        self.assertTrue(stopper.is_alive())
+
+        release.set()
+        stopper.join(2.0)
+        self.assertFalse(stopper.is_alive())
+        self.assertEqual(stopped, [True])
+
+        command_events = [
+            event
+            for event in bus.events("media")
+            if event.type == "command"
+            and event.payload.get("request_id") == request_id
+        ]
+        self.assertEqual(len(command_events), 1)
+
     def test_direct_poll_is_rejected_while_worker_owns_provider_io(self) -> None:
         provider = FakeProvider()
         runtime = MediaRuntime(

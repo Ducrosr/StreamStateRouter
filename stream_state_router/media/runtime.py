@@ -117,6 +117,7 @@ class MediaRuntime:
             maxsize=64
         )
         self._lock = threading.RLock()
+        self._provider_io_lock = threading.RLock()
         self._stopping = False
         self._last_semantic_key: tuple[object, ...] | None = None
         self._last_state: MediaState | None = None
@@ -336,9 +337,25 @@ class MediaRuntime:
                 raise RuntimeError(
                     "L’observation média appartient au worker MediaRuntime"
                 )
-        return self._poll_once()
+        with self._provider_io_lock:
+            # start() may have won the race after the first ownership check.
+            with self._lock:
+                thread = self._thread
+                if (
+                    thread is not None
+                    and thread.is_alive()
+                    and threading.current_thread() is not thread
+                ):
+                    raise RuntimeError(
+                        "L’observation média appartient au worker MediaRuntime"
+                    )
+            return self._poll_once_owned()
 
     def _poll_once(self) -> MediaState:
+        with self._provider_io_lock:
+            return self._poll_once_owned()
+
+    def _poll_once_owned(self) -> MediaState:
         try:
             state = self.provider.state()
             if not isinstance(state, MediaState):
@@ -366,22 +383,25 @@ class MediaRuntime:
         self._refresh_artwork(state)
         semantic_key = state.semantic_key()
         with self._lock:
-            stopping = self._stopping
-        if (
-            self.event_bus is not None
-            and not stopping
-            and semantic_key != self._last_semantic_key
-        ):
-            self.event_bus.publish(
-                channel="media",
-                type="state_changed",
-                platform=self.provider.name,
-                payload=state.as_public_mapping(),
-            )
-        self._last_semantic_key = semantic_key
+            if (
+                self.event_bus is not None
+                and not self._stopping
+                and semantic_key != self._last_semantic_key
+            ):
+                self.event_bus.publish(
+                    channel="media",
+                    type="state_changed",
+                    platform=self.provider.name,
+                    payload=state.as_public_mapping(),
+                )
+            self._last_semantic_key = semantic_key
         return state
 
     def _execute(self, command: _MediaCommand) -> MediaCommandResult:
+        with self._provider_io_lock:
+            return self._execute_owned(command)
+
+    def _execute_owned(self, command: _MediaCommand) -> MediaCommandResult:
         with self._lock:
             if self._stopping:
                 return MediaCommandResult(
@@ -428,30 +448,26 @@ class MediaRuntime:
             with self._lock:
                 stopping = self._stopping
             state = None if stopping else self._poll_once()
-            with self._lock:
-                stopping_after_poll = self._stopping
             result = MediaCommandResult(
                 request_id=command.request_id,
                 action=command.action,
                 success=True,
                 state=self.state_store.public_snapshot(),
             )
-            if (
-                self.event_bus is not None
-                and not stopping_after_poll
-                and state is not None
-            ):
-                self.event_bus.publish(
-                    channel="media",
-                    type="command",
-                    platform=self.provider.name,
-                    payload={
-                        "request_id": command.request_id,
-                        "action": command.action,
-                        "success": True,
-                        "state": state.as_public_mapping(),
-                    },
-                )
+            if state is not None:
+                with self._lock:
+                    if self.event_bus is not None and not self._stopping:
+                        self.event_bus.publish(
+                            channel="media",
+                            type="command",
+                            platform=self.provider.name,
+                            payload={
+                                "request_id": command.request_id,
+                                "action": command.action,
+                                "success": True,
+                                "state": state.as_public_mapping(),
+                            },
+                        )
             return result
         except Exception as exc:
             with self._lock:
