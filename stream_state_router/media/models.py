@@ -53,22 +53,36 @@ class MediaState:
                 number = min(maximum, number)
             return number
 
-        object.__setattr__(self, "provider", str(self.provider or "").strip())
+        def normalized_text(
+            value: object,
+            *,
+            limit: int,
+        ) -> str:
+            return str(value or "").strip()[: max(1, int(limit))]
+
+        object.__setattr__(
+            self,
+            "provider",
+            normalized_text(self.provider, limit=128),
+        )
         object.__setattr__(self, "connected", bool(self.connected))
         object.__setattr__(self, "playback_state", state)
-        for field_name in (
-            "title",
-            "artist",
-            "album",
-            "artwork_url",
-            "uri",
-            "track_id",
-            "error",
+        for field_name, limit in (
+            ("title", 1024),
+            ("artist", 1024),
+            ("album", 1024),
+            ("artwork_url", 8192),
+            ("uri", 8192),
+            ("track_id", 256),
+            ("error", 2048),
         ):
             object.__setattr__(
                 self,
                 field_name,
-                str(getattr(self, field_name) or "").strip(),
+                normalized_text(
+                    getattr(self, field_name),
+                    limit=limit,
+                ),
             )
         duration = finite_number(self.duration_seconds)
         position = finite_number(self.position_seconds)
