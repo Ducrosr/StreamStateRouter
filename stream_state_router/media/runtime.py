@@ -11,7 +11,7 @@ import uuid
 from ..events import EventBus
 from .base import MediaProvider
 from .models import MediaState
-from .state import MediaStateStore
+from .state import MediaArtworkStore, MediaStateStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,12 +77,14 @@ class MediaRuntime:
         provider: MediaProvider,
         *,
         state_store: MediaStateStore | None = None,
+        artwork_store: MediaArtworkStore | None = None,
         event_bus: EventBus | None = None,
         clock=time.monotonic,
     ):
         self.config = config
         self.provider = provider
         self.state_store = state_store or MediaStateStore(provider.name)
+        self.artwork_store = artwork_store or MediaArtworkStore()
         self.event_bus = event_bus
         self._clock = clock
         self._stop = threading.Event()
@@ -94,6 +96,7 @@ class MediaRuntime:
         self._results: dict[str, MediaCommandResult] = {}
         self._last_semantic_key: tuple[object, ...] | None = None
         self._last_state: MediaState | None = None
+        self._last_artwork_identity: tuple[str, ...] | None = None
 
     @property
     def running(self) -> bool:
@@ -194,6 +197,38 @@ class MediaRuntime:
     def state(self) -> dict[str, object]:
         return self.state_store.snapshot()
 
+    def _refresh_artwork(self, state: MediaState) -> None:
+        identity = (
+            state.track_id,
+            state.uri,
+            state.title,
+            state.artwork_url,
+        )
+        if not state.connected or not any(identity):
+            self._last_artwork_identity = identity
+            self.artwork_store.clear()
+            return
+        if identity == self._last_artwork_identity:
+            return
+        self._last_artwork_identity = identity
+        loader = getattr(self.provider, "artwork", None)
+        if not callable(loader):
+            self.artwork_store.clear()
+            return
+        try:
+            content, content_type = loader()
+            if len(content) > 8 * 1024 * 1024:
+                raise ValueError("Pochette média trop volumineuse")
+            self.artwork_store.update(
+                content,
+                content_type=content_type,
+                identity="|".join(identity),
+            )
+        except Exception:
+            # Artwork is optional metadata: never make the player appear
+            # disconnected because a cover cannot be loaded.
+            self.artwork_store.clear()
+
     def poll_once(self) -> MediaState:
         try:
             state = self.provider.state()
@@ -209,6 +244,7 @@ class MediaRuntime:
                 error=str(exc),
             )
         self.state_store.update(state)
+        self._refresh_artwork(state)
         semantic_key = state.semantic_key()
         with self._lock:
             stopping = self._stopping
