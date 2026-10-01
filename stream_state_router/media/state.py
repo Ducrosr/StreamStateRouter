@@ -220,7 +220,6 @@ class MediaCommandStore:
             row["success"] = bool(success)
             row["error"] = str(error or "")
             row["state"] = dict(state or {})
-            self._compact_locked()
 
     def get(self, request_id: str) -> dict[str, object] | None:
         key = str(request_id or "")
