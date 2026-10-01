@@ -100,7 +100,11 @@ from ..services.config_insights import (
     scan_obs_reference_repairs,
     simulate_rule_scenario,
 )
-from ..platforms import TwitchEventSubAdapter
+from ..platforms import (
+    TwitchAudiencePoller,
+    TwitchEventSubAdapter,
+    TwitchHelixClient,
+)
 from ..presentation import PresentationStateStore
 from ..services.control_variables import ControlVariableStore
 from ..services.runtime import RoutingService, RuntimeEvent
@@ -222,6 +226,7 @@ class MainWindow(QMainWindow):
         self._media_state_store = MediaStateStore()
         self._media_engine: MediaEngine | None = None
         self._twitch_adapter: TwitchEventSubAdapter | None = None
+        self._twitch_audience: TwitchAudiencePoller | None = None
         self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
@@ -3312,6 +3317,17 @@ class MainWindow(QMainWindow):
         )
         self._register_obs_connected_control(install_countdown)
         widget_actions.addWidget(install_countdown)
+        install_audience = QPushButton("Installer Audience…")
+        self._set_action_risk(
+            install_audience,
+            "live",
+            "Crée une Browser Source locale pour le compteur d’audience SSR.",
+        )
+        install_audience.clicked.connect(
+            self._install_builtin_audience_in_obs
+        )
+        self._register_obs_connected_control(install_audience)
+        widget_actions.addWidget(install_audience)
         demo = QPushButton("Événements de démo")
         self._set_action_risk(
             demo,
@@ -4604,6 +4620,12 @@ class MainWindow(QMainWindow):
         twitch_note.setWordWrap(True)
         twitch_note.setObjectName("Muted")
         twitch_lay.addWidget(twitch_note)
+        twitch_actions = QHBoxLayout()
+        test_twitch = QPushButton("Tester les credentials Twitch")
+        test_twitch.clicked.connect(self._test_twitch_credentials)
+        twitch_actions.addWidget(test_twitch)
+        twitch_actions.addStretch(1)
+        twitch_lay.addLayout(twitch_actions)
         root.addWidget(twitch_card)
 
         host_card, host_lay = self._card("Contrôle Windows")
@@ -4661,6 +4683,49 @@ class MainWindow(QMainWindow):
         root.addWidget(behavior_card)
         root.addStretch(1)
         return page
+
+    def _test_twitch_credentials(self) -> None:
+        self._collect_settings()
+        cfg = build_twitch_config(self.config)
+        if not cfg.user_access_token.strip():
+            QMessageBox.warning(
+                self,
+                "Twitch",
+                "Renseignez d’abord un User Access Token.",
+            )
+            return
+        try:
+            info = TwitchHelixClient(cfg).validate_token()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Twitch",
+                f"Validation impossible : {exc}",
+            )
+            return
+        scopes = ", ".join(info.scopes) or "aucun scope"
+        mismatch = (
+            cfg.client_id.strip()
+            and info.client_id
+            and cfg.client_id.strip() != info.client_id
+        )
+        detail = (
+            f"Login : {info.login or '—'}\n"
+            f"User ID : {info.user_id or '—'}\n"
+            f"Client ID : {info.client_id or '—'}\n"
+            f"Expiration : {info.expires_in} s\n"
+            f"Scopes : {scopes}"
+        )
+        if mismatch:
+            detail += (
+                "\n\n⚠ Le Client ID saisi ne correspond pas "
+                "au Client ID du token."
+            )
+        QMessageBox.information(
+            self,
+            "Twitch — credentials",
+            detail,
+        )
 
     def _browse_soundvolumeview(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -6915,6 +6980,16 @@ class MainWindow(QMainWindow):
             component="countdown",
             width=560,
             height=240,
+        )
+
+    def _install_builtin_audience_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/audience",
+            module_name="Audience SSR native",
+            input_name="[SSR] Audience",
+            component="audience",
+            width=320,
+            height=96,
         )
 
     def _start_builtin_countdown(self) -> None:
@@ -10099,20 +10174,31 @@ class MainWindow(QMainWindow):
             self._event_bus,
         )
         self._twitch_adapter = adapter
+        self._twitch_audience = None
         try:
             adapter.start()
             if cfg.enabled:
-                self._log("Twitch EventSub natif démarré.")
+                audience = TwitchAudiencePoller(
+                    TwitchHelixClient(cfg),
+                    self._event_bus,
+                )
+                audience.start()
+                self._twitch_audience = audience
+                self._log(
+                    "Twitch natif démarré · EventSub + audience."
+                )
         except Exception as exc:
             self._log(f"Twitch EventSub indisponible : {exc}")
 
     def _restart_twitch_adapter(self) -> None:
-        adapter = self._twitch_adapter
-        if adapter is not None:
-            adapter.stop()
+        self._stop_twitch_adapter()
         self._start_twitch_adapter()
 
     def _stop_twitch_adapter(self) -> None:
+        audience = self._twitch_audience
+        self._twitch_audience = None
+        if audience is not None:
+            audience.stop()
         adapter = self._twitch_adapter
         self._twitch_adapter = None
         if adapter is not None:
@@ -10226,6 +10312,15 @@ class MainWindow(QMainWindow):
                 "last_error": (
                     self._twitch_adapter.last_error
                     if self._twitch_adapter
+                    else ""
+                ),
+                "audience_running": bool(
+                    self._twitch_audience
+                    and self._twitch_audience.running
+                ),
+                "audience_error": (
+                    self._twitch_audience.last_error
+                    if self._twitch_audience
                     else ""
                 ),
             },
