@@ -554,7 +554,8 @@ class PresentationEditor(QWidget):
         combo.blockSignals(True)
         combo.clear()
         combo.addItem(none_label, "")
-        combo.addItems(names)
+        for name in names:
+            combo.addItem(name, name)
         index = combo.findData(current)
         if index < 0:
             index = combo.findText(current)
