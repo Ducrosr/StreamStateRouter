@@ -205,6 +205,56 @@ class WidgetRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(body)["events"], [])
 
+    def test_component_host_defaults_to_builtin_and_can_switch_resource(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, package = self._runtime(Path(tmp))
+
+            _status, body, content_type = self._get(
+                runtime.base_url + "/component/chat"
+            )
+            html = body.decode("utf-8")
+            self.assertIn("text/html", content_type)
+            self.assertIn('const component = "chat"', html)
+            self.assertIn('const fallback = "builtin:chat"', html)
+            self.assertIn(
+                '"/runtime/state?component="',
+                html,
+            )
+            self.assertIn(
+                'value.startsWith("widget:")',
+                html,
+            )
+
+            registry = build_presentation_registry(
+                profiles_raw={
+                    "Custom": {
+                        "components": {
+                            "chat": {
+                                "mode": "custom",
+                                "resource": (
+                                    f"widget:{package.package_id}"
+                                ),
+                                "settings": {},
+                            }
+                        }
+                    }
+                },
+                cues_raw={},
+            )
+            profile = registry.profile("Custom")
+            assert profile is not None
+            runtime.state_store.update(profile)
+
+            _status, state_body, _content_type = self._get(
+                runtime.base_url
+                + "/runtime/state?component=chat"
+            )
+            payload = json.loads(state_body)
+            self.assertEqual(
+                payload["component_state"]["resource"],
+                f"widget:{package.package_id}",
+            )
+
     def test_builtin_events_and_alerts_use_normalized_event_channels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _package = self._runtime(Path(tmp))
