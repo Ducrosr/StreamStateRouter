@@ -71,6 +71,46 @@ export class CancelPreviewAction extends CommandAction<EmptySettings> {
   }
 }
 
+@action({ UUID: "com.remyducros.streamstaterouter.media-toggle" })
+export class MediaToggleAction extends CommandAction<EmptySettings> {
+  override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
+    await this.run(ev, async () => {
+      const status = await ssrClient.status();
+      const media = status.media;
+      if (!media?.running) {
+        throw new Error("Media Runtime indisponible");
+      }
+      const playback = String(media.state?.playback_state ?? "");
+      if (playback === "playing") {
+        await ssrClient.mediaPause();
+      } else {
+        await ssrClient.mediaPlay();
+      }
+    });
+  }
+}
+
+@action({ UUID: "com.remyducros.streamstaterouter.media-next" })
+export class MediaNextAction extends CommandAction<EmptySettings> {
+  override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
+    await this.run(ev, () => ssrClient.mediaNext());
+  }
+}
+
+@action({ UUID: "com.remyducros.streamstaterouter.media-previous" })
+export class MediaPreviousAction extends CommandAction<EmptySettings> {
+  override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
+    await this.run(ev, () => ssrClient.mediaPrevious());
+  }
+}
+
+@action({ UUID: "com.remyducros.streamstaterouter.media-stop" })
+export class MediaStopAction extends CommandAction<EmptySettings> {
+  override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
+    await this.run(ev, () => ssrClient.mediaStop());
+  }
+}
+
 @action({ UUID: "com.remyducros.streamstaterouter.connection" })
 export class ConnectionSettingsAction extends CommandAction<ConnectionSettings> {
   override async onKeyDown(ev: KeyDownEvent<ConnectionSettings>): Promise<void> {
