@@ -228,5 +228,6 @@
     }
   },
   "cues": {},
-  "transition_profiles": {}
+  "transition_profiles": {},
+  "shader_sets": {}
 }
