@@ -108,6 +108,7 @@ class WidgetRuntimeTests(unittest.TestCase):
             )
             self.assertNotIn("obs", payload)
             self.assertNotIn("token", payload)
+            self.assertNotIn("components", payload)
 
     def test_runtime_serves_widget_entry_and_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -147,10 +148,10 @@ class WidgetRuntimeTests(unittest.TestCase):
             )
             rendered = body.decode("utf-8")
 
-            self.assertIn(
-                '/runtime/bridge.js?component=chat',
-                rendered,
-            )
+            self.assertIn("ssr-ready", rendered)
+            self.assertIn("ssr-state", rendered)
+            self.assertNotIn("/runtime/state", rendered)
+            self.assertNotIn("/runtime/bridge.js", rendered)
             self.assertEqual(
                 source_entry.read_text(encoding="utf-8"),
                 source_before,
@@ -268,6 +269,8 @@ class WidgetRuntimeTests(unittest.TestCase):
                 'value.startsWith("widget:")',
                 html,
             )
+            self.assertIn('setAttribute("sandbox", "allow-scripts")', html)
+            self.assertIn('type: "ssr-state"', html)
 
             registry = build_presentation_registry(
                 profiles_raw={
@@ -361,6 +364,54 @@ class WidgetRuntimeTests(unittest.TestCase):
                 json.loads(alerts_body)["events"][0]["type"],
                 "subscription",
             )
+
+    def test_imported_widget_response_is_sandboxed_by_csp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, package = self._runtime(Path(tmp))
+            request = Request(
+                runtime.package_url(package.package_id, component="chat")
+            )
+            with urlopen(request, timeout=2.0) as response:
+                csp = response.headers.get("Content-Security-Policy", "")
+                body = response.read()
+            self.assertIn("sandbox allow-scripts", csp)
+            self.assertIn("connect-src 'none'", csp)
+            self.assertIn(b"ssr-ready", body)
+            self.assertNotIn(b"/runtime/state", body)
+
+    def test_runtime_rejects_foreign_host_and_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            foreign_host = Request(
+                runtime.base_url + "/health",
+                headers={"Host": "attacker.example"},
+            )
+            with self.assertRaises(HTTPError) as host_error:
+                urlopen(foreign_host, timeout=2.0)
+            self.assertEqual(host_error.exception.code, 403)
+
+            foreign_origin = Request(
+                runtime.base_url + "/runtime/state?component=chat",
+                headers={"Origin": "https://attacker.example"},
+            )
+            with self.assertRaises(HTTPError) as origin_error:
+                urlopen(foreign_origin, timeout=2.0)
+            self.assertEqual(origin_error.exception.code, 403)
+
+    def test_unpublished_package_file_is_not_served(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, package = self._runtime(root)
+            secret = package.root / "secret.txt"
+            secret.write_text("credential-like data", encoding="utf-8")
+
+            with self.assertRaises(HTTPError) as error:
+                urlopen(
+                    runtime.base_url
+                    + f"/widgets/{package.package_id}/secret.txt",
+                    timeout=2.0,
+                )
+            self.assertEqual(error.exception.code, 404)
 
     def test_runtime_is_read_only_and_blocks_package_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
