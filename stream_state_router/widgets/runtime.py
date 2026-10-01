@@ -532,7 +532,7 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
 </head>
 <body>
 <div id="radio">
-  <div id="title">Midgar Radio</div>
+  <div id="title">SSR Radio</div>
   <div id="artist">Aucun média</div>
   <div id="progress"><div id="bar"></div></div>
   <div id="status">SSR Media</div>
@@ -549,7 +549,7 @@ html[data-ssr-animation-intensity="off"] #bar { transition:none; }
   const render = (state) => {
     if (!state || state.revision === lastRevision) return;
     lastRevision = Number(state.revision) || 0;
-    title.textContent = state.title || "Midgar Radio";
+    title.textContent = state.title || "SSR Radio";
     artist.textContent =
       [state.artist, state.album].filter(Boolean).join(" · ") ||
       (state.connected ? "Aucun média" : "Lecteur indisponible");
