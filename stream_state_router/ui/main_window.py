@@ -71,7 +71,6 @@ from ..services.config import (
     build_media_runtime_config,
     build_presentation_profiles,
     build_ruleset,
-    build_vlc_config,
     build_widget_runtime_config,
     export_config,
     import_config,
@@ -5201,7 +5200,6 @@ class MainWindow(QMainWindow):
         )
         build_activation_policies(config_data)
         build_media_runtime_config(config_data)
-        build_vlc_config(config_data)
         build_media_provider(config_data)
 
     def _rollback_persisted_apply(
