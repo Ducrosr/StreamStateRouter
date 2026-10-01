@@ -762,6 +762,44 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         if not _valid_int(api.get("port", 8765), minimum=1, maximum=65535):
             errors.append("api.port doit être compris entre 1 et 65535")
 
+    platforms = data.get("platforms", {})
+    if not isinstance(platforms, Mapping):
+        errors.append("platforms doit être un objet")
+    else:
+        twitch = platforms.get("twitch", {})
+        if not isinstance(twitch, Mapping):
+            errors.append("platforms.twitch doit être un objet")
+        else:
+            if (
+                "enabled" in twitch
+                and not isinstance(twitch.get("enabled"), bool)
+            ):
+                errors.append(
+                    "platforms.twitch.enabled doit être booléen"
+                )
+            for key in (
+                "client_id",
+                "broadcaster_user_id",
+                "moderator_user_id",
+            ):
+                if key in twitch and not isinstance(
+                    twitch.get(key),
+                    str,
+                ):
+                    errors.append(
+                        f"platforms.twitch.{key} doit être une chaîne"
+                    )
+            if (
+                bool(twitch.get("enabled", False))
+                and not str(
+                    twitch.get("client_id") or ""
+                ).strip()
+            ):
+                errors.append(
+                    "platforms.twitch.client_id est requis "
+                    "quand Twitch est activé"
+                )
+
     activation_policies = data.get("activation_policies", {})
     if not isinstance(activation_policies, Mapping):
         errors.append("activation_policies doit être un objet")
