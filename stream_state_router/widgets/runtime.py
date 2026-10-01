@@ -844,6 +844,39 @@ iframe{display:block}
                         head_only=head_only,
                     )
                     return
+                raw_origin = str(
+                    self.headers.get("Origin") or ""
+                ).strip()
+                if raw_origin:
+                    if raw_origin.casefold() == "null":
+                        self._send_json(
+                            {"error": "invalid_origin"},
+                            status=HTTPStatus.FORBIDDEN,
+                            head_only=head_only,
+                        )
+                        return
+                    parsed_origin = urlsplit(raw_origin)
+                    origin_host = str(
+                        parsed_origin.hostname or ""
+                    ).casefold()
+                    host_port = (
+                        parsed_host.port
+                        if parsed_host is not None
+                        else None
+                    )
+                    origin_port = parsed_origin.port
+                    if (
+                        parsed_origin.scheme not in {"http", "https"}
+                        or origin_host
+                        not in {"127.0.0.1", "localhost", "::1"}
+                        or origin_port != host_port
+                    ):
+                        self._send_json(
+                            {"error": "invalid_origin"},
+                            status=HTTPStatus.FORBIDDEN,
+                            head_only=head_only,
+                        )
+                        return
                 parsed = urlsplit(self.path)
                 path = parsed.path or "/"
                 if path == "/health":
