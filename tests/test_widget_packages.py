@@ -48,7 +48,9 @@ class HtmlWidgetPackageTests(unittest.TestCase):
 
             self.assertEqual(
                 {
-                    path.relative_to(source).as_posix()
+                    path.relative_to(
+                        inspection.package_root
+                    ).as_posix()
                     for path in inspection.local_files
                 },
                 {
