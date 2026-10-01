@@ -30,6 +30,16 @@ class EventBus:
             str,
             tuple[str, Callable[[EventEnvelope], None]],
         ] = {}
+        self._delivery_queue: deque[
+            tuple[
+                EventEnvelope,
+                tuple[
+                    tuple[str, Callable[[EventEnvelope], None]],
+                    ...,
+                ],
+            ]
+        ] = deque()
+        self._delivering = False
 
     @property
     def sequence(self) -> int:
@@ -67,15 +77,35 @@ class EventBus:
             )
             self._history[normalized_channel].append(event)
             subscribers = tuple(self._subscribers.values())
+            self._delivery_queue.append((event, subscribers))
+            if self._delivering:
+                return event
+            self._delivering = True
 
-        for wanted_channel, callback in subscribers:
-            if wanted_channel and wanted_channel != normalized_channel:
-                continue
-            try:
-                callback(event)
-            except Exception:
-                # One consumer must never break routing/event delivery.
-                continue
+        try:
+            while True:
+                with self._lock:
+                    if not self._delivery_queue:
+                        self._delivering = False
+                        break
+                    delivered_event, delivered_subscribers = (
+                        self._delivery_queue.popleft()
+                    )
+                for wanted_channel, callback in delivered_subscribers:
+                    if (
+                        wanted_channel
+                        and wanted_channel != delivered_event.channel
+                    ):
+                        continue
+                    try:
+                        callback(delivered_event)
+                    except Exception:
+                        # One consumer must never break routing/event delivery.
+                        continue
+        finally:
+            with self._lock:
+                if not self._delivery_queue:
+                    self._delivering = False
         return event
 
     def subscribe(
