@@ -6,6 +6,7 @@ import time
 import unittest
 
 from stream_state_router.media import (
+    MediaProviderCommandError,
     MediaState,
     VLCConfig,
     VLCHttpTransport,
@@ -435,6 +436,23 @@ class VLCProviderTests(unittest.TestCase):
 
         self.assertEqual(state.title, "track.ogg")
         self.assertEqual(state.playback_state, "paused")
+
+    def test_command_transport_failure_is_marked_ambiguous(self) -> None:
+        class FailingTransport(FakeTransport):
+            def get_json(self, path, params=None):
+                values = dict(params or {})
+                self.calls.append((str(path), values))
+                if values.get("command"):
+                    raise OSError("connection reset")
+                return {"state": "playing"}
+
+        provider = VLCProvider(
+            VLCConfig(),
+            transport=FailingTransport({"state": "playing"}),
+        )
+
+        with self.assertRaises(MediaProviderCommandError):
+            provider.next()
 
     def test_controls_use_explicit_pause_and_encoded_values(self) -> None:
         transport = FakeTransport({"state": "playing"})
