@@ -899,6 +899,12 @@ iframe{display:block}
 
   const refreshMedia = async () => {
     if (component !== "radio") return;
+    const currentComponent =
+      (lastState && lastState.component_state) || {};
+    if (currentComponent.mode === "hidden") {
+      window.setTimeout(refreshMedia, 500);
+      return;
+    }
     try {
       const response = await fetch(
         "/runtime/media",
