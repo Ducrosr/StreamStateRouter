@@ -25,6 +25,8 @@ class MediaState:
     position_seconds: float = 0.0
     volume_percent: float = 0.0
     track_id: str = ""
+    observed_at_unix: float = 0.0
+    capabilities: tuple[str, ...] = ()
     error: str = ""
 
     def __post_init__(self) -> None:
@@ -80,6 +82,24 @@ class MediaState:
             "volume_percent",
             finite_number(self.volume_percent, maximum=200.0),
         )
+        object.__setattr__(
+            self,
+            "observed_at_unix",
+            finite_number(self.observed_at_unix),
+        )
+        object.__setattr__(
+            self,
+            "capabilities",
+            tuple(
+                sorted(
+                    {
+                        str(item).strip().casefold()
+                        for item in self.capabilities
+                        if str(item).strip()
+                    }
+                )
+            ),
+        )
 
     @property
     def playing(self) -> bool:
@@ -100,6 +120,7 @@ class MediaState:
             round(self.duration_seconds, 3),
             round(self.volume_percent, 2),
             self.track_id,
+            self.capabilities,
             self.error,
         )
 
@@ -118,6 +139,8 @@ class MediaState:
             "position_seconds": self.position_seconds,
             "volume_percent": self.volume_percent,
             "track_id": self.track_id,
+            "observed_at_unix": self.observed_at_unix,
+            "capabilities": list(self.capabilities),
             "error": self.error,
         }
 
@@ -136,4 +159,6 @@ class MediaState:
             "position_seconds": self.position_seconds,
             "volume_percent": self.volume_percent,
             "track_id": self.track_id,
+            "observed_at_unix": self.observed_at_unix,
+            "capabilities": list(self.capabilities),
         }
