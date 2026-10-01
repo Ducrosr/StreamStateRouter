@@ -7,6 +7,7 @@ import unittest
 from stream_state_router.events import EventBus
 from stream_state_router.media import (
     MediaArtworkStore,
+    MediaCommandStore,
     MediaRuntime,
     MediaRuntimeConfig,
     MediaState,
@@ -380,6 +381,187 @@ class MediaRuntimeTests(unittest.TestCase):
             "non supportée",
         ):
             runtime.request("pause")
+
+    def test_accepted_command_is_immediately_traceable_until_terminal(self) -> None:
+        provider = FakeProvider()
+        entered = threading.Event()
+        release = threading.Event()
+        original_next = provider.next
+
+        def blocking_next() -> None:
+            entered.set()
+            release.wait(1.0)
+            original_next()
+
+        provider.next = blocking_next
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+        )
+        runtime.start()
+        self.addCleanup(runtime.stop)
+
+        request_id = runtime.request("next")
+        immediate = runtime.command_status(request_id)
+        self.assertIsNotNone(immediate)
+        assert immediate is not None
+        self.assertIn(immediate["status"], {"queued", "running"})
+        self.assertIsNone(immediate["success"])
+
+        self.assertTrue(entered.wait(1.0))
+        running = runtime.command_status(request_id)
+        self.assertIsNotNone(running)
+        assert running is not None
+        self.assertEqual(running["status"], "running")
+
+        release.set()
+        deadline = time.monotonic() + 1.0
+        terminal = None
+        while time.monotonic() < deadline:
+            terminal = runtime.command_status(request_id)
+            if terminal and terminal["status"] == "completed":
+                break
+            time.sleep(0.01)
+
+        self.assertIsNotNone(terminal)
+        assert terminal is not None
+        self.assertEqual(terminal["status"], "completed")
+        self.assertTrue(terminal["success"])
+        self.assertEqual(
+            len([row for row in provider.calls if row[0] == "next"]),
+            1,
+        )
+
+    def test_command_status_survives_runtime_replacement(self) -> None:
+        provider = FakeProvider()
+        commands = MediaCommandStore()
+        first = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+            command_store=commands,
+        )
+        first.start()
+        request_id = first.request("next")
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            row = first.command_status(request_id)
+            if row and row["status"] == "completed":
+                break
+            time.sleep(0.01)
+        self.assertTrue(first.stop())
+
+        second = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+            command_store=commands,
+        )
+        second.start()
+        self.addCleanup(second.stop)
+
+        row = second.command_status(request_id)
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["status"], "completed")
+        self.assertTrue(row["success"])
+
+    def test_cancelled_queued_command_uses_public_state_projection(self) -> None:
+        provider = FakeProvider()
+        state_store = MediaStateStore("fake")
+        state_store.update(
+            MediaState(
+                provider="fake",
+                connected=True,
+                playback_state="playing",
+                uri="file:///C:/PRIVATE/track.flac",
+                artwork_url="file:///C:/PRIVATE/cover.png",
+                error="private backend detail",
+            )
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        original_play = provider.play
+
+        def blocking_play() -> None:
+            entered.set()
+            release.wait(1.0)
+            original_play()
+
+        provider.play = blocking_play
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+            state_store=state_store,
+        )
+        runtime.start()
+        active = runtime.request("play")
+        self.assertTrue(entered.wait(1.0))
+        queued = runtime.request("next")
+
+        self.assertFalse(runtime.stop(timeout=0.01))
+        cancelled = runtime.command_status(queued)
+        self.assertIsNotNone(cancelled)
+        assert cancelled is not None
+        self.assertEqual(cancelled["status"], "failed")
+        self.assertNotIn("uri", cancelled["state"])
+        self.assertNotIn("artwork_url", cancelled["state"])
+        self.assertNotIn("error", cancelled["state"])
+
+        release.set()
+        self.assertTrue(runtime.stop(timeout=1.0))
+        self.assertIsNotNone(runtime.command_status(active))
+
+    def test_command_admission_is_bounded_while_provider_is_blocked(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingProvider(FakeProvider):
+            def state(self) -> MediaState:
+                entered.set()
+                release.wait(2.0)
+                return super().state()
+
+        provider = BlockingProvider()
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=10.0),
+            provider,
+        )
+        runtime.start()
+        self.assertTrue(entered.wait(1.0))
+
+        accepted = [runtime.request("next") for _ in range(64)]
+        self.assertEqual(len(accepted), 64)
+        with self.assertRaisesRegex(RuntimeError, "saturée"):
+            runtime.request("next")
+
+        self.assertFalse(runtime.stop(timeout=0.01))
+        for request_id in accepted:
+            row = runtime.command_status(request_id)
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row["status"], "failed")
+
+        release.set()
+        self.assertTrue(runtime.stop(timeout=1.0))
+
+    def test_command_store_retention_is_bounded_and_reports_expiry(self) -> None:
+        store = MediaCommandStore(max_records=3, max_expired=3)
+        ids = []
+        for index in range(6):
+            request_id = f"cmd-{index}"
+            ids.append(request_id)
+            store.reserve(request_id, "next")
+            store.finish(
+                request_id,
+                success=True,
+                state={"revision": index},
+            )
+
+        self.assertLessEqual(len(store), 3)
+        expired = store.get(ids[0])
+        self.assertIsNotNone(expired)
+        assert expired is not None
+        self.assertEqual(expired["status"], "expired")
 
     def test_failed_command_is_not_retried_automatically(self) -> None:
         provider = FakeProvider()
