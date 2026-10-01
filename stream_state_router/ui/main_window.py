@@ -66,6 +66,7 @@ from ..services.config import (
     build_host_controller,
     build_profiles,
     build_layout_profiles,
+    build_presentation_profiles,
     build_ruleset,
     export_config,
     import_config,
@@ -130,6 +131,7 @@ DOMAIN_LABELS = {
     "capture": "CaptureProfile",
     "audio": "AudioProfile",
     "layout": "LayoutProfile",
+    "presentation": "PresentationProfile",
 }
 
 
@@ -2551,6 +2553,7 @@ class MainWindow(QMainWindow):
             "CaptureProfile",
             "AudioProfile",
             "LayoutProfile",
+            "PresentationProfile",
         ):
             value = QLabel("—")
             value.setStyleSheet("font-weight: 700;")
@@ -4813,6 +4816,9 @@ class MainWindow(QMainWindow):
             build_profiles(config_data),
             build_layout_profiles(config_data),
             host_controller=build_host_controller(config_data),
+            presentation_registry=build_presentation_profiles(
+                config_data
+            ),
         )
         StateRouterEngine(
             rules,
@@ -5229,6 +5235,9 @@ class MainWindow(QMainWindow):
             build_profiles(runtime_config),
             build_layout_profiles(runtime_config),
             host_controller=build_host_controller(runtime_config),
+            presentation_registry=build_presentation_profiles(
+                runtime_config
+            ),
         )
         if startup_layout_profile:
             self._dispatcher.set_manual_layout_hold(startup_layout_routing_baseline)
@@ -5886,6 +5895,9 @@ class MainWindow(QMainWindow):
             capture_profile=self.override_boxes["capture"].currentText(),
             audio_profile=self.override_boxes["audio"].currentText(),
             layout_profile=self.override_boxes["layout"].currentText(),
+            presentation_profile=(
+                self.override_boxes["presentation"].currentText()
+            ),
         )
         release_mode = str(
             self.override_release_mode.currentData() or "manual"
@@ -6159,7 +6171,15 @@ class MainWindow(QMainWindow):
         return rows[0].row() if rows else None
 
     def _add_rule(self) -> None:
-        dlg = RuleDialog(self, profile_choices=self._state_profile_choices())
+        dlg = RuleDialog(
+            self,
+            profile_choices=self._state_profile_choices(),
+            fallback_state=(
+                self.config.get("router", {}).get("fallback_state", {})
+                if isinstance(self.config.get("router"), Mapping)
+                else {}
+            ),
+        )
         if dlg.exec() == QDialog.Accepted:
             self.config.setdefault("rules", []).append(dlg.result_rule())
             self._mark_dirty()
@@ -6173,6 +6193,11 @@ class MainWindow(QMainWindow):
             self,
             self.config["rules"][idx],
             profile_choices=self._state_profile_choices(),
+            fallback_state=(
+                self.config.get("router", {}).get("fallback_state", {})
+                if isinstance(self.config.get("router"), Mapping)
+                else {}
+            ),
         )
         if dlg.exec() == QDialog.Accepted:
             self.config["rules"][idx] = dlg.result_rule()
@@ -7825,6 +7850,9 @@ class MainWindow(QMainWindow):
                 client,
                 build_profiles(self.config),
                 build_layout_profiles(self.config),
+                presentation_registry=build_presentation_profiles(
+                    self.config
+                ),
             )
             result = dispatcher.execute_profile(current[0], current[1])
         except Exception as exc:
@@ -7843,7 +7871,19 @@ class MainWindow(QMainWindow):
             for domain in PROFILE_DOMAINS
         }
         choices["layout"] = sorted(
-            self.config.get("layout_profiles", {}).keys(), key=str.casefold
+            self.config.get("layout_profiles", {}).keys(),
+            key=str.casefold,
+        )
+        choices["presentation"] = sorted(
+            (
+                self.config.get("presentation_profiles", {})
+                if isinstance(
+                    self.config.get("presentation_profiles"),
+                    Mapping,
+                )
+                else {}
+            ).keys(),
+            key=str.casefold,
         )
         return choices
 
