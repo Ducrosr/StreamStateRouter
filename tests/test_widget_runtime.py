@@ -236,6 +236,8 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(b"/runtime/media", body)
             self.assertIn(b'id="cover"', body)
             self.assertIn(b"state.artwork_url", body)
+            self.assertIn(b"state.stale", body)
+            self.assertIn("État obsolète".encode("utf-8"), body)
             self.assertIn(b"textContent", body)
             self.assertNotIn(b"innerHTML", body)
             self.assertIn(
