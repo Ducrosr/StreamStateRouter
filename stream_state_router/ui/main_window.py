@@ -9902,12 +9902,19 @@ class MainWindow(QMainWindow):
         if label is None:
             return
         runtime = self._media_runtime
-        state = self._media_state_store.snapshot()
+        state = self._media_state_store.public_snapshot()
         if runtime is None or not runtime.config.enabled:
             label.setText("Media Runtime : désactivé")
             label.setObjectName("Muted")
         elif not runtime.running:
             label.setText("Media Runtime : indisponible")
+            label.setObjectName("Warn")
+        elif bool(state.get("stale", False)):
+            age = float(state.get("age_seconds", 0.0) or 0.0)
+            label.setText(
+                "Media Runtime : état VLC obsolète"
+                + (f" · dernière observation il y a {age:.1f} s" if age else "")
+            )
             label.setObjectName("Warn")
         elif bool(state.get("connected", False)):
             playback = str(
@@ -9932,11 +9939,7 @@ class MainWindow(QMainWindow):
             )
             label.setObjectName("Good")
         else:
-            error = str(state.get("error") or "").strip()
-            label.setText(
-                "Media Runtime : VLC non joignable"
-                + (f" · {error}" if error else "")
-            )
+            label.setText("Media Runtime : VLC non joignable")
             label.setObjectName("Warn")
         label.style().unpolish(label)
         label.style().polish(label)
