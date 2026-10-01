@@ -407,6 +407,15 @@ class VLCProviderTests(unittest.TestCase):
 
                 self.assertEqual(provider.state().track_id, expected)
 
+    def test_empty_status_is_not_treated_as_connected(self) -> None:
+        provider = VLCProvider(
+            VLCConfig(),
+            transport=FakeTransport({}),
+        )
+
+        with self.assertRaisesRegex(ValueError, "incomplète"):
+            provider.state()
+
     def test_status_falls_back_to_filename_for_title(self) -> None:
         provider = VLCProvider(
             VLCConfig(),
