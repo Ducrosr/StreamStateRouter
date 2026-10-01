@@ -295,6 +295,7 @@ class ConfigTests(unittest.TestCase):
             "enabled": True,
             "client_id": "client",
             "user_access_token": "twitch-secret",
+            "refresh_token": "twitch-refresh-secret",
             "broadcaster_user_id": "100",
             "user_id": "100",
             "moderator_user_id": "100",
@@ -309,6 +310,7 @@ class ConfigTests(unittest.TestCase):
             exported = json.loads(path.read_text(encoding="utf-8"))
 
         self.assertEqual(exported["twitch"]["user_access_token"], "")
+        self.assertEqual(exported["twitch"]["refresh_token"], "")
         self.assertFalse(exported["twitch"]["enabled"])
         self.assertEqual(validate_config(exported), [])
 
