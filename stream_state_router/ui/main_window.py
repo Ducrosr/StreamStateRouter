@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..activation import TriggerTargetIdentity
+from ..events import EventBus
 from ..importers import (
     AdvancedSceneSwitcherImporter,
     CurrentStateCaptureOptions,
@@ -208,6 +209,7 @@ class MainWindow(QMainWindow):
         self._dispatcher: OBSDispatcher | None = None
         self._client: OBSClientManager | None = None
         self._presentation_state_store = PresentationStateStore()
+        self._event_bus = EventBus()
         self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
@@ -9719,6 +9721,7 @@ class MainWindow(QMainWindow):
         runtime = WidgetRuntime(
             cfg,
             self._presentation_state_store,
+            event_bus=self._event_bus,
         )
         self._widget_runtime = runtime
         try:
