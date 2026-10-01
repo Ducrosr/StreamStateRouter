@@ -704,6 +704,26 @@ class OBSDispatcher:
                             ),
                         }
                     )
+                if profile.sound_set:
+                    sound_set = self._presentation_registry.sound_set(
+                        profile.sound_set
+                    )
+                    operations.append(
+                        {
+                            "type": "sound_set",
+                            "profile": profile.sound_set,
+                            "enter": (
+                                len(sound_set.enter)
+                                if sound_set is not None
+                                else 0
+                            ),
+                            "exit": (
+                                len(sound_set.exit)
+                                if sound_set is not None
+                                else 0
+                            ),
+                        }
+                    )
                 for cue_kind, cue_name in (
                     ("exit", profile.exit_cue),
                     ("enter", profile.enter_cue),
@@ -1447,6 +1467,44 @@ class OBSDispatcher:
                 },
             )
 
+    def _execute_sound_set_phase(
+        self,
+        profile: ResolvedPresentationProfile,
+        *,
+        phase: str,
+        state: StreamState,
+    ) -> int:
+        name = str(profile.sound_set or "").strip()
+        if not name:
+            return 0
+        sound_set = self._presentation_registry.sound_set(name)
+        if sound_set is None:
+            raise ValueError(f"SoundSet introuvable : {name}")
+        triggers = (
+            sound_set.enter
+            if str(phase).casefold() == "enter"
+            else sound_set.exit
+        )
+        executed = 0
+        variables = self._execution_variables(state)
+        for trigger in triggers:
+            self._yield_runtime()
+            self.execute_action(
+                OBSAction(
+                    type="media_input_action",
+                    params={
+                        "input": trigger.input_name,
+                        "action": trigger.action,
+                    },
+                    enabled=True,
+                    name=f"{name}:{phase}",
+                    preapply_on_launcher=False,
+                ),
+                variables=variables,
+            )
+            executed += 1
+        return executed
+
     def _execute_cue_action(
         self,
         action: CueAction,
@@ -1595,6 +1653,11 @@ class OBSDispatcher:
                             previous_name
                         )
                         if previous_profile is not None:
+                            executed += self._execute_sound_set_phase(
+                                previous_profile,
+                                phase="exit",
+                                state=state,
+                            )
                             cue_executed, cue_skipped = (
                                 self._execute_presentation_cue(
                                     previous_profile.exit_cue,
@@ -1809,6 +1872,11 @@ class OBSDispatcher:
                 )
                 executed += cue_executed
                 skipped += cue_skipped
+                executed += self._execute_sound_set_phase(
+                    presentation_profile,
+                    phase="enter",
+                    state=state,
+                )
             except Exception as exc:
                 message = f"enter cue {presentation_name}: {exc}"
                 warnings.append(
