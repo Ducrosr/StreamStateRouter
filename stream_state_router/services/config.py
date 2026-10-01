@@ -486,6 +486,7 @@ def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
     twitch = result.get("twitch")
     if isinstance(twitch, dict):
         twitch["user_access_token"] = ""
+        twitch["refresh_token"] = ""
         twitch["enabled"] = False
 
     profiles = result.get("profiles")
@@ -1699,6 +1700,7 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
         for key in (
             "client_id",
             "user_access_token",
+            "refresh_token",
             "broadcaster_user_id",
             "user_id",
             "moderator_user_id",
