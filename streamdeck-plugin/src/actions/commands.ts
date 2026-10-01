@@ -80,6 +80,12 @@ export class MediaToggleAction extends CommandAction<EmptySettings> {
       if (!media?.running) {
         throw new Error("Media Runtime indisponible");
       }
+      if (
+        !Boolean(media.state?.connected) ||
+        Boolean(media.state?.stale)
+      ) {
+        throw new Error("État VLC indisponible ou obsolète");
+      }
       const playback = String(media.state?.playback_state ?? "");
       if (playback === "playing") {
         await ssrClient.mediaPause();
