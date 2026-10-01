@@ -1424,17 +1424,20 @@ class OBSDispatcher:
                 if remaining <= 0:
                     break
                 time.sleep(min(0.05, remaining))
-            factor = self._ease_value(step / steps, easing)
-            settings = {
-                key: (
-                    start_values[key]
-                    + (
-                        end_values[key] - start_values[key]
+            if step == steps:
+                settings = dict(end_values)
+            else:
+                factor = self._ease_value(step / steps, easing)
+                settings = {
+                    key: (
+                        start_values[key]
+                        + (
+                            end_values[key] - start_values[key]
+                        )
+                        * factor
                     )
-                    * factor
-                )
-                for key in start_values
-            }
+                    for key in start_values
+                }
             self.client.send(
                 "SetSourceFilterSettings",
                 {
@@ -2074,6 +2077,35 @@ class OBSDispatcher:
                     "filterName": self._need(p, "filter"),
                     "filterSettings": dict(settings),
                     "overlay": bool(p.get("overlay", True)),
+                },
+            )
+            return
+        if kind == "animate_filter_settings":
+            self._animate_filter_settings(p)
+            return
+        if kind == "media_input_action":
+            input_name = self._need(p, "input")
+            action_name = str(
+                p.get("action") or "restart"
+            ).strip().casefold()
+            media_actions = {
+                "play": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY",
+                "pause": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE",
+                "stop": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP",
+                "restart": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+                "next": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_NEXT",
+                "previous": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PREVIOUS",
+            }
+            media_action = media_actions.get(action_name)
+            if media_action is None:
+                raise ValueError(
+                    "media_input_action params.action inconnu"
+                )
+            self.client.send(
+                "TriggerMediaInputAction",
+                {
+                    "inputName": input_name,
+                    "mediaAction": media_action,
                 },
             )
             return
