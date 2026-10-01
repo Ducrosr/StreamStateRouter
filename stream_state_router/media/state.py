@@ -171,6 +171,12 @@ class MediaCommandStore:
                 "state": dict(state or {}),
             }
 
+    def discard(self, request_id: str) -> None:
+        key = str(request_id or "")
+        with self._lock:
+            self._records.pop(key, None)
+            self._expired.pop(key, None)
+
     def mark_running(self, request_id: str) -> None:
         key = str(request_id or "")
         with self._lock:
