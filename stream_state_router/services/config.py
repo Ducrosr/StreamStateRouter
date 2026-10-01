@@ -13,7 +13,11 @@ from typing import Any, Mapping
 
 from ..activation.models import TriggerPolicyConfig
 from ..host import HostControlConfig, HostControlController
-from ..obs.dispatcher import PROFILE_DOMAINS, profile_map_from_raw
+from ..obs.dispatcher import (
+    ACTION_PROFILE_ACTION_TYPES,
+    PROFILE_DOMAINS,
+    profile_map_from_raw,
+)
 from ..obs.models import OBSConnectionConfig
 from ..obs.layouts import anchor_factors, parse_module_source, transform_bbox
 from ..presentation import (
@@ -26,18 +30,7 @@ from ..router.rules import AppRule, ResolutionKind, RuleSet
 from .paths import backups_dir, config_path, default_config_path
 
 SCHEMA_VERSION = 7
-SUPPORTED_ACTION_TYPES = {
-    "set_program_scene",
-    "scene_item_enabled",
-    "source_filter_enabled",
-    "source_filter_settings",
-    "input_mute",
-    "input_volume_db",
-    "set_input_settings",
-    "app_audio_output",
-    "windows_hdr",
-    "wait_ms",
-}
+SUPPORTED_ACTION_TYPES = set(ACTION_PROFILE_ACTION_TYPES)
 PRESENTATION_CUE_ACTION_TYPES = SUPPORTED_ACTION_TYPES | {
     "media_input_action",
     "animate_filter_settings",
