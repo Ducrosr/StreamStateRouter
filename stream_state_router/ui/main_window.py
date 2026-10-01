@@ -6164,6 +6164,15 @@ class MainWindow(QMainWindow):
             obs_connected=bool(
                 client is not None and client.connected
             ),
+            profile_choices=self._state_profile_choices(),
+            fallback_state=(
+                self.config.get("router", {}).get(
+                    "fallback_state",
+                    {},
+                )
+                if isinstance(self.config.get("router"), Mapping)
+                else {}
+            ),
         )
         if force_task:
             index = dialog.task.findData(force_task)
@@ -6185,7 +6194,9 @@ class MainWindow(QMainWindow):
 
     def _execute_setup_guide_result(self, result) -> None:
         if result.task == "app":
-            self._configure_current_application()
+            self._configure_current_application(
+                customizations=result.app_customizations,
+            )
             return
         if result.task == "collection":
             self._guided_analyze_collection()
@@ -6294,11 +6305,20 @@ class MainWindow(QMainWindow):
             5000,
         )
 
-    def _configure_current_application(self) -> None:
+    def _configure_current_application(
+        self,
+        *,
+        customizations: tuple[
+            tuple[str, str, str],
+            ...,
+        ] = (),
+    ) -> None:
         if not self._edit_mode:
             self._toggle_edit_mode()
         if self._edit_mode:
-            self._guided_capture_current_state()
+            self._guided_capture_current_state(
+                customizations=customizations,
+            )
 
     def _configure_repair_refs(self) -> None:
         if not self._edit_mode:
@@ -6908,7 +6928,14 @@ class MainWindow(QMainWindow):
         self._refresh_profile_names()
         self._refresh_override_boxes()
 
-    def _guided_capture_current_state(self) -> None:
+    def _guided_capture_current_state(
+        self,
+        *,
+        customizations: tuple[
+            tuple[str, str, str],
+            ...,
+        ] = (),
+    ) -> None:
         if not self._require_edit_mode("Capturer l’état actuel"):
             return
         service = self._service
@@ -7073,6 +7100,10 @@ class MainWindow(QMainWindow):
                 "title": str(app.window_title or ""),
             },
             "logical_state": logical_state,
+            "app_customizations": [
+                [key, mode, value]
+                for key, mode, value in customizations
+            ],
         }
         self._record_user_activity(
             UserActivityEntry(
@@ -7113,6 +7144,24 @@ class MainWindow(QMainWindow):
             if matches
             else suggest_capture_name(self.config, base_name)
         )
+        raw_customizations = context.get("app_customizations")
+        customization_plan: dict[str, tuple[str, str]] = {}
+        if isinstance(raw_customizations, list):
+            for raw in raw_customizations:
+                if (
+                    isinstance(raw, (list, tuple))
+                    and len(raw) == 3
+                ):
+                    key = str(raw[0] or "").strip()
+                    mode = str(raw[1] or "").strip().casefold()
+                    value = str(raw[2] or "").strip()
+                    if key and mode in {
+                        "inherit",
+                        "capture",
+                        "profile",
+                    }:
+                        customization_plan[key] = (mode, value)
+
         dialog = CurrentStateCaptureDialog(
             self,
             process=process,
@@ -7121,6 +7170,7 @@ class MainWindow(QMainWindow):
             current_scene=str(snapshot.current_program_scene or ""),
             suggested_name=suggested_name,
             matching_rules=matches,
+            customization_plan=customization_plan,
         )
         if dialog.exec() != QDialog.Accepted:
             self._record_user_activity(
@@ -7165,6 +7215,18 @@ class MainWindow(QMainWindow):
             ),
             visibility_domain=str(
                 raw_options.get("visibility_domain") or "game"
+            ),
+            state_overrides={
+                key: value
+                for key, (mode, value)
+                in customization_plan.items()
+                if mode == "profile" and value
+            },
+            inherit_state_keys=tuple(
+                key
+                for key, (mode, _value)
+                in customization_plan.items()
+                if mode == "inherit"
             ),
         )
         raw_layouts = raw_result.get("layouts")
