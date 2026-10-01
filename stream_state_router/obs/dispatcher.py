@@ -1238,7 +1238,10 @@ class OBSDispatcher:
         changed = [
             domain
             for domain in STATE_DOMAINS
-            if not (domain == "layout" and self._layout_is_manually_held_for(state))
+            if not (
+                domain == "layout"
+                and self._layout_is_manually_held_for(state)
+            )
             and (
                 force
                 or (
@@ -1257,56 +1260,162 @@ class OBSDispatcher:
         warnings: list[str] = []
         statuses: list[DomainDispatchStatus] = []
 
-        def status(domain: str, desired: str, value: str, message: str = "") -> None:
+        def status(
+            domain: str,
+            desired: str,
+            value: str,
+            message: str = "",
+        ) -> None:
             statuses.append(
                 DomainDispatchStatus(
                     domain=domain,
                     desired_profile=desired,
-                    applied_profile=self._applied_profiles.get(domain, ""),
+                    applied_profile=self._applied_profiles.get(
+                        domain,
+                        "",
+                    ),
                     status=value,
                     message=message,
                 )
             )
 
+        presentation_profile: ResolvedPresentationProfile | None = None
+        presentation_failed = ""
+        presentation_name = state.profile_name("presentation")
+        if "presentation" in changed:
+            if self._is_unmanaged_default(
+                "presentation",
+                presentation_name,
+            ):
+                skipped += 1
+                status(
+                    "presentation",
+                    presentation_name,
+                    "unmanaged",
+                    "Aucun PresentationProfile configuré pour ce domaine",
+                )
+            else:
+                try:
+                    presentation_profile = self._resolve_presentation(
+                        presentation_name
+                    )
+                except Exception as exc:
+                    presentation_failed = str(exc)
+                if presentation_profile is None and not presentation_failed:
+                    presentation_failed = "PresentationProfile introuvable"
+
+                previous_name = self._applied_profiles.get(
+                    "presentation",
+                    "",
+                )
+                if (
+                    presentation_profile is not None
+                    and previous_name
+                    and previous_name != presentation_name
+                ):
+                    try:
+                        previous_profile = self._resolve_presentation(
+                            previous_name
+                        )
+                        if previous_profile is not None:
+                            cue_executed, cue_skipped = (
+                                self._execute_presentation_cue(
+                                    previous_profile.exit_cue,
+                                    state=state,
+                                )
+                            )
+                            executed += cue_executed
+                            skipped += cue_skipped
+                    except Exception as exc:
+                        presentation_failed = (
+                            f"exit cue {previous_name}: {exc}"
+                        )
+
+                if presentation_failed:
+                    skipped += 1
+                    warnings.append(
+                        f"presentation/{presentation_name}: "
+                        f"{presentation_failed}"
+                    )
+                    status(
+                        "presentation",
+                        presentation_name,
+                        "failed",
+                        presentation_failed,
+                    )
+                    presentation_profile = None
+
         for domain in changed:
+            if domain == "presentation":
+                continue
             self._yield_runtime()
             profile_name = state.profile_name(domain)
             if self._is_unmanaged_default(domain, profile_name):
                 skipped += 1
+                if domain == "layout":
+                    message = (
+                        "Aucun LayoutProfile configuré pour ce domaine"
+                    )
+                else:
+                    message = (
+                        "Aucun profil OBS configuré pour ce domaine"
+                    )
                 status(
                     domain,
                     profile_name,
                     "unmanaged",
-                    (
-                        "Aucun LayoutProfile configuré pour ce domaine"
-                        if domain == "layout"
-                        else "Aucun profil OBS configuré pour ce domaine"
-                    ),
+                    message,
                 )
                 continue
             if domain == "layout":
                 if profile_name not in self._layout_profiles:
                     skipped += 1
-                    status(domain, profile_name, "missing", "LayoutProfile introuvable")
+                    status(
+                        domain,
+                        profile_name,
+                        "missing",
+                        "LayoutProfile introuvable",
+                    )
                     continue
                 try:
-                    layout = resolve_layout_profile(profile_name, self._layout_profiles)
+                    layout = resolve_layout_profile(
+                        profile_name,
+                        self._layout_profiles,
+                    )
                 except Exception as exc:
                     skipped += 1
                     warnings.append(str(exc))
-                    status(domain, profile_name, "failed", str(exc))
+                    status(
+                        domain,
+                        profile_name,
+                        "failed",
+                        str(exc),
+                    )
                     continue
                 conditions = layout.get("conditions")
-                if isinstance(conditions, Mapping) and not self.conditions_match(conditions):
+                if (
+                    isinstance(conditions, Mapping)
+                    and not self.conditions_match(conditions)
+                ):
                     skipped += 1
-                    status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
+                    status(
+                        domain,
+                        profile_name,
+                        "blocked",
+                        "conditions OBS non satisfaites",
+                    )
                     continue
                 try:
                     result = self._layout_manager.apply_profile(layout)
                 except Exception as exc:
                     skipped += 1
                     warnings.append(str(exc))
-                    status(domain, profile_name, "failed", str(exc))
+                    status(
+                        domain,
+                        profile_name,
+                        "failed",
+                        str(exc),
+                    )
                     continue
                 executed += result.elements_applied
                 skipped += result.elements_skipped
@@ -1314,18 +1423,29 @@ class OBSDispatcher:
                 if result.missing_sources or result.warnings:
                     message = "; ".join(
                         [
-                            *(f"source manquante: {name}" for name in result.missing_sources),
+                            *(
+                                f"source manquante: {name}"
+                                for name in result.missing_sources
+                            ),
                             *result.warnings,
                         ]
                     )
-                    status(domain, profile_name, "partial", message)
+                    status(
+                        domain,
+                        profile_name,
+                        "partial",
+                        message,
+                    )
                     continue
                 self._applied_profiles[domain] = profile_name
                 status(domain, profile_name, "applied")
                 continue
 
             try:
-                profile = self._resolve_action_profile(domain, profile_name)
+                profile = self._resolve_action_profile(
+                    domain,
+                    profile_name,
+                )
             except Exception as exc:
                 skipped += 1
                 warnings.append(str(exc))
@@ -1333,43 +1453,89 @@ class OBSDispatcher:
                 continue
             if profile is None:
                 skipped += 1
-                status(domain, profile_name, "missing", "Profil OBS introuvable")
+                status(
+                    domain,
+                    profile_name,
+                    "missing",
+                    "Profil OBS introuvable",
+                )
                 continue
             if not self.conditions_match(profile.conditions):
                 skipped += len(profile.actions) or 1
-                status(domain, profile_name, "blocked", "conditions OBS non satisfaites")
+                status(
+                    domain,
+                    profile_name,
+                    "blocked",
+                    "conditions OBS non satisfaites",
+                )
                 continue
 
-            domain_executed = 0
-            domain_skipped = 0
-            failed = ""
+            domain_failed = ""
             variables = self._execution_variables(state)
             for action in profile.actions:
                 self._yield_runtime()
                 if not action.enabled:
                     skipped += 1
-                    domain_skipped += 1
                     continue
                 if self._action_overridden_by_launcher(
                     action,
                     variables,
                 ):
                     skipped += 1
-                    domain_skipped += 1
                     continue
                 try:
-                    self.execute_action(action, variables=variables)
+                    self.execute_action(
+                        action,
+                        variables=variables,
+                    )
                 except Exception as exc:
-                    failed = str(exc)
-                    warnings.append(f"{domain}/{profile_name}: {exc}")
+                    domain_failed = str(exc)
+                    warnings.append(
+                        f"{domain}/{profile_name}: {exc}"
+                    )
                     break
                 executed += 1
-                domain_executed += 1
-            if failed:
-                status(domain, profile_name, "failed", failed)
+            if domain_failed:
+                status(
+                    domain,
+                    profile_name,
+                    "failed",
+                    domain_failed,
+                )
                 continue
             self._applied_profiles[domain] = profile_name
             status(domain, profile_name, "applied")
+
+        if presentation_profile is not None:
+            try:
+                cue_executed, cue_skipped = (
+                    self._execute_presentation_cue(
+                        presentation_profile.enter_cue,
+                        state=state,
+                    )
+                )
+                executed += cue_executed
+                skipped += cue_skipped
+            except Exception as exc:
+                message = f"enter cue {presentation_name}: {exc}"
+                warnings.append(
+                    f"presentation/{presentation_name}: {message}"
+                )
+                status(
+                    "presentation",
+                    presentation_name,
+                    "failed",
+                    message,
+                )
+            else:
+                self._applied_profiles["presentation"] = (
+                    presentation_name
+                )
+                status(
+                    "presentation",
+                    presentation_name,
+                    "applied",
+                )
 
         return DispatchResult(
             executed,
