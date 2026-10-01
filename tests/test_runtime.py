@@ -1108,6 +1108,87 @@ class RuntimeTests(unittest.TestCase):
         finally:
             self.assertTrue(service.stop())
 
+    def test_widget_browser_source_is_created_on_runtime_worker(self):
+        class WidgetClient(CatalogRuntimeClient):
+            def __init__(self):
+                super().__init__()
+                self.write_threads = []
+
+            def send(self, request, data=None):
+                if request == "CreateInput":
+                    self.request_count += 1
+                    self.calls.append((request, dict(data or {})))
+                    self.write_threads.append(
+                        threading.current_thread().name
+                    )
+                    return {"sceneItemId": 42}
+                return super().send(request, data)
+
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        client = WidgetClient()
+        dispatcher = OBSDispatcher(client, {})
+        service = RoutingService(
+            engine,
+            dispatcher,
+            poll_ms=20,
+            provider=FakeProvider(None),
+        )
+        collector = OBSResultCollector()
+        service.on_event = collector.callback
+        service.pause(True)
+        service.start()
+        try:
+            request_id = service.request_widget_browser_source(
+                scene="Gameplay",
+                input_name="[SSR] Loveless Chat",
+                url="http://127.0.0.1:17861/widgets/chat/",
+                width=1920,
+                height=1080,
+                fps=30,
+            )
+            result = collector.wait(request_id)
+
+            self.assertTrue(result.success, result.error)
+            create_calls = [
+                payload
+                for request, payload in client.calls
+                if request == "CreateInput"
+            ]
+            self.assertEqual(len(create_calls), 1)
+            self.assertEqual(
+                create_calls[0]["inputKind"],
+                "browser_source",
+            )
+            self.assertEqual(
+                create_calls[0]["inputSettings"]["url"],
+                "http://127.0.0.1:17861/widgets/chat/",
+            )
+            self.assertEqual(
+                client.write_threads,
+                ["SSR-Router"],
+            )
+        finally:
+            self.assertTrue(service.stop())
+
+    def test_widget_browser_source_rejects_non_runtime_url(self):
+        engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
+        dispatcher = CommandDispatcher()
+        service = RoutingService(
+            engine,
+            dispatcher,
+            provider=FakeProvider(None),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "localhost",
+        ):
+            service.request_widget_browser_source(
+                scene="Gameplay",
+                input_name="Widget",
+                url="https://example.test/widget",
+            )
+
     def test_catalog_sync_runs_on_runtime_worker_and_updates_status(self):
         engine = StateRouterEngine(RuleSet([]), debounce_ms=0)
         client = CatalogRuntimeClient()
