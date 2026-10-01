@@ -162,6 +162,18 @@ class VLCProviderTests(unittest.TestCase):
             "Basic OnNlY3JldA==",
         )
 
+    def test_artwork_request_timeout_is_capped_at_two_seconds(self) -> None:
+        transport = VLCHttpTransport(
+            VLCConfig(password="secret", timeout_seconds=10.0)
+        )
+        opener = FakeOpener(b"jpeg-bytes", "image/jpeg")
+        transport._opener = opener
+
+        transport.get_bytes("/art")
+
+        _request, timeout = opener.requests[0]
+        self.assertEqual(timeout, 2.0)
+
     def test_provider_artwork_uses_vlc_art_endpoint(self) -> None:
         transport = FakeTransport(
             artwork=b"png-bytes",
