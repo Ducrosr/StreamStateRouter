@@ -550,6 +550,32 @@ html[data-ssr-animation-intensity="off"] .done #time{animation:none}
 </script></body></html>""".strip()
 
 
+_AUDIENCE_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="audience">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--ssr-accent:#63e6ff;--ssr-panel-opacity:.78;--ssr-glow:14px;--ssr-font-size:34px}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:white;font-family:Inter,"Segoe UI",sans-serif}
+#root{width:100%;height:100%;display:flex;align-items:center;justify-content:center;gap:10px;padding:8px 14px;background:rgba(8,17,24,var(--ssr-panel-opacity));border:1px solid var(--ssr-accent);box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.18);border-radius:999px}
+#count{font-size:var(--ssr-font-size);font-weight:900;color:var(--ssr-accent);font-variant-numeric:tabular-nums}
+#label{font-size:.52em;opacity:.72;text-transform:uppercase;letter-spacing:.1em}
+.offline{opacity:.55}
+</style></head>
+<body><div id="root"><span id="count">0</span><span id="label">spectateurs</span></div>
+<script src="/runtime/bridge.js?component=audience"></script>
+<script>
+(() => {
+ const root=document.getElementById("root"), count=document.getElementById("count"), label=document.getElementById("label");
+ let after=0;
+ const apply=(p)=>{const live=!!p.live;const n=Math.max(0,Number(p.viewer_count)||0);count.textContent=String(n);label.textContent=live?(n===1?"spectateur":"spectateurs"):"hors ligne";root.classList.toggle("offline",!live);};
+ const refresh=async()=>{try{const response=await fetch("/runtime/events?channel=audience&after="+after+"&limit=20",{cache:"no-store"});if(response.ok){const data=await response.json();for(const event of data.events||[]){after=Math.max(after,Number(event.sequence)||0);if(event.type==="state")apply(event.payload||{});}}}catch(_){}finally{window.setTimeout(refresh,1000);}};
+ refresh();
+})();
+</script></body></html>""".strip()
+
+
 class _WidgetServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -679,7 +705,7 @@ class WidgetRuntime:
         component_json = json.dumps(wanted, ensure_ascii=False)
         fallback = (
             f"builtin:{wanted}"
-            if wanted in {"chat", "events", "alerts", "now-playing", "clock", "countdown"}
+            if wanted in {"chat", "events", "alerts", "now-playing", "clock", "countdown", "audience"}
             else ""
         )
         fallback_json = json.dumps(fallback)
@@ -707,7 +733,7 @@ iframe{display:block}
     const value = String(resource || fallback || "").trim();
     if (value.startsWith("builtin:")) {
       const name = value.slice("builtin:".length);
-      if (["chat","events","alerts","now-playing","clock","countdown"].includes(name)) {
+      if (["chat","events","alerts","now-playing","clock","countdown","audience"].includes(name)) {
         return "/builtin/" + encodeURIComponent(name);
       }
       return "";
@@ -1058,6 +1084,18 @@ iframe{display:block}
                 }:
                     self._send_bytes(
                         _COUNTDOWN_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {
+                    "/builtin/audience",
+                    "/builtin/audience/",
+                }:
+                    self._send_bytes(
+                        _AUDIENCE_HTML.encode("utf-8"),
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
