@@ -1749,13 +1749,26 @@ class OBSDispatcher:
                     f"{step.phase}/{step.cue}: "
                     f"{step.error or step.status}"
                 )
+                terminal_status = dict(
+                    self._presentation_execution_status
+                )
                 self._presentation_tasks.popleft()
                 # Do not continue a transition chain after an uncertain
                 # one-shot effect. The remaining actions are cancelled and
-                # never replayed automatically.
-                self.cancel_presentation_tasks(
-                    "chaîne annulée après effet échoué ou incertain"
+                # never replayed automatically, while the root failure remains
+                # the published execution status.
+                cancelled_followups = 0
+                while self._presentation_tasks:
+                    followup = self._presentation_tasks.popleft()
+                    if not followup.terminal:
+                        followup.cancel(
+                            "chaîne annulée après effet échoué ou incertain"
+                        )
+                        cancelled_followups += 1
+                terminal_status["cancelled_followups"] = (
+                    cancelled_followups
                 )
+                self._presentation_execution_status = terminal_status
                 break
 
             if step.status in {"completed", "cancelled"}:
