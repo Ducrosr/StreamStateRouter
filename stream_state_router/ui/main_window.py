@@ -119,7 +119,7 @@ from .ergonomics import (
     build_status_strip,
     humanize_rule,
 )
-from .setup_guide import SetupGuideDialog
+from .setup_guide import SetupGuideDialog, WidgetObsInstallDialog
 from .presentation import (
     UserActivityEntry,
     build_automation_rows,
@@ -3218,7 +3218,16 @@ class MainWindow(QMainWindow):
         import_widget.setObjectName("DraftAction")
         import_widget.clicked.connect(self._open_html_widget_guide)
         widget_actions.addWidget(import_widget)
-        copy_uri = QPushButton("Copier l’URI locale")
+        create_obs = QPushButton("Créer dans OBS…")
+        self._set_action_risk(
+            create_obs,
+            "live",
+            "Crée immédiatement une Browser Source OBS via le worker SSR.",
+        )
+        create_obs.clicked.connect(self._create_selected_widget_in_obs)
+        self._register_obs_connected_control(create_obs)
+        widget_actions.addWidget(create_obs)
+        copy_uri = QPushButton("Copier l’URL du Widget Runtime")
         copy_uri.clicked.connect(self._copy_selected_widget_uri)
         widget_actions.addWidget(copy_uri)
         refresh_widgets = QPushButton("Actualiser")
@@ -5614,6 +5623,25 @@ class MainWindow(QMainWindow):
                 self._update_obs_status()
                 return
             if bool(getattr(payload, "success", False)):
+                if action == "widget.browser_source.create":
+                    result = getattr(payload, "result", None)
+                    detail = ""
+                    if isinstance(result, Mapping):
+                        detail = (
+                            f"{result.get('input_name', '')} → "
+                            f"{result.get('scene', '')}"
+                        ).strip(" →")
+                    self._record_user_activity(
+                        UserActivityEntry(
+                            "Good",
+                            "Module SSR créé dans OBS",
+                            detail,
+                        )
+                    )
+                    self.statusBar().showMessage(
+                        "Browser Source SSR créée dans OBS.",
+                        6000,
+                    )
                 if action == "layout.preview":
                     self._preview_active = True
                 elif action in {"layout.cancel-preview", "layout.apply"}:
@@ -6297,6 +6325,7 @@ class MainWindow(QMainWindow):
                 ]
             )
             item.setData(0, Qt.UserRole, package.package_id)
+            item.setData(0, Qt.UserRole + 1, package.name)
             item.setData(3, Qt.UserRole, package.entry_uri)
             item.setToolTip(3, str(package.entry))
             if package.remote_references:
@@ -6306,6 +6335,109 @@ class MainWindow(QMainWindow):
                     + "\n".join(package.remote_references[:20]),
                 )
             self.widget_library.addTopLevelItem(item)
+
+    def _create_selected_widget_in_obs(self) -> None:
+        if self._service is None:
+            QMessageBox.warning(
+                self,
+                "Créer le module dans OBS",
+                "Le runtime SSR n’est pas disponible.",
+            )
+            return
+        runtime = self._widget_runtime
+        if runtime is None or not runtime.running:
+            QMessageBox.warning(
+                self,
+                "Créer le module dans OBS",
+                "Le Widget Runtime doit être actif.",
+            )
+            return
+        if not hasattr(self, "widget_library"):
+            return
+        item = self.widget_library.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self,
+                "Créer le module dans OBS",
+                "Sélectionnez d’abord un module HTML.",
+            )
+            return
+
+        package_id = str(item.data(0, Qt.UserRole) or "").strip()
+        module_name = str(
+            item.data(0, Qt.UserRole + 1) or item.text(0)
+        ).strip()
+        if not package_id:
+            QMessageBox.warning(
+                self,
+                "Créer le module dans OBS",
+                "Identifiant du package introuvable.",
+            )
+            return
+
+        default_scene = ""
+        if self._dispatcher is not None:
+            default_scene = str(
+                self._dispatcher.cached_obs_context().get(
+                    "program_scene",
+                    "",
+                )
+                or ""
+            ).strip()
+
+        dialog = WidgetObsInstallDialog(
+            self,
+            module_name=module_name,
+            default_scene=default_scene,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selection = dialog.result_value()
+
+        try:
+            url = runtime.package_url(
+                package_id,
+                component=selection.component,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Créer le module dans OBS",
+                str(exc),
+            )
+            return
+
+        if not self._safe_live_confirm(
+            f"Créer la Browser Source « {selection.input_name} »"
+        ):
+            return
+
+        try:
+            request_id = self._service.request_widget_browser_source(
+                input_name=selection.input_name,
+                url=url,
+                scene=selection.scene,
+                width=selection.width,
+                height=selection.height,
+                shutdown_when_not_visible=(
+                    selection.shutdown_when_not_visible
+                ),
+                restart_when_active=selection.restart_when_active,
+            )
+            self._track_obs_request(
+                request_id,
+                busy_text="Création…",
+            )
+            self.statusBar().showMessage(
+                "Création de la Browser Source OBS en cours…",
+                6000,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Créer le module dans OBS",
+                str(exc),
+            )
 
     def _copy_selected_widget_uri(self) -> None:
         if not hasattr(self, "widget_library"):
