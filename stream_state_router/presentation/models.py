@@ -93,6 +93,27 @@ class Cue:
 
 
 @dataclass(frozen=True, slots=True)
+class PresentationComponent:
+    mode: str = "inherit"
+    resource: str = ""
+    settings: Mapping[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any],
+    ) -> "PresentationComponent":
+        settings = raw.get("settings")
+        return cls(
+            mode=str(raw.get("mode") or "inherit").strip().casefold(),
+            resource=str(raw.get("resource") or "").strip(),
+            settings=_freeze_mapping(
+                settings if isinstance(settings, Mapping) else {}
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PresentationProfile:
     name: str
     extends: str = ""
@@ -104,6 +125,9 @@ class PresentationProfile:
     widget_theme: str = ""
     animation_intensity: str = "normal"
     theme: Mapping[str, Any] = field(default_factory=dict)
+    components: Mapping[str, PresentationComponent] = field(
+        default_factory=dict
+    )
 
     @classmethod
     def from_mapping(
@@ -112,6 +136,16 @@ class PresentationProfile:
         raw: Mapping[str, Any],
     ) -> "PresentationProfile":
         theme = raw.get("theme")
+        components_raw = raw.get("components")
+        components = {
+            str(key): PresentationComponent.from_mapping(value)
+            for key, value in (
+                components_raw.items()
+                if isinstance(components_raw, Mapping)
+                else ()
+            )
+            if isinstance(value, Mapping)
+        }
         return cls(
             name=str(name),
             extends=str(raw.get("extends") or "").strip(),
@@ -129,6 +163,7 @@ class PresentationProfile:
             theme=_freeze_mapping(
                 theme if isinstance(theme, Mapping) else {}
             ),
+            components=MappingProxyType(components),
         )
 
 
@@ -144,6 +179,9 @@ class ResolvedPresentationProfile:
     widget_theme: str = ""
     animation_intensity: str = "normal"
     theme: Mapping[str, Any] = field(default_factory=dict)
+    components: Mapping[str, PresentationComponent] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +228,7 @@ def resolve_presentation_profile(
             widget_theme=profile.widget_theme,
             animation_intensity=profile.animation_intensity,
             theme=_freeze_mapping(profile.theme),
+            components=MappingProxyType(dict(profile.components)),
         )
 
     parent = resolve_presentation_profile(
@@ -199,6 +238,35 @@ def resolve_presentation_profile(
     )
     theme = dict(parent.theme)
     theme.update(dict(profile.theme))
+
+    components = dict(parent.components)
+    for key, child in profile.components.items():
+        if child.mode == "inherit":
+            continue
+        if child.mode == "hidden":
+            components[key] = child
+            continue
+        inherited = components.get(key)
+        inherited_settings = (
+            dict(inherited.settings)
+            if inherited is not None
+            and inherited.mode == "custom"
+            else {}
+        )
+        inherited_settings.update(dict(child.settings))
+        components[key] = PresentationComponent(
+            mode="custom",
+            resource=(
+                child.resource
+                or (
+                    inherited.resource
+                    if inherited is not None
+                    and inherited.mode == "custom"
+                    else ""
+                )
+            ),
+            settings=_freeze_mapping(inherited_settings),
+        )
 
     def inherit(child: str, parent_value: str) -> str:
         return child if child else parent_value
@@ -221,6 +289,7 @@ def resolve_presentation_profile(
             else parent.animation_intensity
         ),
         theme=_freeze_mapping(theme),
+        components=MappingProxyType(components),
     )
 
 
