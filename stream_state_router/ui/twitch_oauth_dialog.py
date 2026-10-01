@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -73,8 +73,7 @@ class TwitchDeviceOAuthDialog(QDialog):
 
         self.url = QLabel(authorization.verification_uri)
         self.url.setTextInteractionFlags(
-            self.url.textInteractionFlags()
-            | self.url.textInteractionFlags().TextSelectableByMouse
+            Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.url.setWordWrap(True)
         root.addWidget(self.url)
