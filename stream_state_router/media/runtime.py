@@ -234,7 +234,9 @@ class MediaRuntime:
                 content_type=content_type,
                 identity="|".join(identity),
             )
-            self._next_artwork_retry_at = 0.0
+            # A successful artwork belongs to this track identity and
+            # remains valid until that identity changes.
+            self._next_artwork_retry_at = float("inf")
         except Exception:
             # Artwork is optional metadata: never make the player appear
             # disconnected because a cover cannot be loaded.
