@@ -8,6 +8,7 @@ from .twitch_helix import (
 from .twitch_oauth import (
     DEFAULT_TWITCH_SCOPES,
     TwitchDeviceAuthorization,
+    TwitchOAuthError,
     TwitchOAuthTokens,
     begin_device_authorization,
     poll_device_tokens,
@@ -22,6 +23,7 @@ __all__ = [
     "TwitchEventSubAdapter",
     "TwitchEventSubConfig",
     "TwitchHelixClient",
+    "TwitchOAuthError",
     "TwitchOAuthTokens",
     "TwitchTokenInfo",
     "begin_device_authorization",
