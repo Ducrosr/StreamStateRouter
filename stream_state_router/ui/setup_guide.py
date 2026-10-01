@@ -83,6 +83,7 @@ class SetupGuideDialog(QDialog):
         self.html_mode.currentIndexChanged.connect(self._sync_html_mode)
         self.stack.currentChanged.connect(self._sync_navigation)
         self._sync_task_details()
+        self._sync_html_mode()
         self._sync_navigation()
 
     def _build_task_page(self) -> QWidget:
