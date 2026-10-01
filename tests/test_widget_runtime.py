@@ -8,7 +8,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from stream_state_router.media import MediaArtworkStore, MediaState, MediaStateStore
+from stream_state_router.media import MediaArtworkStore, MediaState, MediaStateStore, media_artwork_identity
 from stream_state_router.presentation import (
     PresentationStateStore,
     build_presentation_registry,
@@ -227,11 +227,32 @@ class WidgetRuntimeTests(unittest.TestCase):
     def test_media_artwork_is_served_from_safe_runtime_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _package = self._runtime(Path(tmp))
+            media = MediaStateStore("vlc")
+            state = MediaState(
+                provider="vlc",
+                connected=True,
+                playback_state="playing",
+                title="Mako",
+                uri="file:///C:/Music/mako.flac",
+                artwork_url="file:///C:/Music/cover.jpg",
+                track_id="42",
+            )
+            media.update(state)
+            runtime.media_state_store = media
+
             artwork = MediaArtworkStore()
+            identity = media_artwork_identity(
+                provider=state.provider,
+                track_id=state.track_id,
+                uri=state.uri,
+                title=state.title,
+                artwork_url=state.artwork_url,
+            )
+            valid_jpeg = b"\xff\xd8\xff\xe0SSR-JPEG"
             artwork.update(
-                b"jpeg-cover",
+                valid_jpeg,
                 content_type="image/jpeg",
-                identity="track-42",
+                identity=identity,
             )
             runtime.media_artwork_store = artwork
 
@@ -250,8 +271,51 @@ class WidgetRuntimeTests(unittest.TestCase):
                 runtime.base_url + payload["artwork_url"]
             )
             self.assertEqual(status, 200)
-            self.assertEqual(cover, b"jpeg-cover")
+            self.assertEqual(cover, valid_jpeg)
             self.assertIn("image/jpeg", content_type)
+
+            with self.assertRaises(HTTPError) as expired:
+                self._get(
+                    runtime.base_url
+                    + "/runtime/media/artwork?revision=0"
+                )
+            self.assertEqual(expired.exception.code, 404)
+
+    def test_media_payload_hides_artwork_from_previous_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            media = MediaStateStore("vlc")
+            current = MediaState(
+                provider="vlc",
+                connected=True,
+                playback_state="playing",
+                title="Track B",
+                uri="file:///C:/Music/b.flac",
+                track_id="2",
+            )
+            media.update(current)
+            runtime.media_state_store = media
+
+            artwork = MediaArtworkStore()
+            artwork.update(
+                b"\x89PNG\r\n\x1a\nSSR-PNG",
+                content_type="image/png",
+                identity=media_artwork_identity(
+                    provider="vlc",
+                    track_id="1",
+                    uri="file:///C:/Music/a.flac",
+                    title="Track A",
+                ),
+            )
+            runtime.media_artwork_store = artwork
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+
+            self.assertFalse(payload["artwork_available"])
+            self.assertEqual(payload["artwork_url"], "")
 
     def test_builtin_radio_consumes_media_endpoint_without_html_injection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
