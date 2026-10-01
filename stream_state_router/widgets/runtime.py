@@ -220,6 +220,190 @@ _CHAT_HTML = r"""<!doctype html>
 """.strip()
 
 
+_EVENTS_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="events">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root {
+  --ssr-accent: #63e6ff;
+  --ssr-panel-opacity: .82;
+  --ssr-glow: 10px;
+  --ssr-font-size: 17px;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; width: 100%; height: 100%; overflow: hidden;
+  background: transparent; color: white;
+  font-family: Inter, "Segoe UI", sans-serif;
+  font-size: var(--ssr-font-size);
+}
+#events {
+  display: flex; flex-direction: column-reverse; gap: 6px;
+  width: 100%; height: 100%; padding: 8px;
+}
+.event {
+  padding: 8px 10px;
+  border-left: 2px solid var(--ssr-accent);
+  border-radius: 4px;
+  background: rgba(8,17,24,var(--ssr-panel-opacity));
+  box-shadow: 0 0 var(--ssr-glow) rgba(80,220,255,.18);
+  animation: enter 220ms ease-out both;
+}
+.kind { color: var(--ssr-accent); font-weight: 700; margin-right: 8px; }
+.platform { opacity: .6; font-size: .72em; text-transform: uppercase; margin-right: 6px; }
+@keyframes enter { from { opacity:0; transform:translateX(12px); } to { opacity:1; transform:none; } }
+html[data-ssr-animation-intensity="off"] .event { animation:none; }
+</style>
+</head>
+<body>
+<div id="events" aria-live="polite"></div>
+<script src="/runtime/bridge.js?component=events"></script>
+<script>
+(() => {
+  const root = document.getElementById("events");
+  let after = 0;
+  const maxRows = 30;
+  const render = (event) => {
+    const payload = event.payload || {};
+    const row = document.createElement("div");
+    row.className = "event";
+    const platform = document.createElement("span");
+    platform.className = "platform";
+    platform.textContent = event.platform || "";
+    row.appendChild(platform);
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = payload.label || event.type || "event";
+    row.appendChild(kind);
+    const text = document.createElement("span");
+    text.textContent =
+      payload.text || payload.display_name || payload.user_name ||
+      payload.title || "";
+    row.appendChild(text);
+    root.prepend(row);
+    while (root.children.length > maxRows) root.removeChild(root.lastChild);
+  };
+  const refresh = async () => {
+    try {
+      const response = await fetch(
+        "/runtime/events?channel=events&after=" + after + "&limit=50",
+        { cache: "no-store" }
+      );
+      if (response.ok) {
+        const snapshot = await response.json();
+        for (const event of snapshot.events || []) {
+          after = Math.max(after, Number(event.sequence) || 0);
+          render(event);
+        }
+      }
+    } catch (_) {}
+    finally { window.setTimeout(refresh, 350); }
+  };
+  refresh();
+})();
+</script>
+</body>
+</html>""".strip()
+
+
+_ALERTS_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="alerts">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root {
+  --ssr-accent: #63e6ff;
+  --ssr-panel-opacity: .88;
+  --ssr-glow: 24px;
+  --ssr-font-size: 30px;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin:0; width:100%; height:100%; overflow:hidden;
+  background:transparent; color:white; font-family:Inter,"Segoe UI",sans-serif;
+}
+#root {
+  width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+  pointer-events:none;
+}
+.alert {
+  min-width: 320px; max-width: 80%;
+  padding: 22px 30px; text-align:center;
+  border: 1px solid var(--ssr-accent);
+  background: rgba(8,17,24,var(--ssr-panel-opacity));
+  box-shadow: 0 0 var(--ssr-glow) rgba(80,220,255,.35);
+  border-radius: 10px;
+  animation: alert-in 320ms ease-out both;
+}
+.title { color:var(--ssr-accent); font-size:var(--ssr-font-size); font-weight:800; }
+.text { margin-top:8px; font-size:.65em; }
+@keyframes alert-in {
+  from { opacity:0; transform:scale(.92) translateY(10px); }
+  to { opacity:1; transform:none; }
+}
+html[data-ssr-animation-intensity="off"] .alert { animation:none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/runtime/bridge.js?component=alerts"></script>
+<script>
+(() => {
+  const root = document.getElementById("root");
+  let after = 0;
+  const queue = [];
+  let active = false;
+  const showNext = () => {
+    if (active || !queue.length) return;
+    active = true;
+    const event = queue.shift();
+    const payload = event.payload || {};
+    const box = document.createElement("div");
+    box.className = "alert";
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = payload.title || payload.label || event.type || "Alerte";
+    const text = document.createElement("div");
+    text.className = "text";
+    text.textContent =
+      payload.text || payload.display_name || payload.user_name || "";
+    box.appendChild(title);
+    box.appendChild(text);
+    root.replaceChildren(box);
+    const duration = Math.max(1000, Math.min(20000, Number(payload.duration_ms) || 5000));
+    window.setTimeout(() => {
+      root.replaceChildren();
+      active = false;
+      showNext();
+    }, duration);
+  };
+  const refresh = async () => {
+    try {
+      const response = await fetch(
+        "/runtime/events?channel=alerts&after=" + after + "&limit=20",
+        { cache: "no-store" }
+      );
+      if (response.ok) {
+        const snapshot = await response.json();
+        for (const event of snapshot.events || []) {
+          after = Math.max(after, Number(event.sequence) || 0);
+          queue.push(event);
+        }
+        showNext();
+      }
+    } catch (_) {}
+    finally { window.setTimeout(refresh, 300); }
+  };
+  refresh();
+})();
+</script>
+</body>
+</html>""".strip()
+
+
 class _WidgetServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -480,6 +664,24 @@ class WidgetRuntime:
                 if path in {"/builtin/chat", "/builtin/chat/"}:
                     self._send_bytes(
                         _CHAT_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {"/builtin/events", "/builtin/events/"}:
+                    self._send_bytes(
+                        _EVENTS_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {"/builtin/alerts", "/builtin/alerts/"}:
+                    self._send_bytes(
+                        _ALERTS_HTML.encode("utf-8"),
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",
