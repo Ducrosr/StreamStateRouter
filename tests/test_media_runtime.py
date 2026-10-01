@@ -178,6 +178,8 @@ class MediaRuntimeTests(unittest.TestCase):
 
         self.assertFalse(state.connected)
         self.assertEqual(state.playback_state, "unknown")
+        self.assertGreater(state.observed_at_unix, 0.0)
+        self.assertIn("play", state.capabilities)
         self.assertIn("MediaState", state.error)
 
     def test_state_store_returns_revisioned_snapshot(self) -> None:
@@ -241,6 +243,8 @@ class MediaRuntimeTests(unittest.TestCase):
 
         self.assertFalse(offline.connected)
         self.assertEqual(offline.error, "provider offline")
+        self.assertGreater(offline.observed_at_unix, 0.0)
+        self.assertIn("play", offline.capabilities)
         self.assertTrue(recovered.connected)
         self.assertEqual(recovered.error, "")
         self.assertEqual(
