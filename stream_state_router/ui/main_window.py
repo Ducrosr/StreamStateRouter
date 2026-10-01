@@ -5,8 +5,8 @@ import json
 import os
 import time
 from typing import Mapping
-from PySide6.QtCore import QObject, Qt, Signal, QTimer, QSettings
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QObject, Qt, Signal, QTimer, QSettings, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -45,6 +45,10 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..activation import TriggerTargetIdentity
 from ..events import EventBus
+from ..platforms import (
+    TwitchPlatformController,
+    build_twitch_platform_config,
+)
 from ..importers import (
     AdvancedSceneSwitcherImporter,
     CurrentStateCaptureOptions,
@@ -211,6 +215,8 @@ class MainWindow(QMainWindow):
         self._presentation_state_store = PresentationStateStore()
         self._event_bus = EventBus()
         self._widget_runtime: WidgetRuntime | None = None
+        self._twitch_controller: TwitchPlatformController | None = None
+        self._last_twitch_status: dict[str, object] = {}
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
         self._catalog_tree_guard = False
@@ -262,6 +268,7 @@ class MainWindow(QMainWindow):
         )
         self._start_runtime()
         self._start_widget_runtime()
+        self._start_twitch_platform()
         self._start_api()
         self._module_scan_timer = QTimer(self)
         self._module_scan_timer.timeout.connect(self._auto_scan_modules)
@@ -4456,6 +4463,64 @@ class MainWindow(QMainWindow):
         widget_lay.addWidget(widget_note)
         root.addWidget(widget_card)
 
+        twitch_card, twitch_lay = self._card("Twitch / EventSub")
+        twitch_form = QFormLayout()
+        self.twitch_enabled = QCheckBox(
+            "Activer Twitch EventSub"
+        )
+        self.twitch_client_id = QLineEdit()
+        self.twitch_client_id.setPlaceholderText(
+            "Client ID public de l’application Twitch"
+        )
+        self.twitch_broadcaster_id = QLineEdit()
+        self.twitch_broadcaster_id.setPlaceholderText(
+            "Optionnel · vide = compte connecté"
+        )
+        self.twitch_moderator_id = QLineEdit()
+        self.twitch_moderator_id.setPlaceholderText(
+            "Optionnel · vide = broadcaster"
+        )
+        twitch_form.addRow("", self.twitch_enabled)
+        twitch_form.addRow("Client ID", self.twitch_client_id)
+        twitch_form.addRow(
+            "Broadcaster User ID",
+            self.twitch_broadcaster_id,
+        )
+        twitch_form.addRow(
+            "Moderator User ID",
+            self.twitch_moderator_id,
+        )
+        twitch_lay.addLayout(twitch_form)
+        self.twitch_status = QLabel(
+            "Twitch : non configuré"
+        )
+        self.twitch_status.setObjectName("Muted")
+        self.twitch_status.setWordWrap(True)
+        twitch_lay.addWidget(self.twitch_status)
+        twitch_actions = QHBoxLayout()
+        connect_twitch = QPushButton("Connecter Twitch…")
+        connect_twitch.clicked.connect(self._connect_twitch_account)
+        twitch_actions.addWidget(connect_twitch)
+        reconnect_twitch = QPushButton("Relancer EventSub")
+        reconnect_twitch.clicked.connect(self._restart_twitch_platform)
+        twitch_actions.addWidget(reconnect_twitch)
+        disconnect_twitch = QPushButton("Déconnecter le compte")
+        disconnect_twitch.clicked.connect(
+            self._disconnect_twitch_account
+        )
+        twitch_actions.addWidget(disconnect_twitch)
+        twitch_actions.addStretch(1)
+        twitch_lay.addLayout(twitch_actions)
+        twitch_note = QLabel(
+            "Access token et refresh token ne sont jamais stockés dans "
+            "config.json : sous Windows ils sont chiffrés par DPAPI pour "
+            "le compte utilisateur courant."
+        )
+        twitch_note.setWordWrap(True)
+        twitch_note.setObjectName("Muted")
+        twitch_lay.addWidget(twitch_note)
+        root.addWidget(twitch_card)
+
         host_card, host_lay = self._card("Contrôle Windows")
         host_form = QFormLayout()
         self.soundvolumeview_path = QLineEdit()
@@ -5011,6 +5076,15 @@ class MainWindow(QMainWindow):
         self.widget_runtime_port.setValue(
             int(widget_runtime.get("port", 8766) or 8766)
         )
+        twitch_cfg = build_twitch_platform_config(self.config)
+        self.twitch_enabled.setChecked(twitch_cfg.enabled)
+        self.twitch_client_id.setText(twitch_cfg.client_id)
+        self.twitch_broadcaster_id.setText(
+            twitch_cfg.broadcaster_user_id
+        )
+        self.twitch_moderator_id.setText(
+            twitch_cfg.moderator_user_id
+        )
         self.api_enabled.setChecked(bool(api.get("enabled", True)))
         self.api_port.setValue(int(api.get("port", 8765)))
         self.api_token.setText(str(api.get("token") or ""))
@@ -5049,6 +5123,7 @@ class MainWindow(QMainWindow):
             self.start_with_windows,
             self.api_enabled,
             self.widget_runtime_enabled,
+            self.twitch_enabled,
             self.auto_detect_modules,
             self.safe_live,
         ):
@@ -5057,6 +5132,9 @@ class MainWindow(QMainWindow):
             self.obs_host,
             self.obs_password,
             self.api_token,
+            self.twitch_client_id,
+            self.twitch_broadcaster_id,
+            self.twitch_moderator_id,
             self.soundvolumeview_path,
         ):
             widget.textChanged.connect(self._mark_dirty)
@@ -5082,6 +5160,22 @@ class MainWindow(QMainWindow):
         )
         widget_runtime["host"] = "127.0.0.1"
         widget_runtime["port"] = self.widget_runtime_port.value()
+        platforms = self.config.setdefault("platforms", {})
+        if not isinstance(platforms, dict):
+            platforms = {}
+            self.config["platforms"] = platforms
+        twitch = platforms.setdefault("twitch", {})
+        if not isinstance(twitch, dict):
+            twitch = {}
+            platforms["twitch"] = twitch
+        twitch["enabled"] = self.twitch_enabled.isChecked()
+        twitch["client_id"] = self.twitch_client_id.text().strip()
+        twitch["broadcaster_user_id"] = (
+            self.twitch_broadcaster_id.text().strip()
+        )
+        twitch["moderator_user_id"] = (
+            self.twitch_moderator_id.text().strip()
+        )
         api = self.config.setdefault("api", {})
         api["enabled"] = self.api_enabled.isChecked()
         api["host"] = "127.0.0.1"
@@ -5492,6 +5586,7 @@ class MainWindow(QMainWindow):
         self._draft_dirty = False
         self._restart_api()
         self._restart_widget_runtime()
+        self._restart_twitch_platform()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
         self._refresh_config_revision_status(draft_dirty=False)
@@ -9692,6 +9787,223 @@ class MainWindow(QMainWindow):
             self._obs_module_catalog = catalog
             self._populate_module_tree()
 
+    def _ensure_twitch_controller(self) -> TwitchPlatformController:
+        controller = self._twitch_controller
+        if controller is not None:
+            return controller
+        controller = TwitchPlatformController(
+            self._event_bus,
+            parent=self,
+        )
+        controller.status_changed.connect(
+            self._on_twitch_status
+        )
+        controller.error.connect(self._on_twitch_error)
+        controller.authorization_required.connect(
+            self._on_twitch_authorization_required
+        )
+        controller.account_ready.connect(
+            self._on_twitch_account_ready
+        )
+        self._twitch_controller = controller
+        return controller
+
+    def _start_twitch_platform(self) -> None:
+        controller = self._ensure_twitch_controller()
+        controller.configure(
+            build_twitch_platform_config(self.config)
+        )
+        controller.start_saved()
+
+    def _restart_twitch_platform(self) -> None:
+        controller = self._ensure_twitch_controller()
+        controller.stop_service()
+        controller.configure(
+            build_twitch_platform_config(self.config)
+        )
+        controller.start_saved()
+
+    def _stop_twitch_platform(self) -> None:
+        controller = self._twitch_controller
+        self._twitch_controller = None
+        if controller is not None:
+            controller.close()
+
+    def _connect_twitch_account(self) -> None:
+        client_id = self.twitch_client_id.text().strip()
+        if not client_id:
+            QMessageBox.warning(
+                self,
+                "Twitch",
+                "Indiquez d’abord le Client ID public Twitch.",
+            )
+            return
+        self.twitch_enabled.setChecked(True)
+        controller = self._ensure_twitch_controller()
+        controller.configure(
+            build_twitch_platform_config(
+                {
+                    "platforms": {
+                        "twitch": {
+                            "enabled": True,
+                            "client_id": client_id,
+                            "broadcaster_user_id": (
+                                self.twitch_broadcaster_id.text().strip()
+                            ),
+                            "moderator_user_id": (
+                                self.twitch_moderator_id.text().strip()
+                            ),
+                        }
+                    }
+                }
+            )
+        )
+        controller.begin_authorization(client_id=client_id)
+
+    def _disconnect_twitch_account(self) -> None:
+        controller = self._ensure_twitch_controller()
+        answer = QMessageBox.question(
+            self,
+            "Déconnecter Twitch",
+            (
+                "Supprimer les identifiants Twitch chiffrés de cet "
+                "utilisateur Windows et arrêter EventSub ?"
+            ),
+        )
+        if answer != QMessageBox.Yes:
+            return
+        controller.disconnect_account()
+
+    def _on_twitch_authorization_required(
+        self,
+        verification_uri: str,
+        user_code: str,
+        expires_in: int,
+    ) -> None:
+        if user_code:
+            QApplication.clipboard().setText(user_code)
+        opened = QDesktopServices.openUrl(
+            QUrl(str(verification_uri))
+        )
+        details = (
+            f"Code : {user_code}\n\n"
+            f"Valable environ {max(1, int(expires_in // 60))} min.\n\n"
+            "Le code a été copié dans le presse-papiers."
+        )
+        if not opened:
+            details += (
+                "\n\nLe navigateur n’a pas pu être ouvert "
+                f"automatiquement : {verification_uri}"
+            )
+        QMessageBox.information(
+            self,
+            "Autoriser Twitch",
+            details,
+        )
+
+    def _on_twitch_status(self, payload: object) -> None:
+        status = dict(payload) if isinstance(payload, Mapping) else {}
+        self._last_twitch_status = status
+        state = str(status.get("state") or "")
+        login = str(
+            status.get("account_login")
+            or status.get("login")
+            or ""
+        )
+        labels = {
+            "disabled": ("Twitch : désactivé", "Muted"),
+            "not_configured": (
+                "Twitch : Client ID non configuré",
+                "Warn",
+            ),
+            "authorization_required": (
+                "Twitch : autorisation requise",
+                "Warn",
+            ),
+            "authorizing": (
+                "Twitch : préparation de l’autorisation…",
+                "Warn",
+            ),
+            "waiting_for_user": (
+                "Twitch : autorisation en attente dans le navigateur",
+                "Warn",
+            ),
+            "validating": (
+                "Twitch : validation du compte…",
+                "Warn",
+            ),
+            "connecting": (
+                "Twitch : connexion EventSub…",
+                "Warn",
+            ),
+            "subscribing": (
+                "Twitch : création des subscriptions…",
+                "Warn",
+            ),
+            "connected": (
+                "Twitch : EventSub connecté",
+                "Good",
+            ),
+            "connected_transport": (
+                "Twitch : transport connecté, attente du Welcome",
+                "Warn",
+            ),
+            "reconnecting": (
+                "Twitch : reconnexion transparente…",
+                "Warn",
+            ),
+            "retry_wait": (
+                "Twitch : reconnexion planifiée",
+                "Warn",
+            ),
+            "degraded": (
+                "Twitch : connecté avec erreur de subscription",
+                "Bad",
+            ),
+            "credential_error": (
+                "Twitch : stockage sécurisé indisponible",
+                "Bad",
+            ),
+            "error": ("Twitch : erreur", "Bad"),
+            "stopped": ("Twitch : arrêté", "Muted"),
+        }
+        text, style = labels.get(
+            state,
+            (f"Twitch : {state or 'état inconnu'}", "Muted"),
+        )
+        if login:
+            text += f" · {login}"
+        label = getattr(self, "twitch_status", None)
+        if label is not None:
+            self._set_status_label(label, text, style)
+
+    def _on_twitch_error(self, message: str) -> None:
+        self._log(f"Twitch : {message}")
+        self._record_user_activity(
+            UserActivityEntry(
+                "Warn",
+                "Twitch",
+                str(message),
+            )
+        )
+        label = getattr(self, "twitch_status", None)
+        if label is not None:
+            self._set_status_label(
+                label,
+                f"Twitch : {message}",
+                "Bad",
+            )
+
+    def _on_twitch_account_ready(self, bundle: object) -> None:
+        login = str(getattr(bundle, "login", "") or "")
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Compte Twitch autorisé",
+                login,
+            )
+        )
+
     def _update_widget_runtime_status(self) -> None:
         label = getattr(self, "widget_runtime_status", None)
         if label is None:
@@ -10331,6 +10643,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._stop_twitch_platform()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         event.accept()
