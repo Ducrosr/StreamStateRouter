@@ -1571,8 +1571,6 @@ class ActionDialog(QDialog):
         ("Afficher/masquer une source de scène", "scene_item_enabled"),
         ("Activer/désactiver un filtre", "source_filter_enabled"),
         ("Modifier les réglages d'un filtre", "source_filter_settings"),
-        ("Animer les réglages d'un filtre", "animate_filter_settings"),
-        ("Contrôler une source média", "media_input_action"),
         ("Mute/unmute une entrée", "input_mute"),
         ("Régler le volume d'une entrée (dB)", "input_volume_db"),
         ("Réglages avancés d'une entrée", "set_input_settings"),
