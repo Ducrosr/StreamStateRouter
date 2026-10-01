@@ -189,6 +189,18 @@ class MediaRuntime:
         normalized = str(action or "").strip().casefold()
         if normalized not in self._SUPPORTED_ACTIONS:
             raise ValueError(f"Action média inconnue : {action}")
+        capabilities = {
+            str(item).strip().casefold()
+            for item in (
+                getattr(self.provider, "capabilities", ()) or ()
+            )
+            if str(item).strip()
+        }
+        if capabilities and normalized not in capabilities:
+            raise ValueError(
+                "Action média non supportée par "
+                f"{self.provider.name} : {normalized}"
+            )
         request_id = uuid.uuid4().hex
         command = _MediaCommand(
             request_id=request_id,
@@ -393,6 +405,24 @@ class MediaRuntime:
     def _run(self) -> None:
         next_poll = 0.0
         while not self._stop.is_set():
+            # Commands have priority over the periodic observer. This keeps
+            # controls responsive when a poll is due at the same instant.
+            try:
+                command = self._commands.get_nowait()
+            except queue.Empty:
+                command = None
+
+            if command is not None:
+                result = self._execute(command)
+                with self._lock:
+                    self._results[result.request_id] = result
+                    # Bound command diagnostics; callers only need recent requests.
+                    if len(self._results) > 250:
+                        for key in tuple(self._results)[:50]:
+                            self._results.pop(key, None)
+                next_poll = self._clock() + self.config.poll_seconds
+                continue
+
             now = self._clock()
             if now >= next_poll:
                 with self._lock:
@@ -400,27 +430,15 @@ class MediaRuntime:
                 if stopping:
                     break
                 self.poll_once()
-                next_poll = now + self.config.poll_seconds
-
-            try:
-                command = self._commands.get_nowait()
-            except queue.Empty:
-                timeout = max(
-                    0.01,
-                    min(
-                        0.25,
-                        next_poll - self._clock(),
-                    ),
-                )
-                self._wake.wait(timeout)
-                self._wake.clear()
+                next_poll = self._clock() + self.config.poll_seconds
                 continue
 
-            result = self._execute(command)
-            with self._lock:
-                self._results[result.request_id] = result
-                # Bound command diagnostics; callers only need recent requests.
-                if len(self._results) > 250:
-                    for key in tuple(self._results)[:50]:
-                        self._results.pop(key, None)
-            next_poll = self._clock() + self.config.poll_seconds
+            timeout = max(
+                0.01,
+                min(
+                    0.25,
+                    next_poll - self._clock(),
+                ),
+            )
+            self._wake.wait(timeout)
+            self._wake.clear()
