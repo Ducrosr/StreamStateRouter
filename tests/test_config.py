@@ -225,6 +225,73 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(len(modules["[Global] Date"]["elements"]), 1)
 
 
+    def test_media_engine_config_validates_and_redacts_jellyfin_token(self):
+        data = self.sample()
+        data["media_engine"] = {
+            "enabled": True,
+            "poll_interval_seconds": 1.0,
+            "jellyfin": {
+                "enabled": True,
+                "base_url": "http://127.0.0.1:8096",
+                "token": "jellyfin-secret",
+                "device_id": "",
+                "device_name": "Streaming PC",
+                "client_name": "",
+                "timeout_seconds": 3.0,
+            },
+        }
+
+        self.assertEqual(validate_config(data), [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "share.json"
+            export_config(data, path, include_secrets=False)
+            exported = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            exported["media_engine"]["jellyfin"]["token"],
+            "",
+        )
+        # A redacted shareable export is intentionally not runnable with an
+        # enabled Jellyfin provider until the local secret is restored.
+        errors = validate_config(exported)
+        self.assertTrue(
+            any("media_engine.jellyfin.token est requis" in error for error in errors),
+            errors,
+        )
+
+    def test_media_engine_rejects_enabled_jellyfin_without_endpoint_or_token(self):
+        data = self.sample()
+        data["media_engine"] = {
+            "enabled": True,
+            "poll_interval_seconds": 0.1,
+            "jellyfin": {
+                "enabled": True,
+                "base_url": "",
+                "token": "",
+                "timeout_seconds": 0.1,
+            },
+        }
+
+        errors = validate_config(data)
+
+        self.assertTrue(
+            any("poll_interval_seconds" in error for error in errors),
+            errors,
+        )
+        self.assertTrue(
+            any("jellyfin.base_url est requis" in error for error in errors),
+            errors,
+        )
+        self.assertTrue(
+            any("jellyfin.token est requis" in error for error in errors),
+            errors,
+        )
+        self.assertTrue(
+            any("jellyfin.timeout_seconds" in error for error in errors),
+            errors,
+        )
+
     def test_shareable_export_redacts_secrets_and_is_valid(self):
         data = self.sample()
         data["obs"]["password"] = "obs-secret"
