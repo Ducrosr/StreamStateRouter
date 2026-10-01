@@ -132,6 +132,47 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(b"--ssr-", bridge)
             self.assertIn(b'component.mode === "hidden"', bridge)
 
+    def test_events_endpoint_and_builtin_chat_are_platform_agnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            runtime.event_bus.publish(
+                channel="chat",
+                type="message",
+                platform="twitch",
+                payload={
+                    "display_name": "Cloud",
+                    "text": "<b>not html</b>",
+                    "color": "#44ccff",
+                },
+            )
+
+            status, body, _content_type = self._get(
+                runtime.base_url
+                + "/runtime/events?channel=chat&after=0&limit=20"
+            )
+            snapshot = json.loads(body)
+            self.assertEqual(status, 200)
+            self.assertEqual(len(snapshot["events"]), 1)
+            self.assertEqual(
+                snapshot["events"][0]["payload"]["text"],
+                "<b>not html</b>",
+            )
+
+            _status, chat, content_type = self._get(
+                runtime.base_url + "/builtin/chat"
+            )
+            self.assertIn("text/html", content_type)
+            self.assertIn(b'text.textContent = payload.text', chat)
+            self.assertNotIn(b"innerHTML", chat)
+            self.assertIn(b"/runtime/events?channel=chat", chat)
+
+            after = snapshot["events"][0]["sequence"]
+            _status, body, _content_type = self._get(
+                runtime.base_url
+                + f"/runtime/events?channel=chat&after={after}"
+            )
+            self.assertEqual(json.loads(body)["events"], [])
+
     def test_runtime_is_read_only_and_blocks_package_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, package = self._runtime(Path(tmp))
