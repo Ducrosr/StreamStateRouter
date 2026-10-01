@@ -1512,12 +1512,19 @@ def validate_config(data: Mapping[str, Any]) -> list[str]:
             and not isinstance(widget_runtime.get("enabled"), bool)
         ):
             errors.append("widget_runtime.enabled doit être booléen")
+        api_port = (
+            api.get("port", 8765)
+            if isinstance(api, Mapping)
+            else 8765
+        )
+        widget_port = widget_runtime.get("port", 8766)
         if (
             isinstance(api, Mapping)
             and bool(api.get("enabled", True))
             and bool(widget_runtime.get("enabled", True))
-            and int(api.get("port", 8765) or 8765)
-            == int(widget_runtime.get("port", 8766) or 8766)
+            and _valid_int(api_port, minimum=1, maximum=65535)
+            and _valid_int(widget_port, minimum=1, maximum=65535)
+            and int(api_port) == int(widget_port)
         ):
             errors.append(
                 "widget_runtime.port doit être différent de api.port"
