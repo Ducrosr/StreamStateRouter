@@ -95,6 +95,7 @@ from ..services.runtime import RoutingService, RuntimeEvent
 from ..services.api import APIConfig, LocalControlAPI
 from ..services.startup import is_startup_enabled, set_startup_enabled
 from ..services.system_check import run_system_check
+from ..widgets import import_html_module, list_widget_packages
 from .dialogs import (
     ActionDialog,
     CollectionImportDialog,
@@ -112,6 +113,7 @@ from .ergonomics import (
     build_status_strip,
     humanize_rule,
 )
+from .setup_guide import SetupGuideDialog
 from .presentation import (
     UserActivityEntry,
     build_automation_rows,
@@ -221,6 +223,7 @@ class MainWindow(QMainWindow):
             tuple[str, UserActivityEntry, int, float]
         ] = []
         self._last_system_check_report = None
+        self._current_foreground_app: ForegroundApp | None = None
         self._recent_inspector_targets: list[
             tuple[str, str, str]
         ] = []
@@ -3077,6 +3080,23 @@ class MainWindow(QMainWindow):
         intro.setObjectName("Muted")
         root.addWidget(intro)
 
+        guide_card, guide_lay = self._card(
+            "Guide pas à pas"
+        )
+        guide_hint = QLabel(
+            "Choisissez simplement votre objectif. SSR vérifie les prérequis, "
+            "montre un aperçu et vous conduit vers le bon workflow sans vous "
+            "obliger à connaître Règles, Profils ou Layouts."
+        )
+        guide_hint.setWordWrap(True)
+        guide_hint.setObjectName("Muted")
+        guide_lay.addWidget(guide_hint)
+        guide = QPushButton("Lancer le guide pas à pas…")
+        guide.setObjectName("Primary")
+        guide.clicked.connect(self._open_setup_guide)
+        guide_lay.addWidget(guide, alignment=Qt.AlignLeft)
+        root.addWidget(guide_card)
+
         app_card, app_lay = self._card(
             "Configurer l’application courante"
         )
@@ -3143,6 +3163,53 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         collection_lay.addLayout(row)
         root.addWidget(collection_card)
+
+        widgets_card, widgets_lay = self._card(
+            "Modules HTML gérés par SSR"
+        )
+        widgets_hint = QLabel(
+            "Les modules importés restent locaux. SSR conserve leur point "
+            "d’entrée et leurs assets sans exécuter le HTML pendant l’import."
+        )
+        widgets_hint.setWordWrap(True)
+        widgets_hint.setObjectName("Muted")
+        widgets_lay.addWidget(widgets_hint)
+        self.widget_library = QTreeWidget()
+        self.widget_library.setColumnCount(5)
+        self.widget_library.setHeaderLabels(
+            ["Module", "Fichiers", "Taille", "Point d’entrée", "État"]
+        )
+        self.widget_library.setRootIsDecorated(False)
+        self.widget_library.setAlternatingRowColors(True)
+        self.widget_library.setMaximumHeight(220)
+        self.widget_library.header().setSectionResizeMode(
+            0,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.widget_library.header().setSectionResizeMode(
+            1,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.widget_library.header().setSectionResizeMode(
+            2,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.widget_library.header().setStretchLastSection(True)
+        widgets_lay.addWidget(self.widget_library)
+        widget_actions = QHBoxLayout()
+        import_widget = QPushButton("Importer un module HTML…")
+        import_widget.setObjectName("DraftAction")
+        import_widget.clicked.connect(self._open_html_widget_guide)
+        widget_actions.addWidget(import_widget)
+        copy_uri = QPushButton("Copier l’URI locale")
+        copy_uri.clicked.connect(self._copy_selected_widget_uri)
+        widget_actions.addWidget(copy_uri)
+        refresh_widgets = QPushButton("Actualiser")
+        refresh_widgets.clicked.connect(self._refresh_widget_library)
+        widget_actions.addWidget(refresh_widgets)
+        widget_actions.addStretch(1)
+        widgets_lay.addLayout(widget_actions)
+        root.addWidget(widgets_card)
 
         recipes_card, recipes_lay = self._card(
             "Recettes rapides"
@@ -3212,6 +3279,7 @@ class MainWindow(QMainWindow):
         legend_lay.addWidget(legend)
         root.addWidget(legend_card)
         root.addStretch(1)
+        self._refresh_widget_library()
         return page
 
     def _populate_attention_center(self, report) -> None:
@@ -5363,6 +5431,7 @@ class MainWindow(QMainWindow):
                 timer.start()
 
     def _on_foreground(self, app: ForegroundApp | None) -> None:
+        self._current_foreground_app = app
         if app is None:
             self.fg_exe.setText("Aucune fenêtre exploitable")
             self.fg_title.setText("—")
@@ -6078,6 +6147,152 @@ class MainWindow(QMainWindow):
         )
         if callable(schedule):
             schedule()
+
+    def _setup_guide_dialog(
+        self,
+        *,
+        force_task: str = "",
+    ) -> SetupGuideDialog:
+        client = self._client
+        dialog = SetupGuideDialog(
+            self,
+            foreground=self._current_foreground_app,
+            obs_enabled=bool(
+                client is not None
+                and getattr(client.config, "enabled", False)
+            ),
+            obs_connected=bool(
+                client is not None and client.connected
+            ),
+        )
+        if force_task:
+            index = dialog.task.findData(force_task)
+            if index >= 0:
+                dialog.task.setCurrentIndex(index)
+        return dialog
+
+    def _open_setup_guide(self) -> None:
+        dialog = self._setup_guide_dialog()
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._execute_setup_guide_result(dialog.result_value())
+
+    def _open_html_widget_guide(self) -> None:
+        dialog = self._setup_guide_dialog(force_task="html")
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self._execute_setup_guide_result(dialog.result_value())
+
+    def _execute_setup_guide_result(self, result) -> None:
+        if result.task == "app":
+            self._configure_current_application()
+            return
+        if result.task == "collection":
+            self._guided_analyze_collection()
+            return
+        if result.task == "repair":
+            self._configure_repair_refs()
+            return
+        if result.task != "html":
+            return
+
+        try:
+            package = import_html_module(
+                result.html_entry,
+                name=result.html_name,
+                package_root=(
+                    result.html_package_root or None
+                ),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Import module HTML",
+                str(exc),
+            )
+            return
+
+        self._refresh_widget_library()
+        details = [
+            f"Module : {package.name}",
+            f"Fichiers : {package.file_count}",
+            f"Point d’entrée : {package.entry}",
+            "",
+            (
+                "Le package est prêt dans la bibliothèque SSR. "
+                "Le futur Widget Runtime pourra l’exposer directement "
+                "à OBS sans dépendre de Streamlabs."
+            ),
+        ]
+        if package.warnings:
+            details.extend(
+                ["", "Avertissements :"]
+                + [f"• {item}" for item in package.warnings]
+            )
+        QMessageBox.information(
+            self,
+            "Module HTML importé",
+            "\n".join(details),
+        )
+        self._record_user_activity(
+            UserActivityEntry(
+                "Good",
+                "Module HTML importé",
+                (
+                    f"{package.name} · {package.file_count} fichier(s) · "
+                    f"{package.total_bytes / 1024:.1f} Kio"
+                ),
+            )
+        )
+
+    def _refresh_widget_library(self) -> None:
+        if not hasattr(self, "widget_library"):
+            return
+        self.widget_library.clear()
+        for package in list_widget_packages():
+            state = (
+                f"⚠ {len(package.warnings)} avertissement(s)"
+                if package.warnings
+                else "✓ Prêt"
+            )
+            item = QTreeWidgetItem(
+                [
+                    package.name,
+                    str(package.file_count),
+                    f"{package.total_bytes / 1024:.1f} Kio",
+                    package.entry.name,
+                    state,
+                ]
+            )
+            item.setData(0, Qt.UserRole, package.entry_uri)
+            item.setToolTip(3, str(package.entry))
+            if package.remote_references:
+                item.setToolTip(
+                    4,
+                    "Dépendances distantes :\n"
+                    + "\n".join(package.remote_references[:20]),
+                )
+            self.widget_library.addTopLevelItem(item)
+
+    def _copy_selected_widget_uri(self) -> None:
+        if not hasattr(self, "widget_library"):
+            return
+        item = self.widget_library.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self,
+                "Module HTML",
+                "Sélectionnez d’abord un module.",
+            )
+            return
+        uri = str(item.data(0, Qt.UserRole) or "")
+        if not uri:
+            return
+        QApplication.clipboard().setText(uri)
+        self.statusBar().showMessage(
+            "URI locale du module copiée dans le presse-papiers.",
+            5000,
+        )
 
     def _configure_current_application(self) -> None:
         if not self._edit_mode:
