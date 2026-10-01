@@ -97,6 +97,7 @@ class MediaRuntime:
         self._last_semantic_key: tuple[object, ...] | None = None
         self._last_state: MediaState | None = None
         self._last_artwork_identity: tuple[str, ...] | None = None
+        self._next_artwork_retry_at = 0.0
 
     @property
     def running(self) -> bool:
@@ -204,15 +205,21 @@ class MediaRuntime:
             state.title,
             state.artwork_url,
         )
+        now = self._clock()
         if not state.connected or not any(identity):
             self._last_artwork_identity = identity
+            self._next_artwork_retry_at = 0.0
             self.artwork_store.clear()
             return
-        if identity == self._last_artwork_identity:
+        if (
+            identity == self._last_artwork_identity
+            and now < self._next_artwork_retry_at
+        ):
             return
         self._last_artwork_identity = identity
         loader = getattr(self.provider, "artwork", None)
         if not callable(loader):
+            self._next_artwork_retry_at = float("inf")
             self.artwork_store.clear()
             return
         try:
@@ -224,9 +231,11 @@ class MediaRuntime:
                 content_type=content_type,
                 identity="|".join(identity),
             )
+            self._next_artwork_retry_at = 0.0
         except Exception:
             # Artwork is optional metadata: never make the player appear
             # disconnected because a cover cannot be loaded.
+            self._next_artwork_retry_at = now + 5.0
             self.artwork_store.clear()
 
     def poll_once(self) -> MediaState:
