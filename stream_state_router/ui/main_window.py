@@ -3286,6 +3286,28 @@ class MainWindow(QMainWindow):
             install_now_playing
         )
         widget_actions.addWidget(install_now_playing)
+        install_clock = QPushButton("Installer Horloge…")
+        self._set_action_risk(
+            install_clock,
+            "live",
+            "Crée une Browser Source locale pour l’horloge SSR.",
+        )
+        install_clock.clicked.connect(
+            self._install_builtin_clock_in_obs
+        )
+        self._register_obs_connected_control(install_clock)
+        widget_actions.addWidget(install_clock)
+        install_countdown = QPushButton("Installer Countdown…")
+        self._set_action_risk(
+            install_countdown,
+            "live",
+            "Crée une Browser Source locale pour le compte à rebours SSR.",
+        )
+        install_countdown.clicked.connect(
+            self._install_builtin_countdown_in_obs
+        )
+        self._register_obs_connected_control(install_countdown)
+        widget_actions.addWidget(install_countdown)
         demo = QPushButton("Événements de démo")
         self._set_action_risk(
             demo,
@@ -3294,6 +3316,26 @@ class MainWindow(QMainWindow):
         )
         demo.clicked.connect(self._publish_widget_demo_events)
         widget_actions.addWidget(demo)
+        start_countdown = QPushButton("Démarrer Countdown…")
+        self._set_action_risk(
+            start_countdown,
+            "read",
+            "Publie uniquement un état local vers le widget Countdown.",
+        )
+        start_countdown.clicked.connect(
+            self._start_builtin_countdown
+        )
+        widget_actions.addWidget(start_countdown)
+        clear_countdown = QPushButton("Effacer Countdown")
+        self._set_action_risk(
+            clear_countdown,
+            "read",
+            "Masque le widget Countdown local.",
+        )
+        clear_countdown.clicked.connect(
+            self._clear_builtin_countdown
+        )
+        widget_actions.addWidget(clear_countdown)
         bind_profile = QPushButton("Associer à Présentation…")
         self._set_action_risk(
             bind_profile,
@@ -6783,6 +6825,83 @@ class MainWindow(QMainWindow):
             component="now-playing",
             width=760,
             height=180,
+        )
+
+    def _install_builtin_clock_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/clock",
+            module_name="Horloge SSR native",
+            input_name="[SSR] Clock",
+            component="clock",
+            width=520,
+            height=90,
+        )
+
+    def _install_builtin_countdown_in_obs(self) -> None:
+        self._install_builtin_widget_in_obs(
+            route="/component/countdown",
+            module_name="Countdown SSR natif",
+            input_name="[SSR] Countdown",
+            component="countdown",
+            width=560,
+            height=240,
+        )
+
+    def _start_builtin_countdown(self) -> None:
+        minutes, ok = QInputDialog.getInt(
+            self,
+            "Countdown SSR",
+            "Durée en minutes",
+            5,
+            1,
+            180,
+            1,
+        )
+        if not ok:
+            return
+        label, ok = QInputDialog.getText(
+            self,
+            "Countdown SSR",
+            "Libellé",
+            text="J’ARRIVE",
+        )
+        if not ok:
+            return
+        hide_at_zero = (
+            QMessageBox.question(
+                self,
+                "Countdown SSR",
+                "Masquer automatiquement le module à 00:00 ?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            == QMessageBox.Yes
+        )
+        self._event_bus.publish(
+            channel="countdown",
+            type="set",
+            platform="ssr",
+            payload={
+                "label": label.strip() or "J’ARRIVE",
+                "target_epoch": time.time() + minutes * 60,
+                "hide_at_zero": hide_at_zero,
+            },
+        )
+        self.statusBar().showMessage(
+            f"Countdown SSR lancé pour {minutes} min.",
+            5000,
+        )
+
+    def _clear_builtin_countdown(self) -> None:
+        self._event_bus.publish(
+            channel="countdown",
+            type="clear",
+            platform="ssr",
+            payload={},
+        )
+        self.statusBar().showMessage(
+            "Countdown SSR effacé.",
+            4000,
         )
 
     def _publish_widget_demo_events(self) -> None:
