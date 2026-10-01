@@ -5,6 +5,7 @@ import json
 import time
 from typing import Callable, Mapping, Sequence
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .twitch import (
@@ -19,6 +20,8 @@ TWITCH_EVENTSUB_CREATE_URL = (
     "https://api.twitch.tv/helix/eventsub/subscriptions"
 )
 TWITCH_TOKEN_VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
+TWITCH_DEVICE_CODE_URL = "https://id.twitch.tv/oauth2/device"
+TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,12 +126,218 @@ class TwitchEventSubSessionCoordinator:
 
 
 @dataclass(frozen=True, slots=True)
+class TwitchDeviceAuthorization:
+    device_code: str
+    user_code: str
+    verification_uri: str
+    expires_in: int
+    interval: int
+    scopes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TwitchOAuthTokens:
+    access_token: str
+    refresh_token: str
+    expires_in: int
+    scopes: tuple[str, ...]
+    token_type: str = "bearer"
+
+
+@dataclass(frozen=True, slots=True)
 class TwitchTokenValidation:
     client_id: str
     user_id: str
     login: str
     scopes: tuple[str, ...]
     expires_in: int
+
+
+class TwitchOAuthDeviceClient:
+    """Public-client Device Code OAuth flow for the desktop application."""
+
+    def __init__(
+        self,
+        *,
+        opener=urlopen,
+        timeout_seconds: float = 5.0,
+    ):
+        self._opener = opener
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+
+    def start(
+        self,
+        *,
+        client_id: str,
+        scopes: Sequence[str],
+    ) -> TwitchDeviceAuthorization:
+        client = str(client_id or "").strip()
+        if not client:
+            raise ValueError("client_id requis")
+        normalized_scopes = tuple(
+            sorted(
+                {
+                    str(scope).strip()
+                    for scope in scopes
+                    if str(scope).strip()
+                },
+                key=str.casefold,
+            )
+        )
+        payload = self._post_form(
+            TWITCH_DEVICE_CODE_URL,
+            {
+                "client_id": client,
+                "scopes": " ".join(normalized_scopes),
+            },
+        )
+        return TwitchDeviceAuthorization(
+            device_code=str(payload.get("device_code") or ""),
+            user_code=str(payload.get("user_code") or ""),
+            verification_uri=str(
+                payload.get("verification_uri") or ""
+            ),
+            expires_in=int(payload.get("expires_in") or 0),
+            interval=max(1, int(payload.get("interval") or 5)),
+            scopes=normalized_scopes,
+        )
+
+    def exchange(
+        self,
+        *,
+        client_id: str,
+        device_code: str,
+        scopes: Sequence[str],
+    ) -> TwitchOAuthTokens | None:
+        client = str(client_id or "").strip()
+        code = str(device_code or "").strip()
+        if not client:
+            raise ValueError("client_id requis")
+        if not code:
+            raise ValueError("device_code requis")
+        normalized_scopes = tuple(
+            sorted(
+                {
+                    str(scope).strip()
+                    for scope in scopes
+                    if str(scope).strip()
+                },
+                key=str.casefold,
+            )
+        )
+        try:
+            payload = self._post_form(
+                TWITCH_TOKEN_URL,
+                {
+                    "client_id": client,
+                    "scopes": " ".join(normalized_scopes),
+                    "device_code": code,
+                    "grant_type": (
+                        "urn:ietf:params:oauth:grant-type:device_code"
+                    ),
+                },
+            )
+        except RuntimeError as exc:
+            if "authorization_pending" in str(exc).casefold():
+                return None
+            raise
+        return self._tokens(payload)
+
+    def refresh(
+        self,
+        *,
+        client_id: str,
+        refresh_token: str,
+    ) -> TwitchOAuthTokens:
+        client = str(client_id or "").strip()
+        token = str(refresh_token or "").strip()
+        if not client:
+            raise ValueError("client_id requis")
+        if not token:
+            raise ValueError("refresh_token requis")
+        payload = self._post_form(
+            TWITCH_TOKEN_URL,
+            {
+                "client_id": client,
+                "grant_type": "refresh_token",
+                "refresh_token": token,
+            },
+        )
+        return self._tokens(payload)
+
+    @staticmethod
+    def _tokens(payload: Mapping[str, object]) -> TwitchOAuthTokens:
+        access = str(payload.get("access_token") or "").strip()
+        refresh = str(payload.get("refresh_token") or "").strip()
+        if not access or not refresh:
+            raise RuntimeError("Réponse OAuth Twitch incomplète")
+        scopes_raw = payload.get("scope")
+        return TwitchOAuthTokens(
+            access_token=access,
+            refresh_token=refresh,
+            expires_in=int(payload.get("expires_in") or 0),
+            scopes=tuple(
+                str(item)
+                for item in (
+                    scopes_raw
+                    if isinstance(scopes_raw, list)
+                    else []
+                )
+                if str(item)
+            ),
+            token_type=str(
+                payload.get("token_type") or "bearer"
+            ),
+        )
+
+    def _post_form(
+        self,
+        url: str,
+        values: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        request = Request(
+            url,
+            data=urlencode(
+                {
+                    str(key): str(value)
+                    for key, value in values.items()
+                }
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": (
+                    "application/x-www-form-urlencoded"
+                )
+            },
+            method="POST",
+        )
+        try:
+            with self._opener(
+                request,
+                timeout=self._timeout_seconds,
+            ) as response:
+                raw = response.read()
+        except HTTPError as exc:
+            detail = ""
+            try:
+                payload = json.loads(
+                    exc.read().decode("utf-8")
+                )
+                if isinstance(payload, Mapping):
+                    detail = str(
+                        payload.get("message")
+                        or payload.get("error")
+                        or ""
+                    )
+            except Exception:
+                detail = ""
+            suffix = f" : {detail}" if detail else ""
+            raise RuntimeError(
+                f"Twitch OAuth HTTP {exc.code}{suffix}"
+            ) from exc
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, Mapping):
+            raise RuntimeError("Réponse OAuth Twitch invalide")
+        return payload
 
 
 class TwitchHelixClient:
