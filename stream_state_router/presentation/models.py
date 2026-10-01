@@ -114,6 +114,42 @@ class PresentationComponent:
 
 
 @dataclass(frozen=True, slots=True)
+class TransitionProfile:
+    name: str
+    transition_name: str
+    duration_ms: int | None = None
+    settings: Mapping[str, Any] = field(default_factory=dict)
+    overlay: bool = True
+
+    @classmethod
+    def from_mapping(
+        cls,
+        name: str,
+        raw: Mapping[str, Any],
+    ) -> "TransitionProfile":
+        duration_raw = raw.get("duration_ms")
+        duration = (
+            int(duration_raw)
+            if duration_raw not in (None, "")
+            else None
+        )
+        settings = raw.get("settings")
+        return cls(
+            name=str(name),
+            transition_name=str(
+                raw.get("transition_name")
+                or raw.get("transition")
+                or ""
+            ).strip(),
+            duration_ms=duration,
+            settings=_freeze_mapping(
+                settings if isinstance(settings, Mapping) else {}
+            ),
+            overlay=bool(raw.get("overlay", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PresentationProfile:
     name: str
     extends: str = ""
@@ -188,6 +224,7 @@ class ResolvedPresentationProfile:
 class PresentationRegistry:
     profiles: Mapping[str, PresentationProfile]
     cues: Mapping[str, Cue]
+    transitions: Mapping[str, TransitionProfile]
 
     def profile(self, name: str) -> ResolvedPresentationProfile | None:
         if str(name) not in self.profiles:
@@ -196,6 +233,12 @@ class PresentationRegistry:
 
     def cue(self, name: str) -> Cue | None:
         return self.cues.get(str(name))
+
+    def transition(
+        self,
+        name: str,
+    ) -> TransitionProfile | None:
+        return self.transitions.get(str(name))
 
 
 def resolve_presentation_profile(
@@ -297,6 +340,7 @@ def build_presentation_registry(
     *,
     profiles_raw: Mapping[str, Any] | None,
     cues_raw: Mapping[str, Any] | None,
+    transitions_raw: Mapping[str, Any] | None = None,
 ) -> PresentationRegistry:
     profiles = {
         str(name): PresentationProfile.from_mapping(str(name), raw)
@@ -308,7 +352,13 @@ def build_presentation_registry(
         for name, raw in (cues_raw or {}).items()
         if isinstance(raw, Mapping)
     }
+    transitions = {
+        str(name): TransitionProfile.from_mapping(str(name), raw)
+        for name, raw in (transitions_raw or {}).items()
+        if isinstance(raw, Mapping)
+    }
     return PresentationRegistry(
         profiles=MappingProxyType(profiles),
         cues=MappingProxyType(cues),
+        transitions=MappingProxyType(transitions),
     )
