@@ -44,6 +44,12 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..activation import TriggerTargetIdentity
+from ..events import EventBus
+from ..media import (
+    JellyfinProvider,
+    MediaEngine,
+    MediaStateStore,
+)
 from ..importers import (
     AdvancedSceneSwitcherImporter,
     CurrentStateCaptureOptions,
@@ -69,6 +75,8 @@ from ..services.config import (
     build_presentation_profiles,
     build_ruleset,
     build_widget_runtime_config,
+    build_media_engine_config,
+    build_jellyfin_config,
     export_config,
     import_config,
     list_valid_backups,
@@ -208,6 +216,9 @@ class MainWindow(QMainWindow):
         self._dispatcher: OBSDispatcher | None = None
         self._client: OBSClientManager | None = None
         self._presentation_state_store = PresentationStateStore()
+        self._event_bus = EventBus()
+        self._media_state_store = MediaStateStore()
+        self._media_engine: MediaEngine | None = None
         self._widget_runtime: WidgetRuntime | None = None
         self._obs_module_catalog: dict[str, list] = {}
         self._layout_sync_manager: OBSLayoutManager | None = None
@@ -259,6 +270,7 @@ class MainWindow(QMainWindow):
             self._refresh_dashboard_summary
         )
         self._start_runtime()
+        self._start_media_engine()
         self._start_widget_runtime()
         self._start_api()
         self._module_scan_timer = QTimer(self)
@@ -5489,6 +5501,7 @@ class MainWindow(QMainWindow):
         self._last_saved_config = copy.deepcopy(draft)
         self._draft_dirty = False
         self._restart_api()
+        self._restart_media_engine()
         self._restart_widget_runtime()
         self._configure_module_scan_timer()
         self._refresh_override_boxes()
@@ -9714,11 +9727,61 @@ class MainWindow(QMainWindow):
         label.style().unpolish(label)
         label.style().polish(label)
 
+    def _start_media_engine(self) -> None:
+        cfg = build_media_engine_config(self.config)
+        jellyfin_cfg = build_jellyfin_config(self.config)
+        providers = (
+            (JellyfinProvider(jellyfin_cfg),)
+            if jellyfin_cfg.enabled
+            else ()
+        )
+        engine = MediaEngine(
+            cfg,
+            self._media_state_store,
+            providers=providers,
+            event_bus=self._event_bus,
+        )
+        self._media_engine = engine
+        try:
+            engine.start()
+            if cfg.enabled:
+                self._log(
+                    "Media Engine actif"
+                    + (
+                        " · Jellyfin natif activé."
+                        if jellyfin_cfg.enabled
+                        else " · aucun provider actif."
+                    )
+                )
+        except Exception as exc:
+            self._log(f"Media Engine indisponible : {exc}")
+
+    def _restart_media_engine(self) -> None:
+        engine = self._media_engine
+        if engine is not None:
+            engine.stop()
+        self._start_media_engine()
+
+    def _stop_media_engine(self) -> None:
+        engine = self._media_engine
+        self._media_engine = None
+        if engine is not None:
+            engine.stop()
+
     def _start_widget_runtime(self) -> None:
         cfg = build_widget_runtime_config(self.config)
         runtime = WidgetRuntime(
             cfg,
             self._presentation_state_store,
+            event_bus=self._event_bus,
+            media_store=self._media_state_store,
+            media_artwork=(
+                lambda key: (
+                    self._media_engine.artwork(key)
+                    if self._media_engine is not None
+                    else None
+                )
+            ),
         )
         self._widget_runtime = runtime
         try:
@@ -9792,6 +9855,18 @@ class MainWindow(QMainWindow):
                     and self._widget_runtime.running
                     else ""
                 ),
+            },
+            "media": {
+                "running": bool(
+                    self._media_engine
+                    and self._media_engine.running
+                ),
+                "last_error": (
+                    self._media_engine.last_error
+                    if self._media_engine
+                    else ""
+                ),
+                "state": self._media_state_store.snapshot().as_mapping(),
             },
             "control_variables": (
                 service.control_variables() if service else {}
@@ -10328,6 +10403,7 @@ class MainWindow(QMainWindow):
             return
         if self._api:
             self._api.stop()
+        self._stop_media_engine()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         event.accept()
@@ -10338,6 +10414,7 @@ class MainWindow(QMainWindow):
         self._quitting = True
         if self._api:
             self._api.stop()
+        self._stop_media_engine()
         self._stop_widget_runtime()
         self._stop_runtime_for_exit()
         self.tray.hide()
