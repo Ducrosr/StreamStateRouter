@@ -80,6 +80,20 @@ class VLCProviderTests(unittest.TestCase):
         self.assertEqual(normalized.password, "")
         self.assertEqual(normalized.timeout_seconds, 1.5)
 
+    def test_config_bounds_vlc_timeout(self) -> None:
+        for value in (0, 0.09, 10.01, float("inf")):
+            with self.assertRaisesRegex(ValueError, "Timeout VLC"):
+                VLCConfig(timeout_seconds=value)
+
+        self.assertEqual(
+            VLCConfig(timeout_seconds=0.1).timeout_seconds,
+            0.1,
+        )
+        self.assertEqual(
+            VLCConfig(timeout_seconds=10).timeout_seconds,
+            10.0,
+        )
+
     def test_ipv6_base_url_is_bracketed(self) -> None:
         transport = VLCHttpTransport(
             VLCConfig(host="::1", port=8080, password="secret")
@@ -183,6 +197,7 @@ class VLCProviderTests(unittest.TestCase):
                 "state": "playing",
                 "length": 245,
                 "time": 42,
+                "rate": 1.25,
                 "volume": 256,
                 "currentplid": 17,
                 "information": {
@@ -216,6 +231,7 @@ class VLCProviderTests(unittest.TestCase):
                 uri="file:///music/mako-reactor.flac",
                 duration_seconds=245,
                 position_seconds=42,
+                playback_rate=1.25,
                 volume_percent=100,
                 track_id="17",
             ),
