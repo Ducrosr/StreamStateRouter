@@ -86,6 +86,39 @@ class FakeProvider:
 
 
 class MediaRuntimeTests(unittest.TestCase):
+    def test_media_state_normalizes_non_finite_external_values(self) -> None:
+        state = MediaState(
+            provider=" vlc ",
+            connected=1,
+            playback_state="OPENING-UNKNOWN",
+            title=" Track ",
+            duration_seconds=float("nan"),
+            position_seconds=float("inf"),
+            volume_percent=float("-inf"),
+        )
+
+        self.assertEqual(state.provider, "vlc")
+        self.assertTrue(state.connected)
+        self.assertEqual(state.playback_state, "unknown")
+        self.assertEqual(state.title, "Track")
+        self.assertEqual(state.duration_seconds, 0.0)
+        self.assertEqual(state.position_seconds, 0.0)
+        self.assertEqual(state.volume_percent, 0.0)
+
+    def test_poll_contains_invalid_provider_return_in_disconnected_state(self) -> None:
+        provider = FakeProvider()
+        provider.state = lambda: {"state": "playing"}
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=False),
+            provider,
+        )
+
+        state = runtime.poll_once()
+
+        self.assertFalse(state.connected)
+        self.assertEqual(state.playback_state, "unknown")
+        self.assertIn("MediaState", state.error)
+
     def test_state_store_returns_revisioned_snapshot(self) -> None:
         store = MediaStateStore("fake")
         first = store.snapshot()
@@ -313,6 +346,10 @@ class MediaRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(active_status)
         assert active_status is not None
         self.assertTrue(active_status["success"])
+        self.assertEqual(
+            len([row for row in provider.calls if row[0] == "state"]),
+            1,
+        )
 
     def test_invalid_action_and_disabled_runtime_are_rejected(self) -> None:
         runtime = MediaRuntime(
