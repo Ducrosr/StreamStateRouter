@@ -149,7 +149,7 @@ class MediaArtworkStore:
 class MediaCommandStore:
     """Thread-safe bounded lifecycle registry for accepted media commands."""
 
-    _TERMINAL = frozenset({"completed", "failed"})
+    _TERMINAL = frozenset({"completed", "failed", "uncertain"})
 
     def __init__(
         self,
@@ -210,13 +210,17 @@ class MediaCommandStore:
         success: bool,
         error: str = "",
         state: dict[str, object] | None = None,
+        status: str = "",
     ) -> None:
         key = str(request_id or "")
         with self._lock:
             row = self._records.get(key)
             if row is None:
                 return
-            row["status"] = "completed" if success else "failed"
+            terminal_status = str(status or "").strip().casefold()
+            if terminal_status not in self._TERMINAL:
+                terminal_status = "completed" if success else "failed"
+            row["status"] = terminal_status
             row["success"] = bool(success)
             row["error"] = str(error or "")
             row["state"] = dict(state or {})
