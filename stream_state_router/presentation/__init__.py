@@ -14,9 +14,10 @@ from .models import (
     build_presentation_registry,
     resolve_presentation_profile,
 )
-from .timeline import CueExecutionResult, CueExecutor, CueTask, CueTaskStepResult
+from .timeline import CUE_MAX_RUNTIME_MS, CueExecutionResult, CueExecutor, CueTask, CueTaskStepResult
 
 __all__ = [
+    "CUE_MAX_RUNTIME_MS",
     "Cue",
     "CueAction",
     "CueExecutionResult",
