@@ -88,7 +88,11 @@ class ArtworkServer:
                             time.sleep(outer.chunk_delay)
                     else:
                         self.wfile.write(outer.body)
-                except (BrokenPipeError, ConnectionResetError):
+                except (
+                    BrokenPipeError,
+                    ConnectionResetError,
+                    ConnectionAbortedError,
+                ):
                     return
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -133,6 +137,10 @@ class FakeTransport:
         elif command == "pl_forcepause":
             self.status["state"] = "paused"
         elif command == "pl_stop":
+            self.status["state"] = "stopped"
+        elif command and "state" not in self.status:
+            # VLC status.json processes the command then returns getstatus(),
+            # which always includes the resulting playlist state.
             self.status["state"] = "stopped"
         return self.status
 
