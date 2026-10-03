@@ -111,7 +111,6 @@ class VLCHttpTransport:
             raise ValueError("Réponse JSON VLC invalide")
         return payload
 
-
     @property
     def artwork_timeout_seconds(self) -> float:
         return min(float(self.config.timeout_seconds), 2.0)
@@ -278,6 +277,7 @@ class VLCHttpTransport:
                         )
 
         return bytes(body), headers.get("content-type", "")
+
 
 class VLCProvider:
     """MediaProvider implementation for VLC's local Lua HTTP interface."""
@@ -522,10 +522,14 @@ class VLCProvider:
             raise RuntimeError("VLC n'a pas démarré la lecture")
 
     def pause(self) -> None:
-        self._command("pl_forcepause")
+        after = self._command("pl_forcepause")
+        if self._playback_state(after) != "paused":
+            raise RuntimeError("VLC n'a pas appliqué la pause")
 
     def stop(self) -> None:
-        self._command("pl_stop")
+        after = self._command("pl_stop")
+        if self._playback_state(after) != "stopped":
+            raise RuntimeError("VLC n'a pas appliqué l'arrêt")
 
     def next(self) -> None:
         self._command("pl_next")
