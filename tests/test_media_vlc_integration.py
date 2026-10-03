@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request, urlopen
 
 from stream_state_router.media import (
     MediaRuntime,
@@ -14,6 +15,7 @@ from stream_state_router.media import (
     VLCConfig,
     VLCProvider,
 )
+from stream_state_router.services.api import APIConfig, LocalControlAPI
 
 
 VALID_JPEG = b"\xff\xd8\xff\xe0SSR-INTEGRATION-JPEG"
@@ -158,22 +160,26 @@ def wait_terminal(runtime: MediaRuntime, request_id: str) -> dict[str, object]:
 
 
 class VLCMediaRuntimeIntegrationTests(unittest.TestCase):
+    def _runtime(self, server: FakeVLCLoopbackServer) -> MediaRuntime:
+        provider = VLCProvider(
+            VLCConfig(
+                host="127.0.0.1",
+                port=server.port,
+                password="secret",
+                timeout_seconds=0.5,
+            )
+        )
+        runtime = MediaRuntime(
+            MediaRuntimeConfig(enabled=True, poll_seconds=0.1),
+            provider,
+        )
+        runtime.start()
+        self.addCleanup(runtime.stop)
+        return runtime
+
     def test_real_transport_provider_and_runtime_round_trip(self) -> None:
         with FakeVLCLoopbackServer() as server:
-            provider = VLCProvider(
-                VLCConfig(
-                    host="127.0.0.1",
-                    port=server.port,
-                    password="secret",
-                    timeout_seconds=0.5,
-                )
-            )
-            runtime = MediaRuntime(
-                MediaRuntimeConfig(enabled=True, poll_seconds=0.1),
-                provider,
-            )
-            runtime.start()
-            self.addCleanup(runtime.stop)
+            runtime = self._runtime(server)
 
             deadline = time.monotonic() + 2.0
             snapshot = runtime.state_store.public_snapshot()
@@ -217,6 +223,76 @@ class VLCMediaRuntimeIntegrationTests(unittest.TestCase):
             self.assertIn("1", art_items)
             self.assertIn("2", art_items)
             self.assertNotIn("", art_items)
+
+    def test_local_control_api_round_trip_reaches_vlc_once(self) -> None:
+        with FakeVLCLoopbackServer() as server:
+            runtime = self._runtime(server)
+
+            def action(name, _payload):
+                if name != "media.next":
+                    raise ValueError(f"action inattendue : {name}")
+                return {
+                    "request_id": runtime.request("next"),
+                    "status": "accepted",
+                }
+
+            api = LocalControlAPI(
+                APIConfig(
+                    enabled=True,
+                    host="127.0.0.1",
+                    port=0,
+                ),
+                status=lambda: {
+                    "media": {
+                        "running": runtime.running,
+                        "state": runtime.state_store.public_snapshot(),
+                    }
+                },
+                action=action,
+                request_status=runtime.command_status,
+            )
+            api.start()
+            self.addCleanup(api.stop)
+
+            request = Request(
+                f"http://127.0.0.1:{api.bound_port}/media/next",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request, timeout=2.0) as response:
+                accepted = json.loads(response.read())
+            self.assertEqual(response.status, 202)
+            request_id = accepted["request_id"]
+
+            deadline = time.monotonic() + 2.0
+            terminal = None
+            while time.monotonic() < deadline:
+                with urlopen(
+                    (
+                        f"http://127.0.0.1:{api.bound_port}"
+                        f"/requests/{request_id}"
+                    ),
+                    timeout=2.0,
+                ) as response:
+                    terminal = json.loads(response.read())
+                if terminal["status"] == "completed":
+                    break
+                time.sleep(0.01)
+
+            self.assertIsNotNone(terminal)
+            assert terminal is not None
+            self.assertEqual(terminal["status"], "completed")
+            self.assertTrue(terminal["success"])
+            self.assertEqual(terminal["state"]["track_id"], "2")
+
+            commands = [
+                query.get("command", [""])[0]
+                for path, query in server.calls
+                if path == "/requests/status.json"
+                and query.get("command")
+            ]
+            self.assertEqual(commands.count("pl_next"), 1)
 
     def test_wrong_password_is_disconnected_and_command_failure_is_certain(self) -> None:
         with FakeVLCLoopbackServer(password="correct") as server:
