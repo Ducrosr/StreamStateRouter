@@ -144,6 +144,10 @@ class MediaRuntime:
                 return
             self._stopping = False
             self._stop.clear()
+            self._wake.clear()
+            # A new worker lifecycle must publish its first semantic state even
+            # when it matches the final observation from a previous lifecycle.
+            self._last_semantic_key = None
             thread = threading.Thread(
                 target=self._run,
                 name="SSR-MediaRuntime",
