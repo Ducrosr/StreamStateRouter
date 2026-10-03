@@ -1,4 +1,5 @@
 import streamDeck from "@elgato/streamdeck";
+import { waitForCommandStatus } from "./command-tracking";
 
 export type SSRStatus = {
   paused?: boolean;
@@ -6,6 +7,15 @@ export type SSRStatus = {
   rule?: string;
   state?: Record<string, string>;
   obs_connected?: boolean;
+  media?: {
+    running?: boolean;
+    state?: {
+      connected?: boolean;
+      stale?: boolean;
+      playback_state?: string;
+      title?: string;
+    };
+  };
 };
 
 export type SSRConnectionSettings = {
@@ -34,6 +44,16 @@ export async function saveConnectionSettings(settings: SSRConnectionSettings): P
   });
 }
 
+class SSRRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "SSRRequestError";
+    this.status = status;
+  }
+}
+
 async function request(path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
   const connection = await connectionSettings();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -48,7 +68,10 @@ async function request(path: string, body?: Record<string, unknown>): Promise<Re
   });
   const payload = await response.json() as Record<string, unknown>;
   if (!response.ok || payload.ok === false) {
-    throw new Error(String(payload.error ?? `HTTP ${response.status}`));
+    throw new SSRRequestError(
+      String(payload.error ?? `HTTP ${response.status}`),
+      response.status,
+    );
   }
   return payload;
 }
@@ -58,19 +81,31 @@ async function waitForCommand(payload: Record<string, unknown>): Promise<Record<
   if (!requestId) {
     return payload;
   }
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    const status = await request(`/requests/${encodeURIComponent(requestId)}`);
-    const state = String(status.status ?? "");
-    if (state === "completed") {
-      return status;
-    }
-    if (state === "failed") {
-      throw new Error(String(status.error ?? "Commande SSR échouée"));
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const status = await waitForCommandStatus(
+    requestId,
+    (id) => request(`/requests/${encodeURIComponent(id)}`),
+    {
+      pollIntervalMs: 100,
+      retryIntervalMs: 250,
+      isDefinitelyMissing: (error) =>
+        error instanceof SSRRequestError && error.status === 404,
+    },
+  );
+  const state = String(status.status ?? "");
+  if (state === "completed") {
+    return status;
   }
-  throw new Error(`Commande SSR toujours en cours après 10 s (${requestId})`);
+  throw new Error(
+    String(
+      status.error ??
+      (state === "expired"
+        ? "Résultat de commande SSR expiré"
+        : state === "uncertain"
+          ? "Résultat incertain : ne répétez pas immédiatement la commande"
+          : "Commande SSR échouée")
+    )
+  );
 }
 
 async function command(path: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
@@ -88,4 +123,9 @@ export const ssrClient = {
   previewLayout: async (name: string) => command("/layout/preview", { name }),
   cancelPreview: async () => command("/layout/cancel-preview"),
   undoLayout: async () => command("/layout/undo"),
+  mediaPlay: async () => command("/media/play"),
+  mediaPause: async () => command("/media/pause"),
+  mediaStop: async () => command("/media/stop"),
+  mediaNext: async () => command("/media/next"),
+  mediaPrevious: async () => command("/media/previous"),
 };

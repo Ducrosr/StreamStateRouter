@@ -87,6 +87,8 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Command tracking tests
+        run: npm run test:tracking
       - name: Build
         run: npm run build
       - name: Validate plugin

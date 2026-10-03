@@ -5,6 +5,10 @@ import {
   ConnectionSettingsAction,
   ControlVariableAction,
   LayoutAction,
+  MediaNextAction,
+  MediaPreviousAction,
+  MediaStopAction,
+  MediaToggleAction,
   ReapplyAction,
   TogglePauseAction,
   UndoLayoutAction,
@@ -18,5 +22,9 @@ streamDeck.actions.registerAction(new LayoutAction());
 streamDeck.actions.registerAction(new UndoLayoutAction());
 streamDeck.actions.registerAction(new CancelPreviewAction());
 streamDeck.actions.registerAction(new ControlVariableAction());
+streamDeck.actions.registerAction(new MediaToggleAction());
+streamDeck.actions.registerAction(new MediaNextAction());
+streamDeck.actions.registerAction(new MediaPreviousAction());
+streamDeck.actions.registerAction(new MediaStopAction());
 streamDeck.actions.registerAction(new ConnectionSettingsAction());
 streamDeck.connect();

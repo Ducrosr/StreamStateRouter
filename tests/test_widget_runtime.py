@@ -8,6 +8,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from stream_state_router.media import MediaArtworkStore, MediaState, MediaStateStore, media_artwork_identity
 from stream_state_router.presentation import (
     PresentationStateStore,
     build_presentation_registry,
@@ -155,6 +156,242 @@ class WidgetRuntimeTests(unittest.TestCase):
                 json.dumps(payload, ensure_ascii=False),
             )
 
+    def test_media_endpoint_exposes_normalized_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            media = MediaStateStore("vlc")
+            media.update(
+                MediaState(
+                    provider="vlc",
+                    connected=True,
+                    playback_state="playing",
+                    title="Mako Reactor",
+                    artist="Suno",
+                    album="Midgar Radio",
+                    duration_seconds=180,
+                    position_seconds=45,
+                    volume_percent=75,
+                    track_id="42",
+                )
+            )
+            runtime.media_state_store = media
+
+            status, body, content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+
+            self.assertEqual(status, 200)
+            self.assertIn("application/json", content_type)
+            self.assertEqual(payload["provider"], "vlc")
+            self.assertEqual(payload["playback_state"], "playing")
+            self.assertEqual(payload["title"], "Mako Reactor")
+            self.assertEqual(payload["position_seconds"], 45)
+            self.assertEqual(payload["revision"], 1)
+            self.assertNotIn("password", payload)
+            self.assertNotIn("uri", payload)
+            self.assertFalse(payload["artwork_available"])
+            self.assertEqual(payload["artwork_url"], "")
+            self.assertNotIn("error", payload)
+
+    def test_media_stale_can_change_without_media_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            now = [10.0]
+            media = MediaStateStore("vlc", clock=lambda: now[0])
+            media.update(
+                MediaState(
+                    provider="vlc",
+                    connected=True,
+                    playback_state="playing",
+                    title="Mako",
+                )
+            )
+            runtime.media_state_store = media
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            fresh = json.loads(body)
+            self.assertEqual(fresh["revision"], 1)
+            self.assertFalse(fresh["stale"])
+
+            now[0] = 20.0
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            stale = json.loads(body)
+            self.assertEqual(stale["revision"], 1)
+            self.assertTrue(stale["stale"])
+
+    def test_media_artwork_is_served_from_safe_runtime_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            media = MediaStateStore("vlc")
+            state = MediaState(
+                provider="vlc",
+                connected=True,
+                playback_state="playing",
+                title="Mako",
+                uri="file:///C:/Music/mako.flac",
+                artwork_url="file:///C:/Music/cover.jpg",
+                track_id="42",
+            )
+            media.update(state)
+            runtime.media_state_store = media
+
+            artwork = MediaArtworkStore()
+            identity = media_artwork_identity(
+                provider=state.provider,
+                track_id=state.track_id,
+                uri=state.uri,
+                title=state.title,
+                artwork_url=state.artwork_url,
+            )
+            valid_jpeg = b"\xff\xd8\xff\xe0SSR-JPEG"
+            artwork.update(
+                valid_jpeg,
+                content_type="image/jpeg",
+                identity=identity,
+            )
+            runtime.media_artwork_store = artwork
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+            self.assertTrue(payload["artwork_available"])
+            self.assertEqual(payload["artwork_revision"], 1)
+            self.assertEqual(
+                payload["artwork_url"],
+                "/runtime/media/artwork?revision=1",
+            )
+
+            status, cover, content_type = self._get(
+                runtime.base_url + payload["artwork_url"]
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(cover, valid_jpeg)
+            self.assertIn("image/jpeg", content_type)
+
+            with self.assertRaises(HTTPError) as expired:
+                self._get(
+                    runtime.base_url
+                    + "/runtime/media/artwork?revision=0"
+                )
+            self.assertEqual(expired.exception.code, 404)
+
+    def test_media_payload_uses_one_atomic_media_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+
+            class PairOnlyStore(MediaStateStore):
+                def public_snapshot(self, **_kwargs):
+                    raise AssertionError("public_snapshot séparé interdit")
+
+                def snapshot(self):
+                    raise AssertionError("snapshot séparé interdit")
+
+            media = PairOnlyStore("vlc")
+            current = MediaState(
+                provider="vlc",
+                connected=True,
+                playback_state="playing",
+                title="Track B",
+                uri="file:///C:/Music/b.flac",
+                track_id="2",
+            )
+            media.update(current)
+            runtime.media_state_store = media
+
+            artwork = MediaArtworkStore()
+            artwork.update(
+                b"\x89PNG\r\n\x1a\nSSR-PNG",
+                content_type="image/png",
+                identity=media_artwork_identity(
+                    provider=current.provider,
+                    track_id=current.track_id,
+                    uri=current.uri,
+                    title=current.title,
+                ),
+            )
+            runtime.media_artwork_store = artwork
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+
+            self.assertEqual(payload["title"], "Track B")
+            self.assertEqual(payload["revision"], 1)
+            self.assertTrue(payload["artwork_available"])
+
+    def test_media_payload_hides_artwork_from_previous_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+            media = MediaStateStore("vlc")
+            current = MediaState(
+                provider="vlc",
+                connected=True,
+                playback_state="playing",
+                title="Track B",
+                uri="file:///C:/Music/b.flac",
+                track_id="2",
+            )
+            media.update(current)
+            runtime.media_state_store = media
+
+            artwork = MediaArtworkStore()
+            artwork.update(
+                b"\x89PNG\r\n\x1a\nSSR-PNG",
+                content_type="image/png",
+                identity=media_artwork_identity(
+                    provider="vlc",
+                    track_id="1",
+                    uri="file:///C:/Music/a.flac",
+                    title="Track A",
+                ),
+            )
+            runtime.media_artwork_store = artwork
+
+            _status, body, _content_type = self._get(
+                runtime.base_url + "/runtime/media"
+            )
+            payload = json.loads(body)
+
+            self.assertFalse(payload["artwork_available"])
+            self.assertEqual(payload["artwork_url"], "")
+
+    def test_builtin_radio_consumes_media_endpoint_without_html_injection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime, _package = self._runtime(Path(tmp))
+
+            status, body, content_type = self._get(
+                runtime.base_url + "/builtin/radio"
+            )
+
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", content_type)
+            self.assertIn(b"/runtime/media", body)
+            self.assertIn(b'id="cover"', body)
+            self.assertIn(b"state.artwork_url", body)
+            self.assertIn(b"state.artwork_revision", body)
+            self.assertIn(b"state.stale", body)
+            self.assertIn(b"runtimeUnavailable", body)
+            self.assertIn(b"performance.now()", body)
+            self.assertIn(b"ssrmediastatechange", body)
+            self.assertIn(b"refreshStandalone", body)
+            self.assertIn(b"window.parent !== window", body)
+            self.assertNotIn(b"state.revision === lastRevision", body)
+            self.assertIn("État obsolète".encode("utf-8"), body)
+            self.assertIn("SSR indisponible".encode("utf-8"), body)
+            self.assertIn(b"textContent", body)
+            self.assertNotIn(b"innerHTML", body)
+            self.assertIn(
+                b"/runtime/bridge.js?component=radio",
+                body,
+            )
+
     def test_runtime_serves_widget_entry_and_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime, package = self._runtime(Path(tmp))
@@ -179,6 +416,9 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn(b'component.mode === "hidden"', bridge)
             self.assertIn(b"removeProperty", bridge)
             self.assertIn(b"ssr.widget.state", bridge)
+            self.assertIn(b"ssr.media.state", bridge)
+            self.assertIn(b"ssrmediastatechange", bridge)
+            self.assertIn(b'requested === "radio"', bridge)
             self.assertIn(b"window.parent !== window", bridge)
 
     def test_imported_html_can_receive_presentation_bridge_without_mutation(self) -> None:
@@ -267,6 +507,7 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn("text/html", content_type)
             self.assertIn('const component = "chat"', html)
             self.assertIn('const fallback = "builtin:chat"', html)
+            self.assertIn('"radio"', html)
             self.assertIn(
                 '"/runtime/state?component="',
                 html,
@@ -279,6 +520,16 @@ class WidgetRuntimeTests(unittest.TestCase):
             self.assertIn('if (c.mode === "hidden")', html)
             self.assertIn("host.replaceChildren()", html)
             self.assertIn("postMessage", html)
+            self.assertIn("ssr.media.state", html)
+            self.assertIn("/runtime/media", html)
+            self.assertIn(
+                'currentComponent.mode === "hidden"',
+                html,
+            )
+            self.assertEqual(
+                html.count("postMediaState();"),
+                1,
+            )
 
             registry = build_presentation_registry(
                 profiles_raw={

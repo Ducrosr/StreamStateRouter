@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from ..events import EventBus
+from ..media import MediaArtworkStore, MediaStateStore, media_artwork_identity
 from ..presentation import PresentationStateStore
 from ..services.paths import imported_widgets_dir
 from .packages import WidgetPackage, list_widget_packages
@@ -86,13 +87,27 @@ _BRIDGE_JS = r"""
   window.addEventListener("message", (event) => {
     const message = event.data;
     if (event.origin !== sourceUrl.origin) return;
-    if (!message || message.type !== "ssr.widget.state") return;
+    if (!message) return;
+    if (message.type === "ssr.widget.state") {
+      if (
+        requested &&
+        message.component &&
+        String(message.component) !== requested
+      ) return;
+      apply(message.state);
+      return;
+    }
     if (
-      requested &&
-      message.component &&
-      String(message.component) !== requested
-    ) return;
-    apply(message.state);
+      message.type === "ssr.media.state" &&
+      requested === "radio"
+    ) {
+      window.dispatchEvent(
+        new CustomEvent(
+          "ssrmediastatechange",
+          { detail: message.state || {} }
+        )
+      );
+    }
   });
 
   const refresh = async () => {
@@ -471,6 +486,190 @@ html[data-ssr-animation-intensity="off"] .alert { animation:none; }
 </html>""".strip()
 
 
+_RADIO_HTML = r"""<!doctype html>
+<html lang="fr" data-ssr-component="radio">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root {
+  --ssr-accent: #63e6ff;
+  --ssr-panel-opacity: .82;
+  --ssr-glow: 12px;
+  --ssr-font-size: 20px;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin:0; width:100%; height:100%; overflow:hidden;
+  background:transparent; color:white;
+  font-family:Inter,"Segoe UI",sans-serif;
+}
+#radio {
+  width:100%; height:100%; display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  grid-template-rows:auto auto auto auto;
+  align-content:center; column-gap:12px; row-gap:6px; padding:12px 16px;
+  background:rgba(8,17,24,var(--ssr-panel-opacity));
+  border-left:2px solid var(--ssr-accent);
+  box-shadow:0 0 var(--ssr-glow) rgba(80,220,255,.18);
+}
+#cover {
+  grid-row:1 / 5;
+  width:72px;
+  height:72px;
+  align-self:center;
+  object-fit:cover;
+  border-radius:6px;
+  display:none;
+}
+#title, #artist, #progress, #status {
+  grid-column:2;
+}
+#title {
+  color:var(--ssr-accent);
+  font-size:var(--ssr-font-size);
+  font-weight:800;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+#artist {
+  opacity:.78;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+#status {
+  font-size:.72em;
+  opacity:.62;
+}
+#progress {
+  height:3px;
+  width:100%;
+  background:rgba(255,255,255,.16);
+  overflow:hidden;
+}
+#bar {
+  height:100%;
+  width:0;
+  background:var(--ssr-accent);
+  transition:width 250ms linear;
+}
+html[data-ssr-animation-intensity="off"] #bar { transition:none; }
+</style>
+</head>
+<body>
+<div id="radio">
+  <img id="cover" alt="">
+  <div id="title">SSR Radio</div>
+  <div id="artist">Aucun média</div>
+  <div id="progress"><div id="bar"></div></div>
+  <div id="status">SSR Media</div>
+</div>
+<script src="/runtime/bridge.js?component=radio"></script>
+<script>
+(() => {
+  const cover = document.getElementById("cover");
+  const title = document.getElementById("title");
+  const artist = document.getElementById("artist");
+  const status = document.getElementById("status");
+  const bar = document.getElementById("bar");
+  let lastRenderKey = "";
+  let lastState = null;
+  let lastSuccessAt = 0;
+
+  const render = (state, runtimeUnavailable = false) => {
+    if (!state) return;
+    const renderKey = JSON.stringify([
+      Number(state.revision) || 0,
+      Number(state.artwork_revision) || 0,
+      Boolean(state.stale),
+      Boolean(runtimeUnavailable),
+      Boolean(state.connected),
+      String(state.playback_state || "unknown"),
+      String(state.title || ""),
+      String(state.artist || ""),
+      String(state.album || ""),
+      Number(state.position_seconds) || 0,
+      Number(state.duration_seconds) || 0,
+    ]);
+    if (renderKey === lastRenderKey) return;
+    lastRenderKey = renderKey;
+    title.textContent = state.title || "SSR Radio";
+    const artwork = String(state.artwork_url || "");
+    if (artwork && !runtimeUnavailable) {
+      if (cover.getAttribute("src") !== artwork) {
+        cover.setAttribute("src", artwork);
+      }
+      cover.style.display = "block";
+    } else {
+      cover.removeAttribute("src");
+      cover.style.display = "none";
+    }
+    artist.textContent =
+      [state.artist, state.album].filter(Boolean).join(" · ") ||
+      (state.connected ? "Aucun média" : "Lecteur indisponible");
+    const duration = Math.max(0, Number(state.duration_seconds) || 0);
+    const position = Math.max(0, Number(state.position_seconds) || 0);
+    const percent = duration > 0 && !state.stale && !runtimeUnavailable
+      ? Math.max(0, Math.min(100, position * 100 / duration))
+      : 0;
+    bar.style.width = percent + "%";
+    const playback = String(state.playback_state || "unknown");
+    const provider = String(state.provider || "media").toUpperCase();
+    status.textContent =
+      provider + " · " +
+      (runtimeUnavailable ? "SSR indisponible" :
+       state.stale ? "État obsolète" :
+       playback === "playing" ? "Lecture" :
+       playback === "paused" ? "Pause" :
+       playback === "stopped" ? "Arrêt" : "Indisponible");
+  };
+
+  cover.addEventListener("error", () => {
+    cover.removeAttribute("src");
+    cover.style.display = "none";
+  });
+
+  const acceptState = (state) => {
+    lastState = state || null;
+    lastSuccessAt = performance.now();
+    render(lastState, false);
+  };
+
+  window.addEventListener("ssrmediastatechange", (event) => {
+    acceptState((event && event.detail) || {});
+  });
+
+  const watchdog = () => {
+    if (
+      lastState &&
+      lastSuccessAt > 0 &&
+      performance.now() - lastSuccessAt >= 2000
+    ) {
+      render({ ...lastState, stale: true }, true);
+    }
+    window.setTimeout(watchdog, 500);
+  };
+
+  const refreshStandalone = async () => {
+    if (window.parent !== window) return;
+    try {
+      const response = await fetch("/runtime/media", { cache: "no-store" });
+      if (!response.ok) throw new Error("media unavailable");
+      acceptState(await response.json());
+    } catch (_) {}
+    finally { window.setTimeout(refreshStandalone, 500); }
+  };
+
+  watchdog();
+  refreshStandalone();
+})();
+</script>
+</body>
+</html>""".strip()
+
+
 class _WidgetServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -489,10 +688,22 @@ class WidgetRuntime:
         state_store: PresentationStateStore,
         *,
         event_bus: EventBus | None = None,
+        media_state_store: MediaStateStore | None = None,
+        media_artwork_store: MediaArtworkStore | None = None,
         library_root: str | Path | None = None,
     ):
         self.config = config
         self.state_store = state_store
+        self.media_state_store = (
+            media_state_store
+            if media_state_store is not None
+            else MediaStateStore()
+        )
+        self.media_artwork_store = (
+            media_artwork_store
+            if media_artwork_store is not None
+            else MediaArtworkStore()
+        )
         self.event_bus = event_bus if event_bus is not None else EventBus()
         self.library_root = (
             Path(library_root).expanduser().resolve()
@@ -567,6 +778,37 @@ class WidgetRuntime:
         return self.state_store.snapshot().as_mapping(
             component=component,
         )
+
+    def _media_payload(self) -> dict[str, Any]:
+        payload, internal = (
+            self.media_state_store.public_and_private_snapshot()
+        )
+        artwork = self.media_artwork_store.snapshot()
+        expected_identity = media_artwork_identity(
+            provider=internal.get("provider", ""),
+            track_id=internal.get("track_id", ""),
+            uri=internal.get("uri", ""),
+            title=internal.get("title", ""),
+            artwork_url=internal.get("artwork_url", ""),
+        )
+        artwork_matches = bool(
+            expected_identity
+            and artwork.get("identity") == expected_identity
+        )
+        payload["artwork_available"] = bool(
+            artwork.get("available", False)
+            and artwork_matches
+        )
+        payload["artwork_revision"] = int(
+            artwork.get("revision", 0) or 0
+        )
+        payload["artwork_url"] = (
+            "/runtime/media/artwork?revision="
+            + str(payload["artwork_revision"])
+            if payload["artwork_available"]
+            else ""
+        )
+        return payload
 
     @staticmethod
     def _inside(root: Path, candidate: Path) -> bool:
@@ -659,7 +901,7 @@ class WidgetRuntime:
         component_json = json.dumps(wanted, ensure_ascii=False)
         fallback = (
             f"builtin:{wanted}"
-            if wanted in {"chat", "events", "alerts"}
+            if wanted in {"chat", "events", "alerts", "radio"}
             else ""
         )
         fallback_json = json.dumps(fallback)
@@ -683,6 +925,24 @@ iframe{display:block}
   let current = "";
   let frame = null;
   let lastState = null;
+  let lastMediaState = null;
+
+  const postMediaState = () => {
+    if (
+      component !== "radio" ||
+      !frame ||
+      !frame.contentWindow ||
+      !lastMediaState
+    ) return;
+    frame.contentWindow.postMessage(
+      {
+        type: "ssr.media.state",
+        component,
+        state: lastMediaState,
+      },
+      "*"
+    );
+  };
 
   const postState = () => {
     if (!frame || !frame.contentWindow || !lastState) return;
@@ -700,7 +960,7 @@ iframe{display:block}
     const value = String(resource || fallback || "").trim();
     if (value.startsWith("builtin:")) {
       const name = value.slice("builtin:".length);
-      if (["chat","events","alerts"].includes(name)) {
+      if (["chat","events","alerts","radio"].includes(name)) {
         return "/builtin/" + encodeURIComponent(name);
       }
       return "";
@@ -744,6 +1004,27 @@ iframe{display:block}
     host.appendChild(frame);
   };
 
+  const refreshMedia = async () => {
+    if (component !== "radio") return;
+    const currentComponent =
+      (lastState && lastState.component_state) || {};
+    if (currentComponent.mode === "hidden") {
+      window.setTimeout(refreshMedia, 500);
+      return;
+    }
+    try {
+      const response = await fetch(
+        "/runtime/media",
+        { cache: "no-store" }
+      );
+      if (response.ok) {
+        lastMediaState = await response.json();
+        postMediaState();
+      }
+    } catch (_) {}
+    finally { window.setTimeout(refreshMedia, 500); }
+  };
+
   const refresh = async () => {
     try {
       const response = await fetch(
@@ -755,6 +1036,7 @@ iframe{display:block}
     finally { window.setTimeout(refresh, 250); }
   };
   refresh();
+  refreshMedia();
 })();
 </script>
 </body>
@@ -937,6 +1219,69 @@ iframe{display:block}
                     )
                     return
 
+                if path == "/runtime/media":
+                    self._send_json(
+                        runtime._media_payload(),
+                        head_only=head_only,
+                    )
+                    return
+
+                if path == "/runtime/media/artwork":
+                    artwork = runtime.media_artwork_store.snapshot()
+                    query = parse_qs(parsed.query)
+                    requested_revision = str(
+                        query.get("revision", [""])[0]
+                    ).strip()
+                    current_revision = int(
+                        artwork.get("revision", 0) or 0
+                    )
+                    if requested_revision:
+                        try:
+                            requested_value = int(requested_revision)
+                        except ValueError:
+                            self._send_json(
+                                {"error": "invalid_artwork_revision"},
+                                status=HTTPStatus.BAD_REQUEST,
+                                head_only=head_only,
+                            )
+                            return
+                        if requested_value != current_revision:
+                            self._send_json(
+                                {"error": "artwork_revision_expired"},
+                                status=HTTPStatus.NOT_FOUND,
+                                head_only=head_only,
+                            )
+                            return
+                    body = artwork.get("content", b"")
+                    content_type = str(
+                        artwork.get("content_type") or ""
+                    )
+                    if (
+                        not bool(artwork.get("available", False))
+                        or not isinstance(body, bytes)
+                        or not body
+                        or content_type
+                        not in {
+                            "image/jpeg",
+                            "image/png",
+                            "image/webp",
+                            "image/gif",
+                        }
+                    ):
+                        self._send_json(
+                            {"error": "artwork_not_available"},
+                            status=HTTPStatus.NOT_FOUND,
+                            head_only=head_only,
+                        )
+                        return
+                    self._send_bytes(
+                        body,
+                        content_type=content_type,
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
                 if path == "/runtime/events":
                     query = parse_qs(parsed.query)
                     channel = str(
@@ -1052,6 +1397,15 @@ iframe{display:block}
                 if path in {"/builtin/alerts", "/builtin/alerts/"}:
                     self._send_bytes(
                         _ALERTS_HTML.encode("utf-8"),
+                        content_type="text/html; charset=utf-8",
+                        head_only=head_only,
+                        cache="no-cache",
+                    )
+                    return
+
+                if path in {"/builtin/radio", "/builtin/radio/"}:
+                    self._send_bytes(
+                        _RADIO_HTML.encode("utf-8"),
                         content_type="text/html; charset=utf-8",
                         head_only=head_only,
                         cache="no-cache",

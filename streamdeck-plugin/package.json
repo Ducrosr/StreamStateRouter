@@ -6,6 +6,7 @@
   "scripts": {
     "build": "rolldown -c rolldown.config.ts",
     "typecheck": "tsc --noEmit",
+    "test:tracking": "node --test scripts/command-tracking.test.mjs",
     "validate": "node scripts/validate-ui-assets.mjs && streamdeck validate com.remyducros.streamstaterouter.sdPlugin --no-update-check",
     "pack": "streamdeck pack com.remyducros.streamstaterouter.sdPlugin --no-update-check --force"
   },

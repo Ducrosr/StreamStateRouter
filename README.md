@@ -1,5 +1,48 @@
 # Stream State Router 2.1.0
 
+## Fondation média VLC (expérimentale)
+
+SSR possède désormais une couche média indépendante du lecteur. Le premier
+backend concret est **VLC**, mais les widgets et l'API consomment un état
+normalisé SSR plutôt que le JSON spécifique de VLC. Un autre provider pourra
+donc être ajouté plus tard sans modifier les Browser Sources.
+
+Le backend VLC requiert l'interface HTTP/Web locale de VLC, avec un mot de
+passe configuré. SSR refuse volontairement les hôtes non loopback et n'envoie
+jamais le mot de passe à une Browser Source. Les réglages sont disponibles dans
+**Paramètres > Média / VLC**. Le média est désactivé par défaut.
+
+État normalisé : lecteur connecté, lecture/pause/arrêt, titre, artiste, album,
+durée, position, vitesse de lecture, volume, identifiant de piste, horodatage
+d'observation et capacités du provider. Le snapshot public expose aussi un indicateur de
+fraîcheur dérivé du rythme de polling réel.
+
+La pochette courante est lue depuis `/art` uniquement par
+`SSR-MediaRuntime`, mise en cache en mémoire, limitée à 8 Mio et restreinte à
+JPEG/PNG/WebP/GIF. Les Browser Sources ne reçoivent ni mot de passe VLC, ni
+`file://`, ni chemin local : elles utilisent la route SSR
+`/runtime/media/artwork`.
+
+La Browser Source native **Radio** utilise la route stable
+`/component/radio` et ne reçoit qu'une projection minimale de cet état.
+Un renderer HTML personnalisé affecté au composant `radio` reste sandboxé.
+Il reçoit l'état média public par `postMessage` via le pont SSR, qui déclenche
+l'événement navigateur `ssrmediastatechange`. Il n'a donc besoin ni d'accès
+same-origin ni d'autorisation réseau vers l'API locale.
+
+L'API locale accepte `POST /media/play`, `/media/pause`, `/media/stop`,
+`/media/next`, `/media/previous`, `/media/seek`, `/media/set_volume`,
+`/media/play_uri`, `/media/enqueue_uri` et `/media/clear_queue`.
+`seek` utilise `{"seconds": 42}`, `set_volume` utilise `{"percent": 75}`
+et les actions URI utilisent `{"uri": "..."}`.
+
+Ces commandes sont asynchrones et renvoient un `request_id`, consultable via
+`GET /requests/<request_id>`. Toutes les E/S VLC sont sérialisées par le
+worker `SSR-MediaRuntime` : l'UI Qt et le serveur HTTP local ne parlent jamais
+directement à VLC.
+
+Un export SSR sans secrets vide le mot de passe VLC et désactive le Media
+Runtime dans le fichier exporté afin que la configuration reste ré-importable.
 ## 2.2.0 — contrôle Windows et filtres avancés (en développement)
 
 SSR peut désormais associer aux profils existants des actions qui dépassent le

@@ -20,6 +20,26 @@ abstract class CommandAction<T extends JsonObject> extends SingletonAction<T> {
   }
 }
 
+abstract class ExclusiveCommandAction<T extends JsonObject>
+  extends CommandAction<T> {
+  private pending = false;
+
+  protected async runExclusive(
+    ev: KeyDownEvent<T>,
+    fn: () => Promise<unknown>,
+  ): Promise<void> {
+    if (this.pending) {
+      return;
+    }
+    this.pending = true;
+    try {
+      await this.run(ev, fn);
+    } finally {
+      this.pending = false;
+    }
+  }
+}
+
 @action({ UUID: "com.remyducros.streamstaterouter.toggle-pause" })
 export class TogglePauseAction extends CommandAction<EmptySettings> {
   override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
@@ -68,6 +88,52 @@ export class UndoLayoutAction extends CommandAction<EmptySettings> {
 export class CancelPreviewAction extends CommandAction<EmptySettings> {
   override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
     await this.run(ev, () => ssrClient.cancelPreview());
+  }
+}
+
+@action({ UUID: "com.remyducros.streamstaterouter.media-toggle" })
+export class MediaToggleAction extends ExclusiveCommandAction<EmptySettings> {
+  override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
+    await this.runExclusive(ev, async () => {
+      const status = await ssrClient.status();
+      const media = status.media;
+      if (!media?.running) {
+        throw new Error("Media Runtime indisponible");
+      }
+      if (
+        !Boolean(media.state?.connected) ||
+        Boolean(media.state?.stale)
+      ) {
+        throw new Error("État VLC indisponible ou obsolète");
+      }
+      const playback = String(media.state?.playback_state ?? "");
+      if (playback === "playing") {
+        await ssrClient.mediaPause();
+      } else {
+        await ssrClient.mediaPlay();
+      }
+    });
+  }
+}
+
+@action({ UUID: "com.remyducros.streamstaterouter.media-next" })
+export class MediaNextAction extends ExclusiveCommandAction<EmptySettings> {
+  override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
+    await this.runExclusive(ev, () => ssrClient.mediaNext());
+  }
+}
+
+@action({ UUID: "com.remyducros.streamstaterouter.media-previous" })
+export class MediaPreviousAction extends ExclusiveCommandAction<EmptySettings> {
+  override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
+    await this.runExclusive(ev, () => ssrClient.mediaPrevious());
+  }
+}
+
+@action({ UUID: "com.remyducros.streamstaterouter.media-stop" })
+export class MediaStopAction extends ExclusiveCommandAction<EmptySettings> {
+  override async onKeyDown(ev: KeyDownEvent<EmptySettings>): Promise<void> {
+    await this.runExclusive(ev, () => ssrClient.mediaStop());
   }
 }
 
