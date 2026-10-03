@@ -409,7 +409,7 @@ class VLCProvider:
         values: dict[str, object] = {"command": command}
         values.update(params)
         try:
-            return self._transport.get_json(
+            payload = self._transport.get_json(
                 "/requests/status.json",
                 values,
             )
@@ -426,6 +426,11 @@ class VLCProvider:
             raise MediaProviderCommandError(
                 f"Réponse VLC ambiguë après commande {command}"
             ) from exc
+        if self._playback_state(payload) == "unknown":
+            raise MediaProviderCommandError(
+                f"Réponse VLC incomplète après commande {command}"
+            )
+        return payload
 
     @staticmethod
     def _validated_media_uri(uri: str) -> str:
