@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 
 from stream_state_router.media import (
@@ -41,8 +42,6 @@ class VLCCommandContractTests(unittest.TestCase):
         self.addCleanup(runtime.stop)
 
         request_id = runtime.request("next")
-        import time
-
         deadline = time.monotonic() + 1.0
         row = runtime.command_status(request_id)
         while (
